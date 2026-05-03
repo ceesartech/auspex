@@ -31,8 +31,10 @@ RUN CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d. -f1) \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers
-RUN playwright install chromium && playwright install-deps chromium
+# Install Playwright browsers. We skip `playwright install-deps` because it
+# only ships an Ubuntu package list and fails on Debian trixie. The system
+# Chrome installed above already pulled in the runtime libs Chromium needs.
+RUN playwright install chromium
 
 # Copy application code
 COPY services/data-ingestion/ /app/services/data-ingestion/
