@@ -1,5 +1,6 @@
 """E2E: betting recommendations endpoint with seeded prediction + recommendation."""
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
@@ -8,30 +9,38 @@ from sqlalchemy import text
 def _seed_recommendation(db, *, confidence: str = "high", odds: float = 1.85) -> str:
     """Create a league/teams/match/prediction/betting_recommendation chain.
 
+    Names get a per-call uuid suffix so multiple calls inside one test don't
+    collide on UNIQUE(name, country, sport) for leagues or
+    UNIQUE(normalized_name, sport) for teams.
     Returns the recommendation_id.
     """
-    league_id = db.execute(text("""
+    suffix = uuid.uuid4().hex[:8]
+
+    league_id = db.execute(
+        text("""
             INSERT INTO leagues (name, country, sport)
-            VALUES ('Rec League', 'Spain', 'soccer')
+            VALUES (:name, 'Spain', 'soccer')
             RETURNING id
-            """)).scalar_one()
+            """),
+        {"name": f"Rec League {suffix}"},
+    ).scalar_one()
 
     home_id = db.execute(
         text("""
             INSERT INTO teams (name, normalized_name, league_id, country, sport)
-            VALUES ('Rec Home', 'rec home', :lid, 'Spain', 'soccer')
+            VALUES (:n, :nn, :lid, 'Spain', 'soccer')
             RETURNING id
             """),
-        {"lid": league_id},
+        {"n": f"Rec Home {suffix}", "nn": f"rec home {suffix}", "lid": league_id},
     ).scalar_one()
 
     away_id = db.execute(
         text("""
             INSERT INTO teams (name, normalized_name, league_id, country, sport)
-            VALUES ('Rec Away', 'rec away', :lid, 'Spain', 'soccer')
+            VALUES (:n, :nn, :lid, 'Spain', 'soccer')
             RETURNING id
             """),
-        {"lid": league_id},
+        {"n": f"Rec Away {suffix}", "nn": f"rec away {suffix}", "lid": league_id},
     ).scalar_one()
 
     match_id = db.execute(

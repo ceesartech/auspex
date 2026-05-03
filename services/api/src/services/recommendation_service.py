@@ -46,7 +46,9 @@ class RecommendationService:
         results = self.db.execute(
             query,
             {
-                "confidence_level": confidence_level.lower() if confidence_level else None,
+                # SQL above does UPPER(confidence_rating), so the bind value
+                # must also be uppercased — otherwise no row matches.
+                "confidence_level": confidence_level.upper() if confidence_level else None,
                 "market_type": market_type,
                 "min_odds": min_odds,
                 "max_odds": max_odds,

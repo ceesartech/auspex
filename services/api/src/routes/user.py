@@ -68,9 +68,11 @@ async def update_preferences(
 ) -> Dict[str, Any]:
     """Update user preferences"""
 
+    # Use SQL-standard CAST(); ":value::jsonb" confuses SQLAlchemy's named-
+    # parameter parser (the trailing "::" looks like part of the bind name).
     upsert_query = text("""
         INSERT INTO user_preferences (preference_key, preference_value, description)
-        VALUES (:key, :value::jsonb, :description)
+        VALUES (:key, CAST(:value AS jsonb), :description)
         ON CONFLICT (preference_key) DO UPDATE
         SET preference_value = EXCLUDED.preference_value,
             updated_at = NOW()

@@ -88,7 +88,8 @@ class TestRecommendationService:
         mock_db.execute.assert_called_once()
         call_args = mock_db.execute.call_args
         params = call_args[0][1] if len(call_args[0]) > 1 else call_args[1]
-        assert params["confidence_level"] == "high"
+        # SQL uses UPPER(confidence_rating); the bound value must be uppercased.
+        assert params["confidence_level"] == "HIGH"
         assert params["market_type"] == "1x2"
 
     def test_get_high_value_recommendations(self, mock_db, mock_row, mock_settings):

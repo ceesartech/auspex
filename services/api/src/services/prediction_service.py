@@ -235,7 +235,7 @@ class PredictionService:
             (match_id, model_name, model_version, prediction_type,
              predicted_outcome, confidence, probabilities)
             VALUES (:match_id, :model_name, :model_version, :prediction_type,
-                    :predicted_outcome, :confidence, :probabilities::jsonb)
+                    :predicted_outcome, :confidence, CAST(:probabilities AS jsonb))
             ON CONFLICT (match_id, model_name, model_version)
             DO UPDATE SET
                 predicted_outcome = EXCLUDED.predicted_outcome,

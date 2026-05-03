@@ -27,7 +27,7 @@ class NotificationService:
 
         query = text("""
             INSERT INTO system_notifications (type, title, message, source, metadata)
-            VALUES (:type, :title, :message, :source, :metadata::jsonb)
+            VALUES (:type, :title, :message, :source, CAST(:metadata AS jsonb))
             RETURNING id
         """)
 
