@@ -162,9 +162,7 @@ class ModelRegistry:
         if name not in self._index:
             return
 
-        self._index[name] = [
-            e for e in self._index[name] if e["version"] != version
-        ]
+        self._index[name] = [e for e in self._index[name] if e["version"] != version]
 
         # Remove files
         model_dir = self.registry_dir / name / version

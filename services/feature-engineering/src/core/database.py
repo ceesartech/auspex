@@ -38,9 +38,7 @@ class DatabaseManager:
         finally:
             self.connection_pool.putconn(conn)
 
-    def execute_query(
-        self, query: str, params: tuple = None, fetch: bool = False
-    ) -> Any:
+    def execute_query(self, query: str, params: tuple = None, fetch: bool = False) -> Any:
         """Execute a query and optionally fetch results."""
         with self.get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -55,9 +53,7 @@ class DatabaseManager:
         query = f"SELECT * FROM {func_name}({placeholders})"
         return self.execute_query(query, params, fetch=True)
 
-    def insert_many(
-        self, table: str, columns: List[str], values: List[tuple]
-    ) -> int:
+    def insert_many(self, table: str, columns: List[str], values: List[tuple]) -> int:
         """Bulk insert with execute_values for performance."""
         if not values:
             return 0
@@ -84,13 +80,9 @@ class DatabaseManager:
         values = [data[col] for col in columns]
 
         if update_columns is None:
-            update_columns = [
-                col for col in columns if col not in conflict_columns
-            ]
+            update_columns = [col for col in columns if col not in conflict_columns]
 
-        update_clause = ", ".join(
-            [f"{col} = EXCLUDED.{col}" for col in update_columns]
-        )
+        update_clause = ", ".join([f"{col} = EXCLUDED.{col}" for col in update_columns])
 
         query = f"""
             INSERT INTO {table} ({', '.join(columns)})

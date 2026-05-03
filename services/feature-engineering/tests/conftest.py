@@ -1,16 +1,14 @@
 """Shared test fixtures for feature engineering tests."""
 
-import pytest
 from datetime import datetime, timezone
 from unittest.mock import Mock
 from uuid import UUID, uuid4
 
+import pytest
 from redis import Redis
-
+from src.categories.base import MatchContext
 from src.core.config import FeatureConfig
 from src.core.database import DatabaseManager
-from src.categories.base import MatchContext
-
 
 # ---------- IDs ----------
 
@@ -85,36 +83,39 @@ def match_context():
 def sample_team_matches():
     """Sample match data for team performance tests."""
     from datetime import timedelta
+
     base_date = datetime(2025, 1, 15, tzinfo=timezone.utc)
     base_matches = []
     for i in range(20):
         home_score = (i % 3) + 1  # 1, 2, 3, 1, 2, ...
         away_score = i % 2  # 0, 1, 0, 1, ...
-        base_matches.append({
-            "match_id": str(uuid4()),
-            "match_date": base_date - timedelta(days=i),
-            "home_team_id": str(HOME_TEAM_ID) if i % 2 == 0 else str(uuid4()),
-            "away_team_id": str(uuid4()) if i % 2 == 0 else str(HOME_TEAM_ID),
-            "home_score": home_score,
-            "away_score": away_score,
-            "season": "2024-2025",
-            "possession_home": 55.0,
-            "possession_away": 45.0,
-            "shots_home": 12,
-            "shots_away": 8,
-            "shots_on_target_home": 5,
-            "shots_on_target_away": 3,
-            "corners_home": 6,
-            "corners_away": 4,
-            "fouls_home": 10,
-            "fouls_away": 12,
-            "yellow_cards_home": 2,
-            "yellow_cards_away": 3,
-            "red_cards_home": 0,
-            "red_cards_away": 0,
-            "xg_home": 1.5,
-            "xg_away": 0.8,
-        })
+        base_matches.append(
+            {
+                "match_id": str(uuid4()),
+                "match_date": base_date - timedelta(days=i),
+                "home_team_id": str(HOME_TEAM_ID) if i % 2 == 0 else str(uuid4()),
+                "away_team_id": str(uuid4()) if i % 2 == 0 else str(HOME_TEAM_ID),
+                "home_score": home_score,
+                "away_score": away_score,
+                "season": "2024-2025",
+                "possession_home": 55.0,
+                "possession_away": 45.0,
+                "shots_home": 12,
+                "shots_away": 8,
+                "shots_on_target_home": 5,
+                "shots_on_target_away": 3,
+                "corners_home": 6,
+                "corners_away": 4,
+                "fouls_home": 10,
+                "fouls_away": 12,
+                "yellow_cards_home": 2,
+                "yellow_cards_away": 3,
+                "red_cards_home": 0,
+                "red_cards_away": 0,
+                "xg_home": 1.5,
+                "xg_away": 0.8,
+            }
+        )
     return base_matches
 
 
@@ -122,23 +123,26 @@ def sample_team_matches():
 def sample_h2h_matches():
     """Sample head-to-head match data."""
     from datetime import timedelta
+
     base_date = datetime(2024, 12, 1, tzinfo=timezone.utc)
     matches = []
     for i in range(10):
-        matches.append({
-            "match_id": str(uuid4()),
-            "match_date": base_date - timedelta(days=i * 30),
-            "home_team_id": str(HOME_TEAM_ID) if i % 2 == 0 else str(AWAY_TEAM_ID),
-            "away_team_id": str(AWAY_TEAM_ID) if i % 2 == 0 else str(HOME_TEAM_ID),
-            "home_score": 2 if i % 3 == 0 else 1,
-            "away_score": 1 if i % 3 != 2 else 2,
-            "possession_home": 52.0,
-            "possession_away": 48.0,
-            "shots_home": 10,
-            "shots_away": 9,
-            "xg_home": 1.3,
-            "xg_away": 1.1,
-        })
+        matches.append(
+            {
+                "match_id": str(uuid4()),
+                "match_date": base_date - timedelta(days=i * 30),
+                "home_team_id": str(HOME_TEAM_ID) if i % 2 == 0 else str(AWAY_TEAM_ID),
+                "away_team_id": str(AWAY_TEAM_ID) if i % 2 == 0 else str(HOME_TEAM_ID),
+                "home_score": 2 if i % 3 == 0 else 1,
+                "away_score": 1 if i % 3 != 2 else 2,
+                "possession_home": 52.0,
+                "possession_away": 48.0,
+                "shots_home": 10,
+                "shots_away": 9,
+                "xg_home": 1.3,
+                "xg_away": 1.1,
+            }
+        )
     return matches
 
 
@@ -218,24 +222,78 @@ def sample_player_stats():
 def sample_odds():
     """Sample odds data."""
     return [
-        {"bookmaker": "bet365", "market_type": "1x2", "selection": "home",
-         "odds_decimal": 2.10, "timestamp": datetime(2025, 1, 14), "is_opening": False},
-        {"bookmaker": "bet365", "market_type": "1x2", "selection": "draw",
-         "odds_decimal": 3.40, "timestamp": datetime(2025, 1, 14), "is_opening": False},
-        {"bookmaker": "bet365", "market_type": "1x2", "selection": "away",
-         "odds_decimal": 3.50, "timestamp": datetime(2025, 1, 14), "is_opening": False},
-        {"bookmaker": "betmgm", "market_type": "1x2", "selection": "home",
-         "odds_decimal": 2.15, "timestamp": datetime(2025, 1, 14), "is_opening": False},
-        {"bookmaker": "betmgm", "market_type": "1x2", "selection": "draw",
-         "odds_decimal": 3.30, "timestamp": datetime(2025, 1, 14), "is_opening": False},
-        {"bookmaker": "betmgm", "market_type": "1x2", "selection": "away",
-         "odds_decimal": 3.40, "timestamp": datetime(2025, 1, 14), "is_opening": False},
-        {"bookmaker": "bet365", "market_type": "over_under_25", "selection": "over",
-         "odds_decimal": 1.85, "timestamp": datetime(2025, 1, 14), "is_opening": False},
-        {"bookmaker": "bet365", "market_type": "over_under_25", "selection": "under",
-         "odds_decimal": 1.95, "timestamp": datetime(2025, 1, 14), "is_opening": False},
-        {"bookmaker": "bet365", "market_type": "btts", "selection": "yes",
-         "odds_decimal": 1.80, "timestamp": datetime(2025, 1, 14), "is_opening": False},
+        {
+            "bookmaker": "bet365",
+            "market_type": "1x2",
+            "selection": "home",
+            "odds_decimal": 2.10,
+            "timestamp": datetime(2025, 1, 14),
+            "is_opening": False,
+        },
+        {
+            "bookmaker": "bet365",
+            "market_type": "1x2",
+            "selection": "draw",
+            "odds_decimal": 3.40,
+            "timestamp": datetime(2025, 1, 14),
+            "is_opening": False,
+        },
+        {
+            "bookmaker": "bet365",
+            "market_type": "1x2",
+            "selection": "away",
+            "odds_decimal": 3.50,
+            "timestamp": datetime(2025, 1, 14),
+            "is_opening": False,
+        },
+        {
+            "bookmaker": "betmgm",
+            "market_type": "1x2",
+            "selection": "home",
+            "odds_decimal": 2.15,
+            "timestamp": datetime(2025, 1, 14),
+            "is_opening": False,
+        },
+        {
+            "bookmaker": "betmgm",
+            "market_type": "1x2",
+            "selection": "draw",
+            "odds_decimal": 3.30,
+            "timestamp": datetime(2025, 1, 14),
+            "is_opening": False,
+        },
+        {
+            "bookmaker": "betmgm",
+            "market_type": "1x2",
+            "selection": "away",
+            "odds_decimal": 3.40,
+            "timestamp": datetime(2025, 1, 14),
+            "is_opening": False,
+        },
+        {
+            "bookmaker": "bet365",
+            "market_type": "over_under_25",
+            "selection": "over",
+            "odds_decimal": 1.85,
+            "timestamp": datetime(2025, 1, 14),
+            "is_opening": False,
+        },
+        {
+            "bookmaker": "bet365",
+            "market_type": "over_under_25",
+            "selection": "under",
+            "odds_decimal": 1.95,
+            "timestamp": datetime(2025, 1, 14),
+            "is_opening": False,
+        },
+        {
+            "bookmaker": "bet365",
+            "market_type": "btts",
+            "selection": "yes",
+            "odds_decimal": 1.80,
+            "timestamp": datetime(2025, 1, 14),
+            "is_opening": False,
+        },
     ]
 
 
@@ -243,12 +301,9 @@ def sample_odds():
 def sample_opening_odds():
     """Sample opening odds data."""
     return [
-        {"bookmaker": "bet365", "market_type": "1x2", "selection": "home",
-         "odds_decimal": 2.00},
-        {"bookmaker": "bet365", "market_type": "1x2", "selection": "draw",
-         "odds_decimal": 3.50},
-        {"bookmaker": "bet365", "market_type": "1x2", "selection": "away",
-         "odds_decimal": 3.60},
+        {"bookmaker": "bet365", "market_type": "1x2", "selection": "home", "odds_decimal": 2.00},
+        {"bookmaker": "bet365", "market_type": "1x2", "selection": "draw", "odds_decimal": 3.50},
+        {"bookmaker": "bet365", "market_type": "1x2", "selection": "away", "odds_decimal": 3.60},
     ]
 
 
@@ -256,41 +311,81 @@ def sample_opening_odds():
 def sample_standings():
     """Sample league standings data."""
     return [
-        {"team_id": str(HOME_TEAM_ID), "team_name": "Home FC", "played": 20,
-         "won": 12, "drawn": 4, "lost": 4, "goals_for": 35, "goals_against": 18,
-         "goal_difference": 17, "points": 40},
-        {"team_id": str(uuid4()), "team_name": "Other Team", "played": 20,
-         "won": 11, "drawn": 5, "lost": 4, "goals_for": 30, "goals_against": 20,
-         "goal_difference": 10, "points": 38},
-        {"team_id": str(uuid4()), "team_name": "Third Team", "played": 20,
-         "won": 10, "drawn": 5, "lost": 5, "goals_for": 28, "goals_against": 22,
-         "goal_difference": 6, "points": 35},
-        {"team_id": str(AWAY_TEAM_ID), "team_name": "Away United", "played": 20,
-         "won": 8, "drawn": 6, "lost": 6, "goals_for": 25, "goals_against": 25,
-         "goal_difference": 0, "points": 30},
+        {
+            "team_id": str(HOME_TEAM_ID),
+            "team_name": "Home FC",
+            "played": 20,
+            "won": 12,
+            "drawn": 4,
+            "lost": 4,
+            "goals_for": 35,
+            "goals_against": 18,
+            "goal_difference": 17,
+            "points": 40,
+        },
+        {
+            "team_id": str(uuid4()),
+            "team_name": "Other Team",
+            "played": 20,
+            "won": 11,
+            "drawn": 5,
+            "lost": 4,
+            "goals_for": 30,
+            "goals_against": 20,
+            "goal_difference": 10,
+            "points": 38,
+        },
+        {
+            "team_id": str(uuid4()),
+            "team_name": "Third Team",
+            "played": 20,
+            "won": 10,
+            "drawn": 5,
+            "lost": 5,
+            "goals_for": 28,
+            "goals_against": 22,
+            "goal_difference": 6,
+            "points": 35,
+        },
+        {
+            "team_id": str(AWAY_TEAM_ID),
+            "team_name": "Away United",
+            "played": 20,
+            "won": 8,
+            "drawn": 6,
+            "lost": 6,
+            "goals_for": 25,
+            "goals_against": 25,
+            "goal_difference": 0,
+            "points": 30,
+        },
     ]
 
 
 @pytest.fixture
 def sample_league_stats():
     """Sample league season stats."""
-    return [{
-        "avg_goals": 2.8,
-        "avg_home_goals": 1.6,
-        "avg_away_goals": 1.2,
-        "std_goals": 1.5,
-        "home_win_rate": 0.45,
-        "draw_rate": 0.25,
-    }]
+    return [
+        {
+            "avg_goals": 2.8,
+            "avg_home_goals": 1.6,
+            "avg_away_goals": 1.2,
+            "std_goals": 1.5,
+            "home_win_rate": 0.45,
+            "draw_rate": 0.25,
+        }
+    ]
 
 
 @pytest.fixture
 def sample_referee_stats():
     """Sample referee statistics."""
-    return [{
-        "matches_refereed": 50,
-        "avg_yellows": 4.2,
-        "avg_reds": 0.15,
-        "avg_fouls": 22.5,
-        "avg_goals": 2.7,
-    }]
+    return [
+        {
+            "matches_refereed": 50,
+            "avg_yellows": 4.2,
+            "avg_reds": 0.15,
+            "avg_fouls": 22.5,
+            "avg_goals": 2.7,
+        }
+    ]

@@ -5,7 +5,6 @@ import time
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-
 from models.base_model import BaseModel
 from models.ensemble import EnsemblePredictor
 from models.lightgbm_model import LightGBMMatchPredictor
@@ -58,7 +57,10 @@ class TrainingOrchestrator:
             "xgboost",
             XGBoostMatchPredictor,
             XGBOOST_MATCH_OUTCOME,
-            train_df, val_df, features, target,
+            train_df,
+            val_df,
+            features,
+            target,
         )
 
         # 2. Train LightGBM
@@ -66,7 +68,10 @@ class TrainingOrchestrator:
             "lightgbm",
             LightGBMMatchPredictor,
             LIGHTGBM_MATCH_OUTCOME,
-            train_df, val_df, features, target,
+            train_df,
+            val_df,
+            features,
+            target,
         )
 
         # 3. Train Neural Network
@@ -74,7 +79,10 @@ class TrainingOrchestrator:
             "neural_network",
             NeuralNetworkMatchPredictor,
             NEURAL_NETWORK_CONFIG,
-            train_df, val_df, features, target,
+            train_df,
+            val_df,
+            features,
+            target,
         )
 
         # 4. Train Poisson (needs team columns)
@@ -83,7 +91,10 @@ class TrainingOrchestrator:
                 "poisson",
                 PoissonMatchPredictor,
                 POISSON_CONFIG,
-                train_df, val_df, None, target,
+                train_df,
+                val_df,
+                None,
+                target,
             )
 
             # 5. Train Dixon-Coles
@@ -91,7 +102,10 @@ class TrainingOrchestrator:
                 "dixon_coles",
                 DixonColesPredictor,
                 DIXON_COLES_CONFIG,
-                train_df, val_df, None, target,
+                train_df,
+                val_df,
+                None,
+                target,
             )
 
         # 6. Train Ensemble
@@ -118,9 +132,7 @@ class TrainingOrchestrator:
 
         try:
             model = model_class(config)
-            result = model.train(
-                train_df, val_df=val_df, features=features, target=target
-            )
+            result = model.train(train_df, val_df=val_df, features=features, target=target)
 
             self.trained_models[name] = model
             self.results[name] = result

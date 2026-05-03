@@ -1,12 +1,12 @@
 """Database connection and session management"""
 
+import logging
+from contextlib import contextmanager
+
+from config import settings
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from contextlib import contextmanager
-import logging
-
-from config import settings
 
 logger = logging.getLogger(__name__)
 

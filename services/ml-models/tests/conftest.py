@@ -2,20 +2,20 @@
 
 # Import torch early to avoid PyTorch/XGBoost native library conflicts
 # when running the full test suite
-import torch  # noqa: F401
-
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
+import torch  # noqa: F401
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 
 # ============= SAMPLE DATA =============
+
 
 @pytest.fixture
 def sample_match_data():
@@ -42,8 +42,7 @@ def sample_match_data():
 
     # Derive target
     df["match_outcome"] = np.where(
-        df["home_score"] > df["away_score"], 0,
-        np.where(df["home_score"] == df["away_score"], 1, 2)
+        df["home_score"] > df["away_score"], 0, np.where(df["home_score"] == df["away_score"], 1, 2)
     )
 
     # Generate numeric features
@@ -81,6 +80,7 @@ def train_val_test_split(sample_match_data):
 
 
 # ============= MODEL CONFIGS =============
+
 
 @pytest.fixture
 def xgboost_config():

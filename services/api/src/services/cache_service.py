@@ -1,11 +1,11 @@
 """Redis caching service"""
 
+import json
 import logging
 from typing import Optional
-import json
-from redis import Redis
 
 from config import settings
+from redis import Redis
 
 logger = logging.getLogger(__name__)
 

@@ -1,16 +1,16 @@
 """Prediction endpoints"""
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
-from typing import List, Optional
 import logging
+from typing import List, Optional
 
-from database import get_db
 from auth.dependencies import require_auth
-from models.requests import PredictionRequest, BulkPredictionRequest
+from database import get_db
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from models.requests import BulkPredictionRequest, PredictionRequest
 from models.responses import PredictionResponse
-from services.prediction_service import PredictionService
 from services.cache_service import CacheService
+from services.prediction_service import PredictionService
+from sqlalchemy.orm import Session
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -100,9 +100,7 @@ async def get_upcoming_predictions(
 
     prediction_service = PredictionService(db)
 
-    predictions = prediction_service.get_upcoming_predictions(
-        sport=sport, league=league, limit=limit
-    )
+    predictions = prediction_service.get_upcoming_predictions(sport=sport, league=league, limit=limit)
 
     return predictions
 

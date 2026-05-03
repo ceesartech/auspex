@@ -59,11 +59,7 @@ class LightGBMMatchPredictor(BaseModel):
 
         X_train, y_train = self.prepare_data(train_df, target, features)
 
-        params = {
-            k: v
-            for k, v in self.config.hyperparameters.items()
-            if k not in ("n_estimators", "random_state")
-        }
+        params = {k: v for k, v in self.config.hyperparameters.items() if k not in ("n_estimators", "random_state")}
         params["verbose"] = -1
 
         dtrain = lgb.Dataset(X_train, label=y_train, feature_name=self.feature_names)
@@ -74,19 +70,13 @@ class LightGBMMatchPredictor(BaseModel):
         callbacks = [lgb.log_evaluation(period=self.config.training_config.get("verbose", 100))]
 
         if val_df is not None:
-            X_val = val_df[self.feature_names].fillna(
-                val_df[self.feature_names].median()
-            )
+            X_val = val_df[self.feature_names].fillna(val_df[self.feature_names].median())
             y_val = self.label_encoder.transform(val_df[target])
             dval = lgb.Dataset(X_val, label=y_val, reference=dtrain)
             valid_sets.append(dval)
             valid_names.append("val")
             callbacks.append(
-                lgb.early_stopping(
-                    stopping_rounds=self.config.training_config.get(
-                        "early_stopping_rounds", 50
-                    )
-                )
+                lgb.early_stopping(stopping_rounds=self.config.training_config.get("early_stopping_rounds", 50))
             )
 
         self.model = lgb.train(

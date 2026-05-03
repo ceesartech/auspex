@@ -7,9 +7,8 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
-from redis import Redis
-
 from models.base_model import BaseModel
+from redis import Redis
 
 logger = logging.getLogger(__name__)
 

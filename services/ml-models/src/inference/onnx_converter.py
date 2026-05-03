@@ -17,9 +17,7 @@ class ONNXConverter:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def convert_xgboost(
-        self, model, feature_names: list, output_name: str
-    ) -> str:
+    def convert_xgboost(self, model, feature_names: list, output_name: str) -> str:
         """Convert XGBoost Booster to ONNX."""
         try:
             from onnxmltools import convert_xgboost
@@ -38,9 +36,7 @@ class ONNXConverter:
             logger.warning("onnxmltools not installed, skipping ONNX conversion")
             return ""
 
-    def convert_lightgbm(
-        self, model, feature_names: list, output_name: str
-    ) -> str:
+    def convert_lightgbm(self, model, feature_names: list, output_name: str) -> str:
         """Convert LightGBM model to ONNX."""
         try:
             from onnxmltools import convert_lightgbm
@@ -59,9 +55,7 @@ class ONNXConverter:
             logger.warning("onnxmltools not installed, skipping ONNX conversion")
             return ""
 
-    def convert_pytorch(
-        self, model, input_size: int, output_name: str
-    ) -> str:
+    def convert_pytorch(self, model, input_size: int, output_name: str) -> str:
         """Convert PyTorch model to ONNX."""
         try:
             import torch
@@ -89,9 +83,7 @@ class ONNXConverter:
             logger.warning("torch not available for ONNX export")
             return ""
 
-    def benchmark(
-        self, onnx_path: str, input_data: np.ndarray, n_runs: int = 100
-    ) -> Dict[str, float]:
+    def benchmark(self, onnx_path: str, input_data: np.ndarray, n_runs: int = 100) -> Dict[str, float]:
         """Benchmark ONNX inference latency."""
         try:
             import onnxruntime as ort

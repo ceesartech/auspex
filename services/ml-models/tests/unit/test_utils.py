@@ -2,7 +2,6 @@
 
 import numpy as np
 import pandas as pd
-
 from utils.data_loader import DataLoader
 from utils.feature_selector import FeatureSelector
 
@@ -11,16 +10,16 @@ class TestDataLoader:
     """Tests for DataLoader."""
 
     def test_train_test_split_temporal(self):
-        df = pd.DataFrame({
-            "match_date": pd.date_range("2023-01-01", periods=100, freq="D"),
-            "feature": np.random.randn(100),
-            "target": np.random.randint(0, 3, 100),
-        })
+        df = pd.DataFrame(
+            {
+                "match_date": pd.date_range("2023-01-01", periods=100, freq="D"),
+                "feature": np.random.randn(100),
+                "target": np.random.randint(0, 3, 100),
+            }
+        )
 
         loader = DataLoader()
-        train, val, test = loader.train_test_split_temporal(
-            df, train_ratio=0.6, val_ratio=0.2
-        )
+        train, val, test = loader.train_test_split_temporal(df, train_ratio=0.6, val_ratio=0.2)
 
         assert len(train) == 60
         assert len(val) == 20
@@ -31,11 +30,13 @@ class TestDataLoader:
         assert val["match_date"].max() <= test["match_date"].min()
 
     def test_prepare_features_median(self):
-        df = pd.DataFrame({
-            "f1": [1.0, 2.0, np.nan, 4.0],
-            "f2": [5.0, np.nan, 7.0, 8.0],
-            "target": [0, 1, 2, 0],
-        })
+        df = pd.DataFrame(
+            {
+                "f1": [1.0, 2.0, np.nan, 4.0],
+                "f2": [5.0, np.nan, 7.0, 8.0],
+                "target": [0, 1, 2, 0],
+            }
+        )
 
         loader = DataLoader()
         X, y = loader.prepare_features(df, ["f1", "f2"], "target", fill_strategy="median")
@@ -45,10 +46,12 @@ class TestDataLoader:
         assert len(y) == 4
 
     def test_prepare_features_zero(self):
-        df = pd.DataFrame({
-            "f1": [1.0, np.nan],
-            "target": [0, 1],
-        })
+        df = pd.DataFrame(
+            {
+                "f1": [1.0, np.nan],
+                "target": [0, 1],
+            }
+        )
 
         loader = DataLoader()
         X, y = loader.prepare_features(df, ["f1"], "target", fill_strategy="zero")
@@ -73,10 +76,15 @@ class TestDataLoader:
         assert encoded[1] == 1
 
     def test_get_feature_columns(self):
-        df = pd.DataFrame({
-            "f1": [1.0], "f2": [2.0], "name": ["team"],
-            "target": [0], "match_id": ["abc"],
-        })
+        df = pd.DataFrame(
+            {
+                "f1": [1.0],
+                "f2": [2.0],
+                "name": ["team"],
+                "target": [0],
+                "match_id": ["abc"],
+            }
+        )
 
         loader = DataLoader()
         cols = loader.get_feature_columns(df, exclude_columns=["target", "match_id"])
@@ -91,11 +99,13 @@ class TestFeatureSelector:
     """Tests for FeatureSelector."""
 
     def test_select_by_variance(self):
-        df = pd.DataFrame({
-            "constant": [1.0] * 100,
-            "low_var": np.random.uniform(0, 0.01, 100),
-            "normal": np.random.randn(100),
-        })
+        df = pd.DataFrame(
+            {
+                "constant": [1.0] * 100,
+                "low_var": np.random.uniform(0, 0.01, 100),
+                "normal": np.random.randn(100),
+            }
+        )
 
         selector = FeatureSelector()
         selected = selector.select_by_variance(df, threshold=0.01)
@@ -106,11 +116,13 @@ class TestFeatureSelector:
     def test_select_by_correlation(self):
         np.random.seed(42)
         f1 = np.random.randn(100)
-        df = pd.DataFrame({
-            "f1": f1,
-            "f2": f1 + np.random.randn(100) * 0.01,  # Highly correlated with f1
-            "f3": np.random.randn(100),  # Independent
-        })
+        df = pd.DataFrame(
+            {
+                "f1": f1,
+                "f2": f1 + np.random.randn(100) * 0.01,  # Highly correlated with f1
+                "f3": np.random.randn(100),  # Independent
+            }
+        )
 
         selector = FeatureSelector()
         selected = selector.select_by_correlation(df, threshold=0.95)

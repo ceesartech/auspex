@@ -1,9 +1,9 @@
 """Lottery draw scrapers (Powerball and Mega Millions)"""
 
 import logging
-from typing import Dict
-from datetime import datetime
 import re
+from datetime import datetime
+from typing import Dict
 
 from .base_scraper import BaseScraper
 
@@ -23,7 +23,7 @@ class PowerballScraper(BaseScraper):
         draws_scraped = 0
 
         # Find all draw results
-        draw_items = soup.find_all('div', class_='item')
+        draw_items = soup.find_all("div", class_="item")
 
         for item in draw_items:
             try:
@@ -40,12 +40,12 @@ class PowerballScraper(BaseScraper):
     def _parse_powerball_draw(self, item) -> Dict:
         """Parse Powerball draw data"""
 
-        date_str = item.find('h5', class_='card-title').text.strip()
-        draw_date = datetime.strptime(date_str, '%B %d, %Y').date()
+        date_str = item.find("h5", class_="card-title").text.strip()
+        draw_date = datetime.strptime(date_str, "%B %d, %Y").date()
 
         # Extract numbers
         numbers = []
-        number_divs = item.find_all('div', class_='item-powerball')
+        number_divs = item.find_all("div", class_="item-powerball")
 
         for num_div in number_divs[:-1]:  # Last one is powerball
             numbers.append(int(num_div.text.strip()))
@@ -53,31 +53,31 @@ class PowerballScraper(BaseScraper):
         powerball = int(number_divs[-1].text.strip())
 
         # Extract jackpot
-        jackpot_str = item.find('div', class_='jackpot-amount').text.strip()
+        jackpot_str = item.find("div", class_="jackpot-amount").text.strip()
         jackpot = self._parse_jackpot(jackpot_str)
 
         return {
-            'lottery_type': 'powerball',
-            'draw_date': draw_date,
-            'numbers': numbers,
-            'powerball': powerball,
-            'jackpot': jackpot
+            "lottery_type": "powerball",
+            "draw_date": draw_date,
+            "numbers": numbers,
+            "powerball": powerball,
+            "jackpot": jackpot,
         }
 
     def _parse_jackpot(self, jackpot_str: str) -> int:
         """Parse jackpot string to cents"""
         # "$50 Million" -> 5000000000 cents
-        match = re.search(r'\$?([\d.]+)\s*(million|billion)?', jackpot_str, re.I)
+        match = re.search(r"\$?([\d.]+)\s*(million|billion)?", jackpot_str, re.I)
 
         if not match:
             return 0
 
         amount = float(match.group(1))
-        unit = match.group(2).lower() if match.group(2) else ''
+        unit = match.group(2).lower() if match.group(2) else ""
 
-        if 'million' in unit:
+        if "million" in unit:
             return int(amount * 1_000_000 * 100)
-        elif 'billion' in unit:
+        elif "billion" in unit:
             return int(amount * 1_000_000_000 * 100)
         else:
             return int(amount * 100)
@@ -95,13 +95,13 @@ class PowerballScraper(BaseScraper):
         self.db.execute_query(
             query,
             (
-                draw_data['lottery_type'],
-                draw_data['draw_date'],
-                draw_data['numbers'],
-                draw_data.get('powerball'),
-                draw_data.get('megaball'),
-                draw_data['jackpot']
-            )
+                draw_data["lottery_type"],
+                draw_data["draw_date"],
+                draw_data["numbers"],
+                draw_data.get("powerball"),
+                draw_data.get("megaball"),
+                draw_data["jackpot"],
+            ),
         )
 
 
@@ -117,7 +117,7 @@ class MegaMillionsScraper(BaseScraper):
 
         draws_scraped = 0
 
-        draw_items = soup.find_all('div', class_='drawing-results')
+        draw_items = soup.find_all("div", class_="drawing-results")
 
         for item in draw_items:
             try:
@@ -134,12 +134,12 @@ class MegaMillionsScraper(BaseScraper):
     def _parse_mega_millions_draw(self, item) -> Dict:
         """Parse Mega Millions draw data"""
 
-        date_str = item.find('h5', class_='card-title').text.strip()
-        draw_date = datetime.strptime(date_str, '%B %d, %Y').date()
+        date_str = item.find("h5", class_="card-title").text.strip()
+        draw_date = datetime.strptime(date_str, "%B %d, %Y").date()
 
         # Extract numbers
         numbers = []
-        number_divs = item.find_all('li', class_='ball')
+        number_divs = item.find_all("li", class_="ball")
 
         for num_div in number_divs[:-1]:  # Last one is megaball
             numbers.append(int(num_div.text.strip()))
@@ -147,30 +147,30 @@ class MegaMillionsScraper(BaseScraper):
         megaball = int(number_divs[-1].text.strip())
 
         # Extract jackpot
-        jackpot_elem = item.find('div', class_='jackpot-amount')
+        jackpot_elem = item.find("div", class_="jackpot-amount")
         jackpot = self._parse_jackpot(jackpot_elem.text.strip()) if jackpot_elem else 0
 
         return {
-            'lottery_type': 'mega_millions',
-            'draw_date': draw_date,
-            'numbers': numbers,
-            'megaball': megaball,
-            'jackpot': jackpot
+            "lottery_type": "mega_millions",
+            "draw_date": draw_date,
+            "numbers": numbers,
+            "megaball": megaball,
+            "jackpot": jackpot,
         }
 
     def _parse_jackpot(self, jackpot_str: str) -> int:
         """Parse jackpot string to cents"""
-        match = re.search(r'\$?([\d.]+)\s*(million|billion)?', jackpot_str, re.I)
+        match = re.search(r"\$?([\d.]+)\s*(million|billion)?", jackpot_str, re.I)
 
         if not match:
             return 0
 
         amount = float(match.group(1))
-        unit = match.group(2).lower() if match.group(2) else ''
+        unit = match.group(2).lower() if match.group(2) else ""
 
-        if 'million' in unit:
+        if "million" in unit:
             return int(amount * 1_000_000 * 100)
-        elif 'billion' in unit:
+        elif "billion" in unit:
             return int(amount * 1_000_000_000 * 100)
         else:
             return int(amount * 100)
@@ -188,11 +188,11 @@ class MegaMillionsScraper(BaseScraper):
         self.db.execute_query(
             query,
             (
-                draw_data['lottery_type'],
-                draw_data['draw_date'],
-                draw_data['numbers'],
-                draw_data.get('powerball'),
-                draw_data.get('megaball'),
-                draw_data['jackpot']
-            )
+                draw_data["lottery_type"],
+                draw_data["draw_date"],
+                draw_data["numbers"],
+                draw_data.get("powerball"),
+                draw_data.get("megaball"),
+                draw_data["jackpot"],
+            ),
         )

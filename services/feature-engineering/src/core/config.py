@@ -1,9 +1,10 @@
 """Feature engineering service configuration."""
 
-from pydantic_settings import BaseSettings
-from pydantic import Field
-from typing import List
 import os
+from typing import List
+
+from pydantic import Field
+from pydantic_settings import BaseSettings
 
 
 class FeatureConfig(BaseSettings):
@@ -11,15 +12,11 @@ class FeatureConfig(BaseSettings):
 
     # Database
     database_url: str = Field(
-        default_factory=lambda: os.getenv(
-            "DATABASE_URL", "postgresql://betting:betting@localhost:5432/betting_db"
-        )
+        default_factory=lambda: os.getenv("DATABASE_URL", "postgresql://betting:betting@localhost:5432/betting_db")
     )
 
     # Redis
-    redis_url: str = Field(
-        default_factory=lambda: os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    )
+    redis_url: str = Field(default_factory=lambda: os.getenv("REDIS_URL", "redis://localhost:6379/0"))
 
     # Connection pool
     db_min_connections: int = 1

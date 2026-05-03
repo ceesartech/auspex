@@ -4,7 +4,6 @@ import logging
 from typing import Any, Callable, Dict, Optional
 
 import optuna
-
 from models.model_config import ModelType
 
 logger = logging.getLogger(__name__)

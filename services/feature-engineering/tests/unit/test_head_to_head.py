@@ -1,7 +1,6 @@
 """Tests for head-to-head feature computer."""
 
 import pytest
-
 from src.categories.head_to_head import HeadToHeadComputer
 
 
@@ -33,30 +32,21 @@ class TestHeadToHeadComputer:
         assert features["h2h__draws"] is not None
 
         # Sum of results should equal total matches
-        total = (
-            features["h2h__home_wins"]
-            + features["h2h__away_wins"]
-            + features["h2h__draws"]
-        )
+        total = features["h2h__home_wins"] + features["h2h__away_wins"] + features["h2h__draws"]
         assert total == 10.0
 
     def test_rates_sum_to_one(self, computer, match_context, mock_db, sample_h2h_matches):
         mock_db.execute_query.return_value = sample_h2h_matches
         features = computer.compute(match_context)
 
-        rate_sum = (
-            features["h2h__home_win_rate"]
-            + features["h2h__away_win_rate"]
-            + features["h2h__draw_rate"]
-        )
+        rate_sum = features["h2h__home_win_rate"] + features["h2h__away_win_rate"] + features["h2h__draw_rate"]
         assert abs(rate_sum - 1.0) < 0.01
 
     def test_rates_in_range(self, computer, match_context, mock_db, sample_h2h_matches):
         mock_db.execute_query.return_value = sample_h2h_matches
         features = computer.compute(match_context)
 
-        for key in ["h2h__home_win_rate", "h2h__away_win_rate", "h2h__draw_rate",
-                    "h2h__btts_rate", "h2h__over25_rate"]:
+        for key in ["h2h__home_win_rate", "h2h__away_win_rate", "h2h__draw_rate", "h2h__btts_rate", "h2h__over25_rate"]:
             val = features[key]
             assert 0 <= val <= 1, f"{key}={val}"
 

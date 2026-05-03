@@ -1,8 +1,8 @@
 """Tennis data scraper"""
 
 import logging
-from typing import Dict
 from datetime import datetime
+from typing import Dict
 
 from .base_scraper import BaseScraper
 
@@ -42,10 +42,10 @@ class TennisScraper(BaseScraper):
         soup = self._parse_html(html)
 
         count = 0
-        match_items = soup.find_all('div', class_='day-table')
+        match_items = soup.find_all("div", class_="day-table")
 
         for day in match_items:
-            matches = day.find_all('tr', class_='match')
+            matches = day.find_all("tr", class_="match")
             for match in matches:
                 try:
                     match_data = self._parse_match(match)
@@ -61,28 +61,28 @@ class TennisScraper(BaseScraper):
     def _parse_match(self, match_element) -> Dict:
         """Parse a tennis match element"""
         try:
-            player1 = match_element.find('td', class_='player1')
-            player2 = match_element.find('td', class_='player2')
+            player1 = match_element.find("td", class_="player1")
+            player2 = match_element.find("td", class_="player2")
 
             if not player1 or not player2:
                 return None
 
-            player1_name = player1.find('a').text.strip() if player1.find('a') else player1.text.strip()
-            player2_name = player2.find('a').text.strip() if player2.find('a') else player2.text.strip()
+            player1_name = player1.find("a").text.strip() if player1.find("a") else player1.text.strip()
+            player2_name = player2.find("a").text.strip() if player2.find("a") else player2.text.strip()
 
-            tournament = match_element.find('td', class_='tournament')
-            tournament_name = tournament.text.strip() if tournament else 'Unknown'
+            tournament = match_element.find("td", class_="tournament")
+            tournament_name = tournament.text.strip() if tournament else "Unknown"
 
-            score_elem = match_element.find('td', class_='score')
+            score_elem = match_element.find("td", class_="score")
             score = score_elem.text.strip() if score_elem else None
 
             return {
-                'player1': player1_name,
-                'player2': player2_name,
-                'tournament': tournament_name,
-                'score': score,
-                'sport': 'tennis',
-                'date': datetime.now().date()
+                "player1": player1_name,
+                "player2": player2_name,
+                "tournament": tournament_name,
+                "score": score,
+                "sport": "tennis",
+                "date": datetime.now().date(),
             }
         except Exception as e:
             logger.error(f"Error parsing tennis match: {e}")
@@ -95,27 +95,24 @@ class TennisScraper(BaseScraper):
             return
 
         league_id = self.db.get_or_create_league(
-            name=match_data['tournament'],
-            country='International',
-            sport='tennis',
-            season=str(datetime.now().year)
+            name=match_data["tournament"], country="International", sport="tennis", season=str(datetime.now().year)
         )
 
-        player1_id = self.db.get_or_create_team(match_data['player1'], league_id)
-        player2_id = self.db.get_or_create_team(match_data['player2'], league_id)
+        player1_id = self.db.get_or_create_team(match_data["player1"], league_id)
+        player2_id = self.db.get_or_create_team(match_data["player2"], league_id)
 
         self.db.upsert(
-            'matches',
+            "matches",
             {
-                'home_team_id': player1_id,
-                'away_team_id': player2_id,
-                'league_id': league_id,
-                'match_date': str(match_data['date']),
-                'status': 'finished' if match_data.get('score') else 'scheduled',
-                'season': str(datetime.now().year),
+                "home_team_id": player1_id,
+                "away_team_id": player2_id,
+                "league_id": league_id,
+                "match_date": str(match_data["date"]),
+                "status": "finished" if match_data.get("score") else "scheduled",
+                "season": str(datetime.now().year),
             },
-            conflict_columns=['home_team_id', 'away_team_id', 'match_date'],
-            update_columns=['status']
+            conflict_columns=["home_team_id", "away_team_id", "match_date"],
+            update_columns=["status"],
         )
 
     def _scrape_results(self) -> int:

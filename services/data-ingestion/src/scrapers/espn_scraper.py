@@ -2,8 +2,8 @@
 
 import json
 import logging
-from typing import Dict
 from datetime import datetime
+from typing import Dict
 
 from .base_scraper import BaseScraper
 
@@ -16,9 +16,9 @@ class ESPNScraper(BaseScraper):
     API_URL = "https://site.api.espn.com/apis/site/v2/sports"
 
     SPORT_ENDPOINTS = {
-        'nfl': ('football', 'nfl'),
-        'boxing': ('boxing', ''),
-        'mma': ('mma', 'ufc'),
+        "nfl": ("football", "nfl"),
+        "boxing": ("boxing", ""),
+        "mma": ("mma", "ufc"),
     }
 
     def __init__(self, *args, **kwargs):
@@ -51,7 +51,7 @@ class ESPNScraper(BaseScraper):
 
         try:
             data = json.loads(html)
-            events = data.get('events', [])
+            events = data.get("events", [])
 
             count = 0
             for event in events:
@@ -70,58 +70,57 @@ class ESPNScraper(BaseScraper):
 
     def _process_event(self, event: Dict, sport_key: str):
         """Process a single ESPN event"""
-        event_id = event.get('id')
-        event.get('name', '')
-        date_str = event.get('date', '')
-        status = event.get('status', {}).get('type', {}).get('state', 'pre')
+        event_id = event.get("id")
+        event.get("name", "")
+        date_str = event.get("date", "")
+        status = event.get("status", {}).get("type", {}).get("state", "pre")
 
-        competitions = event.get('competitions', [])
+        competitions = event.get("competitions", [])
         if not competitions:
             return
 
         competition = competitions[0]
-        competitors = competition.get('competitors', [])
+        competitors = competition.get("competitors", [])
 
         if len(competitors) < 2:
             return
 
-        home_competitor = next((c for c in competitors if c.get('homeAway') == 'home'), competitors[0])
-        away_competitor = next((c for c in competitors if c.get('homeAway') == 'away'), competitors[1])
+        home_competitor = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
+        away_competitor = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
 
-        home_team = home_competitor.get('team', {}).get('displayName', '')
-        away_team = away_competitor.get('team', {}).get('displayName', '')
-        home_score = home_competitor.get('score')
-        away_score = away_competitor.get('score')
+        home_team = home_competitor.get("team", {}).get("displayName", "")
+        away_team = away_competitor.get("team", {}).get("displayName", "")
+        home_score = home_competitor.get("score")
+        away_score = away_competitor.get("score")
 
-        venue_info = competition.get('venue', {})
-        venue = venue_info.get('fullName', '')
+        venue_info = competition.get("venue", {})
+        venue = venue_info.get("fullName", "")
 
         # Map ESPN status to our status
         status_map = {
-            'pre': 'scheduled',
-            'in': 'live',
-            'post': 'finished',
+            "pre": "scheduled",
+            "in": "live",
+            "post": "finished",
         }
-        mapped_status = status_map.get(status, 'scheduled')
+        mapped_status = status_map.get(status, "scheduled")
 
-        checksum = self._calculate_checksum({
-            'source': 'espn',
-            'event_id': event_id,
-            'home': home_team,
-            'away': away_team,
-            'date': date_str,
-            'score': f"{home_score}-{away_score}"
-        })
+        checksum = self._calculate_checksum(
+            {
+                "source": "espn",
+                "event_id": event_id,
+                "home": home_team,
+                "away": away_team,
+                "date": date_str,
+                "score": f"{home_score}-{away_score}",
+            }
+        )
 
         if self._is_duplicate(checksum):
             return
 
         # Get or create league
         league_id = self.db.get_or_create_league(
-            name=sport_key.upper(),
-            country='USA',
-            sport=sport_key,
-            season=str(datetime.now().year)
+            name=sport_key.upper(), country="USA", sport=sport_key, season=str(datetime.now().year)
         )
 
         # Get or create teams
@@ -130,23 +129,23 @@ class ESPNScraper(BaseScraper):
 
         # Upsert match
         match_data = {
-            'home_team_id': home_team_id,
-            'away_team_id': away_team_id,
-            'league_id': league_id,
-            'match_date': date_str,
-            'status': mapped_status,
-            'venue': venue,
-            'season': str(datetime.now().year),
+            "home_team_id": home_team_id,
+            "away_team_id": away_team_id,
+            "league_id": league_id,
+            "match_date": date_str,
+            "status": mapped_status,
+            "venue": venue,
+            "season": str(datetime.now().year),
         }
 
         if home_score is not None:
-            match_data['home_score'] = int(home_score)
+            match_data["home_score"] = int(home_score)
         if away_score is not None:
-            match_data['away_score'] = int(away_score)
+            match_data["away_score"] = int(away_score)
 
         self.db.upsert(
-            'matches',
+            "matches",
             match_data,
-            conflict_columns=['home_team_id', 'away_team_id', 'match_date'],
-            update_columns=['status', 'home_score', 'away_score']
+            conflict_columns=["home_team_id", "away_team_id", "match_date"],
+            update_columns=["status", "home_score", "away_score"],
         )

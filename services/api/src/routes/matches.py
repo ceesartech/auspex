@@ -1,13 +1,13 @@
 """Match endpoints"""
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-from typing import List, Optional, Dict, Any
 import logging
+from typing import Any, Dict, List, Optional
 
-from database import get_db
 from auth.dependencies import require_auth
+from database import get_db
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -91,9 +91,7 @@ async def get_match_detail(
     result = db.execute(query, {"match_id": match_id}).fetchone()
 
     if not result:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Match not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
 
     return {
         "match_id": str(result.id),
@@ -143,18 +141,14 @@ async def get_match_stats(
     match_result = db.execute(match_query, {"match_id": match_id}).fetchone()
 
     if not match_result:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Match not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
 
     # Get team form using DB function
     home_form = _get_team_form(db, str(match_result.home_team_id))
     away_form = _get_team_form(db, str(match_result.away_team_id))
 
     # Get H2H using DB function
-    h2h = _get_h2h_stats(
-        db, str(match_result.home_team_id), str(match_result.away_team_id)
-    )
+    h2h = _get_h2h_stats(db, str(match_result.home_team_id), str(match_result.away_team_id))
 
     stats = {}
     for row in stats_results:
@@ -210,9 +204,7 @@ async def get_match_odds(
             "odds_decimal": float(row.odds_decimal),
             "odds_american": row.odds_american,
             "line": float(row.line) if row.line else None,
-            "implied_probability": float(row.implied_probability)
-            if row.implied_probability
-            else None,
+            "implied_probability": float(row.implied_probability) if row.implied_probability else None,
             "timestamp": row.timestamp.isoformat() if row.timestamp else None,
             "is_opening": row.is_opening,
             "is_live": row.is_live,
@@ -229,9 +221,7 @@ def _get_team_form(db: Session, team_id: str, num_matches: int = 5) -> List[Dict
         FROM get_team_form(:team_id, :num_matches)
     """)
 
-    results = db.execute(
-        query, {"team_id": team_id, "num_matches": num_matches}
-    ).fetchall()
+    results = db.execute(query, {"team_id": team_id, "num_matches": num_matches}).fetchall()
 
     return [
         {
@@ -247,9 +237,7 @@ def _get_team_form(db: Session, team_id: str, num_matches: int = 5) -> List[Dict
     ]
 
 
-def _get_h2h_stats(
-    db: Session, team1_id: str, team2_id: str, num_matches: int = 10
-) -> List[Dict]:
+def _get_h2h_stats(db: Session, team1_id: str, team2_id: str, num_matches: int = 10) -> List[Dict]:
     """Call get_h2h_stats() database function"""
     query = text("""
         SELECT match_id, match_date, home_team_id, away_team_id,

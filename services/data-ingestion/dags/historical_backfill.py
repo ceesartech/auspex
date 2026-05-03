@@ -1,41 +1,42 @@
 """Airflow DAG for historical data backfill (10+ years)"""
 
+import logging
+from datetime import datetime, timedelta
+
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from datetime import datetime, timedelta
-import logging
-
-from services.data_ingestion.src.core.config import (
-    FBrefConfig, ScraperConfig
-)
+from redis import Redis
+from services.data_ingestion.src.core.config import FBrefConfig, ScraperConfig
 from services.data_ingestion.src.core.database import DatabaseManager
-from services.data_ingestion.src.scrapers.fbref_scraper import FBrefScraper
 from services.data_ingestion.src.scrapers.espn_scraper import ESPNScraper
+from services.data_ingestion.src.scrapers.fbref_scraper import FBrefScraper
+from services.data_ingestion.src.scrapers.lottery_scrapers import (
+    MegaMillionsScraper,
+    PowerballScraper,
+)
 from services.data_ingestion.src.scrapers.nhl_api_scraper import NHLAPIScraper
 from services.data_ingestion.src.scrapers.tennis_scraper import TennisScraper
-from services.data_ingestion.src.scrapers.lottery_scrapers import PowerballScraper, MegaMillionsScraper
-from redis import Redis
 
 logger = logging.getLogger(__name__)
 
 default_args = {
-    'owner': 'betting-system',
-    'depends_on_past': False,
-    'start_date': datetime(2024, 1, 1),
-    'email_on_failure': False,
-    'email_on_retry': False,
-    'retries': 5,
-    'retry_delay': timedelta(minutes=10),
+    "owner": "betting-system",
+    "depends_on_past": False,
+    "start_date": datetime(2024, 1, 1),
+    "email_on_failure": False,
+    "email_on_retry": False,
+    "retries": 5,
+    "retry_delay": timedelta(minutes=10),
 }
 
 dag = DAG(
-    'historical_backfill',
+    "historical_backfill",
     default_args=default_args,
-    description='One-time backfill of historical data (10+ years)',
+    description="One-time backfill of historical data (10+ years)",
     schedule_interval=None,  # Manual trigger only
     catchup=False,
     max_active_runs=1,
-    tags=['backfill', 'historical']
+    tags=["backfill", "historical"],
 )
 
 
@@ -115,11 +116,11 @@ def backfill_lottery_data():
 
 
 # Tasks
-soccer_task = PythonOperator(task_id='backfill_soccer', python_callable=backfill_soccer_data, dag=dag)
-nfl_task = PythonOperator(task_id='backfill_nfl', python_callable=backfill_nfl_data, dag=dag)
-nhl_task = PythonOperator(task_id='backfill_nhl', python_callable=backfill_nhl_data, dag=dag)
-tennis_task = PythonOperator(task_id='backfill_tennis', python_callable=backfill_tennis_data, dag=dag)
-lottery_task = PythonOperator(task_id='backfill_lottery', python_callable=backfill_lottery_data, dag=dag)
+soccer_task = PythonOperator(task_id="backfill_soccer", python_callable=backfill_soccer_data, dag=dag)
+nfl_task = PythonOperator(task_id="backfill_nfl", python_callable=backfill_nfl_data, dag=dag)
+nhl_task = PythonOperator(task_id="backfill_nhl", python_callable=backfill_nhl_data, dag=dag)
+tennis_task = PythonOperator(task_id="backfill_tennis", python_callable=backfill_tennis_data, dag=dag)
+lottery_task = PythonOperator(task_id="backfill_lottery", python_callable=backfill_lottery_data, dag=dag)
 
 # All backfill tasks run in parallel
 [soccer_task, nfl_task, nhl_task, tennis_task, lottery_task]

@@ -66,9 +66,7 @@ class DataLoader:
         val_df = df_sorted.iloc[train_end:val_end]
         test_df = df_sorted.iloc[val_end:]
 
-        logger.info(
-            f"Split: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}"
-        )
+        logger.info(f"Split: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}")
         return train_df, val_df, test_df
 
     def prepare_features(
@@ -98,8 +96,7 @@ class DataLoader:
         y = df[target_column].values
 
         logger.info(
-            f"Prepared {X.shape[0]} samples with {X.shape[1]} features, "
-            f"NaN remaining: {X.isna().sum().sum()}"
+            f"Prepared {X.shape[0]} samples with {X.shape[1]} features, " f"NaN remaining: {X.isna().sum().sum()}"
         )
         return X, y
 

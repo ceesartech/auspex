@@ -5,7 +5,6 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
-
 from inference.batch_predictor import BatchPredictor
 from inference.real_time_predictor import RealTimePredictor
 
@@ -67,11 +66,13 @@ class TestRealTimePredictor:
     def test_predict_cache_hit(self):
         model = self._make_mock_model()
 
-        cached_data = json.dumps({
-            "predicted_class": 1,
-            "probabilities": {"home_win": 0.3, "draw": 0.5, "away_win": 0.2},
-            "confidence": 0.5,
-        })
+        cached_data = json.dumps(
+            {
+                "predicted_class": 1,
+                "probabilities": {"home_win": 0.3, "draw": 0.5, "away_win": 0.2},
+                "confidence": 0.5,
+            }
+        )
         mock_redis = MagicMock()
         mock_redis.get.return_value = cached_data
 
@@ -144,12 +145,8 @@ class TestBatchPredictor:
 
     def _make_mock_model(self):
         mock = MagicMock()
-        mock.predict = MagicMock(
-            side_effect=lambda X: np.zeros(len(X), dtype=int)
-        )
-        mock.predict_proba = MagicMock(
-            side_effect=lambda X: np.array([[0.5, 0.3, 0.2]] * len(X))
-        )
+        mock.predict = MagicMock(side_effect=lambda X: np.zeros(len(X), dtype=int))
+        mock.predict_proba = MagicMock(side_effect=lambda X: np.array([[0.5, 0.3, 0.2]] * len(X)))
         return mock
 
     def test_init(self):
@@ -186,13 +183,15 @@ class TestBatchPredictor:
         model = self._make_mock_model()
         predictor = BatchPredictor(model)
 
-        df = pd.DataFrame({
-            "f1": np.random.randn(20),
-            "f2": np.random.randn(20),
-            "home_odds": np.random.uniform(1.5, 3.0, 20),
-            "draw_odds": np.random.uniform(2.5, 4.0, 20),
-            "away_odds": np.random.uniform(2.0, 5.0, 20),
-        })
+        df = pd.DataFrame(
+            {
+                "f1": np.random.randn(20),
+                "f2": np.random.randn(20),
+                "home_odds": np.random.uniform(1.5, 3.0, 20),
+                "draw_odds": np.random.uniform(2.5, 4.0, 20),
+                "away_odds": np.random.uniform(2.0, 5.0, 20),
+            }
+        )
 
         odds_columns = {0: "home_odds", 1: "draw_odds", 2: "away_odds"}
         result = predictor.predict_with_value(df, odds_columns=odds_columns)

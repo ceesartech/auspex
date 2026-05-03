@@ -8,7 +8,6 @@ import logging
 from typing import Dict, List, Optional
 from uuid import UUID
 
-
 from ..core.registry import FeatureMetadata
 from ..utils.math_helpers import (
     coefficient_of_variation,
@@ -22,17 +21,27 @@ logger = logging.getLogger(__name__)
 
 # Metrics computed per window
 _WINDOW_METRICS = [
-    "wins", "draws", "losses", "points_per_game",
-    "goals_scored", "goals_conceded", "goal_diff",
-    "clean_sheets", "btts",
-    "avg_xg", "avg_xg_against",
-    "avg_shots", "avg_shots_on_target",
-    "avg_possession", "avg_corners",
+    "wins",
+    "draws",
+    "losses",
+    "points_per_game",
+    "goals_scored",
+    "goals_conceded",
+    "goal_diff",
+    "clean_sheets",
+    "btts",
+    "avg_xg",
+    "avg_xg_against",
+    "avg_shots",
+    "avg_shots_on_target",
+    "avg_possession",
+    "avg_corners",
 ]
 
 _TREND_METRICS = ["points_trend", "goals_trend", "xg_trend"]
 _OVERALL_METRICS = [
-    "scoring_consistency", "defensive_consistency",
+    "scoring_consistency",
+    "defensive_consistency",
 ]
 
 
@@ -49,53 +58,49 @@ class TeamPerformanceComputer(BaseFeatureComputer):
         for side in ["home", "away"]:
             for w in windows:
                 for metric in _WINDOW_METRICS:
-                    defs.append(FeatureMetadata(
-                        name=f"team__{side}__form__{metric}__last{w}",
-                        category=self.category,
-                        description=f"{side} team {metric} over last {w} matches",
-                    ))
+                    defs.append(
+                        FeatureMetadata(
+                            name=f"team__{side}__form__{metric}__last{w}",
+                            category=self.category,
+                            description=f"{side} team {metric} over last {w} matches",
+                        )
+                    )
 
             # Trends (last 5 only to keep count manageable)
             for metric in _TREND_METRICS:
-                defs.append(FeatureMetadata(
-                    name=f"team__{side}__{metric}",
-                    category=self.category,
-                    description=f"{side} team {metric} trend slope",
-                ))
+                defs.append(
+                    FeatureMetadata(
+                        name=f"team__{side}__{metric}",
+                        category=self.category,
+                        description=f"{side} team {metric} trend slope",
+                    )
+                )
 
             # Consistency metrics
             for metric in _OVERALL_METRICS:
-                defs.append(FeatureMetadata(
-                    name=f"team__{side}__{metric}",
-                    category=self.category,
-                    description=f"{side} team {metric}",
-                    min_value=0,
-                ))
+                defs.append(
+                    FeatureMetadata(
+                        name=f"team__{side}__{metric}",
+                        category=self.category,
+                        description=f"{side} team {metric}",
+                        min_value=0,
+                    )
+                )
 
         self._feature_defs = defs
 
-    def compute(
-        self, ctx: MatchContext, **kwargs
-    ) -> Dict[str, Optional[float]]:
+    def compute(self, ctx: MatchContext, **kwargs) -> Dict[str, Optional[float]]:
         features = self._empty_features()
 
         try:
-            home_matches = self._fetch_recent_matches(
-                ctx.home_team_id, ctx.match_date
-            )
-            away_matches = self._fetch_recent_matches(
-                ctx.away_team_id, ctx.match_date
-            )
+            home_matches = self._fetch_recent_matches(ctx.home_team_id, ctx.match_date)
+            away_matches = self._fetch_recent_matches(ctx.away_team_id, ctx.match_date)
         except Exception as e:
             logger.error(f"Failed to fetch team matches: {e}")
             return features
 
-        self._compute_side_features(
-            features, "home", home_matches, ctx.home_team_id
-        )
-        self._compute_side_features(
-            features, "away", away_matches, ctx.away_team_id
-        )
+        self._compute_side_features(features, "home", home_matches, ctx.home_team_id)
+        self._compute_side_features(features, "away", away_matches, ctx.away_team_id)
 
         return features
 
@@ -134,15 +139,9 @@ class TeamPerformanceComputer(BaseFeatureComputer):
             goals_seq = [d["gf"] for d in trend_data]
             xg_seq = [d["xg"] for d in trend_data]
 
-            features[f"team__{side}__points_trend"] = linear_trend(
-                list(reversed(points_seq))
-            )
-            features[f"team__{side}__goals_trend"] = linear_trend(
-                list(reversed(goals_seq))
-            )
-            features[f"team__{side}__xg_trend"] = linear_trend(
-                list(reversed(xg_seq))
-            )
+            features[f"team__{side}__points_trend"] = linear_trend(list(reversed(points_seq)))
+            features[f"team__{side}__goals_trend"] = linear_trend(list(reversed(goals_seq)))
+            features[f"team__{side}__xg_trend"] = linear_trend(list(reversed(xg_seq)))
 
         # Consistency (CV over last 10)
         if len(match_stats) >= 3:
@@ -151,17 +150,15 @@ class TeamPerformanceComputer(BaseFeatureComputer):
             features[f"team__{side}__scoring_consistency"] = coefficient_of_variation(gf_vals)
             features[f"team__{side}__defensive_consistency"] = coefficient_of_variation(ga_vals)
 
-    def _extract_match_stats(
-        self, matches: List[Dict], team_id: UUID
-    ) -> List[Dict]:
+    def _extract_match_stats(self, matches: List[Dict], team_id: UUID) -> List[Dict]:
         """Convert raw match rows into per-match stat dicts for a team."""
         stats = []
         for m in matches:
             is_home = str(m.get("home_team_id")) == str(team_id)
 
             if is_home:
-                gf = (m.get("home_score") or 0)
-                ga = (m.get("away_score") or 0)
+                gf = m.get("home_score") or 0
+                ga = m.get("away_score") or 0
                 xg = self._safe_get(m, "xg_home")
                 xg_against = self._safe_get(m, "xg_away")
                 shots = self._safe_get(m, "shots_home")
@@ -169,8 +166,8 @@ class TeamPerformanceComputer(BaseFeatureComputer):
                 poss = self._safe_get(m, "possession_home", 50.0)
                 corners = self._safe_get(m, "corners_home")
             else:
-                gf = (m.get("away_score") or 0)
-                ga = (m.get("home_score") or 0)
+                gf = m.get("away_score") or 0
+                ga = m.get("home_score") or 0
                 xg = self._safe_get(m, "xg_away")
                 xg_against = self._safe_get(m, "xg_home")
                 shots = self._safe_get(m, "shots_away")
@@ -188,20 +185,22 @@ class TeamPerformanceComputer(BaseFeatureComputer):
                 result = "L"
                 points = 0
 
-            stats.append({
-                "gf": float(gf),
-                "ga": float(ga),
-                "xg": xg,
-                "xg_against": xg_against,
-                "shots": shots,
-                "sot": sot,
-                "possession": poss,
-                "corners": corners,
-                "result": result,
-                "points": float(points),
-                "clean_sheet": 1.0 if ga == 0 else 0.0,
-                "btts": 1.0 if gf > 0 and ga > 0 else 0.0,
-            })
+            stats.append(
+                {
+                    "gf": float(gf),
+                    "ga": float(ga),
+                    "xg": xg,
+                    "xg_against": xg_against,
+                    "shots": shots,
+                    "sot": sot,
+                    "possession": poss,
+                    "corners": corners,
+                    "result": result,
+                    "points": float(points),
+                    "clean_sheet": 1.0 if ga == 0 else 0.0,
+                    "btts": 1.0 if gf > 0 and ga > 0 else 0.0,
+                }
+            )
         return stats
 
     def _compute_window_features(
@@ -221,42 +220,18 @@ class TeamPerformanceComputer(BaseFeatureComputer):
         features[f"{prefix}__wins__last{window}"] = float(wins)
         features[f"{prefix}__draws__last{window}"] = float(draws)
         features[f"{prefix}__losses__last{window}"] = float(losses)
-        features[f"{prefix}__points_per_game__last{window}"] = safe_divide(
-            sum(d["points"] for d in data), n
-        )
+        features[f"{prefix}__points_per_game__last{window}"] = safe_divide(sum(d["points"] for d in data), n)
 
-        features[f"{prefix}__goals_scored__last{window}"] = sum(
-            d["gf"] for d in data
-        )
-        features[f"{prefix}__goals_conceded__last{window}"] = sum(
-            d["ga"] for d in data
-        )
-        features[f"{prefix}__goal_diff__last{window}"] = sum(
-            d["gf"] - d["ga"] for d in data
-        )
+        features[f"{prefix}__goals_scored__last{window}"] = sum(d["gf"] for d in data)
+        features[f"{prefix}__goals_conceded__last{window}"] = sum(d["ga"] for d in data)
+        features[f"{prefix}__goal_diff__last{window}"] = sum(d["gf"] - d["ga"] for d in data)
 
-        features[f"{prefix}__clean_sheets__last{window}"] = sum(
-            d["clean_sheet"] for d in data
-        )
-        features[f"{prefix}__btts__last{window}"] = sum(
-            d["btts"] for d in data
-        )
+        features[f"{prefix}__clean_sheets__last{window}"] = sum(d["clean_sheet"] for d in data)
+        features[f"{prefix}__btts__last{window}"] = sum(d["btts"] for d in data)
 
-        features[f"{prefix}__avg_xg__last{window}"] = safe_divide(
-            sum(d["xg"] for d in data), n
-        )
-        features[f"{prefix}__avg_xg_against__last{window}"] = safe_divide(
-            sum(d["xg_against"] for d in data), n
-        )
-        features[f"{prefix}__avg_shots__last{window}"] = safe_divide(
-            sum(d["shots"] for d in data), n
-        )
-        features[f"{prefix}__avg_shots_on_target__last{window}"] = safe_divide(
-            sum(d["sot"] for d in data), n
-        )
-        features[f"{prefix}__avg_possession__last{window}"] = safe_divide(
-            sum(d["possession"] for d in data), n
-        )
-        features[f"{prefix}__avg_corners__last{window}"] = safe_divide(
-            sum(d["corners"] for d in data), n
-        )
+        features[f"{prefix}__avg_xg__last{window}"] = safe_divide(sum(d["xg"] for d in data), n)
+        features[f"{prefix}__avg_xg_against__last{window}"] = safe_divide(sum(d["xg_against"] for d in data), n)
+        features[f"{prefix}__avg_shots__last{window}"] = safe_divide(sum(d["shots"] for d in data), n)
+        features[f"{prefix}__avg_shots_on_target__last{window}"] = safe_divide(sum(d["sot"] for d in data), n)
+        features[f"{prefix}__avg_possession__last{window}"] = safe_divide(sum(d["possession"] for d in data), n)
+        features[f"{prefix}__avg_corners__last{window}"] = safe_divide(sum(d["corners"] for d in data), n)

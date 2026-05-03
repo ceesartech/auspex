@@ -52,9 +52,7 @@ class BaseFeatureComputer(ABC):
         """
 
     @abstractmethod
-    def compute(
-        self, ctx: MatchContext, **kwargs
-    ) -> Dict[str, Optional[float]]:
+    def compute(self, ctx: MatchContext, **kwargs) -> Dict[str, Optional[float]]:
         """Compute all features for a given match context.
 
         Returns dict of {feature_name: value}.
@@ -76,9 +74,7 @@ class BaseFeatureComputer(ABC):
 
     # ---------- Shared Helpers ----------
 
-    def _safe_get(
-        self, row: Dict, key: str, default: float = 0.0
-    ) -> float:
+    def _safe_get(self, row: Dict, key: str, default: float = 0.0) -> float:
         """Safely get a numeric value from a dict row."""
         val = row.get(key)
         if val is None:
@@ -88,9 +84,7 @@ class BaseFeatureComputer(ABC):
         except (TypeError, ValueError):
             return default
 
-    def _compute_win_draw_loss(
-        self, matches: List[Dict], team_id: UUID
-    ) -> Dict[str, int]:
+    def _compute_win_draw_loss(self, matches: List[Dict], team_id: UUID) -> Dict[str, int]:
         """Compute W/D/L counts for a team from match records."""
         wins = draws = losses = 0
         for m in matches:
@@ -119,9 +113,7 @@ class BaseFeatureComputer(ABC):
         """Compute points from W/D/L dict."""
         return wdl["wins"] * 3 + wdl["draws"]
 
-    def _goals_for_against(
-        self, matches: List[Dict], team_id: UUID
-    ) -> List[Dict[str, int]]:
+    def _goals_for_against(self, matches: List[Dict], team_id: UUID) -> List[Dict[str, int]]:
         """Extract goals for/against per match for a team."""
         results = []
         for m in matches:

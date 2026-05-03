@@ -1,10 +1,10 @@
 """Integration tests - end-to-end API flow tests"""
 
 import sys
-from pathlib import Path
-from datetime import datetime, date
-from unittest.mock import patch, MagicMock
 import uuid
+from datetime import date, datetime
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -34,17 +34,15 @@ class TestAuthToPredictionFlow:
         """Login with correct DOB returns a valid JWT"""
         from auth.jwt_handler import (
             create_access_token,
-            verify_token,
             verify_date_of_birth,
+            verify_token,
         )
 
         # Step 1: Verify DOB
         assert verify_date_of_birth("1994-05-09") is True
 
         # Step 2: Create token
-        token = create_access_token(
-            data={"user_id": "owner", "username": "ceesar"}
-        )
+        token = create_access_token(data={"user_id": "owner", "username": "ceesar"})
 
         # Step 3: Token is valid
         payload = verify_token(token)

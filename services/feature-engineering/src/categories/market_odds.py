@@ -31,19 +31,22 @@ class MarketOddsComputer(BaseFeatureComputer):
                 name="odds__implied_prob__home",
                 category=self.category,
                 description="Implied probability of home win (fair)",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="odds__implied_prob__draw",
                 category=self.category,
                 description="Implied probability of draw (fair)",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="odds__implied_prob__away",
                 category=self.category,
                 description="Implied probability of away win (fair)",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
             # Raw current odds
             FeatureMetadata(
@@ -104,13 +107,15 @@ class MarketOddsComputer(BaseFeatureComputer):
                 name="odds__drift__home",
                 category=self.category,
                 description="Home odds drift direction",
-                min_value=-1, max_value=1,
+                min_value=-1,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="odds__drift__away",
                 category=self.category,
                 description="Away odds drift direction",
-                min_value=-1, max_value=1,
+                min_value=-1,
+                max_value=1,
             ),
             # Market overround
             FeatureMetadata(
@@ -124,13 +129,15 @@ class MarketOddsComputer(BaseFeatureComputer):
                 name="odds__favourite",
                 category=self.category,
                 description="1=home fav, 0=draw fav, -1=away fav",
-                min_value=-1, max_value=1,
+                min_value=-1,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="odds__favourite_prob",
                 category=self.category,
                 description="Implied probability of the favourite",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
             # Odds ratio
             FeatureMetadata(
@@ -175,7 +182,8 @@ class MarketOddsComputer(BaseFeatureComputer):
                 name="odds__over25__implied_prob",
                 category=self.category,
                 description="Implied probability of over 2.5 goals",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
             # BTTS odds
             FeatureMetadata(
@@ -188,13 +196,12 @@ class MarketOddsComputer(BaseFeatureComputer):
                 name="odds__btts_yes__implied_prob",
                 category=self.category,
                 description="Implied probability of BTTS Yes",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
         ]
 
-    def compute(
-        self, ctx: MatchContext, **kwargs
-    ) -> Dict[str, Optional[float]]:
+    def compute(self, ctx: MatchContext, **kwargs) -> Dict[str, Optional[float]]:
         features = self._empty_features()
 
         try:
@@ -214,23 +221,15 @@ class MarketOddsComputer(BaseFeatureComputer):
         return features
 
     def _fetch_latest_odds(self, match_id) -> List[Dict]:
-        return self.db.execute_query(
-            LATEST_ODDS, (str(match_id),), fetch=True
-        )
+        return self.db.execute_query(LATEST_ODDS, (str(match_id),), fetch=True)
 
     def _fetch_opening_odds(self, match_id) -> List[Dict]:
-        return self.db.execute_query(
-            OPENING_ODDS, (str(match_id),), fetch=True
-        )
+        return self.db.execute_query(OPENING_ODDS, (str(match_id),), fetch=True)
 
     def _fetch_all_odds(self, match_id) -> List[Dict]:
-        return self.db.execute_query(
-            MATCH_ODDS, (str(match_id),), fetch=True
-        )
+        return self.db.execute_query(MATCH_ODDS, (str(match_id),), fetch=True)
 
-    def _compute_current_odds(
-        self, features: Dict[str, Optional[float]], odds: List[Dict]
-    ) -> None:
+    def _compute_current_odds(self, features: Dict[str, Optional[float]], odds: List[Dict]) -> None:
         # Find best 1X2 odds across bookmakers
         home_odds = []
         draw_odds = []
@@ -293,9 +292,7 @@ class MarketOddsComputer(BaseFeatureComputer):
             # Ratio
             features["odds__home_away_ratio"] = safe_divide(avg_h, avg_a)
 
-    def _compute_opening_odds(
-        self, features: Dict[str, Optional[float]], odds: List[Dict]
-    ) -> None:
+    def _compute_opening_odds(self, features: Dict[str, Optional[float]], odds: List[Dict]) -> None:
         for o in odds:
             mt = o.get("market_type", "")
             sel = o.get("selection", "")
@@ -327,13 +324,13 @@ class MarketOddsComputer(BaseFeatureComputer):
                     else:
                         features[f"odds__drift__{sel}"] = 0.0
 
-    def _compute_consensus(
-        self, features: Dict[str, Optional[float]], all_odds: List[Dict]
-    ) -> None:
+    def _compute_consensus(self, features: Dict[str, Optional[float]], all_odds: List[Dict]) -> None:
         import numpy as np
 
         bookmaker_probs: Dict[str, List[float]] = {
-            "home": [], "draw": [], "away": [],
+            "home": [],
+            "draw": [],
+            "away": [],
         }
 
         for o in all_odds:
@@ -356,9 +353,7 @@ class MarketOddsComputer(BaseFeatureComputer):
             if len(vals) >= 2:
                 features[f"odds__consensus__{sel}_std"] = float(np.std(vals))
 
-    def _compute_secondary_markets(
-        self, features: Dict[str, Optional[float]], odds: List[Dict]
-    ) -> None:
+    def _compute_secondary_markets(self, features: Dict[str, Optional[float]], odds: List[Dict]) -> None:
         for o in odds:
             mt = o.get("market_type", "")
             sel = o.get("selection", "")
@@ -369,14 +364,10 @@ class MarketOddsComputer(BaseFeatureComputer):
             if mt == "over_under_25":
                 if sel == "over":
                     features["odds__over25__odds"] = val
-                    features["odds__over25__implied_prob"] = (
-                        decimal_odds_to_implied_probability(val)
-                    )
+                    features["odds__over25__implied_prob"] = decimal_odds_to_implied_probability(val)
                 elif sel == "under":
                     features["odds__under25__odds"] = val
             elif mt == "btts":
                 if sel == "yes":
                     features["odds__btts_yes__odds"] = val
-                    features["odds__btts_yes__implied_prob"] = (
-                        decimal_odds_to_implied_probability(val)
-                    )
+                    features["odds__btts_yes__implied_prob"] = decimal_odds_to_implied_probability(val)

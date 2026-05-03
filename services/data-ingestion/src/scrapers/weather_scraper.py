@@ -2,8 +2,8 @@
 
 import json
 import logging
-from typing import List, Dict
 from datetime import datetime
+from typing import Dict, List
 
 from .base_scraper import BaseScraper
 
@@ -28,12 +28,10 @@ class WeatherScraper(BaseScraper):
         for match in upcoming_matches:
             try:
                 weather = self._fetch_weather(
-                    latitude=match.get('latitude'),
-                    longitude=match.get('longitude'),
-                    date=match.get('match_date')
+                    latitude=match.get("latitude"), longitude=match.get("longitude"), date=match.get("match_date")
                 )
                 if weather:
-                    self._save_weather(match['match_id'], weather)
+                    self._save_weather(match["match_id"], weather)
                     total += 1
             except Exception as e:
                 logger.error(f"Error fetching weather for match {match.get('match_id')}: {e}")
@@ -80,27 +78,27 @@ class WeatherScraper(BaseScraper):
 
         try:
             data = json.loads(html)
-            hourly = data.get('hourly', {})
+            hourly = data.get("hourly", {})
 
-            if not hourly or not hourly.get('temperature_2m'):
+            if not hourly or not hourly.get("temperature_2m"):
                 return None
 
             # Get weather at match time (approximate to nearest hour)
             # Default to afternoon (index 15 = 3pm)
-            idx = 15 if len(hourly.get('temperature_2m', [])) > 15 else 0
+            idx = 15 if len(hourly.get("temperature_2m", [])) > 15 else 0
 
-            weather_code = hourly.get('weather_code', [0])[idx]
+            weather_code = hourly.get("weather_code", [0])[idx]
             condition = self._map_weather_code(weather_code)
 
             return {
-                'temperature_celsius': hourly.get('temperature_2m', [None])[idx],
-                'humidity_pct': hourly.get('relative_humidity_2m', [None])[idx],
-                'wind_speed_kmh': hourly.get('wind_speed_10m', [None])[idx],
-                'wind_direction': str(hourly.get('wind_direction_10m', [None])[idx]),
-                'precipitation_mm': hourly.get('precipitation', [None])[idx],
-                'weather_condition': condition,
-                'visibility_km': hourly.get('visibility', [None])[idx],
-                'pressure_hpa': hourly.get('pressure_msl', [None])[idx],
+                "temperature_celsius": hourly.get("temperature_2m", [None])[idx],
+                "humidity_pct": hourly.get("relative_humidity_2m", [None])[idx],
+                "wind_speed_kmh": hourly.get("wind_speed_10m", [None])[idx],
+                "wind_direction": str(hourly.get("wind_direction_10m", [None])[idx]),
+                "precipitation_mm": hourly.get("precipitation", [None])[idx],
+                "weather_condition": condition,
+                "visibility_km": hourly.get("visibility", [None])[idx],
+                "pressure_hpa": hourly.get("pressure_msl", [None])[idx],
             }
 
         except json.JSONDecodeError as e:
@@ -110,50 +108,69 @@ class WeatherScraper(BaseScraper):
     def _map_weather_code(self, code: int) -> str:
         """Map WMO weather code to condition string"""
         code_map = {
-            0: 'clear',
-            1: 'mainly_clear', 2: 'partly_cloudy', 3: 'overcast',
-            45: 'fog', 48: 'depositing_rime_fog',
-            51: 'light_drizzle', 53: 'moderate_drizzle', 55: 'dense_drizzle',
-            56: 'freezing_drizzle', 57: 'freezing_drizzle',
-            61: 'slight_rain', 63: 'moderate_rain', 65: 'heavy_rain',
-            66: 'freezing_rain', 67: 'freezing_rain',
-            71: 'slight_snow', 73: 'moderate_snow', 75: 'heavy_snow',
-            77: 'snow_grains',
-            80: 'slight_rain_shower', 81: 'moderate_rain_shower', 82: 'violent_rain_shower',
-            85: 'slight_snow_shower', 86: 'heavy_snow_shower',
-            95: 'thunderstorm', 96: 'thunderstorm_hail', 99: 'thunderstorm_heavy_hail',
+            0: "clear",
+            1: "mainly_clear",
+            2: "partly_cloudy",
+            3: "overcast",
+            45: "fog",
+            48: "depositing_rime_fog",
+            51: "light_drizzle",
+            53: "moderate_drizzle",
+            55: "dense_drizzle",
+            56: "freezing_drizzle",
+            57: "freezing_drizzle",
+            61: "slight_rain",
+            63: "moderate_rain",
+            65: "heavy_rain",
+            66: "freezing_rain",
+            67: "freezing_rain",
+            71: "slight_snow",
+            73: "moderate_snow",
+            75: "heavy_snow",
+            77: "snow_grains",
+            80: "slight_rain_shower",
+            81: "moderate_rain_shower",
+            82: "violent_rain_shower",
+            85: "slight_snow_shower",
+            86: "heavy_snow_shower",
+            95: "thunderstorm",
+            96: "thunderstorm_hail",
+            99: "thunderstorm_heavy_hail",
         }
-        return code_map.get(code, 'unknown')
+        return code_map.get(code, "unknown")
 
     def _save_weather(self, match_id: str, weather: Dict):
         """Save weather data to database"""
-        checksum = self._calculate_checksum({
-            'match_id': str(match_id),
-            **weather
-        })
+        checksum = self._calculate_checksum({"match_id": str(match_id), **weather})
 
         if self._is_duplicate(checksum):
             return
 
         self.db.upsert(
-            'weather',
+            "weather",
             {
-                'match_id': match_id,
-                'temperature_celsius': weather.get('temperature_celsius'),
-                'humidity_pct': weather.get('humidity_pct'),
-                'wind_speed_kmh': weather.get('wind_speed_kmh'),
-                'wind_direction': weather.get('wind_direction'),
-                'precipitation_mm': weather.get('precipitation_mm'),
-                'weather_condition': weather.get('weather_condition'),
-                'visibility_km': weather.get('visibility_km'),
-                'pressure_hpa': weather.get('pressure_hpa'),
-                'source': 'open-meteo',
-                'recorded_at': datetime.utcnow(),
+                "match_id": match_id,
+                "temperature_celsius": weather.get("temperature_celsius"),
+                "humidity_pct": weather.get("humidity_pct"),
+                "wind_speed_kmh": weather.get("wind_speed_kmh"),
+                "wind_direction": weather.get("wind_direction"),
+                "precipitation_mm": weather.get("precipitation_mm"),
+                "weather_condition": weather.get("weather_condition"),
+                "visibility_km": weather.get("visibility_km"),
+                "pressure_hpa": weather.get("pressure_hpa"),
+                "source": "open-meteo",
+                "recorded_at": datetime.utcnow(),
             },
-            conflict_columns=['match_id'],
+            conflict_columns=["match_id"],
             update_columns=[
-                'temperature_celsius', 'humidity_pct', 'wind_speed_kmh',
-                'wind_direction', 'precipitation_mm', 'weather_condition',
-                'visibility_km', 'pressure_hpa', 'recorded_at'
-            ]
+                "temperature_celsius",
+                "humidity_pct",
+                "wind_speed_kmh",
+                "wind_direction",
+                "precipitation_mm",
+                "weather_condition",
+                "visibility_km",
+                "pressure_hpa",
+                "recorded_at",
+            ],
         )

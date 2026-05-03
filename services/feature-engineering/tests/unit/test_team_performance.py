@@ -1,7 +1,6 @@
 """Tests for team performance feature computer."""
 
 import pytest
-
 from src.categories.team_performance import TeamPerformanceComputer
 
 

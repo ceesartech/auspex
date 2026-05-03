@@ -38,16 +38,12 @@ class SHAPExplainer:
                     raise ValueError("background_data required for DeepExplainer")
                 import torch
 
-                self.explainer = shap.DeepExplainer(
-                    self.model, torch.FloatTensor(background_data)
-                )
+                self.explainer = shap.DeepExplainer(self.model, torch.FloatTensor(background_data))
             elif self.model_type == "kernel":
                 if background_data is None:
                     raise ValueError("background_data required for KernelExplainer")
                 self.explainer = shap.KernelExplainer(
-                    self.model.predict_proba
-                    if hasattr(self.model, "predict_proba")
-                    else self.model.predict,
+                    self.model.predict_proba if hasattr(self.model, "predict_proba") else self.model.predict,
                     background_data,
                 )
             else:
@@ -112,13 +108,15 @@ class SHAPExplainer:
         explanations = []
         for idx in top_indices:
             name = feature_names[idx] if feature_names else f"feature_{idx}"
-            explanations.append({
-                "feature": name,
-                "value": float(x[0, idx]),
-                "shap_value": float(sv[idx]),
-                "impact": "positive" if sv[idx] > 0 else "negative",
-                "abs_impact": float(abs(sv[idx])),
-            })
+            explanations.append(
+                {
+                    "feature": name,
+                    "value": float(x[0, idx]),
+                    "shap_value": float(sv[idx]),
+                    "impact": "positive" if sv[idx] > 0 else "negative",
+                    "abs_impact": float(abs(sv[idx])),
+                }
+            )
 
         return {
             "top_features": explanations,

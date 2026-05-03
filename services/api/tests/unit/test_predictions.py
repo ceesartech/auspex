@@ -1,10 +1,10 @@
 """Tests for prediction endpoints"""
 
 import sys
-from pathlib import Path
-from datetime import datetime
-from unittest.mock import patch, MagicMock
 import uuid
+from datetime import datetime
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -155,6 +155,7 @@ class TestCacheService:
             mock_redis_cls.from_url.return_value = mock_redis
 
             from services.cache_service import CacheService
+
             service = CacheService()
             service.redis = mock_redis
 
@@ -171,6 +172,7 @@ class TestCacheService:
             mock_redis_cls.from_url.return_value = mock_redis
 
             from services.cache_service import CacheService
+
             service = CacheService()
             service.redis = mock_redis
 
@@ -183,6 +185,7 @@ class TestCacheService:
             mock_redis_cls.from_url.return_value = mock_redis
 
             from services.cache_service import CacheService
+
             service = CacheService()
             service.redis = mock_redis
 
@@ -195,6 +198,7 @@ class TestCacheService:
             mock_redis_cls.from_url.return_value = mock_redis
 
             from services.cache_service import CacheService
+
             service = CacheService()
             service.redis = mock_redis
 
@@ -208,6 +212,7 @@ class TestCacheService:
             mock_redis_cls.from_url.return_value = mock_redis
 
             from services.cache_service import CacheService
+
             service = CacheService()
             service.redis = mock_redis
 

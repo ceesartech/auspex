@@ -3,7 +3,6 @@
 import numpy as np
 import pandas as pd
 import pytest
-
 from training.calibration import ProbabilityCalibrator
 from training.cross_validation import TimeSeriesCV
 
@@ -12,11 +11,13 @@ class TestTimeSeriesCV:
     """Tests for TimeSeriesCV."""
 
     def test_split_basic(self):
-        df = pd.DataFrame({
-            "match_date": pd.date_range("2023-01-01", periods=100, freq="D"),
-            "feature": np.random.randn(100),
-            "match_outcome": np.random.randint(0, 3, 100),
-        })
+        df = pd.DataFrame(
+            {
+                "match_date": pd.date_range("2023-01-01", periods=100, freq="D"),
+                "feature": np.random.randn(100),
+                "match_outcome": np.random.randint(0, 3, 100),
+            }
+        )
 
         cv = TimeSeriesCV(n_splits=5, date_column="match_date")
         folds = cv.split(df)
@@ -31,11 +32,13 @@ class TestTimeSeriesCV:
             assert train_max <= val_min
 
     def test_split_with_min_train_size(self):
-        df = pd.DataFrame({
-            "match_date": pd.date_range("2023-01-01", periods=50, freq="D"),
-            "feature": np.random.randn(50),
-            "match_outcome": np.random.randint(0, 3, 50),
-        })
+        df = pd.DataFrame(
+            {
+                "match_date": pd.date_range("2023-01-01", periods=50, freq="D"),
+                "feature": np.random.randn(50),
+                "match_outcome": np.random.randint(0, 3, 50),
+            }
+        )
 
         cv = TimeSeriesCV(n_splits=5, min_train_size=30, date_column="match_date")
         folds = cv.split(df)
@@ -45,11 +48,13 @@ class TestTimeSeriesCV:
             assert fold["train_size"] >= 30
 
     def test_split_with_gap(self):
-        df = pd.DataFrame({
-            "match_date": pd.date_range("2023-01-01", periods=100, freq="D"),
-            "feature": np.random.randn(100),
-            "match_outcome": np.random.randint(0, 3, 100),
-        })
+        df = pd.DataFrame(
+            {
+                "match_date": pd.date_range("2023-01-01", periods=100, freq="D"),
+                "feature": np.random.randn(100),
+                "match_outcome": np.random.randint(0, 3, 100),
+            }
+        )
 
         cv = TimeSeriesCV(n_splits=3, gap=5, date_column="match_date")
         folds = cv.split(df)

@@ -1,9 +1,9 @@
 """Pytest configuration and fixtures"""
 
-import pytest
 from unittest.mock import Mock
-from redis import Redis
 
+import pytest
+from redis import Redis
 from services.data_ingestion.src.core.config import ScraperConfig
 from services.data_ingestion.src.core.database import DatabaseManager
 

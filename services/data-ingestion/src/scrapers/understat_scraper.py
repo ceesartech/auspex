@@ -3,11 +3,11 @@
 import json
 import logging
 import re
-from typing import List, Dict
 from decimal import Decimal
+from typing import Dict, List
 
-from .base_scraper import BaseScraper
 from ..core.config import UnderstatConfig
+from .base_scraper import BaseScraper
 
 logger = logging.getLogger(__name__)
 
@@ -16,11 +16,11 @@ class UnderstatScraper(BaseScraper):
     """Scrape xG data from Understat"""
 
     LEAGUE_MAP = {
-        'EPL': 'EPL',
-        'La_liga': 'La_liga',
-        'Bundesliga': 'Bundesliga',
-        'Serie_A': 'Serie_A',
-        'Ligue_1': 'Ligue_1',
+        "EPL": "EPL",
+        "La_liga": "La_liga",
+        "Bundesliga": "Bundesliga",
+        "Serie_A": "Serie_A",
+        "Ligue_1": "Ligue_1",
     }
 
     def __init__(self, *args, **kwargs):
@@ -53,7 +53,7 @@ class UnderstatScraper(BaseScraper):
         html = self._fetch_page(url)
 
         # Understat stores data as JSON in script tags
-        matches_data = self._extract_json_data(html, 'datesData')
+        matches_data = self._extract_json_data(html, "datesData")
         if not matches_data:
             logger.warning(f"No match data found for {league}")
             return 0
@@ -79,7 +79,7 @@ class UnderstatScraper(BaseScraper):
 
         json_str = match.group(1)
         # Understat encodes special chars
-        json_str = json_str.encode().decode('unicode_escape')
+        json_str = json_str.encode().decode("unicode_escape")
 
         try:
             return json.loads(json_str)
@@ -89,24 +89,26 @@ class UnderstatScraper(BaseScraper):
 
     def _process_match(self, match: Dict, league: str):
         """Process a single match's xG data"""
-        home_team = match.get('h', {}).get('title', '')
-        away_team = match.get('a', {}).get('title', '')
-        home_xg = match.get('xG', {}).get('h')
-        away_xg = match.get('xG', {}).get('a')
-        match_date = match.get('datetime')
+        home_team = match.get("h", {}).get("title", "")
+        away_team = match.get("a", {}).get("title", "")
+        home_xg = match.get("xG", {}).get("h")
+        away_xg = match.get("xG", {}).get("a")
+        match_date = match.get("datetime")
 
         if not all([home_team, away_team, match_date]):
             return
 
         # Check for duplicates
-        checksum = self._calculate_checksum({
-            'source': 'understat',
-            'home': home_team,
-            'away': away_team,
-            'date': match_date,
-            'home_xg': home_xg,
-            'away_xg': away_xg
-        })
+        checksum = self._calculate_checksum(
+            {
+                "source": "understat",
+                "home": home_team,
+                "away": away_team,
+                "date": match_date,
+                "home_xg": home_xg,
+                "away_xg": away_xg,
+            }
+        )
 
         if self._is_duplicate(checksum):
             return
@@ -123,23 +125,19 @@ class UnderstatScraper(BaseScraper):
                 AND m.match_date::date = %s::date
         """
 
-        result = self.db.execute_query(
-            query,
-            (f"%{home_team}%", f"%{away_team}%", match_date),
-            fetch=True
-        )
+        result = self.db.execute_query(query, (f"%{home_team}%", f"%{away_team}%", match_date), fetch=True)
 
         if result and home_xg is not None:
-            match_id = result[0]['match_id']
+            match_id = result[0]["match_id"]
             # Upsert home xG
             self.db.upsert(
-                'match_stats',
+                "match_stats",
                 {
-                    'match_id': match_id,
-                    'team_id': match_id,  # Will need proper team_id lookup
-                    'expected_goals': Decimal(str(home_xg)),
-                    'expected_goals_against': Decimal(str(away_xg)) if away_xg else None,
+                    "match_id": match_id,
+                    "team_id": match_id,  # Will need proper team_id lookup
+                    "expected_goals": Decimal(str(home_xg)),
+                    "expected_goals_against": Decimal(str(away_xg)) if away_xg else None,
                 },
-                conflict_columns=['match_id', 'team_id'],
-                update_columns=['expected_goals', 'expected_goals_against']
+                conflict_columns=["match_id", "team_id"],
+                update_columns=["expected_goals", "expected_goals_against"],
             )

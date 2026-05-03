@@ -1,12 +1,12 @@
 """Bet365 odds scraper"""
 
 import logging
-from typing import List, Dict, Any
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import Any, Dict, List
 
-from .base_scraper import BaseScraper
 from ..core.config import Bet365Config
+from .base_scraper import BaseScraper
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ class Bet365Scraper(BaseScraper):
 
         # Parse matches and odds
         # NOTE: Bet365's HTML structure changes frequently, so selectors need to be updated
-        matches = soup.find_all('div', class_='match-container')  # Example selector
+        matches = soup.find_all("div", class_="match-container")  # Example selector
 
         for match in matches:
             try:
@@ -68,27 +68,27 @@ class Bet365Scraper(BaseScraper):
 
         try:
             # Extract teams
-            home_team = match_element.find('span', class_='home-team').text.strip()
-            away_team = match_element.find('span', class_='away-team').text.strip()
+            home_team = match_element.find("span", class_="home-team").text.strip()
+            away_team = match_element.find("span", class_="away-team").text.strip()
 
             # Extract match time
-            match_time_str = match_element.find('span', class_='match-time').text.strip()
+            match_time_str = match_element.find("span", class_="match-time").text.strip()
             match_date = self._parse_match_time(match_time_str)
 
             # Extract odds
-            home_odds = match_element.find('span', class_='home-odds').text.strip()
-            draw_odds = match_element.find('span', class_='draw-odds').text.strip()
-            away_odds = match_element.find('span', class_='away-odds').text.strip()
+            home_odds = match_element.find("span", class_="home-odds").text.strip()
+            draw_odds = match_element.find("span", class_="draw-odds").text.strip()
+            away_odds = match_element.find("span", class_="away-odds").text.strip()
 
             # Get or create match in database
             match_id = self._get_or_create_match(home_team, away_team, match_date)
 
             return {
-                'match_id': match_id,
-                'home_odds': float(home_odds),
-                'draw_odds': float(draw_odds),
-                'away_odds': float(away_odds),
-                'timestamp': datetime.utcnow()
+                "match_id": match_id,
+                "home_odds": float(home_odds),
+                "draw_odds": float(draw_odds),
+                "away_odds": float(away_odds),
+                "timestamp": datetime.utcnow(),
             }
         except Exception as e:
             logger.error(f"Error parsing match element: {e}")
@@ -100,14 +100,14 @@ class Bet365Scraper(BaseScraper):
 
         now = datetime.utcnow()
 
-        if 'today' in time_str.lower():
+        if "today" in time_str.lower():
             time_part = time_str.split()[-1]
-            hour, minute = map(int, time_part.split(':'))
+            hour, minute = map(int, time_part.split(":"))
             return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-        elif 'tomorrow' in time_str.lower():
+        elif "tomorrow" in time_str.lower():
             time_part = time_str.split()[-1]
-            hour, minute = map(int, time_part.split(':'))
+            hour, minute = map(int, time_part.split(":"))
             tomorrow = now + timedelta(days=1)
             return tomorrow.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
@@ -135,14 +135,10 @@ class Bet365Scraper(BaseScraper):
         date_start = match_date - timedelta(hours=2)
         date_end = match_date + timedelta(hours=2)
 
-        result = self.db.execute_query(
-            query,
-            (home_team, away_team, date_start, date_end),
-            fetch=True
-        )
+        result = self.db.execute_query(query, (home_team, away_team, date_start, date_end), fetch=True)
 
         if result:
-            return result[0]['match_id']
+            return result[0]["match_id"]
 
         # Create new match
         # First get or create teams
@@ -157,40 +153,31 @@ class Bet365Scraper(BaseScraper):
 
         external_id = f"bet365_{home_team}_{away_team}_{match_date.strftime('%Y%m%d')}"
 
-        result = self.db.execute_query(
-            insert_query,
-            (home_team_id, away_team_id, match_date, external_id),
-            fetch=True
-        )
+        result = self.db.execute_query(insert_query, (home_team_id, away_team_id, match_date, external_id), fetch=True)
 
-        return result[0]['match_id']
+        return result[0]["match_id"]
 
     def _save_odds(self, odds_data: List[Dict]):
         """Save odds to database"""
 
         for odds in odds_data:
             # Save 1X2 odds
-            self._save_market_odds(odds['match_id'], '1X2', 'home', odds['home_odds'], odds['timestamp'])
-            self._save_market_odds(odds['match_id'], '1X2', 'draw', odds['draw_odds'], odds['timestamp'])
-            self._save_market_odds(odds['match_id'], '1X2', 'away', odds['away_odds'], odds['timestamp'])
+            self._save_market_odds(odds["match_id"], "1X2", "home", odds["home_odds"], odds["timestamp"])
+            self._save_market_odds(odds["match_id"], "1X2", "draw", odds["draw_odds"], odds["timestamp"])
+            self._save_market_odds(odds["match_id"], "1X2", "away", odds["away_odds"], odds["timestamp"])
 
     def _save_market_odds(
-        self,
-        match_id: int,
-        market_type: str,
-        outcome: str,
-        odds_decimal: float,
-        timestamp: datetime
+        self, match_id: int, market_type: str, outcome: str, odds_decimal: float, timestamp: datetime
     ):
         """Save individual odds entry"""
 
         data = {
-            'match_id': match_id,
-            'bookmaker': 'bet365',
-            'market_type': market_type,
-            'outcome': outcome,
-            'odds_decimal': Decimal(str(odds_decimal)),
-            'timestamp': timestamp
+            "match_id": match_id,
+            "bookmaker": "bet365",
+            "market_type": market_type,
+            "outcome": outcome,
+            "odds_decimal": Decimal(str(odds_decimal)),
+            "timestamp": timestamp,
         }
 
         # Check for duplicates
@@ -202,4 +189,4 @@ class Bet365Scraper(BaseScraper):
         columns = list(data.keys())
         values = [tuple(data[col] for col in columns)]
 
-        self.db.insert_many('odds', columns, values)
+        self.db.insert_many("odds", columns, values)

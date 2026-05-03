@@ -5,8 +5,8 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
-
 from models.base_model import BaseModel
+
 from .metrics import compute_all_metrics, compute_roi
 
 logger = logging.getLogger(__name__)
@@ -116,15 +116,17 @@ class ABTestTracker:
         probability: Optional[float] = None,
         odds: Optional[float] = None,
     ) -> None:
-        self.test_results.append({
-            "test_name": test_name,
-            "model_name": model_name,
-            "match_id": match_id,
-            "predicted": predicted,
-            "actual": actual,
-            "probability": probability,
-            "odds": odds,
-        })
+        self.test_results.append(
+            {
+                "test_name": test_name,
+                "model_name": model_name,
+                "match_id": match_id,
+                "predicted": predicted,
+                "actual": actual,
+                "probability": probability,
+                "odds": odds,
+            }
+        )
 
     def get_results(self, test_name: str) -> pd.DataFrame:
         filtered = [r for r in self.test_results if r["test_name"] == test_name]

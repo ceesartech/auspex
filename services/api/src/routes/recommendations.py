@@ -1,15 +1,15 @@
 """Betting recommendation endpoints"""
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
-from typing import List, Optional
 import logging
+from typing import List, Optional
 
-from database import get_db
 from auth.dependencies import require_auth
+from database import get_db
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from models.requests import AccumulatorRequest
-from models.responses import RecommendationResponse, AccumulatorResponse
+from models.responses import AccumulatorResponse, RecommendationResponse
 from services.recommendation_service import RecommendationService
+from sqlalchemy.orm import Session
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -17,9 +17,7 @@ logger = logging.getLogger(__name__)
 
 @router.get("/", response_model=List[RecommendationResponse])
 async def get_recommendations(
-    confidence_level: Optional[str] = Query(
-        None, pattern="^(LOW|MEDIUM|HIGH|VERY_HIGH)$"
-    ),
+    confidence_level: Optional[str] = Query(None, pattern="^(LOW|MEDIUM|HIGH|VERY_HIGH)$"),
     market_type: Optional[str] = Query(None),
     min_odds: Optional[float] = Query(None, ge=1.01),
     max_odds: Optional[float] = Query(None),

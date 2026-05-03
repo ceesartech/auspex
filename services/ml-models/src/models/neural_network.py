@@ -112,11 +112,7 @@ class NeuralNetworkMatchPredictor(BaseModel):
 
         val_loader = None
         if val_df is not None:
-            X_val = self.scaler.transform(
-                val_df[self.feature_names].fillna(
-                    val_df[self.feature_names].median()
-                )
-            )
+            X_val = self.scaler.transform(val_df[self.feature_names].fillna(val_df[self.feature_names].median()))
             y_val = self.label_encoder.transform(val_df[target])
             val_dataset = MatchDataset(X_val, y_val)
             val_loader = DataLoader(val_dataset, batch_size=256)
@@ -124,9 +120,7 @@ class NeuralNetworkMatchPredictor(BaseModel):
         num_classes = len(self.label_encoder.classes_)
         self.model = MatchPredictorNN(
             input_size=X_train.shape[1],
-            hidden_layers=self.config.hyperparameters.get(
-                "hidden_layers", [256, 128, 64, 32]
-            ),
+            hidden_layers=self.config.hyperparameters.get("hidden_layers", [256, 128, 64, 32]),
             dropout_rate=self.config.hyperparameters.get("dropout_rate", 0.3),
             num_classes=num_classes,
             batch_norm=self.config.hyperparameters.get("batch_norm", True),
@@ -197,9 +191,7 @@ class NeuralNetworkMatchPredictor(BaseModel):
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     patience_counter = 0
-                    best_model_state = {
-                        k: v.cpu().clone() for k, v in self.model.state_dict().items()
-                    }
+                    best_model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
                 else:
                     patience_counter += 1
 
@@ -231,9 +223,7 @@ class NeuralNetworkMatchPredictor(BaseModel):
             raise ValueError("Model not fitted")
 
         if isinstance(X, pd.DataFrame):
-            X_scaled = self.scaler.transform(
-                X[self.feature_names].fillna(X[self.feature_names].median())
-            )
+            X_scaled = self.scaler.transform(X[self.feature_names].fillna(X[self.feature_names].median()))
         else:
             X_scaled = self.scaler.transform(X)
 
@@ -289,9 +279,7 @@ class NeuralNetworkMatchPredictor(BaseModel):
         num_classes = len(self.label_encoder.classes_)
         self.model = MatchPredictorNN(
             input_size=len(self.feature_names),
-            hidden_layers=self.config.hyperparameters.get(
-                "hidden_layers", [256, 128, 64, 32]
-            ),
+            hidden_layers=self.config.hyperparameters.get("hidden_layers", [256, 128, 64, 32]),
             dropout_rate=self.config.hyperparameters.get("dropout_rate", 0.3),
             num_classes=num_classes,
         ).to(self.device)

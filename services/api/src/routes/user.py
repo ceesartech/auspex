@@ -1,16 +1,16 @@
 """User endpoints - preferences, betting history, dashboard"""
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-from typing import Dict, Any, Optional
 import json
 import logging
+from typing import Any, Dict, Optional
 
-from database import get_db
 from auth.dependencies import require_auth
 from auth.jwt_handler import create_access_token, verify_date_of_birth
-from models.requests import LoginRequest, UserPreferencesUpdate, BettingHistoryRecord
+from database import get_db
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from models.requests import BettingHistoryRecord, LoginRequest, UserPreferencesUpdate
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -26,9 +26,7 @@ async def login(request: LoginRequest, db: Session = Depends(get_db)) -> Dict[st
             detail="Invalid credentials",
         )
 
-    token = create_access_token(
-        data={"user_id": "owner", "username": request.username}
-    )
+    token = create_access_token(data={"user_id": "owner", "username": request.username})
 
     return {
         "access_token": token,
@@ -150,9 +148,7 @@ async def get_betting_history(
         WHERE (:status_filter IS NULL OR status = :status_filter)
         AND (:bookmaker IS NULL OR bookmaker = :bookmaker)
     """)
-    total = db.execute(
-        count_query, {"status_filter": status_filter, "bookmaker": bookmaker}
-    ).fetchone().total
+    total = db.execute(count_query, {"status_filter": status_filter, "bookmaker": bookmaker}).fetchone().total
 
     bets = []
     for row in results:
@@ -164,26 +160,22 @@ async def get_betting_history(
                 "selection": row.selection,
                 "odds": float(row.odds),
                 "stake": float(row.stake),
-                "potential_return": float(row.potential_return)
-                if row.potential_return
-                else None,
-                "actual_return": float(row.actual_return)
-                if row.actual_return
-                else None,
+                "potential_return": float(row.potential_return) if row.potential_return else None,
+                "actual_return": float(row.actual_return) if row.actual_return else None,
                 "status": row.status,
                 "notes": row.notes,
                 "placed_at": row.placed_at.isoformat() if row.placed_at else None,
                 "settled_at": row.settled_at.isoformat() if row.settled_at else None,
-                "match": {
-                    "home_team": row.home_team,
-                    "away_team": row.away_team,
-                    "match_date": row.match_date.isoformat()
-                    if row.match_date
-                    else None,
-                    "league": row.league_name,
-                }
-                if row.home_team
-                else None,
+                "match": (
+                    {
+                        "home_team": row.home_team,
+                        "away_team": row.away_team,
+                        "match_date": row.match_date.isoformat() if row.match_date else None,
+                        "league": row.league_name,
+                    }
+                    if row.home_team
+                    else None
+                ),
             }
         )
 

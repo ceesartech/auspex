@@ -7,7 +7,6 @@ from unittest.mock import MagicMock
 import numpy as np
 import pandas as pd
 import pytest
-
 from models.ensemble import EnsemblePredictor
 from models.poisson_models import (
     DixonColesPredictor,

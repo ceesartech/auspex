@@ -1,7 +1,6 @@
 """Tests for derived feature computer."""
 
 import pytest
-
 from src.categories.derived import DerivedFeatureComputer
 
 

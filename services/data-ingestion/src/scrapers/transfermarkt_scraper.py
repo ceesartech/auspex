@@ -1,13 +1,13 @@
 """Transfermarkt player and team data scraper"""
 
 import logging
-from typing import Dict
-from datetime import datetime
 import re
+from datetime import datetime
 from decimal import Decimal
+from typing import Dict
 
-from .base_scraper import BaseScraper
 from ..core.config import TransfermarktConfig
+from .base_scraper import BaseScraper
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +41,12 @@ class TransfermarktScraper(BaseScraper):
 
         injuries_scraped = 0
 
-        injury_table = soup.find('table', class_='items')
+        injury_table = soup.find("table", class_="items")
         if not injury_table:
             logger.warning("No injury table found")
             return 0
 
-        rows = injury_table.find('tbody').find_all('tr')
+        rows = injury_table.find("tbody").find_all("tr")
 
         for row in rows:
             try:
@@ -62,24 +62,24 @@ class TransfermarktScraper(BaseScraper):
 
     def _parse_injury_row(self, row) -> Dict:
         """Parse an injury row from the table"""
-        cells = row.find_all('td')
+        cells = row.find_all("td")
         if len(cells) < 5:
             return None
 
         try:
-            player_name = cells[0].find('a').text.strip() if cells[0].find('a') else cells[0].text.strip()
-            team_name = cells[1].find('a').text.strip() if cells[1].find('a') else cells[1].text.strip()
+            player_name = cells[0].find("a").text.strip() if cells[0].find("a") else cells[0].text.strip()
+            team_name = cells[1].find("a").text.strip() if cells[1].find("a") else cells[1].text.strip()
             injury_type = cells[2].text.strip()
             since_str = cells[3].text.strip()
             until_str = cells[4].text.strip() if len(cells) > 4 else None
 
             return {
-                'player_name': player_name,
-                'team_name': team_name,
-                'injury_type': injury_type,
-                'since': since_str,
-                'until': until_str,
-                'status': 'injured'
+                "player_name": player_name,
+                "team_name": team_name,
+                "injury_type": injury_type,
+                "since": since_str,
+                "until": until_str,
+                "status": "injured",
             }
         except Exception as e:
             logger.error(f"Error parsing injury: {e}")
@@ -97,26 +97,22 @@ class TransfermarktScraper(BaseScraper):
             WHERE normalized_name ILIKE %s
             LIMIT 1
         """
-        result = self.db.execute_query(
-            query,
-            (f"%{injury_data['player_name']}%",),
-            fetch=True
-        )
+        result = self.db.execute_query(query, (f"%{injury_data['player_name']}%",), fetch=True)
 
         if result:
-            player_id = result[0]['id']
+            player_id = result[0]["id"]
             self.db.upsert(
-                'player_availability',
+                "player_availability",
                 {
-                    'player_id': player_id,
-                    'status': 'injured',
-                    'reason': injury_data['injury_type'],
-                    'start_date': injury_data['since'],
-                    'expected_return': injury_data.get('until'),
-                    'source': 'transfermarkt'
+                    "player_id": player_id,
+                    "status": "injured",
+                    "reason": injury_data["injury_type"],
+                    "start_date": injury_data["since"],
+                    "expected_return": injury_data.get("until"),
+                    "source": "transfermarkt",
                 },
-                conflict_columns=['player_id', 'start_date'],
-                update_columns=['status', 'reason', 'expected_return']
+                conflict_columns=["player_id", "start_date"],
+                update_columns=["status", "reason", "expected_return"],
             )
 
     def _scrape_transfers(self) -> int:
@@ -132,11 +128,11 @@ class TransfermarktScraper(BaseScraper):
 
         transfers_scraped = 0
 
-        transfer_table = soup.find('table', class_='items')
+        transfer_table = soup.find("table", class_="items")
         if not transfer_table:
             return 0
 
-        rows = transfer_table.find('tbody').find_all('tr')
+        rows = transfer_table.find("tbody").find_all("tr")
 
         for row in rows:
             try:
@@ -152,26 +148,26 @@ class TransfermarktScraper(BaseScraper):
 
     def _parse_transfer_row(self, row) -> Dict:
         """Parse a transfer row"""
-        cells = row.find_all('td')
+        cells = row.find_all("td")
         if len(cells) < 6:
             return None
 
         try:
-            player_name = cells[0].find('a').text.strip() if cells[0].find('a') else cells[0].text.strip()
-            from_team = cells[2].find('a').text.strip() if cells[2].find('a') else cells[2].text.strip()
-            to_team = cells[4].find('a').text.strip() if cells[4].find('a') else cells[4].text.strip()
+            player_name = cells[0].find("a").text.strip() if cells[0].find("a") else cells[0].text.strip()
+            from_team = cells[2].find("a").text.strip() if cells[2].find("a") else cells[2].text.strip()
+            to_team = cells[4].find("a").text.strip() if cells[4].find("a") else cells[4].text.strip()
             fee_str = cells[5].text.strip()
 
             # Parse fee
             fee = self._parse_fee(fee_str)
 
             return {
-                'player_name': player_name,
-                'from_team': from_team,
-                'to_team': to_team,
-                'fee': fee,
-                'transfer_date': datetime.now().date(),
-                'transfer_type': 'loan' if 'loan' in fee_str.lower() else 'permanent'
+                "player_name": player_name,
+                "from_team": from_team,
+                "to_team": to_team,
+                "fee": fee,
+                "transfer_date": datetime.now().date(),
+                "transfer_type": "loan" if "loan" in fee_str.lower() else "permanent",
             }
         except Exception as e:
             logger.error(f"Error parsing transfer: {e}")
@@ -179,16 +175,16 @@ class TransfermarktScraper(BaseScraper):
 
     def _parse_fee(self, fee_str: str) -> Decimal:
         """Parse transfer fee string"""
-        match = re.search(r'([\d.]+)\s*(m|k)?', fee_str.replace(',', '.'), re.I)
+        match = re.search(r"([\d.]+)\s*(m|k)?", fee_str.replace(",", "."), re.I)
         if not match:
-            return Decimal('0')
+            return Decimal("0")
 
         amount = float(match.group(1))
-        unit = match.group(2).lower() if match.group(2) else ''
+        unit = match.group(2).lower() if match.group(2) else ""
 
-        if unit == 'm':
+        if unit == "m":
             return Decimal(str(amount * 1_000_000))
-        elif unit == 'k':
+        elif unit == "k":
             return Decimal(str(amount * 1_000))
         return Decimal(str(amount))
 
@@ -217,11 +213,11 @@ class TransfermarktScraper(BaseScraper):
         self.db.execute_query(
             query,
             (
-                transfer_data['transfer_date'],
-                transfer_data['fee'],
-                transfer_data['transfer_type'],
+                transfer_data["transfer_date"],
+                transfer_data["fee"],
+                transfer_data["transfer_type"],
                 f"%{transfer_data['from_team']}%",
                 f"%{transfer_data['to_team']}%",
-                f"%{transfer_data['player_name']}%"
-            )
+                f"%{transfer_data['player_name']}%",
+            ),
         )

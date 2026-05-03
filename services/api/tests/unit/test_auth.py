@@ -1,12 +1,12 @@
 """Tests for JWT authentication and DOB verification"""
 
 import sys
-from pathlib import Path
 from datetime import datetime, timedelta
-from unittest.mock import patch, MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-import pytest
 import jwt as pyjwt
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
@@ -35,9 +35,7 @@ class TestCreateAccessToken:
         assert len(token) > 0
 
         # Decode and verify
-        payload = pyjwt.decode(
-            token, "test-secret-key-for-testing-only", algorithms=["HS256"]
-        )
+        payload = pyjwt.decode(token, "test-secret-key-for-testing-only", algorithms=["HS256"])
         assert payload["user_id"] == "owner"
         assert "exp" in payload
 
@@ -47,9 +45,7 @@ class TestCreateAccessToken:
         delta = timedelta(hours=1)
         token = create_access_token(data={"user_id": "owner"}, expires_delta=delta)
 
-        payload = pyjwt.decode(
-            token, "test-secret-key-for-testing-only", algorithms=["HS256"]
-        )
+        payload = pyjwt.decode(token, "test-secret-key-for-testing-only", algorithms=["HS256"])
         assert payload["user_id"] == "owner"
 
     def test_create_token_preserves_data(self, mock_settings):
@@ -58,9 +54,7 @@ class TestCreateAccessToken:
         data = {"user_id": "owner", "username": "ceesar", "role": "admin"}
         token = create_access_token(data=data)
 
-        payload = pyjwt.decode(
-            token, "test-secret-key-for-testing-only", algorithms=["HS256"]
-        )
+        payload = pyjwt.decode(token, "test-secret-key-for-testing-only", algorithms=["HS256"])
         assert payload["user_id"] == "owner"
         assert payload["username"] == "ceesar"
         assert payload["role"] == "admin"

@@ -5,7 +5,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-
 from models.xgboost_model import XGBoostMatchPredictor
 
 

@@ -83,16 +83,10 @@ class FeatureRegistry:
         extra = computed - registered
 
         if missing:
-            warnings.append(
-                f"Missing {len(missing)} registered features: "
-                f"{sorted(list(missing))[:5]}..."
-            )
+            warnings.append(f"Missing {len(missing)} registered features: " f"{sorted(list(missing))[:5]}...")
 
         if extra:
-            warnings.append(
-                f"Found {len(extra)} unregistered features: "
-                f"{sorted(list(extra))[:5]}..."
-            )
+            warnings.append(f"Found {len(extra)} unregistered features: " f"{sorted(list(extra))[:5]}...")
 
         for name, value in features.items():
             meta = self._features.get(name)
@@ -100,13 +94,9 @@ class FeatureRegistry:
                 continue
 
             if meta.min_value is not None and value < meta.min_value:
-                warnings.append(
-                    f"Feature '{name}' value {value} below min {meta.min_value}"
-                )
+                warnings.append(f"Feature '{name}' value {value} below min {meta.min_value}")
             if meta.max_value is not None and value > meta.max_value:
-                warnings.append(
-                    f"Feature '{name}' value {value} above max {meta.max_value}"
-                )
+                warnings.append(f"Feature '{name}' value {value} above max {meta.max_value}")
 
         return warnings
 

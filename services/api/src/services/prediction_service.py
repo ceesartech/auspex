@@ -1,14 +1,14 @@
 """Prediction service"""
 
 import logging
-from typing import Dict, List, Any, Optional
 from datetime import datetime
-from sqlalchemy.orm import Session
-from sqlalchemy import text
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from config import settings
-from models.responses import PredictionResponse, MatchInfo
+from models.responses import MatchInfo, PredictionResponse
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +52,7 @@ class PredictionService:
         features = self._get_match_features(match_id)
 
         if "ensemble" in self.models:
-            prediction = self.models["ensemble"].predict_single(
-                features, explain=include_explanation
-            )
+            prediction = self.models["ensemble"].predict_single(features, explain=include_explanation)
         else:
             # Fallback: return stored prediction from DB
             prediction = self._get_stored_prediction(match_id)
@@ -102,9 +100,7 @@ class PredictionService:
             LIMIT :limit
         """)
 
-        results = self.db.execute(
-            query, {"sport": sport, "league": league, "limit": limit}
-        ).fetchall()
+        results = self.db.execute(query, {"sport": sport, "league": league, "limit": limit}).fetchall()
 
         predictions = []
         for row in results:

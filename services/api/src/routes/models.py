@@ -1,14 +1,14 @@
 """Model performance and management endpoints"""
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-from typing import List, Optional, Dict, Any
 import logging
+from typing import Any, Dict, List, Optional
 
-from database import get_db
 from auth.dependencies import require_auth
+from database import get_db
+from fastapi import APIRouter, Depends, Query
 from models.responses import ModelPerformanceResponse
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -37,9 +37,7 @@ async def get_model_performance(
         LIMIT :limit
     """)
 
-    results = db.execute(
-        query, {"model_name": model_name, "sport": sport, "limit": limit}
-    ).fetchall()
+    results = db.execute(query, {"model_name": model_name, "sport": sport, "limit": limit}).fetchall()
 
     performances = []
     for row in results:
@@ -184,9 +182,7 @@ async def get_retraining_history(
         LIMIT :limit
     """)
 
-    results = db.execute(
-        query, {"model_name": model_name, "limit": limit}
-    ).fetchall()
+    results = db.execute(query, {"model_name": model_name, "limit": limit}).fetchall()
 
     return [
         {
@@ -194,12 +190,8 @@ async def get_retraining_history(
             "old_version": row.old_version,
             "new_version": row.new_version,
             "trigger_reason": row.trigger_reason,
-            "training_data_start": row.training_data_start.isoformat()
-            if row.training_data_start
-            else None,
-            "training_data_end": row.training_data_end.isoformat()
-            if row.training_data_end
-            else None,
+            "training_data_start": row.training_data_start.isoformat() if row.training_data_start else None,
+            "training_data_end": row.training_data_end.isoformat() if row.training_data_end else None,
             "training_samples": row.training_samples,
             "validation_metrics": row.validation_metrics,
             "test_metrics": row.test_metrics,
@@ -207,9 +199,7 @@ async def get_retraining_history(
             "status": row.status,
             "error_message": row.error_message,
             "created_at": row.created_at.isoformat(),
-            "completed_at": row.completed_at.isoformat()
-            if row.completed_at
-            else None,
+            "completed_at": row.completed_at.isoformat() if row.completed_at else None,
         }
         for row in results
     ]

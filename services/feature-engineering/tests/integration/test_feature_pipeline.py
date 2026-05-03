@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from unittest.mock import Mock
 
 import pytest
-
 from src.core.database import DatabaseManager
 from src.orchestrator import RealTimeFeatureComputer
 from tests.conftest import (
@@ -44,20 +43,22 @@ class TestFeaturePipelineIntegration:
 
             # Match details
             if "JOIN leagues" in q and "JOIN teams" in q:
-                return [{
-                    "match_id": MATCH_ID,
-                    "home_team_id": HOME_TEAM_ID,
-                    "away_team_id": AWAY_TEAM_ID,
-                    "league_id": LEAGUE_ID,
-                    "season": "2024-2025",
-                    "match_date": datetime(2025, 1, 15, 15, 0, tzinfo=timezone.utc),
-                    "venue": "Home Stadium",
-                    "referee": "Michael Oliver",
-                    "home_team_name": "Home FC",
-                    "away_team_name": "Away United",
-                    "league_name": "Premier League",
-                    "country": "England",
-                }]
+                return [
+                    {
+                        "match_id": MATCH_ID,
+                        "home_team_id": HOME_TEAM_ID,
+                        "away_team_id": AWAY_TEAM_ID,
+                        "league_id": LEAGUE_ID,
+                        "season": "2024-2025",
+                        "match_date": datetime(2025, 1, 15, 15, 0, tzinfo=timezone.utc),
+                        "venue": "Home Stadium",
+                        "referee": "Michael Oliver",
+                        "home_team_name": "Home FC",
+                        "away_team_name": "Away United",
+                        "league_name": "Premier League",
+                        "country": "England",
+                    }
+                ]
             # Team matches
             if "FROM matches m" in q and "LEFT JOIN match_stats" in q and "home_team_id = %s OR" in q:
                 return sample_team_matches
@@ -112,17 +113,13 @@ class TestFeaturePipelineIntegration:
 
     def test_full_pipeline_computation(self, pipeline):
         """Full pipeline should compute features without errors."""
-        features = pipeline.compute_features(
-            str(MATCH_ID), use_cache=False, validate=True
-        )
+        features = pipeline.compute_features(str(MATCH_ID), use_cache=False, validate=True)
         assert isinstance(features, dict)
         assert len(features) >= 300
 
     def test_full_pipeline_no_none_heavy(self, pipeline):
         """Most features should be non-None with full mock data."""
-        features = pipeline.compute_features(
-            str(MATCH_ID), use_cache=False
-        )
+        features = pipeline.compute_features(str(MATCH_ID), use_cache=False)
         non_null = sum(1 for v in features.values() if v is not None)
         total = len(features)
         ratio = non_null / total
@@ -131,30 +128,22 @@ class TestFeaturePipelineIntegration:
 
     def test_full_pipeline_categories_present(self, pipeline):
         """Features from all categories should be present."""
-        features = pipeline.compute_features(
-            str(MATCH_ID), use_cache=False
-        )
-        prefixes = {"team__", "h2h__", "player__", "ctx__", "odds__",
-                    "temporal__", "derived__"}
+        features = pipeline.compute_features(str(MATCH_ID), use_cache=False)
+        prefixes = {"team__", "h2h__", "player__", "ctx__", "odds__", "temporal__", "derived__"}
         found_prefixes = set()
         for name in features:
             for prefix in prefixes:
                 if name.startswith(prefix):
                     found_prefixes.add(prefix)
 
-        assert found_prefixes == prefixes, (
-            f"Missing prefixes: {prefixes - found_prefixes}"
-        )
+        assert found_prefixes == prefixes, f"Missing prefixes: {prefixes - found_prefixes}"
 
     def test_full_pipeline_temporal_always_present(self, pipeline):
         """Temporal features should always be non-None."""
-        features = pipeline.compute_features(
-            str(MATCH_ID), use_cache=False
-        )
+        features = pipeline.compute_features(str(MATCH_ID), use_cache=False)
         temporal = {k: v for k, v in features.items() if k.startswith("temporal__")}
         assert all(v is not None for v in temporal.values()), (
-            f"Some temporal features are None: "
-            f"{[k for k, v in temporal.items() if v is None]}"
+            f"Some temporal features are None: " f"{[k for k, v in temporal.items() if v is None]}"
         )
 
     def test_full_pipeline_cache_write(self, pipeline, mock_redis):
@@ -165,9 +154,7 @@ class TestFeaturePipelineIntegration:
 
     def test_feature_names_all_valid_format(self, pipeline):
         """All feature names should follow naming convention."""
-        features = pipeline.compute_features(
-            str(MATCH_ID), use_cache=False
-        )
+        features = pipeline.compute_features(str(MATCH_ID), use_cache=False)
         for name in features:
             parts = name.split("__")
             assert len(parts) >= 2, f"Feature name '{name}' has < 2 parts"

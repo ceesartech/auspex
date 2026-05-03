@@ -70,8 +70,7 @@ class FeatureValidator:
 
         if result.missing_rate > self.config.max_missing_rate:
             result.warnings.append(
-                f"High missing rate: {result.missing_rate:.1%} "
-                f"(threshold: {self.config.max_missing_rate:.1%})"
+                f"High missing rate: {result.missing_rate:.1%} " f"(threshold: {self.config.max_missing_rate:.1%})"
             )
 
         # Range validation
@@ -84,13 +83,9 @@ class FeatureValidator:
                 continue
 
             if meta.min_value is not None and value < meta.min_value:
-                result.out_of_range.append(
-                    f"{name}={value} < min={meta.min_value}"
-                )
+                result.out_of_range.append(f"{name}={value} < min={meta.min_value}")
             if meta.max_value is not None and value > meta.max_value:
-                result.out_of_range.append(
-                    f"{name}={value} > max={meta.max_value}"
-                )
+                result.out_of_range.append(f"{name}={value} > max={meta.max_value}")
 
         # NaN/Inf check
         for name, value in features.items():
@@ -113,9 +108,7 @@ class FeatureValidator:
                 if std > 0:
                     z = abs(value - mean) / std
                     if z > threshold:
-                        result.outliers.append(
-                            f"{name}={value} (z={z:.1f}, mean={mean:.2f}, std={std:.2f})"
-                        )
+                        result.outliers.append(f"{name}={value} (z={z:.1f}, mean={mean:.2f}, std={std:.2f})")
 
         # Determine validity
         if result.out_of_range:

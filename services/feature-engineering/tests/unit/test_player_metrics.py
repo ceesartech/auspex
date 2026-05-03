@@ -1,7 +1,6 @@
 """Tests for player metrics feature computer."""
 
 import pytest
-
 from src.categories.player_metrics import PlayerMetricsComputer
 
 
@@ -24,10 +23,10 @@ class TestPlayerMetricsComputer:
         assert len(features) == 32
 
     def test_compute_with_squad(
-        self, computer, match_context, mock_db,
-        sample_squad, sample_availability, sample_player_stats
+        self, computer, match_context, mock_db, sample_squad, sample_availability, sample_player_stats
     ):
         """Should compute features when squad data is available."""
+
         def side_effect(query, params, fetch=False):
             if "FROM players" in query:
                 return sample_squad
@@ -44,9 +43,7 @@ class TestPlayerMetricsComputer:
         non_null = sum(1 for v in features.values() if v is not None)
         assert non_null > 0
 
-    def test_squad_value_total(
-        self, computer, match_context, mock_db, sample_squad
-    ):
+    def test_squad_value_total(self, computer, match_context, mock_db, sample_squad):
         def side_effect(query, params, fetch=False):
             if "FROM players" in query:
                 return sample_squad
@@ -59,10 +56,7 @@ class TestPlayerMetricsComputer:
         if val is not None:
             assert val == 90000000  # 50M + 30M + 10M
 
-    def test_injured_count(
-        self, computer, match_context, mock_db,
-        sample_squad, sample_availability
-    ):
+    def test_injured_count(self, computer, match_context, mock_db, sample_squad, sample_availability):
         def side_effect(query, params, fetch=False):
             if "FROM players" in query:
                 return sample_squad
@@ -77,10 +71,7 @@ class TestPlayerMetricsComputer:
         if val is not None:
             assert val == 1.0  # One injured player in sample data
 
-    def test_unavailable_pct_range(
-        self, computer, match_context, mock_db,
-        sample_squad, sample_availability
-    ):
+    def test_unavailable_pct_range(self, computer, match_context, mock_db, sample_squad, sample_availability):
         def side_effect(query, params, fetch=False):
             if "FROM players" in query:
                 return sample_squad

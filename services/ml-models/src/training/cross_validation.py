@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -29,9 +28,7 @@ class TimeSeriesCV:
         self.gap = gap
         self.date_column = date_column
 
-    def split(
-        self, df: pd.DataFrame
-    ) -> List[Dict[str, pd.DataFrame]]:
+    def split(self, df: pd.DataFrame) -> List[Dict[str, pd.DataFrame]]:
         """Split data chronologically into train/val folds."""
         df_sorted = df.sort_values(self.date_column).reset_index(drop=True)
         n = len(df_sorted)
@@ -45,12 +42,14 @@ class TimeSeriesCV:
         for train_idx, val_idx in tscv.split(df_sorted):
             if self.min_train_size and len(train_idx) < self.min_train_size:
                 continue
-            folds.append({
-                "train": df_sorted.iloc[train_idx],
-                "val": df_sorted.iloc[val_idx],
-                "train_size": len(train_idx),
-                "val_size": len(val_idx),
-            })
+            folds.append(
+                {
+                    "train": df_sorted.iloc[train_idx],
+                    "val": df_sorted.iloc[val_idx],
+                    "train_size": len(train_idx),
+                    "val_size": len(val_idx),
+                }
+            )
 
         logger.info(f"Created {len(folds)} time-series CV folds from {n} samples")
         return folds
@@ -68,10 +67,7 @@ class TimeSeriesCV:
 
         fold_metrics = []
         for i, fold in enumerate(folds):
-            logger.info(
-                f"Fold {i + 1}/{len(folds)}: "
-                f"train={fold['train_size']}, val={fold['val_size']}"
-            )
+            logger.info(f"Fold {i + 1}/{len(folds)}: " f"train={fold['train_size']}, val={fold['val_size']}")
 
             model = model_class(config)
             model.train(
@@ -95,10 +91,7 @@ class TimeSeriesCV:
             metrics = model.evaluate(X_val, y_val)
             fold_metrics.append(metrics)
 
-            logger.info(
-                f"Fold {i + 1} metrics: "
-                + ", ".join(f"{k}={v:.4f}" for k, v in metrics.items())
-            )
+            logger.info(f"Fold {i + 1} metrics: " + ", ".join(f"{k}={v:.4f}" for k, v in metrics.items()))
 
         # Aggregate
         all_metric_names = set()
@@ -117,11 +110,7 @@ class TimeSeriesCV:
 
         logger.info(
             "CV complete: "
-            + ", ".join(
-                f"{k}={v:.4f}"
-                for k, v in aggregated.items()
-                if isinstance(v, float) and k.startswith("mean_")
-            )
+            + ", ".join(f"{k}={v:.4f}" for k, v in aggregated.items() if isinstance(v, float) and k.startswith("mean_"))
         )
 
         return aggregated

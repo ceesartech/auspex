@@ -5,29 +5,30 @@ from datetime import datetime, timezone
 from unittest.mock import Mock
 
 import pytest
-
 from src.orchestrator import RealTimeFeatureComputer
-from tests.conftest import HOME_TEAM_ID, AWAY_TEAM_ID, LEAGUE_ID, MATCH_ID
+from tests.conftest import AWAY_TEAM_ID, HOME_TEAM_ID, LEAGUE_ID, MATCH_ID
 
 
 class TestRealTimeFeatureComputer:
 
     @pytest.fixture
     def match_row(self):
-        return [{
-            "match_id": MATCH_ID,
-            "home_team_id": HOME_TEAM_ID,
-            "away_team_id": AWAY_TEAM_ID,
-            "league_id": LEAGUE_ID,
-            "season": "2024-2025",
-            "match_date": datetime(2025, 1, 15, 15, 0, tzinfo=timezone.utc),
-            "venue": "Home Stadium",
-            "referee": "Michael Oliver",
-            "home_team_name": "Home FC",
-            "away_team_name": "Away United",
-            "league_name": "Premier League",
-            "country": "England",
-        }]
+        return [
+            {
+                "match_id": MATCH_ID,
+                "home_team_id": HOME_TEAM_ID,
+                "away_team_id": AWAY_TEAM_ID,
+                "league_id": LEAGUE_ID,
+                "season": "2024-2025",
+                "match_date": datetime(2025, 1, 15, 15, 0, tzinfo=timezone.utc),
+                "venue": "Home Stadium",
+                "referee": "Michael Oliver",
+                "home_team_name": "Home FC",
+                "away_team_name": "Away United",
+                "league_name": "Premier League",
+                "country": "England",
+            }
+        ]
 
     @pytest.fixture
     def orchestrator(self, mock_config, mock_db, mock_redis):
@@ -52,9 +53,7 @@ class TestRealTimeFeatureComputer:
         names = orchestrator.get_feature_names()
         assert len(names) == len(set(names)), "Duplicate feature names found"
 
-    def test_compute_features_with_cache_hit(
-        self, orchestrator, mock_redis, mock_db
-    ):
+    def test_compute_features_with_cache_hit(self, orchestrator, mock_redis, mock_db):
         """Should return cached features without computing."""
         cached = {"f1": 1.0, "f2": 2.0}
         mock_redis.get.return_value = json.dumps(cached)
@@ -64,9 +63,7 @@ class TestRealTimeFeatureComputer:
         # Should not query for match details
         # (only cache get query, no MATCH_DETAILS query)
 
-    def test_compute_features_cache_miss(
-        self, orchestrator, mock_redis, mock_db, match_row
-    ):
+    def test_compute_features_cache_miss(self, orchestrator, mock_redis, mock_db, match_row):
         """Should compute features when cache misses."""
         mock_redis.get.return_value = None
 
@@ -86,9 +83,7 @@ class TestRealTimeFeatureComputer:
         assert isinstance(result, dict)
         assert len(result) > 0
 
-    def test_compute_features_no_match(
-        self, orchestrator, mock_redis, mock_db
-    ):
+    def test_compute_features_no_match(self, orchestrator, mock_redis, mock_db):
         """Should return empty dict if match not found."""
         mock_redis.get.return_value = None
         mock_db.execute_query.return_value = []
@@ -96,18 +91,12 @@ class TestRealTimeFeatureComputer:
         result = orchestrator.compute_features(str(MATCH_ID))
         assert result == {}
 
-    def test_compute_features_no_cache(
-        self, orchestrator, mock_redis, mock_db, match_row
-    ):
+    def test_compute_features_no_cache(self, orchestrator, mock_redis, mock_db, match_row):
         """Should skip cache when use_cache=False."""
-        mock_db.execute_query.side_effect = lambda q, p=None, fetch=False: (
-            match_row if "JOIN leagues" in q else []
-        )
+        mock_db.execute_query.side_effect = lambda q, p=None, fetch=False: (match_row if "JOIN leagues" in q else [])
         mock_db.call_function.return_value = []
 
-        orchestrator.compute_features(
-            str(MATCH_ID), use_cache=False
-        )
+        orchestrator.compute_features(str(MATCH_ID), use_cache=False)
         # Redis get should not be called
         mock_redis.get.assert_not_called()
 
@@ -137,9 +126,7 @@ class TestRealTimeFeatureComputer:
 
     def test_compute_batch(self, orchestrator, mock_redis, mock_db, match_row):
         mock_redis.get.return_value = None
-        mock_db.execute_query.side_effect = lambda q, p=None, fetch=False: (
-            match_row if "JOIN leagues" in q else []
-        )
+        mock_db.execute_query.side_effect = lambda q, p=None, fetch=False: (match_row if "JOIN leagues" in q else [])
         mock_db.call_function.return_value = []
 
         results = orchestrator.compute_batch([str(MATCH_ID)])

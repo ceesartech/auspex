@@ -1,10 +1,10 @@
 """Tests for recommendation service and endpoints"""
 
 import sys
-from pathlib import Path
-from datetime import datetime
-from unittest.mock import patch, MagicMock
 import uuid
+from datetime import datetime
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -179,9 +179,7 @@ class TestRecommendationService:
             if call_count[0] == 1:  # Fetch legs
                 result.fetchall.return_value = legs
             elif call_count[0] == 2:  # Get bankroll
-                result.fetchone.return_value = mock_row(
-                    preference_value={"value": 5000}
-                )
+                result.fetchone.return_value = mock_row(preference_value={"value": 5000})
             elif call_count[0] == 3:  # Insert accumulator
                 result.fetchone.return_value = None
             return result

@@ -50,19 +50,22 @@ class HeadToHeadComputer(BaseFeatureComputer):
                 name="h2h__home_win_rate",
                 category=self.category,
                 description="Home team H2H win rate",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="h2h__away_win_rate",
                 category=self.category,
                 description="Away team H2H win rate",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="h2h__draw_rate",
                 category=self.category,
                 description="H2H draw rate",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="h2h__avg_total_goals",
@@ -86,50 +89,58 @@ class HeadToHeadComputer(BaseFeatureComputer):
                 name="h2h__btts_rate",
                 category=self.category,
                 description="Both teams to score rate in H2H",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="h2h__over25_rate",
                 category=self.category,
                 description="Over 2.5 goals rate in H2H",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="h2h__clean_sheet_home_rate",
                 category=self.category,
                 description="Home team clean sheet rate in H2H",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="h2h__clean_sheet_away_rate",
                 category=self.category,
                 description="Away team clean sheet rate in H2H",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="h2h__home_scored_rate",
                 category=self.category,
                 description="Rate home team scored in H2H",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="h2h__away_scored_rate",
                 category=self.category,
                 description="Rate away team scored in H2H",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
             # Recent H2H (last 3)
             FeatureMetadata(
                 name="h2h__recent3__home_wins",
                 category=self.category,
                 description="Home team wins in last 3 H2H",
-                min_value=0, max_value=3,
+                min_value=0,
+                max_value=3,
             ),
             FeatureMetadata(
                 name="h2h__recent3__away_wins",
                 category=self.category,
                 description="Away team wins in last 3 H2H",
-                min_value=0, max_value=3,
+                min_value=0,
+                max_value=3,
             ),
             FeatureMetadata(
                 name="h2h__recent3__avg_goals",
@@ -158,9 +169,7 @@ class HeadToHeadComputer(BaseFeatureComputer):
             ),
         ]
 
-    def compute(
-        self, ctx: MatchContext, **kwargs
-    ) -> Dict[str, Optional[float]]:
+    def compute(self, ctx: MatchContext, **kwargs) -> Dict[str, Optional[float]]:
         features = self._empty_features()
 
         try:
@@ -230,17 +239,11 @@ class HeadToHeadComputer(BaseFeatureComputer):
 
         features["h2h__recent3__home_wins"] = float(r3_hw)
         features["h2h__recent3__away_wins"] = float(r3_aw)
-        features["h2h__recent3__avg_goals"] = safe_divide(
-            sum(h + a for h, a in zip(r3_home, r3_away)), recent3
-        )
+        features["h2h__recent3__avg_goals"] = safe_divide(sum(h + a for h, a in zip(r3_home, r3_away)), recent3)
 
         # EWA (oldest first for EWA)
-        features["h2h__ewa_home_goals"] = exponential_weighted_avg(
-            list(reversed(home_goals_list))
-        )
-        features["h2h__ewa_away_goals"] = exponential_weighted_avg(
-            list(reversed(away_goals_list))
-        )
+        features["h2h__ewa_home_goals"] = exponential_weighted_avg(list(reversed(home_goals_list)))
+        features["h2h__ewa_away_goals"] = exponential_weighted_avg(list(reversed(away_goals_list)))
 
         # Days since last meeting
         last_date = matches[0].get("match_date")
@@ -254,8 +257,10 @@ class HeadToHeadComputer(BaseFeatureComputer):
         return self.db.execute_query(
             H2H_MATCHES,
             (
-                str(ctx.home_team_id), str(ctx.away_team_id),
-                str(ctx.away_team_id), str(ctx.home_team_id),
+                str(ctx.home_team_id),
+                str(ctx.away_team_id),
+                str(ctx.away_team_id),
+                str(ctx.home_team_id),
                 ctx.match_date,
                 self.config.h2h_max_matches,
             ),

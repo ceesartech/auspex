@@ -1,15 +1,25 @@
 """SQLAlchemy ORM models mapping to existing database tables"""
 
-from sqlalchemy import (
-    Column, String, Integer, Boolean, DateTime, Date, Text,
-    ForeignKey, Numeric, ARRAY, UniqueConstraint, CheckConstraint
-)
-from sqlalchemy.dialects.postgresql import UUID, JSONB
-from sqlalchemy.orm import relationship
-from datetime import datetime
 import uuid
+from datetime import datetime
 
 from database import Base
+from sqlalchemy import (
+    ARRAY,
+    Boolean,
+    CheckConstraint,
+    Column,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import relationship
 
 
 class League(Base):
@@ -28,9 +38,7 @@ class League(Base):
     teams = relationship("Team", back_populates="league")
     matches = relationship("Match", back_populates="league")
 
-    __table_args__ = (
-        UniqueConstraint("name", "country", "sport"),
-    )
+    __table_args__ = (UniqueConstraint("name", "country", "sport"),)
 
 
 class Team(Base):
@@ -50,9 +58,7 @@ class Team(Base):
 
     league = relationship("League", back_populates="teams")
 
-    __table_args__ = (
-        UniqueConstraint("normalized_name", "sport"),
-    )
+    __table_args__ = (UniqueConstraint("normalized_name", "sport"),)
 
 
 class Match(Base):
@@ -88,9 +94,7 @@ class Match(Base):
 
     __table_args__ = (
         UniqueConstraint("home_team_id", "away_team_id", "match_date"),
-        CheckConstraint(
-            "status IN ('scheduled', 'live', 'finished', 'postponed', 'cancelled')"
-        ),
+        CheckConstraint("status IN ('scheduled', 'live', 'finished', 'postponed', 'cancelled')"),
     )
 
 
@@ -135,9 +139,7 @@ class MatchStats(Base):
     match = relationship("Match", back_populates="stats")
     team = relationship("Team")
 
-    __table_args__ = (
-        UniqueConstraint("match_id", "team_id"),
-    )
+    __table_args__ = (UniqueConstraint("match_id", "team_id"),)
 
 
 class Odds(Base):
@@ -283,9 +285,7 @@ class AccumulatorLeg(Base):
     accumulator = relationship("Accumulator", back_populates="legs")
     recommendation = relationship("BettingRecommendation")
 
-    __table_args__ = (
-        UniqueConstraint("accumulator_id", "leg_order"),
-    )
+    __table_args__ = (UniqueConstraint("accumulator_id", "leg_order"),)
 
 
 class UserPreference(Base):
@@ -338,9 +338,7 @@ class LotteryDraw(Base):
     metadata_ = Column("metadata", JSONB, default={})
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
-    __table_args__ = (
-        UniqueConstraint("game", "draw_date"),
-    )
+    __table_args__ = (UniqueConstraint("game", "draw_date"),)
 
 
 class ModelPerformanceLog(Base):
@@ -392,9 +390,7 @@ class FeaturesCache(Base):
     computed_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     expires_at = Column(DateTime(timezone=True))
 
-    __table_args__ = (
-        UniqueConstraint("match_id", "feature_set", "feature_version"),
-    )
+    __table_args__ = (UniqueConstraint("match_id", "feature_set", "feature_version"),)
 
 
 class ApiRequestLog(Base):

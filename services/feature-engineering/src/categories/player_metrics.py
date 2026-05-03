@@ -26,111 +26,116 @@ class PlayerMetricsComputer(BaseFeatureComputer):
     def _register_features(self) -> None:
         defs = []
         for side in ["home", "away"]:
-            defs.extend([
-                # Squad value
-                FeatureMetadata(
-                    name=f"player__{side}__squad_value_total",
-                    category=self.category,
-                    description=f"{side} team total squad market value",
-                    min_value=0,
-                ),
-                FeatureMetadata(
-                    name=f"player__{side}__squad_value_avg",
-                    category=self.category,
-                    description=f"{side} team average player market value",
-                    min_value=0,
-                ),
-                FeatureMetadata(
-                    name=f"player__{side}__squad_size",
-                    category=self.category,
-                    description=f"{side} team active squad size",
-                    min_value=0,
-                ),
-                FeatureMetadata(
-                    name=f"player__{side}__avg_age",
-                    category=self.category,
-                    description=f"{side} team average player age",
-                    min_value=15, max_value=45,
-                ),
-                # Availability
-                FeatureMetadata(
-                    name=f"player__{side}__injured_count",
-                    category=self.category,
-                    description=f"{side} team number of injured players",
-                    min_value=0,
-                ),
-                FeatureMetadata(
-                    name=f"player__{side}__suspended_count",
-                    category=self.category,
-                    description=f"{side} team number of suspended players",
-                    min_value=0,
-                ),
-                FeatureMetadata(
-                    name=f"player__{side}__doubtful_count",
-                    category=self.category,
-                    description=f"{side} team number of doubtful players",
-                    min_value=0,
-                ),
-                FeatureMetadata(
-                    name=f"player__{side}__unavailable_pct",
-                    category=self.category,
-                    description=f"{side} team percentage of squad unavailable",
-                    min_value=0, max_value=1,
-                ),
-                FeatureMetadata(
-                    name=f"player__{side}__injured_value_pct",
-                    category=self.category,
-                    description=f"{side} team pct of squad value unavailable",
-                    min_value=0, max_value=1,
-                ),
-                # Top scorer form
-                FeatureMetadata(
-                    name=f"player__{side}__top_scorer_goals_last5",
-                    category=self.category,
-                    description=f"{side} team top scorer goals in last 5",
-                    min_value=0,
-                ),
-                FeatureMetadata(
-                    name=f"player__{side}__top_scorer_avg_rating",
-                    category=self.category,
-                    description=f"{side} team top scorer avg rating last 5",
-                ),
-                FeatureMetadata(
-                    name=f"player__{side}__top_scorer_minutes_pct",
-                    category=self.category,
-                    description=f"{side} team top scorer minutes played pct last 5",
-                    min_value=0, max_value=1,
-                ),
-                # Team key player form (avg of top 3)
-                FeatureMetadata(
-                    name=f"player__{side}__key_players_avg_rating",
-                    category=self.category,
-                    description=f"{side} team avg rating of top 3 players",
-                ),
-                FeatureMetadata(
-                    name=f"player__{side}__key_players_avg_xg",
-                    category=self.category,
-                    description=f"{side} team avg xG of top 3 players",
-                    min_value=0,
-                ),
-                FeatureMetadata(
-                    name=f"player__{side}__key_players_avg_xa",
-                    category=self.category,
-                    description=f"{side} team avg xA of top 3 players",
-                    min_value=0,
-                ),
-                FeatureMetadata(
-                    name=f"player__{side}__key_players_available",
-                    category=self.category,
-                    description=f"{side} team number of top 3 players available",
-                    min_value=0, max_value=3,
-                ),
-            ])
+            defs.extend(
+                [
+                    # Squad value
+                    FeatureMetadata(
+                        name=f"player__{side}__squad_value_total",
+                        category=self.category,
+                        description=f"{side} team total squad market value",
+                        min_value=0,
+                    ),
+                    FeatureMetadata(
+                        name=f"player__{side}__squad_value_avg",
+                        category=self.category,
+                        description=f"{side} team average player market value",
+                        min_value=0,
+                    ),
+                    FeatureMetadata(
+                        name=f"player__{side}__squad_size",
+                        category=self.category,
+                        description=f"{side} team active squad size",
+                        min_value=0,
+                    ),
+                    FeatureMetadata(
+                        name=f"player__{side}__avg_age",
+                        category=self.category,
+                        description=f"{side} team average player age",
+                        min_value=15,
+                        max_value=45,
+                    ),
+                    # Availability
+                    FeatureMetadata(
+                        name=f"player__{side}__injured_count",
+                        category=self.category,
+                        description=f"{side} team number of injured players",
+                        min_value=0,
+                    ),
+                    FeatureMetadata(
+                        name=f"player__{side}__suspended_count",
+                        category=self.category,
+                        description=f"{side} team number of suspended players",
+                        min_value=0,
+                    ),
+                    FeatureMetadata(
+                        name=f"player__{side}__doubtful_count",
+                        category=self.category,
+                        description=f"{side} team number of doubtful players",
+                        min_value=0,
+                    ),
+                    FeatureMetadata(
+                        name=f"player__{side}__unavailable_pct",
+                        category=self.category,
+                        description=f"{side} team percentage of squad unavailable",
+                        min_value=0,
+                        max_value=1,
+                    ),
+                    FeatureMetadata(
+                        name=f"player__{side}__injured_value_pct",
+                        category=self.category,
+                        description=f"{side} team pct of squad value unavailable",
+                        min_value=0,
+                        max_value=1,
+                    ),
+                    # Top scorer form
+                    FeatureMetadata(
+                        name=f"player__{side}__top_scorer_goals_last5",
+                        category=self.category,
+                        description=f"{side} team top scorer goals in last 5",
+                        min_value=0,
+                    ),
+                    FeatureMetadata(
+                        name=f"player__{side}__top_scorer_avg_rating",
+                        category=self.category,
+                        description=f"{side} team top scorer avg rating last 5",
+                    ),
+                    FeatureMetadata(
+                        name=f"player__{side}__top_scorer_minutes_pct",
+                        category=self.category,
+                        description=f"{side} team top scorer minutes played pct last 5",
+                        min_value=0,
+                        max_value=1,
+                    ),
+                    # Team key player form (avg of top 3)
+                    FeatureMetadata(
+                        name=f"player__{side}__key_players_avg_rating",
+                        category=self.category,
+                        description=f"{side} team avg rating of top 3 players",
+                    ),
+                    FeatureMetadata(
+                        name=f"player__{side}__key_players_avg_xg",
+                        category=self.category,
+                        description=f"{side} team avg xG of top 3 players",
+                        min_value=0,
+                    ),
+                    FeatureMetadata(
+                        name=f"player__{side}__key_players_avg_xa",
+                        category=self.category,
+                        description=f"{side} team avg xA of top 3 players",
+                        min_value=0,
+                    ),
+                    FeatureMetadata(
+                        name=f"player__{side}__key_players_available",
+                        category=self.category,
+                        description=f"{side} team number of top 3 players available",
+                        min_value=0,
+                        max_value=3,
+                    ),
+                ]
+            )
         self._feature_defs = defs
 
-    def compute(
-        self, ctx: MatchContext, **kwargs
-    ) -> Dict[str, Optional[float]]:
+    def compute(self, ctx: MatchContext, **kwargs) -> Dict[str, Optional[float]]:
         features = self._empty_features()
 
         try:
@@ -156,15 +161,10 @@ class PlayerMetricsComputer(BaseFeatureComputer):
         unavailable_ids = {str(a["player_id"]) for a in availability}
 
         # Squad value & demographics
-        values = [
-            self._safe_get(p, "market_value") for p in squad
-            if p.get("market_value") is not None
-        ]
+        values = [self._safe_get(p, "market_value") for p in squad if p.get("market_value") is not None]
         total_value = sum(values) if values else 0
         features[f"player__{side}__squad_value_total"] = total_value
-        features[f"player__{side}__squad_value_avg"] = safe_divide(
-            total_value, len(values) if values else 1
-        )
+        features[f"player__{side}__squad_value_avg"] = safe_divide(total_value, len(values) if values else 1)
         features[f"player__{side}__squad_size"] = float(len(squad))
 
         # Average age
@@ -174,9 +174,7 @@ class PlayerMetricsComputer(BaseFeatureComputer):
             if dob:
                 age = (ctx.match_date.date() - dob).days / 365.25
                 ages.append(age)
-        features[f"player__{side}__avg_age"] = (
-            safe_divide(sum(ages), len(ages)) if ages else None
-        )
+        features[f"player__{side}__avg_age"] = safe_divide(sum(ages), len(ages)) if ages else None
 
         # Availability counts
         injured = sum(1 for a in availability if a.get("status") == "injured")
@@ -187,20 +185,17 @@ class PlayerMetricsComputer(BaseFeatureComputer):
         features[f"player__{side}__injured_count"] = float(injured)
         features[f"player__{side}__suspended_count"] = float(suspended)
         features[f"player__{side}__doubtful_count"] = float(doubtful)
-        features[f"player__{side}__unavailable_pct"] = safe_divide(
-            total_unavail, len(squad)
-        )
+        features[f"player__{side}__unavailable_pct"] = safe_divide(total_unavail, len(squad))
 
         # Value of unavailable players
         unavail_value = sum(
             self._safe_get(p, "market_value")
             for p in squad
-            if str(p.get("player_id")) in unavailable_ids
-            and p.get("market_value") is not None
+            if str(p.get("player_id")) in unavailable_ids and p.get("market_value") is not None
         )
-        features[f"player__{side}__injured_value_pct"] = safe_divide(
-            unavail_value, total_value
-        ) if total_value > 0 else 0.0
+        features[f"player__{side}__injured_value_pct"] = (
+            safe_divide(unavail_value, total_value) if total_value > 0 else 0.0
+        )
 
         # Key player form — fetch recent stats for top players by value
         sorted_squad = sorted(
@@ -222,18 +217,12 @@ class PlayerMetricsComputer(BaseFeatureComputer):
             features[f"player__{side}__top_scorer_goals_last5"] = float(
                 sum(s.get("goals", 0) or 0 for s in top_scorer_stats)
             )
-            ratings = [
-                self._safe_get(s, "rating")
-                for s in top_scorer_stats
-                if s.get("rating")
-            ]
+            ratings = [self._safe_get(s, "rating") for s in top_scorer_stats if s.get("rating")]
             features[f"player__{side}__top_scorer_avg_rating"] = (
                 safe_divide(sum(ratings), len(ratings)) if ratings else None
             )
             mins = [self._safe_get(s, "minutes_played") for s in top_scorer_stats]
-            features[f"player__{side}__top_scorer_minutes_pct"] = safe_divide(
-                sum(mins), len(mins) * 90
-            )
+            features[f"player__{side}__top_scorer_minutes_pct"] = safe_divide(sum(mins), len(mins) * 90)
 
         # Key players (top 3 by value) averages
         key_ids = [str(p["player_id"]) for p in sorted_squad[:3]]
@@ -255,23 +244,15 @@ class PlayerMetricsComputer(BaseFeatureComputer):
         features[f"player__{side}__key_players_avg_rating"] = (
             safe_divide(sum(key_ratings), len(key_ratings)) if key_ratings else None
         )
-        features[f"player__{side}__key_players_avg_xg"] = (
-            safe_divide(sum(key_xg), len(key_xg)) if key_xg else None
-        )
-        features[f"player__{side}__key_players_avg_xa"] = (
-            safe_divide(sum(key_xa), len(key_xa)) if key_xa else None
-        )
+        features[f"player__{side}__key_players_avg_xg"] = safe_divide(sum(key_xg), len(key_xg)) if key_xg else None
+        features[f"player__{side}__key_players_avg_xa"] = safe_divide(sum(key_xa), len(key_xa)) if key_xa else None
         features[f"player__{side}__key_players_available"] = float(key_available)
 
     def _fetch_squad(self, team_id) -> List[Dict]:
-        return self.db.execute_query(
-            TEAM_SQUAD, (str(team_id),), fetch=True
-        )
+        return self.db.execute_query(TEAM_SQUAD, (str(team_id),), fetch=True)
 
     def _fetch_availability(self, team_id) -> List[Dict]:
-        return self.db.execute_query(
-            PLAYER_AVAILABILITY, (str(team_id),), fetch=True
-        )
+        return self.db.execute_query(PLAYER_AVAILABILITY, (str(team_id),), fetch=True)
 
     def _fetch_player_recent(self, player_id, before_date) -> List[Dict]:
         return self.db.execute_query(
@@ -280,9 +261,7 @@ class PlayerMetricsComputer(BaseFeatureComputer):
             fetch=True,
         )
 
-    def _find_top_scorer(
-        self, player_stats: Dict[str, List[Dict]]
-    ) -> Optional[List[Dict]]:
+    def _find_top_scorer(self, player_stats: Dict[str, List[Dict]]) -> Optional[List[Dict]]:
         """Find the player with most goals in recent matches."""
         best_pid = None
         best_goals = -1

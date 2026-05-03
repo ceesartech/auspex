@@ -6,7 +6,6 @@ from typing import List, Optional, Tuple
 import numpy as np
 from scipy import stats
 
-
 # ---------- Elo Rating ----------
 
 ELO_K_FACTOR = 32
@@ -18,9 +17,7 @@ def elo_expected(rating_a: float, rating_b: float) -> float:
     return 1.0 / (1.0 + 10.0 ** ((rating_b - rating_a) / 400.0))
 
 
-def elo_update(
-    rating: float, expected: float, actual: float, k: float = ELO_K_FACTOR
-) -> float:
+def elo_update(rating: float, expected: float, actual: float, k: float = ELO_K_FACTOR) -> float:
     """Update Elo rating after a match result."""
     return rating + k * (actual - expected)
 
@@ -69,9 +66,7 @@ def poisson_match_probabilities(
 
     for i in range(max_goals + 1):
         for j in range(max_goals + 1):
-            p = poisson_probability(home_lambda, i) * poisson_probability(
-                away_lambda, j
-            )
+            p = poisson_probability(home_lambda, i) * poisson_probability(away_lambda, j)
             if i > j:
                 p_home_win += p
             elif i == j:
@@ -85,9 +80,7 @@ def poisson_match_probabilities(
 # ---------- Exponential Weighted Average ----------
 
 
-def exponential_weighted_avg(
-    values: List[float], span: Optional[int] = None, alpha: Optional[float] = None
-) -> float:
+def exponential_weighted_avg(values: List[float], span: Optional[int] = None, alpha: Optional[float] = None) -> float:
     """Compute exponential weighted average.
 
     More recent values have higher weight.

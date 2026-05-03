@@ -3,8 +3,11 @@
 import tempfile
 
 import numpy as np
-
-from evaluation.metrics import compute_all_metrics, compute_roi, ranked_probability_score
+from evaluation.metrics import (
+    compute_all_metrics,
+    compute_roi,
+    ranked_probability_score,
+)
 from evaluation.model_comparison import ABTestTracker
 from evaluation.performance_tracker import PerformanceTracker
 from models.model_config import PredictionTask
@@ -16,12 +19,20 @@ class TestComputeAllMetrics:
     def test_multiclass_metrics(self):
         y_true = np.array([0, 1, 2, 0, 1, 2, 0, 1, 2, 0])
         y_pred = np.array([0, 1, 2, 0, 1, 1, 0, 2, 2, 0])
-        y_proba = np.array([
-            [0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8],
-            [0.7, 0.2, 0.1], [0.1, 0.7, 0.2], [0.2, 0.6, 0.2],
-            [0.9, 0.05, 0.05], [0.2, 0.3, 0.5], [0.1, 0.1, 0.8],
-            [0.8, 0.1, 0.1],
-        ])
+        y_proba = np.array(
+            [
+                [0.8, 0.1, 0.1],
+                [0.1, 0.8, 0.1],
+                [0.1, 0.1, 0.8],
+                [0.7, 0.2, 0.1],
+                [0.1, 0.7, 0.2],
+                [0.2, 0.6, 0.2],
+                [0.9, 0.05, 0.05],
+                [0.2, 0.3, 0.5],
+                [0.1, 0.1, 0.8],
+                [0.8, 0.1, 0.1],
+            ]
+        )
 
         metrics = compute_all_metrics(y_true, y_pred, y_proba)
 
@@ -38,14 +49,20 @@ class TestComputeAllMetrics:
     def test_binary_metrics(self):
         y_true = np.array([0, 1, 0, 1, 1, 0, 1, 0])
         y_pred = np.array([0, 1, 0, 1, 0, 0, 1, 1])
-        y_proba = np.array([
-            [0.8, 0.2], [0.3, 0.7], [0.6, 0.4], [0.2, 0.8],
-            [0.6, 0.4], [0.7, 0.3], [0.3, 0.7], [0.4, 0.6],
-        ])
-
-        metrics = compute_all_metrics(
-            y_true, y_pred, y_proba, task=PredictionTask.OVER_UNDER
+        y_proba = np.array(
+            [
+                [0.8, 0.2],
+                [0.3, 0.7],
+                [0.6, 0.4],
+                [0.2, 0.8],
+                [0.6, 0.4],
+                [0.7, 0.3],
+                [0.3, 0.7],
+                [0.4, 0.6],
+            ]
         )
+
+        metrics = compute_all_metrics(y_true, y_pred, y_proba, task=PredictionTask.OVER_UNDER)
 
         assert "accuracy" in metrics
         assert "roc_auc" in metrics
@@ -53,10 +70,15 @@ class TestComputeAllMetrics:
     def test_perfect_predictions(self):
         y_true = np.array([0, 1, 2, 0, 1])
         y_pred = np.array([0, 1, 2, 0, 1])
-        y_proba = np.array([
-            [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],
-            [1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
-        ])
+        y_proba = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ]
+        )
 
         metrics = compute_all_metrics(y_true, y_pred, y_proba)
         assert metrics["accuracy"] == 1.0
@@ -67,11 +89,13 @@ class TestRankedProbabilityScore:
 
     def test_perfect_rps(self):
         y_true = np.array([0, 1, 2])
-        y_proba = np.array([
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ])
+        y_proba = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
         rps = ranked_probability_score(y_true, y_proba)
         assert rps == 0.0
 
@@ -121,9 +145,7 @@ class TestComputeROI:
         odds = np.array([2.0, 2.0, 2.0])
         y_proba = np.array([[0.8, 0.1, 0.1], [0.4, 0.3, 0.3], [0.7, 0.2, 0.1]])
 
-        result = compute_roi(
-            y_true, y_pred, odds, min_confidence=0.6, y_pred_proba=y_proba
-        )
+        result = compute_roi(y_true, y_pred, odds, min_confidence=0.6, y_pred_proba=y_proba)
         # Only bets where max prob >= 0.6: indices 0 and 2
         assert result["bets_placed"] == 2
 
@@ -133,9 +155,7 @@ class TestComputeROI:
         odds = np.array([2.0])
         y_proba = np.array([[0.4, 0.3, 0.3]])
 
-        result = compute_roi(
-            y_true, y_pred, odds, min_confidence=0.9, y_pred_proba=y_proba
-        )
+        result = compute_roi(y_true, y_pred, odds, min_confidence=0.9, y_pred_proba=y_proba)
         assert result["bets_placed"] == 0
         assert result["roi"] == 0.0
 

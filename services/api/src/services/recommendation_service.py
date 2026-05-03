@@ -1,13 +1,13 @@
 """Recommendation service - value bet detection, Kelly criterion, accumulators"""
 
 import logging
-from typing import List, Optional
-from datetime import datetime
-from sqlalchemy.orm import Session
-from sqlalchemy import text
 import uuid
+from datetime import datetime
+from typing import List, Optional
 
-from models.responses import RecommendationResponse, AccumulatorResponse, MatchInfo
+from models.responses import AccumulatorResponse, MatchInfo, RecommendationResponse
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -108,9 +108,7 @@ class RecommendationService:
             LIMIT :limit
         """)
 
-        results = self.db.execute(
-            query, {"min_ev": min_ev, "limit": limit}
-        ).fetchall()
+        results = self.db.execute(query, {"min_ev": min_ev, "limit": limit}).fetchall()
 
         recommendations = []
         for row in results:
@@ -177,9 +175,7 @@ class RecommendationService:
         ).fetchall()
 
         if len(results) < min_legs:
-            raise ValueError(
-                f"Not enough qualifying recommendations. Found {len(results)}, need {min_legs}."
-            )
+            raise ValueError(f"Not enough qualifying recommendations. Found {len(results)}, need {min_legs}.")
 
         # Select legs optimizing for total odds within range
         selected_legs = []
@@ -201,10 +197,7 @@ class RecommendationService:
                 break
 
         if len(selected_legs) < min_legs:
-            raise ValueError(
-                f"Could not build accumulator within odds range. "
-                f"Best total odds: {total_odds:.2f}"
-            )
+            raise ValueError(f"Could not build accumulator within odds range. " f"Best total odds: {total_odds:.2f}")
 
         # Calculate Kelly criterion for accumulator
         ev = combined_prob * total_odds - 1
@@ -215,9 +208,7 @@ class RecommendationService:
         recommended_stake = round(bankroll * kelly_stake * 0.25, 2)  # Quarter Kelly
 
         # Create accumulator in database
-        acc_id = self._create_accumulator(
-            selected_legs, total_odds, recommended_stake, combined_prob, ev
-        )
+        acc_id = self._create_accumulator(selected_legs, total_odds, recommended_stake, combined_prob, ev)
 
         # Build leg responses
         leg_responses = []
@@ -269,10 +260,7 @@ class RecommendationService:
             return float(val)
         return 1000.0
 
-    def _create_accumulator(
-        self, legs, total_odds: float, stake: float,
-        combined_prob: float, ev: float
-    ) -> uuid.UUID:
+    def _create_accumulator(self, legs, total_odds: float, stake: float, combined_prob: float, ev: float) -> uuid.UUID:
         """Create accumulator and legs in database"""
         acc_id = uuid.uuid4()
 

@@ -4,6 +4,7 @@ import logging
 from typing import Dict, Optional
 
 import numpy as np
+from models.model_config import PredictionTask
 from sklearn.metrics import (
     accuracy_score,
     brier_score_loss,
@@ -13,8 +14,6 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-
-from models.model_config import PredictionTask
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +73,7 @@ def compute_all_metrics(
             p = y_pred_proba[:, 1] if y_pred_proba.ndim > 1 else y_pred_proba
             metrics["roc_auc"] = float(roc_auc_score(y_true, p))
         elif n_classes > 2 and y_pred_proba.ndim > 1:
-            metrics["roc_auc"] = float(
-                roc_auc_score(y_true, y_pred_proba, multi_class="ovr", average="weighted")
-            )
+            metrics["roc_auc"] = float(roc_auc_score(y_true, y_pred_proba, multi_class="ovr", average="weighted"))
     except Exception:
         pass
 

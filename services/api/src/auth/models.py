@@ -1,15 +1,16 @@
 """Authentication models - single-user session management"""
 
-from sqlalchemy import Column, String, DateTime, Boolean, Text
-from sqlalchemy.dialects.postgresql import UUID
-from datetime import datetime
 import uuid
+from datetime import datetime
 
 from database import Base
+from sqlalchemy import Boolean, Column, DateTime, String, Text
+from sqlalchemy.dialects.postgresql import UUID
 
 
 class UserSession(Base):
     """Tracks JWT sessions for the single user"""
+
     __tablename__ = "user_sessions"
     __table_args__ = {"extend_existing": True}
 

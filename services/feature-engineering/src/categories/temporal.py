@@ -24,102 +24,118 @@ class TemporalFeatureComputer(BaseFeatureComputer):
                 name="temporal__dow__raw",
                 category=self.category,
                 description="Day of week (0=Monday, 6=Sunday)",
-                min_value=0, max_value=6,
+                min_value=0,
+                max_value=6,
             ),
             FeatureMetadata(
                 name="temporal__dow__sin",
                 category=self.category,
                 description="Day of week sine encoding",
-                min_value=-1, max_value=1,
+                min_value=-1,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="temporal__dow__cos",
                 category=self.category,
                 description="Day of week cosine encoding",
-                min_value=-1, max_value=1,
+                min_value=-1,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="temporal__dow__is_weekend",
                 category=self.category,
                 description="1 if Saturday or Sunday",
-                dtype="bool", min_value=0, max_value=1,
+                dtype="bool",
+                min_value=0,
+                max_value=1,
             ),
             # Month
             FeatureMetadata(
                 name="temporal__month__raw",
                 category=self.category,
                 description="Month of year (1-12)",
-                min_value=1, max_value=12,
+                min_value=1,
+                max_value=12,
             ),
             FeatureMetadata(
                 name="temporal__month__sin",
                 category=self.category,
                 description="Month sine encoding",
-                min_value=-1, max_value=1,
+                min_value=-1,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="temporal__month__cos",
                 category=self.category,
                 description="Month cosine encoding",
-                min_value=-1, max_value=1,
+                min_value=-1,
+                max_value=1,
             ),
             # Hour
             FeatureMetadata(
                 name="temporal__hour__raw",
                 category=self.category,
                 description="Hour of day (0-23)",
-                min_value=0, max_value=23,
+                min_value=0,
+                max_value=23,
             ),
             FeatureMetadata(
                 name="temporal__hour__sin",
                 category=self.category,
                 description="Hour sine encoding",
-                min_value=-1, max_value=1,
+                min_value=-1,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="temporal__hour__cos",
                 category=self.category,
                 description="Hour cosine encoding",
-                min_value=-1, max_value=1,
+                min_value=-1,
+                max_value=1,
             ),
             # Season phase
             FeatureMetadata(
                 name="temporal__season__phase",
                 category=self.category,
                 description="Season phase: 0=early, 0.5=mid, 1=late",
-                min_value=0, max_value=1,
+                min_value=0,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="temporal__season__is_early",
                 category=self.category,
                 description="1 if in first third of season",
-                dtype="bool", min_value=0, max_value=1,
+                dtype="bool",
+                min_value=0,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="temporal__season__is_late",
                 category=self.category,
                 description="1 if in last third of season",
-                dtype="bool", min_value=0, max_value=1,
+                dtype="bool",
+                min_value=0,
+                max_value=1,
             ),
             # Day of year
             FeatureMetadata(
                 name="temporal__doy__sin",
                 category=self.category,
                 description="Day of year sine encoding",
-                min_value=-1, max_value=1,
+                min_value=-1,
+                max_value=1,
             ),
             FeatureMetadata(
                 name="temporal__doy__cos",
                 category=self.category,
                 description="Day of year cosine encoding",
-                min_value=-1, max_value=1,
+                min_value=-1,
+                max_value=1,
             ),
         ]
         self._feature_defs = defs
 
-    def compute(
-        self, ctx: MatchContext, **kwargs
-    ) -> Dict[str, Optional[float]]:
+    def compute(self, ctx: MatchContext, **kwargs) -> Dict[str, Optional[float]]:
         """Compute all temporal features from match date."""
         dt = ctx.match_date
         features: Dict[str, Optional[float]] = {}

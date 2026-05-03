@@ -1,10 +1,10 @@
 """Tests for user endpoints - preferences, betting history, dashboard"""
 
 import sys
-from pathlib import Path
-from datetime import date
-from unittest.mock import patch
 import uuid
+from datetime import date
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 

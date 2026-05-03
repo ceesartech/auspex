@@ -3,9 +3,8 @@
 from datetime import datetime, timezone
 
 import pytest
-
-from src.categories.temporal import TemporalFeatureComputer
 from src.categories.base import MatchContext
+from src.categories.temporal import TemporalFeatureComputer
 
 
 class TestTemporalFeatureComputer:
@@ -51,10 +50,16 @@ class TestTemporalFeatureComputer:
 
     def test_cyclical_encoding_ranges(self, computer, match_context):
         features = computer.compute(match_context)
-        for key in ["temporal__dow__sin", "temporal__dow__cos",
-                    "temporal__month__sin", "temporal__month__cos",
-                    "temporal__hour__sin", "temporal__hour__cos",
-                    "temporal__doy__sin", "temporal__doy__cos"]:
+        for key in [
+            "temporal__dow__sin",
+            "temporal__dow__cos",
+            "temporal__month__sin",
+            "temporal__month__cos",
+            "temporal__hour__sin",
+            "temporal__hour__cos",
+            "temporal__doy__sin",
+            "temporal__doy__cos",
+        ]:
             assert -1.0 <= features[key] <= 1.0, f"{key}={features[key]}"
 
     def test_month(self, computer, match_context):

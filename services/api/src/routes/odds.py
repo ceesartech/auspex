@@ -1,13 +1,13 @@
 """Odds endpoints"""
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-from typing import List, Optional, Dict, Any
 import logging
+from typing import Any, Dict, List, Optional
 
-from database import get_db
 from auth.dependencies import require_auth
+from database import get_db
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -42,9 +42,7 @@ async def get_live_odds(
         LIMIT :limit
     """)
 
-    results = db.execute(
-        query, {"sport": sport, "bookmaker": bookmaker, "limit": limit}
-    ).fetchall()
+    results = db.execute(query, {"sport": sport, "bookmaker": bookmaker, "limit": limit}).fetchall()
 
     return [
         {
@@ -57,9 +55,7 @@ async def get_live_odds(
             "market_type": row.market_type,
             "selection": row.selection,
             "odds_decimal": float(row.odds_decimal),
-            "implied_probability": float(row.implied_probability)
-            if row.implied_probability
-            else None,
+            "implied_probability": float(row.implied_probability) if row.implied_probability else None,
             "timestamp": row.timestamp.isoformat() if row.timestamp else None,
         }
         for row in results
@@ -108,9 +104,7 @@ async def get_match_odds(
             "odds_decimal": float(row.odds_decimal),
             "odds_american": row.odds_american,
             "line": float(row.line) if row.line else None,
-            "implied_probability": float(row.implied_probability)
-            if row.implied_probability
-            else None,
+            "implied_probability": float(row.implied_probability) if row.implied_probability else None,
             "timestamp": row.timestamp.isoformat() if row.timestamp else None,
             "is_opening": row.is_opening,
             "is_live": row.is_live,
@@ -160,9 +154,7 @@ async def get_odds_movements(
         movements[selection].append(
             {
                 "odds_decimal": float(row.odds_decimal),
-                "implied_probability": float(row.implied_probability)
-                if row.implied_probability
-                else None,
+                "implied_probability": float(row.implied_probability) if row.implied_probability else None,
                 "timestamp": row.timestamp.isoformat() if row.timestamp else None,
                 "bookmaker": row.bookmaker,
                 "is_opening": row.is_opening,
@@ -180,9 +172,7 @@ async def get_odds_movements(
                 "current_odds": current,
                 "change": round(current - opening, 4),
                 "change_pct": round((current - opening) / opening * 100, 2),
-                "direction": "shortening" if current < opening else "drifting"
-                if current > opening
-                else "stable",
+                "direction": "shortening" if current < opening else "drifting" if current > opening else "stable",
                 "data_points": len(history),
             }
 

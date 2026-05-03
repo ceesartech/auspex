@@ -1,7 +1,8 @@
 """Prometheus metrics middleware"""
 
-from prometheus_client import Counter, Histogram
 import time
+
+from prometheus_client import Counter, Histogram
 
 # Metrics
 REQUEST_COUNT = Counter(

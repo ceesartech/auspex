@@ -32,278 +32,319 @@ class DerivedFeatureComputer(BaseFeatureComputer):
 
         # Elo ratings
         for side in ["home", "away"]:
-            defs.append(FeatureMetadata(
-                name=f"derived__elo__{side}_rating",
-                category=self.category,
-                description=f"{side} team Elo rating",
-            ))
-        defs.extend([
-            FeatureMetadata(
-                name="derived__elo__diff",
-                category=self.category,
-                description="Elo rating difference (home - away)",
-            ),
-            FeatureMetadata(
-                name="derived__elo__home_expected",
-                category=self.category,
-                description="Elo-based expected score for home team",
-                min_value=0, max_value=1,
-            ),
-        ])
+            defs.append(
+                FeatureMetadata(
+                    name=f"derived__elo__{side}_rating",
+                    category=self.category,
+                    description=f"{side} team Elo rating",
+                )
+            )
+        defs.extend(
+            [
+                FeatureMetadata(
+                    name="derived__elo__diff",
+                    category=self.category,
+                    description="Elo rating difference (home - away)",
+                ),
+                FeatureMetadata(
+                    name="derived__elo__home_expected",
+                    category=self.category,
+                    description="Elo-based expected score for home team",
+                    min_value=0,
+                    max_value=1,
+                ),
+            ]
+        )
 
         # Poisson model
-        defs.extend([
-            FeatureMetadata(
-                name="derived__poisson__home_lambda",
-                category=self.category,
-                description="Poisson expected goals for home team",
-                min_value=0,
-            ),
-            FeatureMetadata(
-                name="derived__poisson__away_lambda",
-                category=self.category,
-                description="Poisson expected goals for away team",
-                min_value=0,
-            ),
-            FeatureMetadata(
-                name="derived__poisson__home_win",
-                category=self.category,
-                description="Poisson home win probability",
-                min_value=0, max_value=1,
-            ),
-            FeatureMetadata(
-                name="derived__poisson__draw",
-                category=self.category,
-                description="Poisson draw probability",
-                min_value=0, max_value=1,
-            ),
-            FeatureMetadata(
-                name="derived__poisson__away_win",
-                category=self.category,
-                description="Poisson away win probability",
-                min_value=0, max_value=1,
-            ),
-            FeatureMetadata(
-                name="derived__poisson__over25",
-                category=self.category,
-                description="Poisson probability of over 2.5 goals",
-                min_value=0, max_value=1,
-            ),
-            FeatureMetadata(
-                name="derived__poisson__btts",
-                category=self.category,
-                description="Poisson probability of BTTS",
-                min_value=0, max_value=1,
-            ),
-        ])
+        defs.extend(
+            [
+                FeatureMetadata(
+                    name="derived__poisson__home_lambda",
+                    category=self.category,
+                    description="Poisson expected goals for home team",
+                    min_value=0,
+                ),
+                FeatureMetadata(
+                    name="derived__poisson__away_lambda",
+                    category=self.category,
+                    description="Poisson expected goals for away team",
+                    min_value=0,
+                ),
+                FeatureMetadata(
+                    name="derived__poisson__home_win",
+                    category=self.category,
+                    description="Poisson home win probability",
+                    min_value=0,
+                    max_value=1,
+                ),
+                FeatureMetadata(
+                    name="derived__poisson__draw",
+                    category=self.category,
+                    description="Poisson draw probability",
+                    min_value=0,
+                    max_value=1,
+                ),
+                FeatureMetadata(
+                    name="derived__poisson__away_win",
+                    category=self.category,
+                    description="Poisson away win probability",
+                    min_value=0,
+                    max_value=1,
+                ),
+                FeatureMetadata(
+                    name="derived__poisson__over25",
+                    category=self.category,
+                    description="Poisson probability of over 2.5 goals",
+                    min_value=0,
+                    max_value=1,
+                ),
+                FeatureMetadata(
+                    name="derived__poisson__btts",
+                    category=self.category,
+                    description="Poisson probability of BTTS",
+                    min_value=0,
+                    max_value=1,
+                ),
+            ]
+        )
 
         # Momentum composites
         for side in ["home", "away"]:
-            defs.extend([
-                FeatureMetadata(
-                    name=f"derived__momentum__{side}__attack",
-                    category=self.category,
-                    description=f"{side} attack momentum (goals + xG trend)",
-                ),
-                FeatureMetadata(
-                    name=f"derived__momentum__{side}__defense",
-                    category=self.category,
-                    description=f"{side} defensive momentum",
-                ),
-                FeatureMetadata(
-                    name=f"derived__momentum__{side}__overall",
-                    category=self.category,
-                    description=f"{side} overall momentum composite",
-                ),
-                FeatureMetadata(
-                    name=f"derived__momentum__{side}__form_index",
-                    category=self.category,
-                    description=f"{side} weighted form index (recent > older)",
-                ),
-            ])
+            defs.extend(
+                [
+                    FeatureMetadata(
+                        name=f"derived__momentum__{side}__attack",
+                        category=self.category,
+                        description=f"{side} attack momentum (goals + xG trend)",
+                    ),
+                    FeatureMetadata(
+                        name=f"derived__momentum__{side}__defense",
+                        category=self.category,
+                        description=f"{side} defensive momentum",
+                    ),
+                    FeatureMetadata(
+                        name=f"derived__momentum__{side}__overall",
+                        category=self.category,
+                        description=f"{side} overall momentum composite",
+                    ),
+                    FeatureMetadata(
+                        name=f"derived__momentum__{side}__form_index",
+                        category=self.category,
+                        description=f"{side} weighted form index (recent > older)",
+                    ),
+                ]
+            )
 
         # Momentum comparison
-        defs.extend([
-            FeatureMetadata(
-                name="derived__momentum__attack_diff",
-                category=self.category,
-                description="Attack momentum difference (home - away)",
-            ),
-            FeatureMetadata(
-                name="derived__momentum__defense_diff",
-                category=self.category,
-                description="Defense momentum difference (home - away)",
-            ),
-            FeatureMetadata(
-                name="derived__momentum__overall_diff",
-                category=self.category,
-                description="Overall momentum difference (home - away)",
-            ),
-        ])
+        defs.extend(
+            [
+                FeatureMetadata(
+                    name="derived__momentum__attack_diff",
+                    category=self.category,
+                    description="Attack momentum difference (home - away)",
+                ),
+                FeatureMetadata(
+                    name="derived__momentum__defense_diff",
+                    category=self.category,
+                    description="Defense momentum difference (home - away)",
+                ),
+                FeatureMetadata(
+                    name="derived__momentum__overall_diff",
+                    category=self.category,
+                    description="Overall momentum difference (home - away)",
+                ),
+            ]
+        )
 
         # Interaction terms (cross-category)
-        defs.extend([
-            FeatureMetadata(
-                name="derived__interact__home_form_x_h2h",
-                category=self.category,
-                description="Home form PPG * H2H home win rate",
-            ),
-            FeatureMetadata(
-                name="derived__interact__away_form_x_h2h",
-                category=self.category,
-                description="Away form PPG * H2H away win rate",
-            ),
-            FeatureMetadata(
-                name="derived__interact__home_attack_x_away_defense",
-                category=self.category,
-                description="Home xG * Away goals conceded",
-            ),
-            FeatureMetadata(
-                name="derived__interact__away_attack_x_home_defense",
-                category=self.category,
-                description="Away xG * Home goals conceded",
-            ),
-            FeatureMetadata(
-                name="derived__interact__form_x_rest_home",
-                category=self.category,
-                description="Home form * rest advantage",
-            ),
-            FeatureMetadata(
-                name="derived__interact__form_x_rest_away",
-                category=self.category,
-                description="Away form * rest advantage",
-            ),
-            FeatureMetadata(
-                name="derived__interact__odds_x_form_home",
-                category=self.category,
-                description="Home implied prob * form PPG",
-            ),
-            FeatureMetadata(
-                name="derived__interact__odds_x_form_away",
-                category=self.category,
-                description="Away implied prob * form PPG",
-            ),
-            FeatureMetadata(
-                name="derived__interact__position_x_form",
-                category=self.category,
-                description="Position diff * form diff",
-            ),
-            FeatureMetadata(
-                name="derived__interact__injuries_x_form_home",
-                category=self.category,
-                description="Home unavailability * inverse form",
-            ),
-            FeatureMetadata(
-                name="derived__interact__injuries_x_form_away",
-                category=self.category,
-                description="Away unavailability * inverse form",
-            ),
-        ])
+        defs.extend(
+            [
+                FeatureMetadata(
+                    name="derived__interact__home_form_x_h2h",
+                    category=self.category,
+                    description="Home form PPG * H2H home win rate",
+                ),
+                FeatureMetadata(
+                    name="derived__interact__away_form_x_h2h",
+                    category=self.category,
+                    description="Away form PPG * H2H away win rate",
+                ),
+                FeatureMetadata(
+                    name="derived__interact__home_attack_x_away_defense",
+                    category=self.category,
+                    description="Home xG * Away goals conceded",
+                ),
+                FeatureMetadata(
+                    name="derived__interact__away_attack_x_home_defense",
+                    category=self.category,
+                    description="Away xG * Home goals conceded",
+                ),
+                FeatureMetadata(
+                    name="derived__interact__form_x_rest_home",
+                    category=self.category,
+                    description="Home form * rest advantage",
+                ),
+                FeatureMetadata(
+                    name="derived__interact__form_x_rest_away",
+                    category=self.category,
+                    description="Away form * rest advantage",
+                ),
+                FeatureMetadata(
+                    name="derived__interact__odds_x_form_home",
+                    category=self.category,
+                    description="Home implied prob * form PPG",
+                ),
+                FeatureMetadata(
+                    name="derived__interact__odds_x_form_away",
+                    category=self.category,
+                    description="Away implied prob * form PPG",
+                ),
+                FeatureMetadata(
+                    name="derived__interact__position_x_form",
+                    category=self.category,
+                    description="Position diff * form diff",
+                ),
+                FeatureMetadata(
+                    name="derived__interact__injuries_x_form_home",
+                    category=self.category,
+                    description="Home unavailability * inverse form",
+                ),
+                FeatureMetadata(
+                    name="derived__interact__injuries_x_form_away",
+                    category=self.category,
+                    description="Away unavailability * inverse form",
+                ),
+            ]
+        )
 
         # Strength differentials
         for metric in [
-            "xg", "shots", "possession", "ppg", "goals_scored",
-            "goals_conceded", "clean_sheets",
+            "xg",
+            "shots",
+            "possession",
+            "ppg",
+            "goals_scored",
+            "goals_conceded",
+            "clean_sheets",
         ]:
-            defs.append(FeatureMetadata(
-                name=f"derived__diff__{metric}",
-                category=self.category,
-                description=f"Differential in {metric} (home - away, last 5)",
-            ))
+            defs.append(
+                FeatureMetadata(
+                    name=f"derived__diff__{metric}",
+                    category=self.category,
+                    description=f"Differential in {metric} (home - away, last 5)",
+                )
+            )
 
         # Relative to league average
         for side in ["home", "away"]:
             for metric in ["goals_scored", "goals_conceded", "xg", "xg_against"]:
-                defs.append(FeatureMetadata(
-                    name=f"derived__relative__{side}__{metric}",
-                    category=self.category,
-                    description=f"{side} {metric} relative to league avg",
-                ))
+                defs.append(
+                    FeatureMetadata(
+                        name=f"derived__relative__{side}__{metric}",
+                        category=self.category,
+                        description=f"{side} {metric} relative to league avg",
+                    )
+                )
 
         # Value-based features
-        defs.extend([
-            FeatureMetadata(
-                name="derived__value__squad_ratio",
-                category=self.category,
-                description="Home/Away squad value ratio",
-                min_value=0,
-            ),
-            FeatureMetadata(
-                name="derived__value__squad_diff_log",
-                category=self.category,
-                description="Log of squad value difference",
-            ),
-        ])
+        defs.extend(
+            [
+                FeatureMetadata(
+                    name="derived__value__squad_ratio",
+                    category=self.category,
+                    description="Home/Away squad value ratio",
+                    min_value=0,
+                ),
+                FeatureMetadata(
+                    name="derived__value__squad_diff_log",
+                    category=self.category,
+                    description="Log of squad value difference",
+                ),
+            ]
+        )
 
         # Model agreement
-        defs.extend([
-            FeatureMetadata(
-                name="derived__agreement__elo_vs_odds",
-                category=self.category,
-                description="Agreement between Elo and odds (1 - abs diff)",
-                min_value=0, max_value=1,
-            ),
-            FeatureMetadata(
-                name="derived__agreement__poisson_vs_odds",
-                category=self.category,
-                description="Agreement between Poisson and odds",
-                min_value=0, max_value=1,
-            ),
-            FeatureMetadata(
-                name="derived__agreement__form_vs_odds",
-                category=self.category,
-                description="Agreement between form and odds",
-                min_value=0, max_value=1,
-            ),
-        ])
+        defs.extend(
+            [
+                FeatureMetadata(
+                    name="derived__agreement__elo_vs_odds",
+                    category=self.category,
+                    description="Agreement between Elo and odds (1 - abs diff)",
+                    min_value=0,
+                    max_value=1,
+                ),
+                FeatureMetadata(
+                    name="derived__agreement__poisson_vs_odds",
+                    category=self.category,
+                    description="Agreement between Poisson and odds",
+                    min_value=0,
+                    max_value=1,
+                ),
+                FeatureMetadata(
+                    name="derived__agreement__form_vs_odds",
+                    category=self.category,
+                    description="Agreement between form and odds",
+                    min_value=0,
+                    max_value=1,
+                ),
+            ]
+        )
 
         # Composite scores
-        defs.extend([
-            FeatureMetadata(
-                name="derived__composite__home_strength",
-                category=self.category,
-                description="Composite home team strength score",
-            ),
-            FeatureMetadata(
-                name="derived__composite__away_strength",
-                category=self.category,
-                description="Composite away team strength score",
-            ),
-            FeatureMetadata(
-                name="derived__composite__match_quality",
-                category=self.category,
-                description="Expected match quality/entertainment index",
-                min_value=0,
-            ),
-            FeatureMetadata(
-                name="derived__composite__upset_potential",
-                category=self.category,
-                description="Likelihood of an upset",
-                min_value=0, max_value=1,
-            ),
-            FeatureMetadata(
-                name="derived__composite__goals_expectation",
-                category=self.category,
-                description="Composite expected total goals",
-                min_value=0,
-            ),
-        ])
+        defs.extend(
+            [
+                FeatureMetadata(
+                    name="derived__composite__home_strength",
+                    category=self.category,
+                    description="Composite home team strength score",
+                ),
+                FeatureMetadata(
+                    name="derived__composite__away_strength",
+                    category=self.category,
+                    description="Composite away team strength score",
+                ),
+                FeatureMetadata(
+                    name="derived__composite__match_quality",
+                    category=self.category,
+                    description="Expected match quality/entertainment index",
+                    min_value=0,
+                ),
+                FeatureMetadata(
+                    name="derived__composite__upset_potential",
+                    category=self.category,
+                    description="Likelihood of an upset",
+                    min_value=0,
+                    max_value=1,
+                ),
+                FeatureMetadata(
+                    name="derived__composite__goals_expectation",
+                    category=self.category,
+                    description="Composite expected total goals",
+                    min_value=0,
+                ),
+            ]
+        )
 
         # Confidence features
-        defs.extend([
-            FeatureMetadata(
-                name="derived__confidence__data_completeness",
-                category=self.category,
-                description="Fraction of non-null input features",
-                min_value=0, max_value=1,
-            ),
-            FeatureMetadata(
-                name="derived__confidence__model_consensus",
-                category=self.category,
-                description="How much Elo, Poisson, odds agree",
-                min_value=0, max_value=1,
-            ),
-        ])
+        defs.extend(
+            [
+                FeatureMetadata(
+                    name="derived__confidence__data_completeness",
+                    category=self.category,
+                    description="Fraction of non-null input features",
+                    min_value=0,
+                    max_value=1,
+                ),
+                FeatureMetadata(
+                    name="derived__confidence__model_consensus",
+                    category=self.category,
+                    description="How much Elo, Poisson, odds agree",
+                    min_value=0,
+                    max_value=1,
+                ),
+            ]
+        )
 
         self._feature_defs = defs
 
@@ -344,9 +385,7 @@ class DerivedFeatureComputer(BaseFeatureComputer):
         away_elo = features.get("derived__elo__away_rating")
         if home_elo is not None and away_elo is not None:
             features["derived__elo__diff"] = home_elo - away_elo
-            features["derived__elo__home_expected"] = elo_expected(
-                home_elo, away_elo
-            )
+            features["derived__elo__home_expected"] = elo_expected(home_elo, away_elo)
 
     # ---------- Poisson ----------
 
@@ -398,9 +437,7 @@ class DerivedFeatureComputer(BaseFeatureComputer):
             # BTTS = 1 - P(home=0) - P(away=0) + P(both=0)
             p_home_zero = poisson_probability(h_lam, 0)
             p_away_zero = poisson_probability(a_lam, 0)
-            features["derived__poisson__btts"] = (
-                1.0 - p_home_zero - p_away_zero + p_home_zero * p_away_zero
-            )
+            features["derived__poisson__btts"] = 1.0 - p_home_zero - p_away_zero + p_home_zero * p_away_zero
 
     # ---------- Momentum ----------
 
@@ -434,9 +471,7 @@ class DerivedFeatureComputer(BaseFeatureComputer):
 
             # Overall
             if attack is not None and defense is not None:
-                features[f"derived__momentum__{side}__overall"] = (
-                    0.6 * attack + 0.4 * defense
-                )
+                features[f"derived__momentum__{side}__overall"] = 0.6 * attack + 0.4 * defense
 
             # Form index (weighted PPG across windows)
             ppg3 = pf.get(f"team__{side}__form__points_per_game__last3")
@@ -445,9 +480,7 @@ class DerivedFeatureComputer(BaseFeatureComputer):
 
             if ppg3 is not None and ppg5 is not None:
                 ppg10v = ppg10 if ppg10 is not None else ppg5
-                features[f"derived__momentum__{side}__form_index"] = (
-                    0.5 * ppg3 + 0.3 * ppg5 + 0.2 * ppg10v
-                )
+                features[f"derived__momentum__{side}__form_index"] = 0.5 * ppg3 + 0.3 * ppg5 + 0.2 * ppg10v
 
         # Momentum diffs
         for metric in ["attack", "defense", "overall"]:
@@ -475,13 +508,9 @@ class DerivedFeatureComputer(BaseFeatureComputer):
         home_gc = pf.get("team__home__form__goals_conceded__last5")
 
         if home_xg is not None and away_gc is not None:
-            features["derived__interact__home_attack_x_away_defense"] = (
-                home_xg * (away_gc / 5.0)
-            )
+            features["derived__interact__home_attack_x_away_defense"] = home_xg * (away_gc / 5.0)
         if away_xg is not None and home_gc is not None:
-            features["derived__interact__away_attack_x_home_defense"] = (
-                away_xg * (home_gc / 5.0)
-            )
+            features["derived__interact__away_attack_x_home_defense"] = away_xg * (home_gc / 5.0)
 
         # Form x rest
         home_rest = pf.get("ctx__home__rest_days")
@@ -504,21 +533,15 @@ class DerivedFeatureComputer(BaseFeatureComputer):
         # Position x form
         pos_diff = pf.get("ctx__position_diff")
         if pos_diff is not None and home_ppg is not None and away_ppg is not None:
-            features["derived__interact__position_x_form"] = (
-                pos_diff * (home_ppg - away_ppg)
-            )
+            features["derived__interact__position_x_form"] = pos_diff * (home_ppg - away_ppg)
 
         # Injuries x form
         home_unavail = pf.get("player__home__unavailable_pct")
         away_unavail = pf.get("player__away__unavailable_pct")
         if home_unavail is not None and home_ppg is not None:
-            features["derived__interact__injuries_x_form_home"] = (
-                home_unavail * (3.0 - home_ppg)
-            )
+            features["derived__interact__injuries_x_form_home"] = home_unavail * (3.0 - home_ppg)
         if away_unavail is not None and away_ppg is not None:
-            features["derived__interact__injuries_x_form_away"] = (
-                away_unavail * (3.0 - away_ppg)
-            )
+            features["derived__interact__injuries_x_form_away"] = away_unavail * (3.0 - away_ppg)
 
     # ---------- Differentials ----------
 
@@ -555,13 +578,9 @@ class DerivedFeatureComputer(BaseFeatureComputer):
             xga = pf.get(f"team__{side}__form__avg_xg_against__last5")
 
             if gs is not None:
-                features[f"derived__relative__{side}__goals_scored"] = (
-                    (gs / 5.0) / half_avg
-                )
+                features[f"derived__relative__{side}__goals_scored"] = (gs / 5.0) / half_avg
             if gc is not None:
-                features[f"derived__relative__{side}__goals_conceded"] = (
-                    (gc / 5.0) / half_avg
-                )
+                features[f"derived__relative__{side}__goals_conceded"] = (gc / 5.0) / half_avg
             if xg is not None:
                 features[f"derived__relative__{side}__xg"] = xg / half_avg
             if xga is not None:
@@ -576,9 +595,7 @@ class DerivedFeatureComputer(BaseFeatureComputer):
         if home_val is not None and away_val is not None and away_val > 0:
             features["derived__value__squad_ratio"] = safe_divide(home_val, away_val)
             diff = abs(home_val - away_val)
-            features["derived__value__squad_diff_log"] = (
-                math.log1p(diff) if diff > 0 else 0.0
-            )
+            features["derived__value__squad_diff_log"] = math.log1p(diff) if diff > 0 else 0.0
 
     # ---------- Agreement ----------
 
@@ -587,24 +604,18 @@ class DerivedFeatureComputer(BaseFeatureComputer):
 
         elo_exp = features.get("derived__elo__home_expected")
         if elo_exp is not None and odds_home is not None:
-            features["derived__agreement__elo_vs_odds"] = (
-                1.0 - abs(elo_exp - odds_home)
-            )
+            features["derived__agreement__elo_vs_odds"] = 1.0 - abs(elo_exp - odds_home)
 
         poisson_home = features.get("derived__poisson__home_win")
         if poisson_home is not None and odds_home is not None:
-            features["derived__agreement__poisson_vs_odds"] = (
-                1.0 - abs(poisson_home - odds_home)
-            )
+            features["derived__agreement__poisson_vs_odds"] = 1.0 - abs(poisson_home - odds_home)
 
         # Form vs odds: normalize PPG to probability-like scale
         home_ppg = pf.get("team__home__form__points_per_game__last5")
         away_ppg = pf.get("team__away__form__points_per_game__last5")
         if home_ppg is not None and away_ppg is not None and odds_home is not None:
             form_ratio = safe_divide(home_ppg, home_ppg + away_ppg, 0.5)
-            features["derived__agreement__form_vs_odds"] = (
-                1.0 - abs(form_ratio - odds_home)
-            )
+            features["derived__agreement__form_vs_odds"] = 1.0 - abs(form_ratio - odds_home)
 
     # ---------- Composites ----------
 
@@ -626,17 +637,13 @@ class DerivedFeatureComputer(BaseFeatureComputer):
                 components.append(min(math.log10(squad_val) / 10.0, 1.0))
 
             if components:
-                features[f"derived__composite__{side}_strength"] = (
-                    sum(components) / len(components)
-                )
+                features[f"derived__composite__{side}_strength"] = sum(components) / len(components)
 
         # Match quality
         h_str = features.get("derived__composite__home_strength")
         a_str = features.get("derived__composite__away_strength")
         if h_str is not None and a_str is not None:
-            features["derived__composite__match_quality"] = (
-                (h_str + a_str) / 2.0
-            )
+            features["derived__composite__match_quality"] = (h_str + a_str) / 2.0
 
         # Upset potential
         odds_home = pf.get("odds__implied_prob__home")
@@ -661,9 +668,7 @@ class DerivedFeatureComputer(BaseFeatureComputer):
             components.append(league_avg)
 
         if components:
-            features["derived__composite__goals_expectation"] = (
-                sum(components) / len(components)
-            )
+            features["derived__composite__goals_expectation"] = sum(components) / len(components)
 
     # ---------- Confidence ----------
 
@@ -671,20 +676,14 @@ class DerivedFeatureComputer(BaseFeatureComputer):
         # Data completeness
         total = len(pf)
         non_null = sum(1 for v in pf.values() if v is not None)
-        features["derived__confidence__data_completeness"] = (
-            safe_divide(non_null, total) if total > 0 else 0.0
-        )
+        features["derived__confidence__data_completeness"] = safe_divide(non_null, total) if total > 0 else 0.0
 
         # Model consensus
         elo_home = features.get("derived__elo__home_expected")
         poisson_home = features.get("derived__poisson__home_win")
         odds_home = pf.get("odds__implied_prob__home")
 
-        predictions = [
-            p for p in [elo_home, poisson_home, odds_home] if p is not None
-        ]
+        predictions = [p for p in [elo_home, poisson_home, odds_home] if p is not None]
         if len(predictions) >= 2:
             std = float(np.std(predictions))
-            features["derived__confidence__model_consensus"] = max(
-                0, 1.0 - std * 3.0
-            )
+            features["derived__confidence__model_consensus"] = max(0, 1.0 - std * 3.0)

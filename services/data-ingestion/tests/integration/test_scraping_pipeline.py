@@ -1,7 +1,6 @@
 """Integration tests for the scraping pipeline."""
 
 import pytest
-
 from services.data_ingestion.src.scrapers.bet365_scraper import Bet365Scraper
 from services.data_ingestion.src.scrapers.betmgm_scraper import BetMGMScraper
 from services.data_ingestion.src.scrapers.fbref_scraper import FBrefScraper
@@ -38,32 +37,30 @@ class TestScrapingPipeline:
         """Test that scraper sets proper headers"""
         scraper = Bet365Scraper(mock_config, mock_db, mock_redis)
         headers = scraper._get_headers()
-        assert 'User-Agent' in headers
-        assert 'Accept' in headers
-        assert 'DNT' in headers
+        assert "User-Agent" in headers
+        assert "Accept" in headers
+        assert "DNT" in headers
 
     def test_data_validator_odds(self):
         """Test data validator with valid odds"""
         validator = DataValidator()
-        result = validator.validate_odds({
-            'match_id': 1,
-            'bookmaker': 'bet365',
-            'market_type': '1X2',
-            'outcome': 'home',
-            'odds_decimal': 2.50
-        })
+        result = validator.validate_odds(
+            {"match_id": 1, "bookmaker": "bet365", "market_type": "1X2", "outcome": "home", "odds_decimal": 2.50}
+        )
         assert result is True
 
     def test_data_validator_odds_invalid(self):
         """Test data validator rejects invalid odds"""
         validator = DataValidator()
-        result = validator.validate_odds({
-            'match_id': 1,
-            'bookmaker': 'bet365',
-            'market_type': '1X2',
-            'outcome': 'home',
-            'odds_decimal': 0.50  # Too low
-        })
+        result = validator.validate_odds(
+            {
+                "match_id": 1,
+                "bookmaker": "bet365",
+                "market_type": "1X2",
+                "outcome": "home",
+                "odds_decimal": 0.50,  # Too low
+            }
+        )
         assert result is False
 
     def test_checksum_deduplication(self, mock_config, mock_db, mock_redis):
@@ -72,7 +69,7 @@ class TestScrapingPipeline:
 
         scraper = Bet365Scraper(mock_config, mock_db, mock_redis)
 
-        data = {'key': 'value', 'number': 42}
+        data = {"key": "value", "number": 42}
         checksum = scraper._calculate_checksum(data)
 
         assert len(checksum) == 32  # MD5 hex digest length

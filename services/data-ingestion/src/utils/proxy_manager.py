@@ -1,11 +1,12 @@
 """Proxy rotation and management"""
 
-import requests
-from typing import Dict, Optional
-import random
-import logging
-from redis import Redis
 import json
+import logging
+import random
+from typing import Dict, Optional
+
+import requests
+from redis import Redis
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ class ProxyManager:
 
         try:
             response = requests.get(self.proxy_list_url, timeout=10)
-            proxies = response.text.strip().split('\n')
+            proxies = response.text.strip().split("\n")
 
             # Cache for 1 hour
             self.redis.setex(self.proxy_key, 3600, json.dumps(proxies))
@@ -49,10 +50,7 @@ class ProxyManager:
             return None
 
         proxy_url = random.choice(proxies)
-        return {
-            'http': f'http://{proxy_url}',
-            'https': f'http://{proxy_url}'
-        }
+        return {"http": f"http://{proxy_url}", "https": f"http://{proxy_url}"}
 
     def mark_proxy_bad(self, proxy_url: str):
         """Remove a non-working proxy"""

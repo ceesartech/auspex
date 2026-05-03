@@ -57,25 +57,15 @@ class XGBoostMatchPredictor(BaseModel):
 
         X_train, y_train = self.prepare_data(train_df, target, features)
 
-        dtrain = xgb.DMatrix(
-            X_train, label=y_train, feature_names=self.feature_names
-        )
+        dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=self.feature_names)
 
-        params = {
-            k: v
-            for k, v in self.config.hyperparameters.items()
-            if k != "n_estimators"
-        }
+        params = {k: v for k, v in self.config.hyperparameters.items() if k != "n_estimators"}
 
         evals = [(dtrain, "train")]
         if val_df is not None:
-            X_val = val_df[self.feature_names].fillna(
-                val_df[self.feature_names].median()
-            ).values
+            X_val = val_df[self.feature_names].fillna(val_df[self.feature_names].median()).values
             y_val = self.label_encoder.transform(val_df[target])
-            dval = xgb.DMatrix(
-                X_val, label=y_val, feature_names=self.feature_names
-            )
+            dval = xgb.DMatrix(X_val, label=y_val, feature_names=self.feature_names)
             evals.append((dval, "val"))
 
         evals_result: Dict = {}
@@ -85,9 +75,7 @@ class XGBoostMatchPredictor(BaseModel):
             num_boost_round=self.config.hyperparameters.get("n_estimators", 500),
             evals=evals,
             evals_result=evals_result,
-            early_stopping_rounds=self.config.training_config.get(
-                "early_stopping_rounds", 50
-            ),
+            early_stopping_rounds=self.config.training_config.get("early_stopping_rounds", 50),
             verbose_eval=self.config.training_config.get("verbose", 100),
         )
 
@@ -96,9 +84,7 @@ class XGBoostMatchPredictor(BaseModel):
 
         # Feature importance
         importance_dict = self.model.get_score(importance_type="gain")
-        self.feature_importance = dict(
-            sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)
-        )
+        self.feature_importance = dict(sorted(importance_dict.items(), key=lambda x: x[1], reverse=True))
 
         # Initialize SHAP
         try:
@@ -111,9 +97,7 @@ class XGBoostMatchPredictor(BaseModel):
         # Validation metrics
         validation_metrics = {}
         if val_df is not None:
-            validation_metrics = self.evaluate(
-                pd.DataFrame(X_val, columns=self.feature_names), y_val
-            )
+            validation_metrics = self.evaluate(pd.DataFrame(X_val, columns=self.feature_names), y_val)
 
         logger.info(f"Training completed. Best iteration: {self.model.best_iteration}")
 
@@ -135,18 +119,14 @@ class XGBoostMatchPredictor(BaseModel):
             raise ValueError("Model not fitted yet")
 
         if isinstance(X, pd.DataFrame):
-            X_vals = X[self.feature_names].fillna(
-                X[self.feature_names].median()
-            )
+            X_vals = X[self.feature_names].fillna(X[self.feature_names].median())
             dmatrix = xgb.DMatrix(X_vals.values, feature_names=self.feature_names)
         else:
             dmatrix = xgb.DMatrix(X, feature_names=self.feature_names)
 
         return self.model.predict(dmatrix)
 
-    def predict_single(
-        self, features: Dict[str, Any], explain: bool = True
-    ) -> Dict[str, Any]:
+    def predict_single(self, features: Dict[str, Any], explain: bool = True) -> Dict[str, Any]:
         """Predict single match with optional SHAP explanation."""
         X = pd.DataFrame([features])[self.feature_names]
         X = X.fillna(X.median())
@@ -156,9 +136,7 @@ class XGBoostMatchPredictor(BaseModel):
 
         result = {
             "predicted_class": predicted_class,
-            "predicted_label": self.label_encoder.inverse_transform(
-                [predicted_class]
-            )[0],
+            "predicted_label": self.label_encoder.inverse_transform([predicted_class])[0],
             "probabilities": {
                 "home_win": float(proba[0]),
                 "draw": float(proba[1]),
@@ -169,9 +147,7 @@ class XGBoostMatchPredictor(BaseModel):
 
         if explain and self.shap_explainer is not None:
             shap_values = self.shap_explainer.shap_values(X.values)
-            explanation = self._format_shap_explanation(
-                X.values[0], shap_values[predicted_class][0]
-            )
+            explanation = self._format_shap_explanation(X.values[0], shap_values[predicted_class][0])
             result["explanation"] = explanation
 
         return result
@@ -190,12 +166,14 @@ class XGBoostMatchPredictor(BaseModel):
             val = feature_values[idx]
             sv = shap_values[idx]
             impact = "increases" if sv > 0 else "decreases"
-            explanations.append({
-                "feature": name,
-                "value": float(val),
-                "impact": float(sv),
-                "description": f"{name} ({val:.2f}) {impact} probability",
-            })
+            explanations.append(
+                {
+                    "feature": name,
+                    "value": float(val),
+                    "impact": float(sv),
+                    "description": f"{name} ({val:.2f}) {impact} probability",
+                }
+            )
 
         return {"top_features": explanations}
 

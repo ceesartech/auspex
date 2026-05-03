@@ -23,8 +23,8 @@ from .core.cache import FeatureCacheManager
 from .core.config import FeatureConfig
 from .core.database import DatabaseManager
 from .core.registry import global_registry
-from .validator import FeatureValidator
 from .utils.sql_queries import MATCH_DETAILS
+from .validator import FeatureValidator
 
 logger = logging.getLogger(__name__)
 
@@ -98,9 +98,7 @@ class RealTimeFeatureComputer:
         if use_cache:
             cached = self.cache.get(match_id)
             if cached:
-                logger.info(
-                    f"Match {match_id}: returning {len(cached)} cached features"
-                )
+                logger.info(f"Match {match_id}: returning {len(cached)} cached features")
                 return cached
 
         # Build match context
@@ -122,25 +120,18 @@ class RealTimeFeatureComputer:
         if validate:
             result = self.validator.validate(all_features)
             if not result.is_valid:
-                logger.warning(
-                    f"Match {match_id}: validation issues — {result.summary}"
-                )
+                logger.warning(f"Match {match_id}: validation issues — {result.summary}")
 
         # Cache result
         if use_cache:
             self.cache.set(match_id, all_features)
 
         duration = time.time() - start_time
-        logger.info(
-            f"Match {match_id}: computed {len(all_features)} features "
-            f"in {duration:.2f}s"
-        )
+        logger.info(f"Match {match_id}: computed {len(all_features)} features " f"in {duration:.2f}s")
 
         return all_features
 
-    def compute_batch(
-        self, match_ids: List[str], use_cache: bool = True
-    ) -> Dict[str, Dict[str, Optional[float]]]:
+    def compute_batch(self, match_ids: List[str], use_cache: bool = True) -> Dict[str, Dict[str, Optional[float]]]:
         """Compute features for multiple matches.
 
         Returns dict of {match_id: features}.
@@ -169,9 +160,7 @@ class RealTimeFeatureComputer:
     def _build_context(self, match_id: str) -> Optional[MatchContext]:
         """Build MatchContext from database."""
         try:
-            result = self.db.execute_query(
-                MATCH_DETAILS, (match_id,), fetch=True
-            )
+            result = self.db.execute_query(MATCH_DETAILS, (match_id,), fetch=True)
             if not result:
                 return None
 
@@ -209,31 +198,21 @@ class RealTimeFeatureComputer:
                 try:
                     result = future.result()
                     all_features.update(result)
-                    logger.debug(
-                        f"Phase 1 — {category_name}: {len(result)} features"
-                    )
+                    logger.debug(f"Phase 1 — {category_name}: {len(result)} features")
                 except Exception as e:
-                    logger.error(
-                        f"Phase 1 — {category_name} failed: {e}"
-                    )
+                    logger.error(f"Phase 1 — {category_name} failed: {e}")
 
         return all_features
 
-    def _run_phase2(
-        self, ctx: MatchContext, prior_features: Dict[str, Optional[float]]
-    ) -> Dict[str, Optional[float]]:
+    def _run_phase2(self, ctx: MatchContext, prior_features: Dict[str, Optional[float]]) -> Dict[str, Optional[float]]:
         """Run phase-2 derived feature computation."""
         try:
-            return self.derived_computer.compute(
-                ctx, prior_features=prior_features
-            )
+            return self.derived_computer.compute(ctx, prior_features=prior_features)
         except Exception as e:
             logger.error(f"Phase 2 — derived failed: {e}")
             return self.derived_computer._empty_features()
 
-    def _safe_compute(
-        self, name: str, computer, ctx: MatchContext
-    ) -> Dict[str, Optional[float]]:
+    def _safe_compute(self, name: str, computer, ctx: MatchContext) -> Dict[str, Optional[float]]:
         """Safely compute features for a category, returning empty on error."""
         try:
             return computer.compute(ctx)

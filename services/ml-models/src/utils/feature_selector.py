@@ -49,9 +49,7 @@ class FeatureSelector:
             threshold: Maximum correlation threshold.
         """
         corr_matrix = X.corr().abs()
-        upper = corr_matrix.where(
-            np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
-        )
+        upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
 
         to_drop = set()
         for col in upper.columns:
@@ -79,9 +77,7 @@ class FeatureSelector:
             top_n: Keep top N features.
             min_importance: Minimum importance threshold.
         """
-        sorted_features = sorted(
-            feature_importance.items(), key=lambda x: x[1], reverse=True
-        )
+        sorted_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)
 
         # Apply threshold
         filtered = [(f, s) for f, s in sorted_features if s > min_importance]
@@ -94,9 +90,7 @@ class FeatureSelector:
         self.feature_scores = dict(filtered)
         self.selected_features = selected
 
-        logger.info(
-            f"Selected {len(selected)} features from {len(feature_importance)} by importance"
-        )
+        logger.info(f"Selected {len(selected)} features from {len(feature_importance)} by importance")
         return selected
 
     def select_by_mutual_information(

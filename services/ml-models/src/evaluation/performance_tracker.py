@@ -44,9 +44,7 @@ class PerformanceTracker:
         with open(log_path, "a") as f:
             f.write(json.dumps(entry) + "\n")
 
-    def get_metric_trend(
-        self, model_name: str, metric_name: str, last_n: int = 20
-    ) -> List[float]:
+    def get_metric_trend(self, model_name: str, metric_name: str, last_n: int = 20) -> List[float]:
         """Get recent values of a metric."""
         entries = self.metrics_history.get(model_name, [])
         values = []
@@ -72,7 +70,7 @@ class PerformanceTracker:
         if len(values) < window * 2:
             return {"has_drift": False, "reason": "Not enough data"}
 
-        historical = values[: window]
+        historical = values[:window]
         recent = values[window:]
 
         hist_mean = float(np.mean(historical))

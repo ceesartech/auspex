@@ -1,8 +1,8 @@
 """Tests for contextual feature computer."""
 
-import pytest
 from datetime import datetime, timezone
 
+import pytest
 from src.categories.contextual import ContextualFeatureComputer
 
 
@@ -28,9 +28,7 @@ class TestContextualFeatureComputer:
     def test_rest_days(self, computer, match_context, mock_db):
         last_match = datetime(2025, 1, 12, tzinfo=timezone.utc)
         mock_db.execute_query.side_effect = lambda q, p, fetch=False: (
-            [{"last_match_date": last_match}]
-            if "MAX(m.match_date)" in q
-            else []
+            [{"last_match_date": last_match}] if "MAX(m.match_date)" in q else []
         )
         mock_db.call_function.return_value = []
 
@@ -43,9 +41,7 @@ class TestContextualFeatureComputer:
     def test_short_rest_flag(self, computer, match_context, mock_db):
         last_match = datetime(2025, 1, 13, tzinfo=timezone.utc)
         mock_db.execute_query.side_effect = lambda q, p, fetch=False: (
-            [{"last_match_date": last_match}]
-            if "MAX(m.match_date)" in q
-            else []
+            [{"last_match_date": last_match}] if "MAX(m.match_date)" in q else []
         )
         mock_db.call_function.return_value = []
 
@@ -54,9 +50,7 @@ class TestContextualFeatureComputer:
         if home_rest is not None:
             assert features["ctx__home__is_short_rest"] == 1.0
 
-    def test_referee_features(
-        self, computer, match_context, mock_db, sample_referee_stats
-    ):
+    def test_referee_features(self, computer, match_context, mock_db, sample_referee_stats):
         def side_effect(q, p, fetch=False):
             if "m.referee" in q:
                 return sample_referee_stats
@@ -70,9 +64,7 @@ class TestContextualFeatureComputer:
             assert features["ctx__referee__avg_yellows"] == 4.2
             assert features["ctx__referee__is_strict"] == 1.0
 
-    def test_league_stats(
-        self, computer, match_context, mock_db, sample_league_stats
-    ):
+    def test_league_stats(self, computer, match_context, mock_db, sample_league_stats):
         def side_effect(q, p, fetch=False):
             if "AVG(m.home_score + m.away_score)" in q:
                 return sample_league_stats
@@ -85,9 +77,7 @@ class TestContextualFeatureComputer:
         if features["ctx__league__avg_goals"] is not None:
             assert features["ctx__league__avg_goals"] == 2.8
 
-    def test_standings_features(
-        self, computer, match_context, mock_db, sample_standings
-    ):
+    def test_standings_features(self, computer, match_context, mock_db, sample_standings):
         mock_db.execute_query.return_value = []
         mock_db.call_function.return_value = sample_standings
 
@@ -101,9 +91,7 @@ class TestContextualFeatureComputer:
             assert features["ctx__away__league_position"] == 4.0
             assert features["ctx__away__is_top4"] == 1.0
 
-    def test_position_diff(
-        self, computer, match_context, mock_db, sample_standings
-    ):
+    def test_position_diff(self, computer, match_context, mock_db, sample_standings):
         mock_db.execute_query.return_value = []
         mock_db.call_function.return_value = sample_standings
 

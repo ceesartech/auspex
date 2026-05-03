@@ -1,21 +1,21 @@
 """FastAPI application entry point"""
 
-from fastapi import FastAPI, Request, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
-from contextlib import asynccontextmanager
 import logging
-from prometheus_client import make_asgi_app
 import time
+from contextlib import asynccontextmanager
 
 from config import settings
-from routes import predictions, recommendations, matches, odds, user
-from routes import models as model_routes
-from routes import lottery, websocket
-from middleware.rate_limiter import RateLimitMiddleware
+from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from middleware.error_handler import error_handler_middleware
 from middleware.metrics import metrics_middleware
+from middleware.rate_limiter import RateLimitMiddleware
+from prometheus_client import make_asgi_app
+from routes import lottery, matches
+from routes import models as model_routes
+from routes import odds, predictions, recommendations, user, websocket
 
 # Configure logging
 logging.basicConfig(
@@ -73,12 +73,8 @@ app.middleware("http")(error_handler_middleware)
 app.middleware("http")(metrics_middleware)
 
 # Include routers
-app.include_router(
-    predictions.router, prefix="/api/v1/predictions", tags=["Predictions"]
-)
-app.include_router(
-    recommendations.router, prefix="/api/v1/recommendations", tags=["Recommendations"]
-)
+app.include_router(predictions.router, prefix="/api/v1/predictions", tags=["Predictions"])
+app.include_router(recommendations.router, prefix="/api/v1/recommendations", tags=["Recommendations"])
 app.include_router(matches.router, prefix="/api/v1/matches", tags=["Matches"])
 app.include_router(odds.router, prefix="/api/v1/odds", tags=["Odds"])
 app.include_router(user.router, prefix="/api/v1/user", tags=["User"])
@@ -95,9 +91,7 @@ app.mount("/metrics", metrics_app)
 
 # Exception handlers
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(
-    request: Request, exc: RequestValidationError
-):
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """Handle validation errors"""
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

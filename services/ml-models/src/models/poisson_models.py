@@ -45,9 +45,7 @@ class PoissonMatchPredictor(BaseModel):
         self.league_avg_goals: float = 1.35
         self.max_goals: int = config.hyperparameters.get("max_goals", 6)
 
-    def prepare_data(
-        self, df: pd.DataFrame, target: str, features: Optional[List[str]] = None
-    ) -> tuple:
+    def prepare_data(self, df: pd.DataFrame, target: str, features: Optional[List[str]] = None) -> tuple:
         required_cols = ["home_team", "away_team", "home_score", "away_score"]
         for col in required_cols:
             if col not in df.columns:
@@ -64,9 +62,7 @@ class PoissonMatchPredictor(BaseModel):
         logger.info("Training Poisson model...")
 
         df = train_df.copy()
-        self.league_avg_goals = (
-            df["home_score"].mean() + df["away_score"].mean()
-        ) / 2.0
+        self.league_avg_goals = (df["home_score"].mean() + df["away_score"].mean()) / 2.0
 
         teams = set(df["home_team"].unique()) | set(df["away_team"].unique())
 
@@ -97,9 +93,7 @@ class PoissonMatchPredictor(BaseModel):
                 for _, row in home_matches.iterrows():
                     opp = row["away_team"]
                     attack_num += row["home_score"]
-                    attack_den += self.team_defense[opp] * (
-                        self.league_avg_goals + self.home_advantage
-                    )
+                    attack_den += self.team_defense[opp] * (self.league_avg_goals + self.home_advantage)
                     defense_num += row["away_score"]
                     defense_den += self.team_attack[opp] * self.league_avg_goals
 
@@ -108,9 +102,7 @@ class PoissonMatchPredictor(BaseModel):
                     attack_num += row["away_score"]
                     attack_den += self.team_defense[opp] * self.league_avg_goals
                     defense_num += row["home_score"]
-                    defense_den += self.team_attack[opp] * (
-                        self.league_avg_goals + self.home_advantage
-                    )
+                    defense_den += self.team_attack[opp] * (self.league_avg_goals + self.home_advantage)
 
                 if attack_den > 0:
                     self.team_attack[team] = (attack_num + reg) / (attack_den + reg)
@@ -126,12 +118,8 @@ class PoissonMatchPredictor(BaseModel):
 
             # Check convergence
             max_change = max(
-                max(
-                    abs(self.team_attack[t] - old_attack[t]) for t in teams
-                ),
-                max(
-                    abs(self.team_defense[t] - old_defense[t]) for t in teams
-                ),
+                max(abs(self.team_attack[t] - old_attack[t]) for t in teams),
+                max(abs(self.team_defense[t] - old_defense[t]) for t in teams),
             )
             if max_change < tol:
                 logger.info(f"Converged after {iteration + 1} iterations")
@@ -146,10 +134,7 @@ class PoissonMatchPredictor(BaseModel):
             if y_val is not None:
                 validation_metrics = self.evaluate(val_df, y_val)
 
-        logger.info(
-            f"Poisson model trained: {len(teams)} teams, "
-            f"league avg goals={self.league_avg_goals:.2f}"
-        )
+        logger.info(f"Poisson model trained: {len(teams)} teams, " f"league avg goals={self.league_avg_goals:.2f}")
         return {
             "team_count": len(teams),
             "league_avg_goals": self.league_avg_goals,
@@ -162,23 +147,17 @@ class PoissonMatchPredictor(BaseModel):
         away_attack = self.team_attack.get(away_team, 1.0)
         home_defense = self.team_defense.get(home_team, 1.0)
 
-        home_lambda = home_attack * away_defense * (
-            self.league_avg_goals + self.home_advantage
-        )
+        home_lambda = home_attack * away_defense * (self.league_avg_goals + self.home_advantage)
         away_lambda = away_attack * home_defense * self.league_avg_goals
 
         return home_lambda, away_lambda
 
-    def _score_matrix(
-        self, home_lambda: float, away_lambda: float
-    ) -> np.ndarray:
+    def _score_matrix(self, home_lambda: float, away_lambda: float) -> np.ndarray:
         mg = self.max_goals + 1
         matrix = np.zeros((mg, mg))
         for i in range(mg):
             for j in range(mg):
-                matrix[i, j] = poisson_pmf(i, home_lambda) * poisson_pmf(
-                    j, away_lambda
-                )
+                matrix[i, j] = poisson_pmf(i, home_lambda) * poisson_pmf(j, away_lambda)
         return matrix
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
@@ -208,9 +187,7 @@ class PoissonMatchPredictor(BaseModel):
 
         return np.array(results)
 
-    def predict_score(
-        self, home_team: str, away_team: str
-    ) -> Dict[str, Any]:
+    def predict_score(self, home_team: str, away_team: str) -> Dict[str, Any]:
         """Predict most likely scores and match probabilities."""
         h_lam, a_lam = self._expected_goals(home_team, away_team)
         matrix = self._score_matrix(h_lam, a_lam)
@@ -225,30 +202,19 @@ class PoissonMatchPredictor(BaseModel):
         mg = self.max_goals + 1
         for idx in flat_idx:
             h, a = divmod(idx, mg)
-            top_scores.append({
-                "home_goals": int(h),
-                "away_goals": int(a),
-                "probability": float(matrix[h, a]),
-            })
+            top_scores.append(
+                {
+                    "home_goals": int(h),
+                    "away_goals": int(a),
+                    "probability": float(matrix[h, a]),
+                }
+            )
 
         # Over/Under 2.5
-        p_over_25 = float(
-            sum(
-                matrix[i, j]
-                for i in range(mg)
-                for j in range(mg)
-                if i + j > 2
-            )
-        )
+        p_over_25 = float(sum(matrix[i, j] for i in range(mg) for j in range(mg) if i + j > 2))
 
         # BTTS
-        p_btts = float(
-            sum(
-                matrix[i, j]
-                for i in range(1, mg)
-                for j in range(1, mg)
-            )
-        )
+        p_btts = float(sum(matrix[i, j] for i in range(1, mg) for j in range(1, mg)))
 
         return {
             "home_lambda": h_lam,
@@ -307,9 +273,7 @@ class DixonColesPredictor(PoissonMatchPredictor):
         self.rho: float = config.hyperparameters.get("rho_init", -0.13)
         self.time_decay: float = config.hyperparameters.get("time_decay", 0.0018)
 
-    def _score_matrix(
-        self, home_lambda: float, away_lambda: float
-    ) -> np.ndarray:
+    def _score_matrix(self, home_lambda: float, away_lambda: float) -> np.ndarray:
         mg = self.max_goals + 1
         matrix = np.zeros((mg, mg))
         for i in range(mg):
@@ -341,9 +305,7 @@ class DixonColesPredictor(PoissonMatchPredictor):
             rho = rho_arr[0]
             nll = 0.0
             for _, row in df.iterrows():
-                h_lam, a_lam = self._expected_goals(
-                    row["home_team"], row["away_team"]
-                )
+                h_lam, a_lam = self._expected_goals(row["home_team"], row["away_team"])
                 hs = int(row["home_score"])
                 as_ = int(row["away_score"])
 
@@ -368,9 +330,7 @@ class DixonColesPredictor(PoissonMatchPredictor):
         logger.info(f"Optimized rho: {self.rho:.4f}")
 
         if val_df is not None and "match_outcome" in val_df.columns:
-            result["validation_metrics"] = self.evaluate(
-                val_df, val_df["match_outcome"].values
-            )
+            result["validation_metrics"] = self.evaluate(val_df, val_df["match_outcome"].values)
 
         result["rho"] = self.rho
         return result

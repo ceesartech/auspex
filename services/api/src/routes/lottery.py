@@ -1,15 +1,15 @@
 """Lottery endpoints - draws, analysis, recommendations"""
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-from typing import List, Optional, Dict, Any
-from collections import Counter
 import logging
+from collections import Counter
+from typing import Any, Dict, List, Optional
 
-from database import get_db
 from auth.dependencies import require_auth
-from models.responses import LotteryDrawResponse, LotteryAnalysisResponse
+from database import get_db
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from models.responses import LotteryAnalysisResponse, LotteryDrawResponse
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 router = APIRouter()
 logger = logging.getLogger(__name__)

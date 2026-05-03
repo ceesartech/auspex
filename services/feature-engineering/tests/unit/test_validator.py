@@ -1,7 +1,6 @@
 """Tests for feature validator."""
 
 import pytest
-
 from src.core.registry import FeatureMetadata, FeatureRegistry
 from src.validator import FeatureValidator
 
@@ -11,13 +10,13 @@ class TestFeatureValidator:
     @pytest.fixture
     def registry(self):
         reg = FeatureRegistry()
-        reg.register_many([
-            FeatureMetadata(name="f1", category="test", description="test feature 1",
-                            min_value=0, max_value=1),
-            FeatureMetadata(name="f2", category="test", description="test feature 2",
-                            min_value=-10, max_value=10),
-            FeatureMetadata(name="f3", category="test", description="test feature 3"),
-        ])
+        reg.register_many(
+            [
+                FeatureMetadata(name="f1", category="test", description="test feature 1", min_value=0, max_value=1),
+                FeatureMetadata(name="f2", category="test", description="test feature 2", min_value=-10, max_value=10),
+                FeatureMetadata(name="f3", category="test", description="test feature 3"),
+            ]
+        )
         return reg
 
     @pytest.fixture

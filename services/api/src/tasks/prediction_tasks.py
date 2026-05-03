@@ -30,10 +30,7 @@ def generate_predictions(self, match_ids: List[str]):
                 logger.error(f"Failed to predict match {match_id}: {e}")
                 results["failed"].append({"match_id": match_id, "error": str(e)})
 
-    logger.info(
-        f"Predictions complete: {len(results['success'])} success, "
-        f"{len(results['failed'])} failed"
-    )
+    logger.info(f"Predictions complete: {len(results['success'])} success, " f"{len(results['failed'])} failed")
     return results
 
 

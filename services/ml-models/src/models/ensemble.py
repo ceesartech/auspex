@@ -84,6 +84,7 @@ class EnsemblePredictor(BaseModel):
 
         # Encode labels if needed
         from sklearn.preprocessing import LabelEncoder
+
         le = LabelEncoder()
         y_encoded = le.fit_transform(y_true)
 
@@ -170,9 +171,7 @@ class EnsemblePredictor(BaseModel):
 
         return blended
 
-    def predict_with_disagreement(
-        self, X: pd.DataFrame
-    ) -> Dict[str, Any]:
+    def predict_with_disagreement(self, X: pd.DataFrame) -> Dict[str, Any]:
         """Predict with individual model outputs and disagreement measure."""
         individual = {}
         for name, model in self.models.items():

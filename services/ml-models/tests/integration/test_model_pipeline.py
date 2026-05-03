@@ -3,7 +3,6 @@
 import tempfile
 
 import numpy as np
-
 from models.model_registry import ModelRegistry, ModelVersion
 from models.poisson_models import PoissonMatchPredictor
 from models.xgboost_model import XGBoostMatchPredictor

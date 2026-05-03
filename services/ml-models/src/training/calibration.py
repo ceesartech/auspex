@@ -91,9 +91,7 @@ class ProbabilityCalibrator:
 
         return calibrated
 
-    def calibration_error(
-        self, y_proba: np.ndarray, y_true: np.ndarray, n_bins: int = 10
-    ) -> Dict[str, float]:
+    def calibration_error(self, y_proba: np.ndarray, y_true: np.ndarray, n_bins: int = 10) -> Dict[str, float]:
         """Compute Expected Calibration Error (ECE) and Maximum Calibration Error (MCE)."""
         n_classes = y_proba.shape[1] if y_proba.ndim > 1 else 2
 
