@@ -96,7 +96,21 @@ jobs:
           REDIS_URL: redis://localhost:6379/0
           ENVIRONMENT: test
         run: |
-          pytest services/ -m "not integration" --cov=services --cov-report=xml --cov-report=term -v
+          # Each service has its own src/ package and the tests import from it
+          # using names like `from services.prediction_service import ...`. Running
+          # `pytest services/...` from the repo root would auto-create a `services`
+          # namespace package and shadow each service's inner `services/` subpackage,
+          # so we cd into each service and run pytest with PYTHONPATH=src.
+          set -e
+          for svc in api data-ingestion feature-engineering ml-models; do
+            echo "::group::pytest services/$svc"
+            (
+              cd "services/$svc"
+              PYTHONPATH=src pytest tests -m "not integration" --rootdir=. \
+                --cov=src --cov-append --cov-report=xml --cov-report=term -v
+            )
+            echo "::endgroup::"
+          done
 
       - name: Run integration tests
         env:
@@ -104,7 +118,15 @@ jobs:
           REDIS_URL: redis://localhost:6379/0
           ENVIRONMENT: test
         run: |
-          pytest services/ -m integration -v
+          set -e
+          for svc in api data-ingestion feature-engineering ml-models; do
+            echo "::group::pytest services/$svc (integration)"
+            (
+              cd "services/$svc"
+              PYTHONPATH=src pytest tests -m integration --rootdir=. -v
+            )
+            echo "::endgroup::"
+          done
 
       - name: Upload coverage
         uses: codecov/codecov-action@v3

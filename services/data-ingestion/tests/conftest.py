@@ -1,11 +1,15 @@
 """Pytest configuration and fixtures"""
 
+import sys
+from pathlib import Path
 from unittest.mock import Mock
 
-import pytest
-from redis import Redis
-from services.data_ingestion.src.core.config import ScraperConfig
-from services.data_ingestion.src.core.database import DatabaseManager
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import pytest  # noqa: E402
+from redis import Redis  # noqa: E402
+from src.core.config import ScraperConfig  # noqa: E402
+from src.core.database import DatabaseManager  # noqa: E402
 
 
 @pytest.fixture

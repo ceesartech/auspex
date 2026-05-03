@@ -1,6 +1,6 @@
 """Unit tests for data validators"""
 
-from services.data_ingestion.src.validators.data_validator import DataValidator
+from src.validators.data_validator import DataValidator
 
 
 class TestDataValidator:

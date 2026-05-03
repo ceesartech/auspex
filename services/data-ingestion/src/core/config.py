@@ -53,6 +53,7 @@ class ScraperConfig(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"
 
 
 # Scraper-specific configs

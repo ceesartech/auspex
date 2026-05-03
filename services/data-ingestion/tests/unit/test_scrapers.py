@@ -2,7 +2,7 @@
 
 from unittest.mock import Mock, patch
 
-from services.data_ingestion.src.scrapers.bet365_scraper import Bet365Scraper
+from src.scrapers.bet365_scraper import Bet365Scraper
 
 
 class TestBet365Scraper:
@@ -16,7 +16,7 @@ class TestBet365Scraper:
         assert scraper.db == mock_db
         assert scraper.redis == mock_redis
 
-    @patch("services.data_ingestion.src.scrapers.base_scraper.requests.Session")
+    @patch("src.scrapers.base_scraper.requests.Session")
     def test_fetch_page(self, mock_session, mock_config, mock_db, mock_redis):
         """Test page fetching"""
         mock_response = Mock()

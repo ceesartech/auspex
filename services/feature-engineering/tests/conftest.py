@@ -1,14 +1,18 @@
 """Shared test fixtures for feature engineering tests."""
 
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import Mock
 from uuid import UUID, uuid4
 
-import pytest
-from redis import Redis
-from src.categories.base import MatchContext
-from src.core.config import FeatureConfig
-from src.core.database import DatabaseManager
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import pytest  # noqa: E402
+from redis import Redis  # noqa: E402
+from src.categories.base import MatchContext  # noqa: E402
+from src.core.config import FeatureConfig  # noqa: E402
+from src.core.database import DatabaseManager  # noqa: E402
 
 # ---------- IDs ----------
 

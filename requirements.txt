@@ -68,6 +68,7 @@ mlflow==2.19.0
 
 # ── Auth / Security ──────────────────────────────────────────────────────────
 python-jose[cryptography]==3.3.0
+pyjwt==2.10.1
 passlib[bcrypt]==1.7.4
 cryptography==44.0.0
 

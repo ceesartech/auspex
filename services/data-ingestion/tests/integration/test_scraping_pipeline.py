@@ -1,10 +1,10 @@
 """Integration tests for the scraping pipeline."""
 
 import pytest
-from services.data_ingestion.src.scrapers.bet365_scraper import Bet365Scraper
-from services.data_ingestion.src.scrapers.betmgm_scraper import BetMGMScraper
-from services.data_ingestion.src.scrapers.fbref_scraper import FBrefScraper
-from services.data_ingestion.src.validators.data_validator import DataValidator
+from src.scrapers.bet365_scraper import Bet365Scraper
+from src.scrapers.betmgm_scraper import BetMGMScraper
+from src.scrapers.fbref_scraper import FBrefScraper
+from src.validators.data_validator import DataValidator
 
 
 @pytest.mark.integration
