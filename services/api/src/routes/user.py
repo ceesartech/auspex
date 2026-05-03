@@ -239,7 +239,10 @@ async def get_dashboard(
             COALESCE(SUM(actual_return), 0) as total_returns,
             COALESCE(SUM(actual_return) - SUM(stake), 0) as profit_loss,
             CASE WHEN SUM(stake) > 0
-                THEN ROUND(((SUM(actual_return) - SUM(stake)) / SUM(stake) * 100)::numeric, 2)
+                THEN ROUND(
+                    ((COALESCE(SUM(actual_return), 0) - SUM(stake)) / SUM(stake) * 100)::numeric,
+                    2
+                )
                 ELSE 0 END as roi_pct,
             CASE WHEN COUNT(*) FILTER (WHERE status IN ('won', 'lost')) > 0
                 THEN ROUND((COUNT(*) FILTER (WHERE status = 'won')::numeric /
