@@ -4,27 +4,13 @@ import sys
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import jwt as pyjwt
 import pytest
 
 # Add src to path for absolute imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
-# Patch settings before any imports that use them
-with patch.dict(
-    "os.environ",
-    {
-        "DATABASE_URL": "postgresql://test:test@localhost:5432/test_db",
-        "REDIS_URL": "redis://localhost:6379/15",
-        "JWT_SECRET": "test-secret-key-for-testing-only",
-        "USER_DOB": "1994-05-09",
-    },
-):
-    from config import Settings
-
-    test_settings = Settings()
 
 
 # ==================== Auth Fixtures ====================
