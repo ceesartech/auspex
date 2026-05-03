@@ -32,6 +32,7 @@ dag = DAG(
     tags=['scraping', 'odds', 'live']
 )
 
+
 def scrape_bet365():
     """Scrape Bet365 odds"""
     config = Bet365Config()
@@ -44,6 +45,7 @@ def scrape_bet365():
     logger.info(f"Scraped {records} odds from Bet365")
     return records
 
+
 def scrape_betmgm():
     """Scrape BetMGM odds"""
     config = BetMGMConfig()
@@ -55,6 +57,7 @@ def scrape_betmgm():
 
     logger.info(f"Scraped {records} odds from BetMGM")
     return records
+
 
 # Tasks
 bet365_task = PythonOperator(

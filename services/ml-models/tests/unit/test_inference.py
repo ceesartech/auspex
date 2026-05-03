@@ -1,11 +1,10 @@
 """Tests for inference components: RealTimePredictor, BatchPredictor, ONNXConverter."""
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from inference.batch_predictor import BatchPredictor
 from inference.real_time_predictor import RealTimePredictor

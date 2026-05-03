@@ -1,7 +1,7 @@
 """BetMGM odds scraper"""
 
 import logging
-from typing import List, Dict, Any
+from typing import Dict
 from datetime import datetime
 import json
 
@@ -9,6 +9,7 @@ from .base_scraper import BaseScraper
 from ..core.config import BetMGMConfig
 
 logger = logging.getLogger(__name__)
+
 
 class BetMGMScraper(BaseScraper):
     """Scrape odds from BetMGM"""

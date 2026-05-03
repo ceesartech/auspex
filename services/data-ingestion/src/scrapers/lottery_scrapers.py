@@ -1,14 +1,14 @@
 """Lottery draw scrapers (Powerball and Mega Millions)"""
 
 import logging
-from typing import List, Dict
+from typing import Dict
 from datetime import datetime
 import re
 
 from .base_scraper import BaseScraper
-from ..core.config import ScraperConfig
 
 logger = logging.getLogger(__name__)
+
 
 class PowerballScraper(BaseScraper):
     """Scrape Powerball lottery draws"""

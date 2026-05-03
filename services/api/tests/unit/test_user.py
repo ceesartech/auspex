@@ -2,8 +2,8 @@
 
 import sys
 from pathlib import Path
-from datetime import datetime, date
-from unittest.mock import patch, MagicMock
+from datetime import date
+from unittest.mock import patch
 import uuid
 
 import pytest

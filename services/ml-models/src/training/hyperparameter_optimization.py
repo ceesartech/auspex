@@ -1,11 +1,9 @@
 """Hyperparameter optimization with Optuna."""
 
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
-import numpy as np
 import optuna
-import pandas as pd
 
 from models.model_config import ModelType
 

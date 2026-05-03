@@ -1,11 +1,9 @@
 """Unit tests for scrapers"""
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
-from datetime import datetime
+from unittest.mock import Mock, patch
 
 from services.data_ingestion.src.scrapers.bet365_scraper import Bet365Scraper
-from services.data_ingestion.src.scrapers.fbref_scraper import FBrefScraper
+
 
 class TestBet365Scraper:
     """Test Bet365 scraper"""

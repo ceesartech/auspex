@@ -2,7 +2,6 @@
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from utils.data_loader import DataLoader
 from utils.feature_selector import FeatureSelector

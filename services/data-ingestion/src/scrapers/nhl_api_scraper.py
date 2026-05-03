@@ -2,13 +2,13 @@
 
 import json
 import logging
-from typing import List, Dict, Any
+from typing import Dict
 from datetime import datetime
 
 from .base_scraper import BaseScraper
-from ..core.config import ScraperConfig
 
 logger = logging.getLogger(__name__)
+
 
 class NHLAPIScraper(BaseScraper):
     """Scrape data from the NHL official API"""
@@ -66,10 +66,14 @@ class NHLAPIScraper(BaseScraper):
         home_team_info = game.get('homeTeam', {})
         away_team_info = game.get('awayTeam', {})
 
-        home_team = home_team_info.get('placeName', {}).get('default', '') + ' ' + home_team_info.get('commonName', {}).get('default', '')
-        away_team = away_team_info.get('placeName', {}).get('default', '') + ' ' + away_team_info.get('commonName', {}).get('default', '')
-        home_team = home_team.strip()
-        away_team = away_team.strip()
+        home_team = (
+            home_team_info.get('placeName', {}).get('default', '') + ' ' +
+            home_team_info.get('commonName', {}).get('default', '')
+        ).strip()
+        away_team = (
+            away_team_info.get('placeName', {}).get('default', '') + ' ' +
+            away_team_info.get('commonName', {}).get('default', '')
+        ).strip()
 
         game_date = game.get('gameDate', '')
         game_state = game.get('gameState', 'FUT')

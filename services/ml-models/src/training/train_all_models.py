@@ -23,7 +23,6 @@ from models.neural_network import NeuralNetworkMatchPredictor
 from models.poisson_models import DixonColesPredictor, PoissonMatchPredictor
 from models.xgboost_model import XGBoostMatchPredictor
 from training.calibration import ProbabilityCalibrator
-from training.cross_validation import TimeSeriesCV
 
 logger = logging.getLogger(__name__)
 

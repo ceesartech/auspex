@@ -1,14 +1,12 @@
 """All evaluation metrics for model assessment."""
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 import numpy as np
 from sklearn.metrics import (
     accuracy_score,
     brier_score_loss,
-    classification_report,
-    confusion_matrix,
     f1_score,
     log_loss,
     precision_score,

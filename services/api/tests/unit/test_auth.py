@@ -2,7 +2,7 @@
 
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock
 
 import pytest

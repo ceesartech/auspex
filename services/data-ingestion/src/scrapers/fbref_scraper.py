@@ -1,7 +1,7 @@
 """FBref soccer statistics scraper"""
 
 import logging
-from typing import List, Dict, Any
+from typing import Dict
 from datetime import datetime
 import re
 from decimal import Decimal
@@ -10,6 +10,7 @@ from .base_scraper import BaseScraper
 from ..core.config import FBrefConfig
 
 logger = logging.getLogger(__name__)
+
 
 class FBrefScraper(BaseScraper):
     """Scrape soccer statistics from FBref"""
@@ -193,7 +194,7 @@ class FBrefScraper(BaseScraper):
         # Save xG stats if available
         if match_data.get('home_xg') is not None:
             self._save_xg_stats(match_id, home_team_id, away_team_id,
-                              match_data['home_xg'], match_data['away_xg'])
+                                match_data['home_xg'], match_data['away_xg'])
 
     def _save_xg_stats(
         self,

@@ -4,7 +4,6 @@ Covers squad value, availability, fatigue, and key player form.
 """
 
 import logging
-from datetime import datetime
 from typing import Dict, List, Optional
 
 from ..core.registry import FeatureMetadata

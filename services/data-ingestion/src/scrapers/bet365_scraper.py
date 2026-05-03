@@ -3,13 +3,13 @@
 import logging
 from typing import List, Dict, Any
 from datetime import datetime, timedelta
-import re
 from decimal import Decimal
 
 from .base_scraper import BaseScraper
 from ..core.config import Bet365Config
 
 logger = logging.getLogger(__name__)
+
 
 class Bet365Scraper(BaseScraper):
     """Scrape odds from Bet365"""

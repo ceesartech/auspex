@@ -2,14 +2,13 @@
 
 import pytest
 from datetime import datetime, timezone
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock
 from uuid import UUID, uuid4
 
 from redis import Redis
 
 from src.core.config import FeatureConfig
 from src.core.database import DatabaseManager
-from src.core.registry import FeatureRegistry
 from src.categories.base import MatchContext
 
 

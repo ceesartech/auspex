@@ -3,7 +3,7 @@
 import sys
 from pathlib import Path
 from datetime import datetime
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import uuid
 
 import pytest

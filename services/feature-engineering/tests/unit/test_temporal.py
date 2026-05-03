@@ -1,6 +1,5 @@
 """Tests for temporal feature computer."""
 
-import math
 from datetime import datetime, timezone
 
 import pytest
@@ -39,7 +38,7 @@ class TestTemporalFeatureComputer:
     def test_weekend_detection(self, computer, mock_config, mock_db):
         """Saturday should be detected as weekend."""
         ctx = MatchContext(
-            match_id=match_context.match_id if hasattr(self, '_match_context') else "00000000-0000-0000-0000-000000000000",
+            match_id="00000000-0000-0000-0000-000000000000",
             home_team_id="11111111-1111-1111-1111-111111111111",
             away_team_id="22222222-2222-2222-2222-222222222222",
             league_id="44444444-4444-4444-4444-444444444444",
@@ -53,9 +52,9 @@ class TestTemporalFeatureComputer:
     def test_cyclical_encoding_ranges(self, computer, match_context):
         features = computer.compute(match_context)
         for key in ["temporal__dow__sin", "temporal__dow__cos",
-                     "temporal__month__sin", "temporal__month__cos",
-                     "temporal__hour__sin", "temporal__hour__cos",
-                     "temporal__doy__sin", "temporal__doy__cos"]:
+                    "temporal__month__sin", "temporal__month__cos",
+                    "temporal__hour__sin", "temporal__hour__cos",
+                    "temporal__doy__sin", "temporal__doy__cos"]:
             assert -1.0 <= features[key] <= 1.0, f"{key}={features[key]}"
 
     def test_month(self, computer, match_context):

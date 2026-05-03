@@ -2,10 +2,9 @@
 
 import sys
 from pathlib import Path
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from unittest.mock import patch, MagicMock
 import uuid
-import json
 
 import pytest
 
@@ -131,6 +130,7 @@ class TestNotificationFlow:
         ]
 
         call_count = [0]
+
         def side_effect(query, params=None):
             call_count[0] += 1
             result = MagicMock()
@@ -165,6 +165,7 @@ class TestNotificationFlow:
         ]
 
         call_count = [0]
+
         def side_effect(query, params=None):
             call_count[0] += 1
             result = MagicMock()

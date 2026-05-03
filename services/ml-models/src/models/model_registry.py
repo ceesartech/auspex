@@ -10,7 +10,6 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from .base_model import BaseModel
-from .model_config import ModelConfig, ModelType
 
 logger = logging.getLogger(__name__)
 

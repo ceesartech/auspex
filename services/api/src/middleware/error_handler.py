@@ -4,7 +4,6 @@ from fastapi import Request, status
 from fastapi.responses import JSONResponse
 import logging
 import time
-import traceback
 
 logger = logging.getLogger(__name__)
 

@@ -1,9 +1,8 @@
 """Recommendation service - value bet detection, Kelly criterion, accumulators"""
 
 import logging
-import math
-from typing import List, Optional, Dict
-from datetime import datetime, timedelta
+from typing import List, Optional
+from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 import uuid

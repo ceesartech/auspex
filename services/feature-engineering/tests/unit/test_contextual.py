@@ -4,7 +4,6 @@ import pytest
 from datetime import datetime, timezone
 
 from src.categories.contextual import ContextualFeatureComputer
-from tests.conftest import HOME_TEAM_ID, AWAY_TEAM_ID
 
 
 class TestContextualFeatureComputer:

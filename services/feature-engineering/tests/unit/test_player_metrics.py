@@ -3,7 +3,6 @@
 import pytest
 
 from src.categories.player_metrics import PlayerMetricsComputer
-from tests.conftest import HOME_TEAM_ID, PLAYER_2_ID
 
 
 class TestPlayerMetricsComputer:
@@ -30,7 +29,6 @@ class TestPlayerMetricsComputer:
     ):
         """Should compute features when squad data is available."""
         def side_effect(query, params, fetch=False):
-            query_str = query.strip()[:30]
             if "FROM players" in query:
                 return sample_squad
             elif "player_availability" in query:

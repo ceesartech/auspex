@@ -1,6 +1,5 @@
 """Real-time prediction with caching and latency optimization."""
 
-import hashlib
 import json
 import logging
 import time

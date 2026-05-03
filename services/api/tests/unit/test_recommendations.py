@@ -77,7 +77,7 @@ class TestRecommendationService:
         mock_db.execute.return_value.fetchall.return_value = []
 
         service = RecommendationService(mock_db)
-        recs = service.get_active_recommendations(
+        service.get_active_recommendations(
             confidence_level="HIGH",
             market_type="1x2",
             min_odds=1.5,
@@ -172,6 +172,7 @@ class TestRecommendationService:
 
         # First call returns legs, second returns bankroll
         call_count = [0]
+
         def side_effect(query, params=None):
             call_count[0] += 1
             result = MagicMock()

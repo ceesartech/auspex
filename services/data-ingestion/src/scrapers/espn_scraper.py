@@ -2,13 +2,13 @@
 
 import json
 import logging
-from typing import List, Dict, Any
+from typing import Dict
 from datetime import datetime
 
 from .base_scraper import BaseScraper
-from ..core.config import ScraperConfig
 
 logger = logging.getLogger(__name__)
+
 
 class ESPNScraper(BaseScraper):
     """Scrape sports data from ESPN's public API"""
@@ -71,7 +71,7 @@ class ESPNScraper(BaseScraper):
     def _process_event(self, event: Dict, sport_key: str):
         """Process a single ESPN event"""
         event_id = event.get('id')
-        name = event.get('name', '')
+        event.get('name', '')
         date_str = event.get('date', '')
         status = event.get('status', {}).get('type', {}).get('state', 'pre')
 

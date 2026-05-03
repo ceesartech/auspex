@@ -2,7 +2,6 @@
 
 import logging
 from typing import List, Dict, Optional
-from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 

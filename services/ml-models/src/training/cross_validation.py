@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
 
-from models.base_model import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +116,7 @@ class TimeSeriesCV:
         aggregated["fold_metrics"] = fold_metrics
 
         logger.info(
-            f"CV complete: "
+            "CV complete: "
             + ", ".join(
                 f"{k}={v:.4f}"
                 for k, v in aggregated.items()

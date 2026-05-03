@@ -3,13 +3,14 @@
 import json
 import logging
 import re
-from typing import List, Dict, Any
+from typing import List, Dict
 from decimal import Decimal
 
 from .base_scraper import BaseScraper
 from ..core.config import UnderstatConfig
 
 logger = logging.getLogger(__name__)
+
 
 class UnderstatScraper(BaseScraper):
     """Scrape xG data from Understat"""

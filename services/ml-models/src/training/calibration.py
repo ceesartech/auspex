@@ -1,10 +1,9 @@
 """Probability calibration for model outputs."""
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import numpy as np
-from sklearn.calibration import CalibratedClassifierCV
 from sklearn.isotonic import IsotonicRegression
 
 logger = logging.getLogger(__name__)

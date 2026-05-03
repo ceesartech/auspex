@@ -64,6 +64,7 @@ class TestPredictionService:
         )
 
         call_count = [0]
+
         def side_effect(query, params=None):
             call_count[0] += 1
             result = MagicMock()

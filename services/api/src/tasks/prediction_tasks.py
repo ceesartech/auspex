@@ -2,7 +2,7 @@
 
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import List
 
 from celery_app import celery_app
 from database import get_db_context
@@ -24,9 +24,7 @@ def generate_predictions(self, match_ids: List[str]):
 
         for match_id in match_ids:
             try:
-                prediction = service.predict_match(
-                    match_id=match_id, include_explanation=False
-                )
+                service.predict_match(match_id=match_id, include_explanation=False)
                 results["success"].append(match_id)
             except Exception as e:
                 logger.error(f"Failed to predict match {match_id}: {e}")
@@ -77,7 +75,6 @@ def retrain_model(
     """Trigger model retraining"""
 
     from sqlalchemy import text
-    import json
 
     logger.info(f"Retraining model: {model_name} (reason: {trigger_reason})")
 

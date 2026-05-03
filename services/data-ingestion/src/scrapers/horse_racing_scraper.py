@@ -1,13 +1,13 @@
 """Horse racing data scraper"""
 
 import logging
-from typing import List, Dict, Any
+from typing import Dict
 from datetime import datetime
 
 from .base_scraper import BaseScraper
-from ..core.config import ScraperConfig
 
 logger = logging.getLogger(__name__)
+
 
 class HorseRacingScraper(BaseScraper):
     """Scrape horse racing data and odds"""
@@ -132,7 +132,7 @@ class HorseRacingScraper(BaseScraper):
 
     def _scrape_results(self) -> int:
         """Scrape recent race results"""
-        url = f"{self.BASE_URL}/racing/results"
+        f"{self.BASE_URL}/racing/results"
         logger.info("Scraping horse racing results")
         # Similar structure to _scrape_todays_races
         return 0

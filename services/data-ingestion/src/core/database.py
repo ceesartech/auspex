@@ -2,13 +2,13 @@
 
 import psycopg2
 from psycopg2.extras import execute_values, RealDictCursor
-from psycopg2 import pool
 from contextlib import contextmanager
 from typing import List, Dict, Any, Optional
 import logging
 from .config import ScraperConfig
 
 logger = logging.getLogger(__name__)
+
 
 class DatabaseManager:
     """Manage database connections and operations"""

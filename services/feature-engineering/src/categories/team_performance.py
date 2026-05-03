@@ -8,12 +8,10 @@ import logging
 from typing import Dict, List, Optional
 from uuid import UUID
 
-import numpy as np
 
 from ..core.registry import FeatureMetadata
 from ..utils.math_helpers import (
     coefficient_of_variation,
-    exponential_weighted_avg,
     linear_trend,
     safe_divide,
 )

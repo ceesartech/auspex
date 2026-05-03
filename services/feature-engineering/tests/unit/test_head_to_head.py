@@ -1,7 +1,6 @@
 """Tests for head-to-head feature computer."""
 
 import pytest
-from datetime import datetime, timezone
 
 from src.categories.head_to_head import HeadToHeadComputer
 
@@ -57,7 +56,7 @@ class TestHeadToHeadComputer:
         features = computer.compute(match_context)
 
         for key in ["h2h__home_win_rate", "h2h__away_win_rate", "h2h__draw_rate",
-                     "h2h__btts_rate", "h2h__over25_rate"]:
+                    "h2h__btts_rate", "h2h__over25_rate"]:
             val = features[key]
             assert 0 <= val <= 1, f"{key}={val}"
 

@@ -1,13 +1,9 @@
 """Integration tests for the full model pipeline."""
 
 import tempfile
-from pathlib import Path
 
 import numpy as np
-import pandas as pd
-import pytest
 
-from models.model_config import ModelType, PredictionTask
 from models.model_registry import ModelRegistry, ModelVersion
 from models.poisson_models import PoissonMatchPredictor
 from models.xgboost_model import XGBoostMatchPredictor

@@ -2,7 +2,6 @@
 
 import sys
 from pathlib import Path
-from datetime import datetime
 from unittest.mock import patch, MagicMock, AsyncMock
 import time
 
@@ -211,7 +210,7 @@ class TestMetricsMiddleware:
 
     @pytest.mark.asyncio
     async def test_metrics_middleware_records_metrics(self, mock_settings):
-        from middleware.metrics import metrics_middleware, REQUEST_COUNT
+        from middleware.metrics import metrics_middleware
 
         request = MagicMock()
         request.method = "POST"

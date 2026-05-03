@@ -4,14 +4,11 @@ Uses mocked DB/Redis but exercises the full computation flow
 from orchestrator through all categories and derived features.
 """
 
-import json
 from datetime import datetime, timezone
 from unittest.mock import Mock
-from uuid import uuid4
 
 import pytest
 
-from src.core.config import FeatureConfig
 from src.core.database import DatabaseManager
 from src.orchestrator import RealTimeFeatureComputer
 from tests.conftest import (
@@ -19,7 +16,6 @@ from tests.conftest import (
     HOME_TEAM_ID,
     LEAGUE_ID,
     MATCH_ID,
-    PLAYER_1_ID,
 )
 
 
@@ -139,7 +135,7 @@ class TestFeaturePipelineIntegration:
             str(MATCH_ID), use_cache=False
         )
         prefixes = {"team__", "h2h__", "player__", "ctx__", "odds__",
-                     "temporal__", "derived__"}
+                    "temporal__", "derived__"}
         found_prefixes = set()
         for name in features:
             for prefix in prefixes:

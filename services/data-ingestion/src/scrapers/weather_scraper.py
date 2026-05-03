@@ -2,14 +2,13 @@
 
 import json
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict
 from datetime import datetime
-from decimal import Decimal
 
 from .base_scraper import BaseScraper
-from ..core.config import ScraperConfig
 
 logger = logging.getLogger(__name__)
+
 
 class WeatherScraper(BaseScraper):
     """Scrape weather data from Open-Meteo (free, no API key needed)"""

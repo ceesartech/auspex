@@ -1,13 +1,11 @@
 """Tests for evaluation metrics, comparison, and performance tracking."""
 
 import tempfile
-from pathlib import Path
 
 import numpy as np
-import pytest
 
 from evaluation.metrics import compute_all_metrics, compute_roi, ranked_probability_score
-from evaluation.model_comparison import ABTestTracker, ModelComparison
+from evaluation.model_comparison import ABTestTracker
 from evaluation.performance_tracker import PerformanceTracker
 from models.model_config import PredictionTask
 

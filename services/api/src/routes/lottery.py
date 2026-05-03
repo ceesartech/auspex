@@ -88,10 +88,10 @@ async def get_lottery_analysis(
     # Determine number range based on game
     if game == "powerball":
         main_range = range(1, 70)
-        bonus_range = range(1, 27)
+        range(1, 27)
     else:  # mega_millions
         main_range = range(1, 71)
-        bonus_range = range(1, 26)
+        range(1, 26)
 
     # Hot numbers (most frequent)
     hot = sorted(number_counts.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -196,7 +196,7 @@ async def get_lottery_recommendations(
         pick_count = 5
 
     all_main = list(range(1, main_max + 1))
-    all_bonus = list(range(1, bonus_max + 1))
+    list(range(1, bonus_max + 1))
 
     recommendations = []
 

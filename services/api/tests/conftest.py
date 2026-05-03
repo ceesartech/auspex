@@ -5,9 +5,9 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 import uuid
-import json
 
 import pytest
+import jwt as pyjwt
 
 # Add src to path for absolute imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -21,8 +21,6 @@ with patch.dict("os.environ", {
 }):
     from config import Settings
     test_settings = Settings()
-
-import jwt as pyjwt
 
 
 # ==================== Auth Fixtures ====================

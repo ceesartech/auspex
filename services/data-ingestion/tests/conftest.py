@@ -7,6 +7,7 @@ from redis import Redis
 from services.data_ingestion.src.core.config import ScraperConfig
 from services.data_ingestion.src.core.database import DatabaseManager
 
+
 @pytest.fixture
 def mock_config():
     """Mock scraper configuration"""
@@ -22,10 +23,12 @@ def mock_config():
     config.headless = True
     return config
 
+
 @pytest.fixture
 def mock_db(mock_config):
     """Mock database manager"""
     return Mock(spec=DatabaseManager)
+
 
 @pytest.fixture
 def mock_redis():

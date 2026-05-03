@@ -3,8 +3,7 @@ match importance, league stats, and manager/derby indicators.
 """
 
 import logging
-from datetime import timedelta
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from ..core.registry import FeatureMetadata
 from ..utils.math_helpers import safe_divide

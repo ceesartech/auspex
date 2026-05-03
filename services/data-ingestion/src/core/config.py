@@ -5,6 +5,7 @@ from pydantic import Field
 from typing import Optional, List
 import os
 
+
 class ScraperConfig(BaseSettings):
     """Base configuration for all scrapers"""
 
@@ -53,6 +54,8 @@ class ScraperConfig(BaseSettings):
         case_sensitive = False
 
 # Scraper-specific configs
+
+
 class Bet365Config(ScraperConfig):
     """Bet365 scraper configuration"""
     base_url: str = "https://www.bet365.com"
@@ -60,11 +63,13 @@ class Bet365Config(ScraperConfig):
     login_required: bool = False
     scrape_interval_minutes: int = 1  # Every minute for odds
 
+
 class BetMGMConfig(ScraperConfig):
     """BetMGM scraper configuration"""
     base_url: str = "https://sports.co.betmgm.com"
     soccer_url: str = "https://sports.co.betmgm.com/en/sports/soccer-4"
     scrape_interval_minutes: int = 1
+
 
 class FBrefConfig(ScraperConfig):
     """FBref scraper configuration"""
@@ -80,10 +85,12 @@ class FBrefConfig(ScraperConfig):
         "MLS"
     ]
 
+
 class UnderstatConfig(ScraperConfig):
     """Understat scraper configuration"""
     base_url: str = "https://understat.com"
     scrape_interval_hours: int = 24
+
 
 class TransfermarktConfig(ScraperConfig):
     """Transfermarkt scraper configuration"""

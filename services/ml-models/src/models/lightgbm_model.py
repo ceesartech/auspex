@@ -89,7 +89,6 @@ class LightGBMMatchPredictor(BaseModel):
                 )
             )
 
-        evals_result: Dict = {}
         self.model = lgb.train(
             params=params,
             train_set=dtrain,

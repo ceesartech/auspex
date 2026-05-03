@@ -2,7 +2,7 @@
 
 import json
 from datetime import datetime, timezone
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
@@ -105,7 +105,7 @@ class TestRealTimeFeatureComputer:
         )
         mock_db.call_function.return_value = []
 
-        result = orchestrator.compute_features(
+        orchestrator.compute_features(
             str(MATCH_ID), use_cache=False
         )
         # Redis get should not be called

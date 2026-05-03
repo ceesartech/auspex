@@ -32,6 +32,7 @@ dag = DAG(
     tags=['lottery', 'scraping']
 )
 
+
 def scrape_powerball():
     """Scrape Powerball draw results"""
     config = ScraperConfig()
@@ -44,6 +45,7 @@ def scrape_powerball():
     logger.info(f"Scraped {records} Powerball draws")
     return records
 
+
 def scrape_megamillions():
     """Scrape Mega Millions draw results"""
     config = ScraperConfig()
@@ -55,6 +57,7 @@ def scrape_megamillions():
 
     logger.info(f"Scraped {records} Mega Millions draws")
     return records
+
 
 # Tasks
 powerball_task = PythonOperator(

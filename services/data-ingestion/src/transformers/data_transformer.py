@@ -1,7 +1,7 @@
 """Data transformation utilities for normalizing scraped data."""
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from loguru import logger
 

@@ -26,7 +26,6 @@ class BaseModel(ABC):
     @abstractmethod
     def prepare_data(self, df: pd.DataFrame, target: str) -> tuple:
         """Prepare data for training."""
-        pass
 
     @abstractmethod
     def train(
@@ -36,27 +35,22 @@ class BaseModel(ABC):
         **kwargs,
     ) -> Dict[str, Any]:
         """Train the model."""
-        pass
 
     @abstractmethod
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """Make predictions (class labels)."""
-        pass
 
     @abstractmethod
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         """Predict probabilities."""
-        pass
 
     @abstractmethod
     def save(self, path: str) -> None:
         """Save model to disk."""
-        pass
 
     @abstractmethod
     def load(self, path: str) -> None:
         """Load model from disk."""
-        pass
 
     def evaluate(self, X: pd.DataFrame, y: np.ndarray) -> Dict[str, float]:
         """Evaluate model on test data."""

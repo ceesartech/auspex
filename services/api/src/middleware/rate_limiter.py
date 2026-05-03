@@ -44,7 +44,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 content={
                     "error": "Rate limit exceeded",
-                    "detail": f"Maximum {settings.RATE_LIMIT_REQUESTS} requests per {settings.RATE_LIMIT_WINDOW} seconds",
+                    "detail": (
+                        f"Maximum {settings.RATE_LIMIT_REQUESTS} requests "
+                        f"per {settings.RATE_LIMIT_WINDOW} seconds"
+                    ),
                 },
             )
 

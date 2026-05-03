@@ -3,7 +3,7 @@
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Dict
 
 import numpy as np
 

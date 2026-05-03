@@ -50,7 +50,6 @@ class BaseFeatureComputer(ABC):
 
         Subclasses must populate self._feature_defs.
         """
-        pass
 
     @abstractmethod
     def compute(
@@ -61,7 +60,6 @@ class BaseFeatureComputer(ABC):
         Returns dict of {feature_name: value}.
         None values indicate the feature could not be computed.
         """
-        pass
 
     def get_feature_names(self) -> List[str]:
         """Get list of all feature names this computer produces."""

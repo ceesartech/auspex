@@ -8,7 +8,6 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
-from uuid import UUID
 
 from redis import Redis
 
@@ -23,8 +22,8 @@ from .categories.temporal import TemporalFeatureComputer
 from .core.cache import FeatureCacheManager
 from .core.config import FeatureConfig
 from .core.database import DatabaseManager
-from .core.registry import FeatureRegistry, global_registry
-from .validator import FeatureValidator, ValidationResult
+from .core.registry import global_registry
+from .validator import FeatureValidator
 from .utils.sql_queries import MATCH_DETAILS
 
 logger = logging.getLogger(__name__)

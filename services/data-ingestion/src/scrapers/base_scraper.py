@@ -4,7 +4,7 @@ import logging
 import hashlib
 import json
 from abc import ABC, abstractmethod
-from typing import Dict, List, Any, Optional
+from typing import Dict, Optional
 from datetime import datetime
 import time
 import random
@@ -13,7 +13,6 @@ import requests
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -26,6 +25,7 @@ from ..utils.retry_logic import retry_with_backoff
 from ..utils.proxy_manager import ProxyManager
 
 logger = logging.getLogger(__name__)
+
 
 class BaseScraper(ABC):
     """Base class for all scrapers"""
@@ -168,7 +168,6 @@ class BaseScraper(ABC):
     @abstractmethod
     def scrape(self) -> int:
         """Main scraping method - must be implemented by subclasses"""
-        pass
 
     def run(self) -> int:
         """Run scraper with error handling and logging"""

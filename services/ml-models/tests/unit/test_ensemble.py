@@ -1,6 +1,5 @@
 """Tests for Ensemble and Poisson/Dixon-Coles models."""
 
-import json
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -250,7 +249,7 @@ class TestEnsemblePredictor:
         model.add_model("a", self._make_mock_model(), weight=1.0)
         model.add_model("b", self._make_mock_model(), weight=1.0)
 
-        result = model.train(pd.DataFrame(), val_df=None)
+        model.train(pd.DataFrame(), val_df=None)
         assert model.is_fitted is True
         # Equal weights when no val data
         assert abs(model.weights["a"] - 0.5) < 0.01

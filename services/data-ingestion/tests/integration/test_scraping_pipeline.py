@@ -1,11 +1,7 @@
 """Integration tests for the scraping pipeline."""
 
 import pytest
-from unittest.mock import Mock
-from redis import Redis
 
-from services.data_ingestion.src.core.config import Bet365Config, BetMGMConfig, ScraperConfig
-from services.data_ingestion.src.core.database import DatabaseManager
 from services.data_ingestion.src.scrapers.bet365_scraper import Bet365Scraper
 from services.data_ingestion.src.scrapers.betmgm_scraper import BetMGMScraper
 from services.data_ingestion.src.scrapers.fbref_scraper import FBrefScraper

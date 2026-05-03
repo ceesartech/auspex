@@ -6,7 +6,7 @@ time-of-day, and cyclical encodings.
 
 import math
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from ..core.registry import FeatureMetadata
 from .base import BaseFeatureComputer, MatchContext

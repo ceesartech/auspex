@@ -41,12 +41,14 @@ dag = DAG(
     tags=['stats', 'daily', 'scraping']
 )
 
+
 def _create_scraper(config_class, scraper_class):
     """Helper to create a scraper with proper config, db, and redis"""
     config = config_class()
     db = DatabaseManager(config)
     redis = Redis.from_url(config.redis_url)
     return scraper_class(config, db, redis)
+
 
 def scrape_fbref():
     """Scrape match statistics from FBref"""
@@ -55,12 +57,14 @@ def scrape_fbref():
     logger.info(f"Scraped {records} records from FBref")
     return records
 
+
 def scrape_understat():
     """Scrape xG data from Understat"""
     scraper = _create_scraper(UnderstatConfig, UnderstatScraper)
     records = scraper.run()
     logger.info(f"Scraped {records} records from Understat")
     return records
+
 
 def scrape_transfermarkt():
     """Scrape player data from Transfermarkt"""
@@ -69,12 +73,14 @@ def scrape_transfermarkt():
     logger.info(f"Scraped {records} records from Transfermarkt")
     return records
 
+
 def scrape_espn():
     """Scrape NFL/Boxing/MMA data from ESPN"""
     scraper = _create_scraper(ScraperConfig, ESPNScraper)
     records = scraper.run()
     logger.info(f"Scraped {records} records from ESPN")
     return records
+
 
 def scrape_nhl():
     """Scrape NHL data from official API"""
@@ -83,12 +89,14 @@ def scrape_nhl():
     logger.info(f"Scraped {records} records from NHL API")
     return records
 
+
 def scrape_tennis():
     """Scrape tennis data"""
     scraper = _create_scraper(ScraperConfig, TennisScraper)
     records = scraper.run()
     logger.info(f"Scraped {records} records from Tennis")
     return records
+
 
 def scrape_horse_racing():
     """Scrape horse racing data"""
@@ -97,12 +105,14 @@ def scrape_horse_racing():
     logger.info(f"Scraped {records} records from Horse Racing")
     return records
 
+
 def scrape_weather():
     """Scrape weather data for upcoming matches"""
     scraper = _create_scraper(ScraperConfig, WeatherScraper)
     records = scraper.run()
     logger.info(f"Scraped {records} weather records")
     return records
+
 
 # Tasks
 fbref_task = PythonOperator(task_id='scrape_fbref', python_callable=scrape_fbref, dag=dag)

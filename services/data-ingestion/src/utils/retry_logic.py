@@ -8,6 +8,7 @@ import random
 
 logger = logging.getLogger(__name__)
 
+
 def retry_with_backoff(
     max_retries: int = 3,
     backoff_factor: float = 2.0,

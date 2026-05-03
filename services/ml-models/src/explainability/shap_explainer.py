@@ -4,7 +4,6 @@ import logging
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-import pandas as pd
 
 logger = logging.getLogger(__name__)
 

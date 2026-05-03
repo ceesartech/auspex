@@ -1,7 +1,7 @@
 """Transfermarkt player and team data scraper"""
 
 import logging
-from typing import List, Dict, Any
+from typing import Dict
 from datetime import datetime
 import re
 from decimal import Decimal
@@ -10,6 +10,7 @@ from .base_scraper import BaseScraper
 from ..core.config import TransfermarktConfig
 
 logger = logging.getLogger(__name__)
+
 
 class TransfermarktScraper(BaseScraper):
     """Scrape player values, transfers, and injuries from Transfermarkt"""
@@ -122,7 +123,10 @@ class TransfermarktScraper(BaseScraper):
         """Scrape recent transfers"""
         logger.info("Scraping Transfermarkt transfers")
 
-        url = f"{self.config.base_url}/transfers/transfertagedetail/statistik/top/plus/0/galession//land_id//wettbewerb_id//minMarktwert//maxMarktwert//veression//betrag/"
+        url = (
+            f"{self.config.base_url}/transfers/transfertagedetail/statistik/top/plus/0"
+            "/galession//land_id//wettbewerb_id//minMarktwert//maxMarktwert//veression//betrag/"
+        )
         html = self._fetch_page(url)
         soup = self._parse_html(html)
 

@@ -1,14 +1,11 @@
 """Tests for XGBoost model."""
 
-import json
 import tempfile
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import pytest
 
-from models.model_config import ModelConfig, ModelType, PredictionTask
 from models.xgboost_model import XGBoostMatchPredictor
 
 

@@ -1,13 +1,13 @@
 """Tennis data scraper"""
 
 import logging
-from typing import List, Dict, Any
+from typing import Dict
 from datetime import datetime
 
 from .base_scraper import BaseScraper
-from ..core.config import ScraperConfig
 
 logger = logging.getLogger(__name__)
+
 
 class TennisScraper(BaseScraper):
     """Scrape tennis match data and rankings from ATP/WTA"""
@@ -120,14 +120,14 @@ class TennisScraper(BaseScraper):
 
     def _scrape_results(self) -> int:
         """Scrape recent tennis results"""
-        url = f"{self.BASE_URL}/en/scores/results-archive"
+        f"{self.BASE_URL}/en/scores/results-archive"
         logger.info("Scraping tennis results")
         # Similar implementation to _scrape_schedule
         return 0
 
     def _scrape_rankings(self) -> int:
         """Scrape ATP rankings"""
-        url = f"{self.BASE_URL}/en/rankings/singles"
+        f"{self.BASE_URL}/en/rankings/singles"
         logger.info("Scraping tennis rankings")
         # Rankings are stored as team metadata
         return 0

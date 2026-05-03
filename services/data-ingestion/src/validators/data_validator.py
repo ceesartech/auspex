@@ -1,9 +1,10 @@
 """Data validation using Great Expectations"""
 
 import logging
-from typing import Dict, List
+from typing import Dict
 
 logger = logging.getLogger(__name__)
+
 
 class DataValidator:
     """Validate scraped data before database insertion"""

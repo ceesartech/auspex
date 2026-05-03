@@ -6,11 +6,10 @@ from datetime import datetime, timedelta
 import logging
 
 from services.data_ingestion.src.core.config import (
-    FBrefConfig, UnderstatConfig, ScraperConfig
+    FBrefConfig, ScraperConfig
 )
 from services.data_ingestion.src.core.database import DatabaseManager
 from services.data_ingestion.src.scrapers.fbref_scraper import FBrefScraper
-from services.data_ingestion.src.scrapers.understat_scraper import UnderstatScraper
 from services.data_ingestion.src.scrapers.espn_scraper import ESPNScraper
 from services.data_ingestion.src.scrapers.nhl_api_scraper import NHLAPIScraper
 from services.data_ingestion.src.scrapers.tennis_scraper import TennisScraper
@@ -39,12 +38,14 @@ dag = DAG(
     tags=['backfill', 'historical']
 )
 
+
 def _create_scraper(config_class, scraper_class):
     """Helper to create a scraper with proper config, db, and redis"""
     config = config_class()
     db = DatabaseManager(config)
     redis = Redis.from_url(config.redis_url)
     return scraper_class(config, db, redis)
+
 
 def backfill_soccer_data():
     """Backfill historical soccer data from FBref (10+ years)"""
@@ -60,7 +61,7 @@ def backfill_soccer_data():
             # Override season for historical scraping
             for league in config.leagues:
                 season = f"{year}-{year + 1}"
-                league_url = f"{config.base_url}/en/comps/9/{season}/{season}-{league}-Stats"
+                f"{config.base_url}/en/comps/9/{season}/{season}-{league}-Stats"
                 logger.info(f"Backfilling {league} {season}")
                 count = scraper._scrape_league(league)
                 total += count
@@ -71,12 +72,14 @@ def backfill_soccer_data():
     logger.info(f"Soccer backfill complete: {total} records")
     return total
 
+
 def backfill_nfl_data():
     """Backfill historical NFL data from ESPN"""
     scraper = _create_scraper(ScraperConfig, ESPNScraper)
     records = scraper.run()
     logger.info(f"NFL backfill complete: {records} records")
     return records
+
 
 def backfill_nhl_data():
     """Backfill historical NHL data"""
@@ -85,12 +88,14 @@ def backfill_nhl_data():
     logger.info(f"NHL backfill complete: {records} records")
     return records
 
+
 def backfill_tennis_data():
     """Backfill historical tennis data"""
     scraper = _create_scraper(ScraperConfig, TennisScraper)
     records = scraper.run()
     logger.info(f"Tennis backfill complete: {records} records")
     return records
+
 
 def backfill_lottery_data():
     """Backfill historical lottery draw results"""
@@ -107,6 +112,7 @@ def backfill_lottery_data():
     total = pb_records + mm_records
     logger.info(f"Lottery backfill complete: {total} records")
     return total
+
 
 # Tasks
 soccer_task = PythonOperator(task_id='backfill_soccer', python_callable=backfill_soccer_data, dag=dag)

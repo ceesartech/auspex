@@ -7,19 +7,15 @@ categories have been computed.
 
 import logging
 import math
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import numpy as np
 
 from ..core.registry import FeatureMetadata
 from ..utils.math_helpers import (
-    compute_elo_ratings,
     elo_expected,
-    exponential_weighted_avg,
-    linear_trend,
     poisson_match_probabilities,
     safe_divide,
-    z_score,
 )
 from .base import BaseFeatureComputer, MatchContext
 
@@ -389,7 +385,7 @@ class DerivedFeatureComputer(BaseFeatureComputer):
             features["derived__poisson__away_win"] = p_away
 
             # Over 2.5 = 1 - P(0,1,2 total goals)
-            total_lambda = h_lam + a_lam
+            h_lam + a_lam
             from ..utils.math_helpers import poisson_probability
 
             p_under25 = 0.0
@@ -414,7 +410,7 @@ class DerivedFeatureComputer(BaseFeatureComputer):
             gs5 = pf.get(f"team__{side}__form__goals_scored__last5")
             gs3 = pf.get(f"team__{side}__form__goals_scored__last3")
             xg5 = pf.get(f"team__{side}__form__avg_xg__last5")
-            xg3 = pf.get(f"team__{side}__form__avg_xg__last3")
+            pf.get(f"team__{side}__form__avg_xg__last3")
 
             attack = None
             if gs5 is not None and gs3 is not None and xg5 is not None:

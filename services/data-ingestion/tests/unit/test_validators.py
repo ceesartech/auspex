@@ -1,6 +1,5 @@
 """Unit tests for data validators"""
 
-import pytest
 from services.data_ingestion.src.validators.data_validator import DataValidator
 
 

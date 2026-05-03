@@ -1,13 +1,14 @@
 """Proxy rotation and management"""
 
 import requests
-from typing import List, Dict, Optional
+from typing import Dict, Optional
 import random
 import logging
 from redis import Redis
 import json
 
 logger = logging.getLogger(__name__)
+
 
 class ProxyManager:
     """Manage proxy rotation"""
