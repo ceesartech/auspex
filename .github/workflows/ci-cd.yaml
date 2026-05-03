@@ -136,7 +136,7 @@ jobs:
           done
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           # Each service writes its own coverage.xml in its own dir because
           # pytest is invoked from inside that dir (see Run unit tests above).
@@ -145,6 +145,10 @@ jobs:
             ./services/data-ingestion/coverage.xml,
             ./services/feature-engineering/coverage.xml,
             ./services/ml-models/coverage.xml
+          # Tokenless uploads are rate-limited even on public repos. Add
+          # CODECOV_TOKEN as a repo secret to lift the limit. Without it the
+          # step still runs (fail_ci_if_error: false) and CI stays green.
+          token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
   build:
