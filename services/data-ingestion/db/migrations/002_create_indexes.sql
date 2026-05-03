@@ -68,8 +68,10 @@ CREATE INDEX idx_matches_result_covering ON matches(league_id, match_date DESC)
 
 -- ============= EXPRESSION INDEXES =============
 
--- Index on date part of match_date for daily grouping
-CREATE INDEX idx_matches_date_only ON matches((match_date::date));
+-- Index on date part of match_date for daily grouping. We anchor to UTC
+-- because `match_date::date` depends on the session timezone and
+-- therefore isn't IMMUTABLE — Postgres rejects it as an index expression.
+CREATE INDEX idx_matches_date_only ON matches(((match_date AT TIME ZONE 'UTC')::date));
 
 -- Index on lower case for case-insensitive team search
 CREATE INDEX idx_teams_name_lower ON teams(lower(name));
