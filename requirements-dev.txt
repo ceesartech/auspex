@@ -1,0 +1,22 @@
+# Development tools
+ipython==8.30.0
+jupyter==1.1.1
+
+# Debugging
+ipdb==0.13.13
+
+# Docs
+mkdocs==1.6.1
+mkdocs-material==9.5.49
+
+# Testing utilities
+responses==0.25.3
+pytest-xdist==3.6.1
+pytest-timeout==2.3.1
+
+# Code quality
+black==24.10.0
+flake8==7.1.1
+isort==5.13.2
+mypy==1.13.0
+pylint==3.3.2

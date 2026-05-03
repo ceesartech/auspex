@@ -1,0 +1,293 @@
+version: '3.8'
+
+services:
+  # ============= CORE INFRASTRUCTURE =============
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: betting-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./services/data-ingestion/db/migrations:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - betting-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: betting-redis
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    # Start with requirepass only when a password is actually provided.
+    # $$REDIS_PASSWORD is compose-escaped so the shell inside the container
+    # reads it from the container's environment at runtime.
+    command: >
+      sh -c "[ -n \"$$REDIS_PASSWORD\" ] &&
+             exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\" ||
+             exec redis-server --appendonly yes"
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "[ -n \"$$REDIS_PASSWORD\" ] && redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG || redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - betting-network
+    restart: unless-stopped
+
+  # ============= AIRFLOW =============
+
+  airflow-init:
+    image: apache/airflow:2.8.0-python3.11
+    container_name: betting-airflow-init
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW__WEBSERVER__SECRET_KEY}
+      - _AIRFLOW_DB_UPGRADE=true
+      - _AIRFLOW_WWW_USER_CREATE=true
+      - _AIRFLOW_WWW_USER_USERNAME=admin
+      - _AIRFLOW_WWW_USER_PASSWORD=admin
+    volumes:
+      - ./services/data-ingestion/dags:/opt/airflow/dags
+      - ./services/data-ingestion/logs:/opt/airflow/logs
+      - ./services/data-ingestion/plugins:/opt/airflow/plugins
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - betting-network
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db init &&
+        airflow db upgrade &&
+        airflow users create \
+          --username admin \
+          --password admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com
+
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.airflow
+    container_name: betting-airflow-webserver
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
+      - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW__WEBSERVER__SECRET_KEY}
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    volumes:
+      - ./services/data-ingestion/dags:/opt/airflow/dags
+      - ./services/data-ingestion/logs:/opt/airflow/logs
+      - ./services/data-ingestion/plugins:/opt/airflow/plugins
+      - ./services/data-ingestion/src:/opt/airflow/scrapers
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: webserver
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - betting-network
+    restart: unless-stopped
+
+  airflow-scheduler:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.airflow
+    container_name: betting-airflow-scheduler
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    volumes:
+      - ./services/data-ingestion/dags:/opt/airflow/dags
+      - ./services/data-ingestion/logs:/opt/airflow/logs
+      - ./services/data-ingestion/plugins:/opt/airflow/plugins
+      - ./services/data-ingestion/src:/opt/airflow/scrapers
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $(hostname)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - betting-network
+    restart: unless-stopped
+
+  # ============= API SERVICE =============
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: betting-api
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - MODEL_PATH=/app/models
+      - ENVIRONMENT=production
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./models:/app/models:ro
+      - ./services/api:/app/services/api
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - betting-network
+    restart: unless-stopped
+
+  # ============= CELERY WORKERS =============
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: betting-celery-worker
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/2
+    volumes:
+      - ./services/api:/app/services/api
+      - ./models:/app/models:ro
+    command: celery -A services.api.celery_app worker --loglevel=info --concurrency=4
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - betting-network
+    restart: unless-stopped
+
+  # ============= MONITORING =============
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: betting-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts:/etc/prometheus/alerts:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - betting-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: betting-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - betting-network
+    restart: unless-stopped
+
+  # ============= MLFLOW =============
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.10.0
+    container_name: betting-mlflow
+    environment:
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
+    volumes:
+      - mlflow_data:/mlflow
+    ports:
+      - "5001:5001"
+    # Use SQLite for local dev — avoids needing a separate 'mlflow' Postgres DB.
+    # In production, override MLFLOW_BACKEND_STORE_URI via K8s secret/env.
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5001
+      --backend-store-uri sqlite:///mlflow/mlflow.db
+      --artifacts-destination /mlflow/artifacts
+    networks:
+      - betting-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  mlflow_data:
+    driver: local
+
+networks:
+  betting-network:
+    driver: bridge

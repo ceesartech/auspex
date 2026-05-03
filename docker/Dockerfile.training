@@ -1,0 +1,29 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY services/ml-models/ /app/services/ml-models/
+COPY services/feature-engineering/ /app/services/feature-engineering/
+COPY services/data-ingestion/src/core/ /app/services/data-ingestion/src/core/
+
+# Create directories for models and data
+RUN mkdir -p /app/models /app/data
+
+# Create non-root user
+RUN groupadd -r trainer && useradd -r -g trainer trainer
+RUN chown -R trainer:trainer /app
+USER trainer
+
+CMD ["python", "-m", "services.ml-models.src.training.train_all_models"]

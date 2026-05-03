@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: betting-api
+  namespace: betting-system
+spec:
+  replicas: 3
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: betting-frontend
+  namespace: betting-system
+spec:
+  replicas: 2
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: betting-api-hpa
+  namespace: betting-system
+spec:
+  minReplicas: 2
+  maxReplicas: 10
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: betting-api-pdb
+  namespace: betting-system
+spec:
+  minAvailable: 2

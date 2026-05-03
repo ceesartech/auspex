@@ -1,0 +1,31 @@
+Betting System has been deployed!
+
+Environment: {{ .Values.global.environment }}
+
+Services:
+  - API: betting-api (port {{ .Values.api.service.port }})
+  - Frontend: betting-frontend (port 3000)
+  - PostgreSQL: betting-system-db (port 5432)
+  - Redis: betting-system-redis (port 6379)
+
+{{- if .Values.api.ingress.enabled }}
+
+Ingress:
+  Host: {{ .Values.api.ingress.host }}
+  TLS: {{ .Values.api.ingress.tls }}
+{{- end }}
+
+{{- if .Values.api.autoscaling.enabled }}
+
+Autoscaling:
+  Min Replicas: {{ .Values.api.autoscaling.minReplicas }}
+  Max Replicas: {{ .Values.api.autoscaling.maxReplicas }}
+  Target CPU: {{ .Values.api.autoscaling.targetCPU }}%
+{{- end }}
+
+To check the deployment status:
+  kubectl get pods -n {{ include "betting-system.namespace" . }}
+  kubectl get services -n {{ include "betting-system.namespace" . }}
+
+To view logs:
+  kubectl logs -f deployment/betting-api -n {{ include "betting-system.namespace" . }}

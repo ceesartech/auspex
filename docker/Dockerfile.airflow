@@ -1,0 +1,21 @@
+FROM apache/airflow:2.8.0-python3.11
+
+USER root
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+USER airflow
+
+# Copy requirements and install additional Python dependencies
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# Copy DAGs and scraper code
+COPY services/data-ingestion/dags/ /opt/airflow/dags/
+COPY services/data-ingestion/src/ /opt/airflow/scrapers/
+
+EXPOSE 8080

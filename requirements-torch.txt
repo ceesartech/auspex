@@ -1,0 +1,16 @@
+# PyTorch — installed separately because:
+#   1. The wheel is ~2 GB
+#   2. CPU vs GPU versions require different index URLs
+#   3. Python 3.13 support arrived in torch 2.5+
+#
+# macOS (CPU only — default for local dev):
+#   pip install -r requirements-torch.txt
+#
+# Linux with CUDA 12.4:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+#
+# See: https://pytorch.org/get-started/locally/
+
+--index-url https://download.pytorch.org/whl/cpu
+torch==2.6.0
+torchvision==0.21.0

@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: betting-system-config
+  namespace: betting-system
+data:
+  # Database
+  POSTGRES_HOST: "betting-system-db"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "betting_system"
+
+  # Redis
+  REDIS_HOST: "betting-system-redis"
+  REDIS_PORT: "6379"
+
+  # API
+  API_HOST: "0.0.0.0"
+  API_PORT: "8000"
+  API_WORKERS: "4"
+
+  # Airflow
+  AIRFLOW__CORE__EXECUTOR: "LocalExecutor"
+  AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+
+  # Features
+  ENABLE_WEB_SCRAPING: "true"
+  ENABLE_MODEL_TRAINING: "true"
+  ENABLE_PREDICTIONS: "true"
+
+  # Logging
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"

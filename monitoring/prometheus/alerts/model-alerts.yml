@@ -1,0 +1,92 @@
+groups:
+  - name: model_alerts
+    interval: 1h
+    rules:
+
+    - alert: LowPredictionConfidence
+      expr: |
+        avg(prediction_confidence) < 0.6
+      for: 10m
+      labels:
+        severity: warning
+        component: ml-models
+      annotations:
+        summary: "Low average prediction confidence"
+        description: "Average confidence is {{ $value }}, below threshold of 0.6"
+
+    - alert: ModelAccuracyDrop
+      expr: |
+        (
+          model_accuracy_7d - model_accuracy_30d
+        ) < -0.05
+      for: 1h
+      labels:
+        severity: critical
+        component: ml-models
+      annotations:
+        summary: "Model accuracy has dropped significantly"
+        description: "Accuracy dropped by {{ $value | humanizePercentage }} compared to 30-day baseline"
+        runbook: "https://runbooks.betting-system.com/MODEL_DRIFT"
+
+    - alert: NegativeROI
+      expr: model_roi_7d < 0
+      for: 24h
+      labels:
+        severity: warning
+        component: ml-models
+      annotations:
+        summary: "Model has negative ROI"
+        description: "7-day ROI is {{ $value | humanizePercentage }}"
+
+    - alert: ModelStale
+      expr: |
+        (time() - model_last_trained_timestamp) > 86400 * 7
+      for: 1h
+      labels:
+        severity: warning
+        component: ml-models
+      annotations:
+        summary: "Model hasn't been retrained in 7+ days"
+        description: "Last training was {{ $value | humanizeDuration }} ago"
+
+    - alert: LowPredictionVolume
+      expr: |
+        rate(predictions_total[1h]) < 10
+      for: 2h
+      labels:
+        severity: warning
+        component: ml-models
+      annotations:
+        summary: "Low prediction volume"
+        description: "Only {{ $value }} predictions/hour (expected >10)"
+
+    - alert: HighCalibrationError
+      expr: model_calibration_error > 0.1
+      for: 30m
+      labels:
+        severity: warning
+        component: ml-models
+      annotations:
+        summary: "Model calibration error is high"
+        description: "Calibration error is {{ $value }} (threshold: 0.1)"
+
+    - alert: DataDriftDetected
+      expr: drift_score > 0.3
+      for: 30m
+      labels:
+        severity: critical
+        component: ml-models
+      annotations:
+        summary: "Data drift detected"
+        description: "Drift score is {{ $value }} (threshold: 0.3). Retraining may be required."
+        runbook: "https://runbooks.betting-system.com/MODEL_DRIFT"
+
+    - alert: RetrainingJobFailed
+      expr: kube_job_status_failed{job_name=~"model-retraining.*", namespace="betting-system"} > 0
+      for: 5m
+      labels:
+        severity: critical
+        component: ml-models
+      annotations:
+        summary: "Model retraining job failed"
+        description: "Retraining job {{ $labels.job_name }} has failed"

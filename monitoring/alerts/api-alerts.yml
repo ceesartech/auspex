@@ -1,0 +1,98 @@
+groups:
+  - name: api_alerts
+    rules:
+      - alert: APIHighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High API error rate detected"
+          description: "API error rate is above 5% for the last 5 minutes (current: {{ $value | humanizePercentage }})"
+
+      - alert: APIHighLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High API latency detected"
+          description: "95th percentile latency is above 2 seconds (current: {{ $value }}s)"
+
+      - alert: APIDown
+        expr: up{job="betting-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Betting API is down"
+          description: "The betting API service has been down for more than 1 minute"
+
+  - name: scraping_alerts
+    rules:
+      - alert: ScrapingFailureRate
+        expr: rate(scraping_failures_total[1h]) > 5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High scraping failure rate"
+          description: "More than 5 scraping failures per hour for {{ $labels.scraper_name }}"
+
+      - alert: OddsDataStale
+        expr: (time() - odds_last_update_timestamp) > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Odds data is stale"
+          description: "Odds data hasn't been updated in over 5 minutes"
+
+  - name: model_alerts
+    rules:
+      - alert: ModelAccuracyDrop
+        expr: model_accuracy < 0.55
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model accuracy below threshold"
+          description: "Model {{ $labels.model_type }} accuracy is {{ $value }} (threshold: 0.55)"
+
+      - alert: PredictionLatency
+        expr: prediction_duration_seconds > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prediction latency too high"
+          description: "Prediction generation is taking over 5 seconds"
+
+  - name: infrastructure_alerts
+    rules:
+      - alert: DatabaseConnectionPoolExhausted
+        expr: pg_stat_activity_count / pg_settings_max_connections > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database connection pool nearly exhausted"
+          description: "Database connection usage is at {{ $value | humanizePercentage }}"
+
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis memory usage high"
+          description: "Redis memory usage is at {{ $value | humanizePercentage }}"
+
+      - alert: DiskSpaceLow
+        expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.1
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Low disk space"
+          description: "Disk space is below 10% on {{ $labels.instance }}"

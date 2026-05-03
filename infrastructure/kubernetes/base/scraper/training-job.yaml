@@ -1,0 +1,49 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-training
+  namespace: betting-system
+  labels:
+    app: model-training
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 14400
+  template:
+    metadata:
+      labels:
+        app: model-training
+    spec:
+      restartPolicy: OnFailure
+      tolerations:
+      - key: "workload"
+        operator: "Equal"
+        value: "ml"
+        effect: "NoSchedule"
+      nodeSelector:
+        cloud.google.com/gke-nodepool: ml-pool
+      containers:
+      - name: trainer
+        image: gcr.io/PROJECT_ID/betting-training:latest
+
+        envFrom:
+        - configMapRef:
+            name: betting-system-config
+        - secretRef:
+            name: betting-system-secrets
+
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2000m"
+          limits:
+            memory: "8Gi"
+            cpu: "4000m"
+
+        volumeMounts:
+        - name: model-output
+          mountPath: /app/models
+
+      volumes:
+      - name: model-output
+        persistentVolumeClaim:
+          claimName: model-storage-pvc

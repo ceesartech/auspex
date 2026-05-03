@@ -1,0 +1,137 @@
+name: Model Retraining Pipeline
+
+on:
+  schedule:
+    # Run weekly on Sundays at 2 AM Denver time (9 AM UTC)
+    - cron: '0 9 * * 0'
+  workflow_dispatch:
+    inputs:
+      model_type:
+        description: 'Model type to retrain'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - xgboost
+          - neural_network
+          - poisson
+          - dixon_coles
+          - ensemble
+      force_deploy:
+        description: 'Force deployment even if metrics are not improved'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  data-validation:
+    name: Validate Training Data
+    runs-on: ubuntu-latest
+    outputs:
+      data_quality: ${{ steps.validate.outputs.quality }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate training data
+        id: validate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python -m services.ml_models.src.validation.validate_training_data
+          echo "quality=passed" >> $GITHUB_OUTPUT
+
+  retrain:
+    name: Retrain Models
+    runs-on: ubuntu-latest
+    needs: data-validation
+    if: needs.data-validation.outputs.data_quality == 'passed'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Train models
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          MODEL_TYPE: ${{ github.event.inputs.model_type || 'all' }}
+        run: |
+          python -m services.ml_models.src.training.train_all_models \
+            --model-type $MODEL_TYPE \
+            --output-dir ./models
+
+      - name: Evaluate models
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+        run: |
+          python -m services.ml_models.src.evaluation.evaluate_models \
+            --model-dir ./models \
+            --output-file ./evaluation_report.json
+
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: trained-models
+          path: |
+            ./models/
+            ./evaluation_report.json
+
+  deploy-model:
+    name: Deploy Model
+    runs-on: ubuntu-latest
+    needs: retrain
+    if: success()
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download model artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: trained-models
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Upload to GCS
+        run: |
+          gsutil -m cp -r ./models/* gs://${{ secrets.GCS_MODEL_BUCKET }}/models/$(date +%Y%m%d)/
+
+      - name: Trigger model reload
+        env:
+          API_URL: ${{ secrets.API_URL }}
+          API_KEY: ${{ secrets.API_KEY }}
+        run: |
+          curl -X POST "${API_URL}/api/v1/models/reload" \
+            -H "Authorization: Bearer ${API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"force": ${{ github.event.inputs.force_deploy || false }}}'

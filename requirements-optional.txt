@@ -1,0 +1,27 @@
+# Optional heavy dependencies — not required for core functionality.
+# Install only what you need.
+#
+# SHAP — ML explainability (no binary wheel for Python 3.13 macOS arm64; compiles C++):
+#   Requires: sudo xcodebuild -license accept
+#   Then:     pip install shap==0.46.0
+#
+# Feature store (requires Redis + Postgres already running):
+#   pip install feast==0.40.0
+#
+# Data quality (very heavy — 200+ MB):
+#   pip install great-expectations==0.18.22
+#
+# ML experiment versioning / data versioning:
+#   pip install dvc==3.56.0
+#
+# SHAP — ML explainability (compiles C++; needs Xcode license)
+shap==0.46.0
+
+# Feast (feature store) — requires separate feast apply step:
+feast==0.40.0
+
+# Great Expectations — data quality validation
+great-expectations==0.18.22
+
+# DVC — data and model versioning
+dvc==3.56.0

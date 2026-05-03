@@ -1,0 +1,150 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "business-metrics",
+    "title": "Business Metrics",
+    "tags": ["business", "roi", "predictions"],
+    "timezone": "browser",
+    "schemaVersion": 36,
+    "version": 1,
+    "refresh": "5m",
+    "time": { "from": "now-30d", "to": "now" },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Total Predictions (30 days)",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+        "targets": [
+          {
+            "expr": "sum(increase(predictions_total[30d]))",
+            "legendFormat": "Total Predictions"
+          }
+        ],
+        "fieldConfig": { "defaults": { "unit": "short" } }
+      },
+      {
+        "id": 2,
+        "title": "Win Rate (7 days)",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+        "targets": [
+          {
+            "expr": "model_accuracy_7d",
+            "legendFormat": "Win Rate"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "thresholds": {
+              "steps": [
+                { "color": "red", "value": 0 },
+                { "color": "yellow", "value": 0.5 },
+                { "color": "green", "value": 0.6 }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "ROI (7 days)",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+        "targets": [
+          {
+            "expr": "model_roi_7d",
+            "legendFormat": "7d ROI"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "thresholds": {
+              "steps": [
+                { "color": "red", "value": -0.1 },
+                { "color": "yellow", "value": 0 },
+                { "color": "green", "value": 0.05 }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Average Confidence",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+        "targets": [
+          {
+            "expr": "model:prediction_confidence:p50",
+            "legendFormat": "Median Confidence"
+          }
+        ],
+        "fieldConfig": { "defaults": { "unit": "percentunit" } }
+      },
+      {
+        "id": 5,
+        "title": "Predictions by Outcome",
+        "type": "piechart",
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 4 },
+        "targets": [
+          {
+            "expr": "sum(increase(predictions_total[30d])) by (predicted_outcome)",
+            "legendFormat": "{{ predicted_outcome }}"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Accuracy Trend (30 days)",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 16, "x": 8, "y": 4 },
+        "targets": [
+          {
+            "expr": "model_accuracy_7d",
+            "legendFormat": "7-day Accuracy"
+          },
+          {
+            "expr": "model_accuracy_30d",
+            "legendFormat": "30-day Accuracy"
+          }
+        ],
+        "fieldConfig": { "defaults": { "unit": "percentunit" } }
+      },
+      {
+        "id": 7,
+        "title": "Win Rate by Confidence Band",
+        "type": "bargauge",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+        "targets": [
+          {
+            "expr": "sum(increase(predictions_correct[7d])) by (confidence_level) / sum(increase(predictions_total[7d])) by (confidence_level)",
+            "legendFormat": "Confidence {{ confidence_level }}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "min": 0,
+            "max": 1
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "Daily Prediction Count",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+        "targets": [
+          {
+            "expr": "sum(increase(predictions_total[1d]))",
+            "legendFormat": "Daily Predictions"
+          }
+        ],
+        "fieldConfig": { "defaults": { "unit": "short" } }
+      }
+    ]
+  }
+}

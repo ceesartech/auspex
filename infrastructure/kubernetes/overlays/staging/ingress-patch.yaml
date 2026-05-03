@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: betting-system-ingress
+  namespace: betting-system
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-staging"
+spec:
+  tls:
+  - hosts:
+    - staging.betting-system.com
+    secretName: betting-system-tls-staging
+  rules:
+  - host: staging.betting-system.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: betting-api
+            port:
+              number: 8000

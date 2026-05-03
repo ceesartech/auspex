@@ -1,0 +1,61 @@
+groups:
+  - name: scraping_alerts
+    interval: 5m
+    rules:
+
+    - alert: ScraperFailing
+      expr: |
+        rate(scraping_errors_total[15m]) > 0.1
+      for: 15m
+      labels:
+        severity: warning
+        component: scraper
+      annotations:
+        summary: "High scraping error rate for {{ $labels.scraper }}"
+        description: "Error rate: {{ $value | humanizePercentage }}"
+
+    - alert: NoDataScraped
+      expr: |
+        rate(scraping_records_total[1h]) == 0
+      for: 1h
+      labels:
+        severity: critical
+        component: scraper
+      annotations:
+        summary: "No data scraped by {{ $labels.scraper }}"
+        description: "Zero records scraped in last hour"
+
+    - alert: StaleOdds
+      expr: |
+        (time() - odds_last_updated_timestamp) > 300
+      for: 5m
+      labels:
+        severity: warning
+        component: scraper
+      annotations:
+        summary: "Odds data is stale"
+        description: "Last update was {{ $value | humanizeDuration }} ago"
+
+    - alert: ScraperBanned
+      expr: |
+        rate(scraping_errors_total{error_type="403"}[5m]) > 0.5
+      for: 5m
+      labels:
+        severity: critical
+        component: scraper
+      annotations:
+        summary: "Scraper {{ $labels.scraper }} may be banned"
+        description: "High rate of 403 errors from {{ $labels.scraper }}"
+
+    - alert: AirflowDAGFailed
+      expr: |
+        airflow_dag_run_duration_success == 0
+          unless
+        airflow_dag_run_duration_success offset 30m > 0
+      for: 10m
+      labels:
+        severity: warning
+        component: scraper
+      annotations:
+        summary: "Airflow DAG has not completed successfully"
+        description: "DAG {{ $labels.dag_id }} has not had a successful run recently"

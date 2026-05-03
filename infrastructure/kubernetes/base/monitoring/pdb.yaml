@@ -1,0 +1,21 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: betting-api-pdb
+  namespace: betting-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: betting-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: betting-frontend-pdb
+  namespace: betting-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: betting-frontend

@@ -1,0 +1,86 @@
+# ── Core ──────────────────────────────────────────────────────────────────────
+python-dotenv==1.0.1
+pydantic==2.9.2
+pydantic-settings==2.6.1
+tenacity==9.0.0
+
+# ── Database ──────────────────────────────────────────────────────────────────
+psycopg2-binary==2.9.10
+sqlalchemy==2.0.36
+alembic==1.14.0
+asyncpg==0.30.0
+
+# ── Redis / Cache ─────────────────────────────────────────────────────────────
+redis==5.2.1
+# hiredis is a C-extension speed-up; optional but recommended when wheels exist
+hiredis==3.1.0
+
+# ── Async / HTTP ──────────────────────────────────────────────────────────────
+aiohttp==3.11.10
+httpx==0.27.2
+# asyncio is Python stdlib since 3.4 — do NOT install the PyPI stub
+
+# ── Data processing ───────────────────────────────────────────────────────────
+# numpy 2.x has binary wheels for Python 3.12+ on macOS (arm64 + x86_64)
+numpy==2.1.3
+# pandas 2.2.x has binary wheels for Python 3.12+ on macOS
+pandas==2.2.3
+pyarrow==18.1.0
+
+# ── Web scraping ──────────────────────────────────────────────────────────────
+beautifulsoup4==4.12.3
+selenium==4.27.1
+playwright==1.49.0
+undetected-chromedriver==3.5.5
+fake-useragent==1.5.1
+# lxml 5.x has binary wheels for Python 3.12+ on macOS
+lxml==5.3.0
+
+# ── Data validation ───────────────────────────────────────────────────────────
+# great-expectations is very heavy — use requirements-optional.txt if needed
+jsonschema==4.23.0
+
+# ── Logging & Monitoring ──────────────────────────────────────────────────────
+loguru==0.7.3
+prometheus-client==0.21.1
+
+# ── API ───────────────────────────────────────────────────────────────────────
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.20
+
+# ── ML Libraries ──────────────────────────────────────────────────────────────
+# All packages below have Python 3.12/3.13 binary wheels on macOS
+scikit-learn==1.6.0
+xgboost==2.1.3
+lightgbm==4.5.0
+scipy==1.14.1
+# shap has no binary wheel for Python 3.13 on macOS arm64 — installed separately
+# in setup.sh after accepting the Xcode license. See requirements-optional.txt.
+optuna==4.1.0
+
+# PyTorch: binary wheel is ~2 GB — installed separately in setup.sh
+# Run:  pip install torch --index-url https://download.pytorch.org/whl/cpu
+# (see requirements-torch.txt)
+
+# ── ML Ops ───────────────────────────────────────────────────────────────────
+mlflow==2.19.0
+
+# ── Auth / Security ──────────────────────────────────────────────────────────
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+cryptography==44.0.0
+
+# ── Celery ────────────────────────────────────────────────────────────────────
+celery==5.4.0
+flower==2.0.1
+
+# ── Testing (also in requirements-dev.txt — duplicated intentionally so CI
+#    can install just requirements.txt and get test runner) ──────────────────
+pytest==8.3.4
+pytest-cov==6.0.0
+pytest-asyncio==0.24.0
+pytest-mock==3.14.0
+faker==33.1.0
+requests==2.32.3
+websocket-client==1.8.0

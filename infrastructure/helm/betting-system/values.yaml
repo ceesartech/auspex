@@ -1,0 +1,94 @@
+global:
+  project_id: "betting-system-prod"
+  environment: prod
+
+api:
+  image:
+    repository: gcr.io/betting-system-prod/betting-api
+    tag: latest
+    pullPolicy: Always
+  replicas: 2
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPU: 70
+    targetMemory: 80
+  service:
+    type: ClusterIP
+    port: 8000
+  ingress:
+    enabled: true
+    className: nginx
+    host: api.betting-system.com
+    tls: true
+    clusterIssuer: letsencrypt-prod
+
+frontend:
+  image:
+    repository: gcr.io/betting-system-prod/betting-frontend
+    tag: latest
+    pullPolicy: Always
+  replicas: 2
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "250m"
+
+postgres:
+  image:
+    repository: postgres
+    tag: "15-alpine"
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+  storage:
+    size: 50Gi
+    storageClassName: standard-rwo
+
+redis:
+  image:
+    repository: redis
+    tag: "7-alpine"
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "250m"
+  storage:
+    size: 5Gi
+
+config:
+  POSTGRES_HOST: "betting-system-db"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "betting_system"
+  REDIS_HOST: "betting-system-redis"
+  REDIS_PORT: "6379"
+  API_HOST: "0.0.0.0"
+  API_PORT: "8000"
+  API_WORKERS: "4"
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+
+secrets:
+  POSTGRES_USER: "betting_user"
+  POSTGRES_PASSWORD: "REPLACE_ME"
+  REDIS_PASSWORD: "REPLACE_ME"
+  JWT_SECRET: "REPLACE_ME"
+  SECRET_KEY: "REPLACE_ME"

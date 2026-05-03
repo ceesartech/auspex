@@ -1,0 +1,13 @@
+apiVersion: v2
+name: betting-system
+description: AI-powered sports betting prediction system
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+maintainers:
+- name: ceesartech
+keywords:
+- betting
+- ml
+- predictions
+- kubernetes

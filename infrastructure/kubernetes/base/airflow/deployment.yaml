@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-webserver
+  namespace: betting-system
+  labels:
+    app: airflow
+    component: webserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow
+      component: webserver
+  template:
+    metadata:
+      labels:
+        app: airflow
+        component: webserver
+    spec:
+      containers:
+      - name: webserver
+        image: gcr.io/PROJECT_ID/betting-airflow:latest
+        command: ["airflow", "webserver"]
+        ports:
+        - containerPort: 8080
+          name: http
+
+        envFrom:
+        - configMapRef:
+            name: betting-system-config
+        - secretRef:
+            name: betting-system-secrets
+
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 30
+
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-scheduler
+  namespace: betting-system
+  labels:
+    app: airflow
+    component: scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow
+      component: scheduler
+  template:
+    metadata:
+      labels:
+        app: airflow
+        component: scheduler
+    spec:
+      containers:
+      - name: scheduler
+        image: gcr.io/PROJECT_ID/betting-airflow:latest
+        command: ["airflow", "scheduler"]
+
+        envFrom:
+        - configMapRef:
+            name: betting-system-config
+        - secretRef:
+            name: betting-system-secrets
+
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
