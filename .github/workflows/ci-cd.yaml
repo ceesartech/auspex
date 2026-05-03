@@ -81,6 +81,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
+          pip install -r requirements-torch.txt
 
       - name: Run database migrations
         env:
@@ -118,13 +119,19 @@ jobs:
           REDIS_URL: redis://localhost:6379/0
           ENVIRONMENT: test
         run: |
+          # pytest exits 5 when no tests match the marker. That is fine here
+          # because not every service has integration-marked tests.
           set -e
           for svc in api data-ingestion feature-engineering ml-models; do
             echo "::group::pytest services/$svc (integration)"
+            rc=0
             (
               cd "services/$svc"
               PYTHONPATH=src pytest tests -m integration --rootdir=. -v
-            )
+            ) || rc=$?
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
+              exit "$rc"
+            fi
             echo "::endgroup::"
           done
 
