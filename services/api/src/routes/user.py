@@ -91,11 +91,14 @@ async def update_preferences(
     }
 
     for key, value in update_data.items():
+        # Store the raw value as JSON. The GET endpoint already wraps the
+        # JSONB column under a "value" key in its response, so wrapping
+        # again here would produce {"value": {"value": X}} on read.
         db.execute(
             upsert_query,
             {
                 "key": key,
-                "value": json.dumps({"value": value}),
+                "value": json.dumps(value),
                 "description": descriptions.get(key, ""),
             },
         )
