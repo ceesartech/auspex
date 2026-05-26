@@ -92,6 +92,9 @@ node_modules/
 .nuxt/
 out/
 dist/
+*.tsbuildinfo
+playwright-report/
+test-results/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

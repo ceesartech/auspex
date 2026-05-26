@@ -75,8 +75,8 @@ async def get_lottery_analysis(
         )
 
     # Frequency analysis
-    number_counts = Counter()
-    bonus_counts = Counter()
+    number_counts: Counter[int] = Counter()
+    bonus_counts: Counter[int] = Counter()
 
     for row in results:
         for num in row.numbers:
@@ -88,10 +88,8 @@ async def get_lottery_analysis(
     # Determine number range based on game
     if game == "powerball":
         main_range = range(1, 70)
-        range(1, 27)
     else:  # mega_millions
         main_range = range(1, 71)
-        range(1, 26)
 
     # Hot numbers (most frequent)
     hot = sorted(number_counts.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -177,8 +175,8 @@ async def get_lottery_recommendations(
 
     results = db.execute(query, {"game": game}).fetchall()
 
-    number_counts = Counter()
-    bonus_counts = Counter()
+    number_counts: Counter[int] = Counter()
+    bonus_counts: Counter[int] = Counter()
 
     for row in results:
         for num in row.numbers:

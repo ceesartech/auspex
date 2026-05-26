@@ -46,13 +46,15 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+          pip install -r requirements-torch.txt
 
       - name: Validate training data
         id: validate
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        working-directory: services/ml-models
         run: |
-          python -m services.ml_models.src.validation.validate_training_data
+          PYTHONPATH=src python -m validation.validate_training_data
           echo "quality=passed" >> $GITHUB_OUTPUT
 
   retrain:
@@ -74,25 +76,28 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+          pip install -r requirements-torch.txt
 
       - name: Train models
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
           MODEL_TYPE: ${{ github.event.inputs.model_type || 'all' }}
+        working-directory: services/ml-models
         run: |
-          python -m services.ml_models.src.training.train_all_models \
+          PYTHONPATH=src python -m training.train_all_models \
             --model-type $MODEL_TYPE \
-            --output-dir ./models
+            --output-dir ../../models
 
       - name: Evaluate models
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+        working-directory: services/ml-models
         run: |
-          python -m services.ml_models.src.evaluation.evaluate_models \
-            --model-dir ./models \
-            --output-file ./evaluation_report.json
+          PYTHONPATH=src python -m evaluation.evaluate_models \
+            --model-dir ../../models \
+            --output-file ../../evaluation_report.json
 
       - name: Upload model artifacts
         uses: actions/upload-artifact@v4

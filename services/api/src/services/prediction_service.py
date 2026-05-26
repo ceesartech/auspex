@@ -16,9 +16,14 @@ logger = logging.getLogger(__name__)
 class PredictionService:
     """Service for generating predictions"""
 
-    def __init__(self, db: Session = None):
+    def __init__(self, db: Optional[Session] = None):
         self.db = db
-        self.models = {}
+        self.models: Dict[str, Any] = {}
+
+    def _require_db(self) -> Session:
+        if self.db is None:
+            raise RuntimeError("PredictionService requires a database session for this operation")
+        return self.db
 
     def load_models(self):
         """Load trained ML models"""
@@ -100,7 +105,8 @@ class PredictionService:
             LIMIT :limit
         """)
 
-        results = self.db.execute(query, {"sport": sport, "league": league, "limit": limit}).fetchall()
+        db = self._require_db()
+        results = db.execute(query, {"sport": sport, "league": league, "limit": limit}).fetchall()
 
         predictions = []
         for row in results:
@@ -142,7 +148,8 @@ class PredictionService:
             ORDER BY m.match_date ASC
         """)
 
-        results = self.db.execute(query).fetchall()
+        db = self._require_db()
+        results = db.execute(query).fetchall()
 
         predictions = []
         for row in results:
@@ -180,7 +187,8 @@ class PredictionService:
             WHERE m.id = :match_id
         """)
 
-        result = self.db.execute(query, {"match_id": match_id}).fetchone()
+        db = self._require_db()
+        result = db.execute(query, {"match_id": match_id}).fetchone()
 
         if result:
             return {
@@ -203,7 +211,8 @@ class PredictionService:
             ORDER BY computed_at DESC LIMIT 1
         """)
 
-        result = self.db.execute(query, {"match_id": match_id}).fetchone()
+        db = self._require_db()
+        result = db.execute(query, {"match_id": match_id}).fetchone()
         if result:
             return result.features
         return {}
@@ -218,7 +227,8 @@ class PredictionService:
             ORDER BY created_at DESC LIMIT 1
         """)
 
-        result = self.db.execute(query, {"match_id": match_id}).fetchone()
+        db = self._require_db()
+        result = db.execute(query, {"match_id": match_id}).fetchone()
         if result:
             return {
                 "predicted_label": result.predicted_outcome,
@@ -247,7 +257,8 @@ class PredictionService:
         try:
             import json
 
-            self.db.execute(
+            db = self._require_db()
+            db.execute(
                 query,
                 {
                     "match_id": match_id,
@@ -259,7 +270,8 @@ class PredictionService:
                     "probabilities": json.dumps(prediction["probabilities"]),
                 },
             )
-            self.db.commit()
+            db.commit()
         except Exception as e:
             logger.error(f"Failed to store prediction: {e}")
-            self.db.rollback()
+            if self.db is not None:
+                self.db.rollback()

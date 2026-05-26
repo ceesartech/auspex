@@ -3,7 +3,7 @@
 import asyncio
 import json
 import logging
-from typing import List
+from typing import List, Optional
 
 from auth.jwt_handler import verify_token
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -47,7 +47,7 @@ manager = ConnectionManager()
 
 
 @router.websocket("/predictions")
-async def websocket_predictions(websocket: WebSocket, token: str = None):
+async def websocket_predictions(websocket: WebSocket, token: Optional[str] = None):
     """WebSocket for live prediction updates"""
 
     if token:
@@ -81,7 +81,7 @@ async def websocket_predictions(websocket: WebSocket, token: str = None):
 
 
 @router.websocket("/odds")
-async def websocket_odds(websocket: WebSocket, token: str = None):
+async def websocket_odds(websocket: WebSocket, token: Optional[str] = None):
     """WebSocket for live odds updates"""
 
     await manager.connect(websocket)

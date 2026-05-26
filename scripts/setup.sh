@@ -172,6 +172,8 @@ if [[ "$NO_FRONTEND" == false ]]; then
   info "Installing frontend dependencies..."
   cd services/frontend
   npm install --silent
+  npx playwright install chromium >/dev/null \
+    || warn "Playwright browser install failed. Run: cd services/frontend && npx playwright install chromium"
   cd "$ROOT"
   success "Frontend dependencies installed"
 fi

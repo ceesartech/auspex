@@ -44,6 +44,9 @@ class NotificationService:
             },
         ).fetchone()
 
+        if result is None:
+            raise RuntimeError("Failed to create notification")
+
         self.db.commit()
         return str(result.id)
 

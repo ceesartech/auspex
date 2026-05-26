@@ -14,12 +14,35 @@ info(){ echo -e "${BLUE}[TEST]${NC} $*"; }
 
 [[ -f venv/bin/activate ]] && source venv/bin/activate
 
+PYTHON_SERVICES=(api data-ingestion feature-engineering ml-models)
+
+run_service_pytest() {
+  local marker="$1"
+  shift
+
+  for svc in "${PYTHON_SERVICES[@]}"; do
+    info "Running ${svc} tests..."
+    rc=0
+    (
+      cd "$ROOT/services/$svc"
+      PYTHONPATH=src pytest tests -m "$marker" --rootdir=. "$@"
+    ) || rc=$?
+
+    if [[ "$rc" -ne 0 ]]; then
+      if [[ "$marker" == "integration" && "$rc" -eq 5 ]]; then
+        info "No integration tests matched for ${svc}; continuing."
+      else
+        exit "$rc"
+      fi
+    fi
+  done
+}
+
 case "$MODE" in
   unit)
     info "Running unit tests..."
-    pytest services/ -m "unit or not (integration or e2e or slow)" \
-      --cov=services --cov-report=term-missing --cov-report=html:htmlcov \
-      -x "$@"
+    run_service_pytest "not (integration or e2e or slow)" \
+      --cov=src --cov-report=term-missing -x "$@"
     ;;
 
   integration)
@@ -27,7 +50,7 @@ case "$MODE" in
     # Ensure DB + Redis are up
     docker-compose up -d postgres redis
     until docker-compose exec -T postgres pg_isready -q; do sleep 1; done
-    pytest services/ -m "integration" --tb=short "$@"
+    run_service_pytest "integration" --tb=short "$@"
     ;;
 
   e2e)
@@ -45,9 +68,9 @@ case "$MODE" in
     info "Running all tests (unit + integration + e2e)..."
     docker-compose up -d postgres redis
     until docker-compose exec -T postgres pg_isready -q; do sleep 1; done
-    pytest services/ tests/e2e/ \
-      --cov=services --cov-report=term-missing --cov-report=html:htmlcov \
-      --tb=short "$@"
+    run_service_pytest "not e2e" \
+      --cov=src --cov-report=term-missing --tb=short "$@"
+    pytest tests/e2e/ --tb=short "$@"
     ;;
 
   *)

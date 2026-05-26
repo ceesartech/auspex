@@ -1,6 +1,7 @@
 """Async notification dispatch tasks"""
 
 import logging
+from typing import Any, Dict, Optional
 
 from celery_app import celery_app
 from database import get_db_context
@@ -43,7 +44,7 @@ def send_notification(
     title: str,
     message: str,
     source: str = "system",
-    metadata: dict = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ):
     """Create a system notification"""
 

@@ -25,7 +25,7 @@ class RecommendationService:
         min_odds: Optional[float] = None,
         max_odds: Optional[float] = None,
         limit: int = 20,
-        user_id: str = None,
+        user_id: Optional[str] = None,
     ) -> List[RecommendationResponse]:
         """Get active betting recommendations from the vw_active_recommendations view"""
 
@@ -86,7 +86,7 @@ class RecommendationService:
         self,
         min_ev: float = 0.05,
         limit: int = 10,
-        user_id: str = None,
+        user_id: Optional[str] = None,
     ) -> List[RecommendationResponse]:
         """Get highest expected value recommendations"""
 
@@ -145,7 +145,7 @@ class RecommendationService:
         min_total_odds: float = 2.0,
         max_total_odds: float = 10.0,
         confidence_threshold: float = 0.65,
-        user_id: str = None,
+        user_id: Optional[str] = None,
     ) -> AccumulatorResponse:
         """Build optimized accumulator bet using available recommendations"""
 
@@ -180,7 +180,7 @@ class RecommendationService:
             raise ValueError(f"Not enough qualifying recommendations. Found {len(results)}, need {min_legs}.")
 
         # Select legs optimizing for total odds within range
-        selected_legs = []
+        selected_legs: List = []
         total_odds = 1.0
         combined_prob = 1.0
 

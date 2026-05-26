@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from database import Base
 from sqlalchemy import (
@@ -330,7 +331,7 @@ class LotteryDraw(Base):
     game = Column(String(50), nullable=False)
     draw_date = Column(Date, nullable=False)
     draw_number = Column(Integer)
-    numbers = Column(ARRAY(Integer), nullable=False)
+    numbers: Any = Column(ARRAY(Integer), nullable=False)
     bonus_number = Column(Integer, nullable=False)
     multiplier = Column(Integer)
     jackpot_amount = Column(Numeric(15, 2))

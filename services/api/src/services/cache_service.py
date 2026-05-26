@@ -38,7 +38,7 @@ class CacheService:
 
         return None
 
-    def set_prediction(self, match_id: str, prediction: dict, ttl: int = None):
+    def set_prediction(self, match_id: str, prediction: dict, ttl: Optional[int] = None):
         """Cache prediction"""
         if not self.redis:
             return
@@ -72,7 +72,7 @@ class CacheService:
             logger.error(f"Cache get error: {e}")
             return None
 
-    def set(self, key: str, value: str, ttl: int = None):
+    def set(self, key: str, value: str, ttl: Optional[int] = None):
         """Generic cache set"""
         if not self.redis:
             return

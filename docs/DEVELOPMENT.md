@@ -159,15 +159,24 @@ class MyCategory(BaseFeatureCategory):
 # Ensure you have seed data and features computed
 python3 scripts/seed_dev_data.py
 
+# Validate training data from local database
+cd services/ml-models
+PYTHONPATH=src python -m validation.validate_training_data
+
 # Train all models
-python3 -m services.ml_models.src.training.train_all_models \
-    --data-dir ./data/training-data \
-    --output-dir ./models \
-    --mlflow-uri http://localhost:5000
+PYTHONPATH=src python -m training.train_all_models \
+    --model-type all \
+    --output-dir ../../models
 
 # Or train a single model
-python3 -m services.ml_models.src.models.xgboost_model \
-    --train --save-path ./models/xgboost.pkl
+PYTHONPATH=src python -m training.train_all_models \
+    --model-type xgboost \
+    --output-dir ../../models
+
+# Evaluate the registered training results
+PYTHONPATH=src python -m evaluation.evaluate_models \
+    --model-dir ../../models \
+    --output-file ../../evaluation_report.json
 ```
 
 View experiments in MLflow at http://localhost:5000.
@@ -238,17 +247,16 @@ tests/e2e/
 
 | Tool | Config | Command |
 |---|---|---|
-| black | line-length 120 | `black services/ tests/` |
-| isort | profile=black | `isort services/ tests/` |
-| flake8 | max-line=120 | `flake8 services/ tests/` |
-| mypy | strict | `mypy services/` |
-| eslint | next/recommended | `cd services/frontend && npm run lint` |
+| black | line-length 120 | `make lint` |
+| isort | profile=black | `make lint` |
+| flake8 | max-line=120 | `make lint` |
+| mypy | baseline source check | `make type-check` |
+| eslint | next/core-web-vitals | `cd services/frontend && npm run lint` |
 
 Format everything:
 
 ```bash
-black services/ tests/ monitoring/model-monitoring/ scripts/
-isort services/ tests/ monitoring/model-monitoring/ scripts/
+make format
 cd services/frontend && npm run lint -- --fix
 ```
 
@@ -276,6 +284,7 @@ npm run build
 npm test
 
 # Run Playwright e2e tests (requires running stack)
+npx playwright install chromium
 npx playwright test
 ```
 

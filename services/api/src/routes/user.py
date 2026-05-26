@@ -153,7 +153,8 @@ async def get_betting_history(
         WHERE (:status_filter IS NULL OR status = :status_filter)
         AND (:bookmaker IS NULL OR bookmaker = :bookmaker)
     """)
-    total = db.execute(count_query, {"status_filter": status_filter, "bookmaker": bookmaker}).fetchone().total
+    count_result = db.execute(count_query, {"status_filter": status_filter, "bookmaker": bookmaker}).fetchone()
+    total = count_result.total if count_result is not None else 0
 
     bets = []
     for row in results:
@@ -219,6 +220,12 @@ async def record_bet(
         },
     ).fetchone()
 
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to record bet",
+        )
+
     db.commit()
 
     return {"id": str(result.id), "status": "recorded"}
@@ -252,20 +259,27 @@ async def get_dashboard(
     """)
 
     stats = db.execute(stats_query).fetchone()
+    if stats is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to load dashboard statistics",
+        )
 
     # Count active recommendations
     rec_query = text("""
         SELECT COUNT(*) as count FROM betting_recommendations
         WHERE status IN ('pending', 'placed')
     """)
-    active_recs = db.execute(rec_query).fetchone().count
+    active_recs_result = db.execute(rec_query).fetchone()
+    active_recs = active_recs_result.count if active_recs_result is not None else 0
 
     # Count upcoming matches
     upcoming_query = text("""
         SELECT COUNT(*) as count FROM matches
         WHERE status = 'scheduled' AND match_date > NOW()
     """)
-    upcoming = db.execute(upcoming_query).fetchone().count
+    upcoming_result = db.execute(upcoming_query).fetchone()
+    upcoming = upcoming_result.count if upcoming_result is not None else 0
 
     return {
         "total_bets": stats.total_bets,

@@ -39,14 +39,15 @@ test.describe('Navigation', () => {
 
   test('dashboard loads for authenticated users', async ({ page }) => {
     await page.goto('/');
-    await expect(page.getByText('Dashboard')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
   });
 
   test('navigation links are visible', async ({ page }) => {
     await page.goto('/');
-    await expect(page.getByRole('link', { name: 'Predictions' })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Recommendations' })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Accumulator' })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Analytics' })).toBeVisible();
+    const header = page.getByRole('banner');
+    await expect(header.getByRole('link', { name: 'Predictions' })).toBeVisible();
+    await expect(header.getByRole('link', { name: 'Recommendations' })).toBeVisible();
+    await expect(header.getByRole('link', { name: 'Accumulator' })).toBeVisible();
+    await expect(header.getByRole('link', { name: 'Analytics' })).toBeVisible();
   });
 });

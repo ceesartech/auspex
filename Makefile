@@ -1,6 +1,22 @@
 .PHONY: help setup test lint format docker-build docker-up docker-down clean db-migrate db-reset \
 	tf-init tf-plan tf-apply tf-destroy k8s-deploy k8s-status backup restore rollback health-check
 
+PYTHON_SERVICES := api data-ingestion feature-engineering ml-models
+PYTHON_SERVICE_DIRS := $(addprefix services/,$(PYTHON_SERVICES))
+# Baseline mypy gate. Tighten disabled error codes as services get stronger annotations.
+MYPY_FLAGS := --ignore-missing-imports --implicit-optional \
+	--disable-error-code=arg-type \
+	--disable-error-code=assignment \
+	--disable-error-code=attr-defined \
+	--disable-error-code=import-untyped \
+	--disable-error-code=misc \
+	--disable-error-code=operator \
+	--disable-error-code=return-value \
+	--disable-error-code=truthy-function \
+	--disable-error-code=union-attr \
+	--disable-error-code=valid-type \
+	--disable-error-code=var-annotated
+
 help:
 	@echo "Available commands:"
 	@echo "  make setup          - Set up development environment"
@@ -39,25 +55,39 @@ setup:
 	@echo "Setup complete! Activate virtualenv with: source venv/bin/activate"
 
 test:
-	pytest services/ --cov=services --cov-report=html --cov-report=term -v
+	@set -e; for svc in $(PYTHON_SERVICES); do \
+		echo "==> pytest services/$$svc"; \
+		( cd "services/$$svc" && PYTHONPATH=src pytest tests --rootdir=. --cov=src --cov-report=term -v ); \
+	done
 
 test-unit:
-	pytest services/ -m "not integration" --cov=services --cov-report=term -v
+	@set -e; for svc in $(PYTHON_SERVICES); do \
+		echo "==> pytest services/$$svc (unit)"; \
+		( cd "services/$$svc" && PYTHONPATH=src pytest tests -m "not integration" --rootdir=. --cov=src --cov-report=term -v ); \
+	done
 
 test-integration:
-	pytest services/ -m integration -v
+	@set -e; for svc in $(PYTHON_SERVICES); do \
+		echo "==> pytest services/$$svc (integration)"; \
+		rc=0; \
+		( cd "services/$$svc" && PYTHONPATH=src pytest tests -m integration --rootdir=. -v ) || rc=$$?; \
+		if [ "$$rc" -ne 0 ] && [ "$$rc" -ne 5 ]; then exit "$$rc"; fi; \
+	done
 
 lint:
-	flake8 services/ --max-line-length=120 --extend-ignore=E203,W503
-	black --check services/ --line-length=120
-	isort --check-only services/ --profile black
+	flake8 $(PYTHON_SERVICE_DIRS) --max-line-length=120 --extend-ignore=E203,W503
+	black --check $(PYTHON_SERVICE_DIRS) --line-length=120
+	isort --check-only $(PYTHON_SERVICE_DIRS) --profile black
 
 format:
-	black services/ --line-length=120
-	isort services/ --profile black
+	black $(PYTHON_SERVICE_DIRS) --line-length=120
+	isort $(PYTHON_SERVICE_DIRS) --profile black
 
 type-check:
-	mypy services/ --ignore-missing-imports
+	@set -e; for svc in $(PYTHON_SERVICES); do \
+		echo "==> mypy services/$$svc"; \
+		( cd "services/$$svc" && PYTHONPATH=src python -m mypy src $(MYPY_FLAGS) ); \
+	done
 
 docker-build:
 	docker-compose build

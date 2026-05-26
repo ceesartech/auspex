@@ -31,13 +31,79 @@ jobs:
           pip install flake8 black isort mypy
 
       - name: Run flake8
-        run: flake8 services/ --max-line-length=120 --extend-ignore=E203,W503
+        run: flake8 services/api services/data-ingestion services/feature-engineering services/ml-models --max-line-length=120 --extend-ignore=E203,W503
 
       - name: Run black check
-        run: black --check services/ --line-length=120
+        run: black --check services/api services/data-ingestion services/feature-engineering services/ml-models --line-length=120
 
       - name: Run isort check
-        run: isort --check-only services/ --profile black
+        run: isort --check-only services/api services/data-ingestion services/feature-engineering services/ml-models --profile black
+
+      - name: Run mypy
+        run: |
+          set -e
+          for svc in api data-ingestion feature-engineering ml-models; do
+            echo "::group::mypy services/$svc"
+            (
+              cd "services/$svc"
+              PYTHONPATH=src python -m mypy src \
+                --ignore-missing-imports \
+                --implicit-optional \
+                --disable-error-code=arg-type \
+                --disable-error-code=assignment \
+                --disable-error-code=attr-defined \
+                --disable-error-code=import-untyped \
+                --disable-error-code=misc \
+                --disable-error-code=operator \
+                --disable-error-code=return-value \
+                --disable-error-code=truthy-function \
+                --disable-error-code=union-attr \
+                --disable-error-code=valid-type \
+                --disable-error-code=var-annotated
+            )
+            echo "::endgroup::"
+          done
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: services/frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: services/frontend
+        run: npm ci
+
+      - name: Install Playwright browser
+        working-directory: services/frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Lint frontend
+        working-directory: services/frontend
+        run: npm run lint
+
+      - name: Type-check frontend
+        working-directory: services/frontend
+        run: npm run type-check
+
+      - name: Test frontend
+        working-directory: services/frontend
+        run: npm test -- --runInBand
+
+      - name: Build frontend
+        working-directory: services/frontend
+        run: npm run build
+
+      - name: Run frontend e2e tests
+        working-directory: services/frontend
+        run: npm run test:e2e
 
   test:
     name: Tests
@@ -154,7 +220,7 @@ jobs:
   build:
     name: Build Docker Images
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, frontend]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

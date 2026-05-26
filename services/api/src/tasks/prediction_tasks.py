@@ -2,7 +2,7 @@
 
 import logging
 from datetime import datetime
-from typing import List
+from typing import Any, Dict, List
 
 from celery_app import celery_app
 from database import get_db_context
@@ -17,7 +17,7 @@ def generate_predictions(self, match_ids: List[str]):
 
     logger.info(f"Generating predictions for {len(match_ids)} matches")
 
-    results = {"success": [], "failed": []}
+    results: Dict[str, List[Any]] = {"success": [], "failed": []}
 
     with get_db_context() as db:
         service = PredictionService(db)
@@ -94,6 +94,8 @@ def retrain_model(
             },
         ).fetchone()
 
+        if result is None:
+            raise RuntimeError("Failed to create retraining log")
         log_id = result.id
         db.commit()
 

@@ -145,7 +145,7 @@ async def get_odds_movements(
         )
 
     # Group by selection
-    movements = {}
+    movements: Dict[str, List[Dict[str, Any]]] = {}
     for row in results:
         selection = row.selection
         if selection not in movements:
@@ -162,7 +162,7 @@ async def get_odds_movements(
         )
 
     # Calculate movement summary
-    summary = {}
+    summary: Dict[str, Dict[str, Any]] = {}
     for selection, history in movements.items():
         if len(history) >= 2:
             opening = history[0]["odds_decimal"]
