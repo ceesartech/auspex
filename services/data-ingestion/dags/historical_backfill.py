@@ -10,10 +10,7 @@ from services.data_ingestion.src.core.config import FBrefConfig, ScraperConfig
 from services.data_ingestion.src.core.database import DatabaseManager
 from services.data_ingestion.src.scrapers.espn_scraper import ESPNScraper
 from services.data_ingestion.src.scrapers.fbref_scraper import FBrefScraper
-from services.data_ingestion.src.scrapers.lottery_scrapers import (
-    MegaMillionsScraper,
-    PowerballScraper,
-)
+from services.data_ingestion.src.scrapers.lottery_scrapers import MegaMillionsScraper, PowerballScraper
 from services.data_ingestion.src.scrapers.nhl_api_scraper import NHLAPIScraper
 from services.data_ingestion.src.scrapers.tennis_scraper import TennisScraper
 

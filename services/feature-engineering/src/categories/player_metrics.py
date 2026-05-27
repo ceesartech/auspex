@@ -8,11 +8,7 @@ from typing import Dict, List, Optional
 
 from ..core.registry import FeatureMetadata
 from ..utils.math_helpers import safe_divide
-from ..utils.sql_queries import (
-    PLAYER_AVAILABILITY,
-    PLAYER_RECENT_STATS,
-    TEAM_SQUAD,
-)
+from ..utils.sql_queries import PLAYER_AVAILABILITY, PLAYER_RECENT_STATS, TEAM_SQUAD
 from .base import BaseFeatureComputer, MatchContext
 
 logger = logging.getLogger(__name__)

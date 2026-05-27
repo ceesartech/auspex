@@ -2,11 +2,7 @@
 
 import pandas as pd
 import pytest
-from utils.training_data import (
-    get_feature_columns,
-    prepare_training_frame,
-    validate_training_frame,
-)
+from utils.training_data import get_feature_columns, prepare_training_frame, validate_training_frame
 
 
 def test_prepare_training_frame_flattens_features_and_derives_target():

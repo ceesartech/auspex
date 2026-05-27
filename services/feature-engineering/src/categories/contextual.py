@@ -7,11 +7,7 @@ from typing import Dict, Optional
 
 from ..core.registry import FeatureMetadata
 from ..utils.math_helpers import safe_divide
-from ..utils.sql_queries import (
-    LEAGUE_SEASON_STATS,
-    REFEREE_STATS,
-    TEAM_LAST_MATCH_DATE,
-)
+from ..utils.sql_queries import LEAGUE_SEASON_STATS, REFEREE_STATS, TEAM_LAST_MATCH_DATE
 from .base import BaseFeatureComputer, MatchContext
 
 logger = logging.getLogger(__name__)

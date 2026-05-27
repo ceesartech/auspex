@@ -8,11 +8,7 @@ import logging
 from typing import Dict, List, Optional
 
 from ..core.registry import FeatureMetadata
-from ..utils.math_helpers import (
-    decimal_odds_to_implied_probability,
-    remove_overround,
-    safe_divide,
-)
+from ..utils.math_helpers import decimal_odds_to_implied_probability, remove_overround, safe_divide
 from ..utils.sql_queries import LATEST_ODDS, MATCH_ODDS, OPENING_ODDS
 from .base import BaseFeatureComputer, MatchContext
 

@@ -8,10 +8,7 @@ from airflow.operators.python import PythonOperator
 from redis import Redis
 from services.data_ingestion.src.core.config import ScraperConfig
 from services.data_ingestion.src.core.database import DatabaseManager
-from services.data_ingestion.src.scrapers.lottery_scrapers import (
-    MegaMillionsScraper,
-    PowerballScraper,
-)
+from services.data_ingestion.src.scrapers.lottery_scrapers import MegaMillionsScraper, PowerballScraper
 
 logger = logging.getLogger(__name__)
 

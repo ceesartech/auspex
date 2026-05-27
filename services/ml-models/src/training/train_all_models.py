@@ -29,11 +29,7 @@ from models.neural_network import NeuralNetworkMatchPredictor
 from models.poisson_models import DixonColesPredictor, PoissonMatchPredictor
 from models.xgboost_model import XGBoostMatchPredictor
 from training.calibration import ProbabilityCalibrator
-from utils.training_data import (
-    get_feature_columns,
-    load_training_frame,
-    validate_training_frame,
-)
+from utils.training_data import get_feature_columns, load_training_frame, validate_training_frame
 
 logger = logging.getLogger(__name__)
 

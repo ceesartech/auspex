@@ -9,11 +9,7 @@ from typing import Dict, List, Optional
 from uuid import UUID
 
 from ..core.registry import FeatureMetadata
-from ..utils.math_helpers import (
-    coefficient_of_variation,
-    linear_trend,
-    safe_divide,
-)
+from ..utils.math_helpers import coefficient_of_variation, linear_trend, safe_divide
 from ..utils.sql_queries import TEAM_RECENT_MATCHES
 from .base import BaseFeatureComputer, MatchContext
 

@@ -6,21 +6,14 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from redis import Redis
-from services.data_ingestion.src.core.config import (
-    FBrefConfig,
-    ScraperConfig,
-    TransfermarktConfig,
-    UnderstatConfig,
-)
+from services.data_ingestion.src.core.config import FBrefConfig, ScraperConfig, TransfermarktConfig, UnderstatConfig
 from services.data_ingestion.src.core.database import DatabaseManager
 from services.data_ingestion.src.scrapers.espn_scraper import ESPNScraper
 from services.data_ingestion.src.scrapers.fbref_scraper import FBrefScraper
 from services.data_ingestion.src.scrapers.horse_racing_scraper import HorseRacingScraper
 from services.data_ingestion.src.scrapers.nhl_api_scraper import NHLAPIScraper
 from services.data_ingestion.src.scrapers.tennis_scraper import TennisScraper
-from services.data_ingestion.src.scrapers.transfermarkt_scraper import (
-    TransfermarktScraper,
-)
+from services.data_ingestion.src.scrapers.transfermarkt_scraper import TransfermarktScraper
 from services.data_ingestion.src.scrapers.understat_scraper import UnderstatScraper
 from services.data_ingestion.src.scrapers.weather_scraper import WeatherScraper
 

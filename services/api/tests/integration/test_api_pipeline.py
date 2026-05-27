@@ -32,11 +32,7 @@ class TestAuthToPredictionFlow:
 
     def test_login_generates_valid_token(self, mock_settings):
         """Login with correct DOB returns a valid JWT"""
-        from auth.jwt_handler import (
-            create_access_token,
-            verify_date_of_birth,
-            verify_token,
-        )
+        from auth.jwt_handler import create_access_token, verify_date_of_birth, verify_token
 
         # Step 1: Verify DOB
         assert verify_date_of_birth("1994-05-09") is True

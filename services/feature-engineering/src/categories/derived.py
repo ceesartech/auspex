@@ -12,11 +12,7 @@ from typing import Dict, Optional
 import numpy as np
 
 from ..core.registry import FeatureMetadata
-from ..utils.math_helpers import (
-    elo_expected,
-    poisson_match_probabilities,
-    safe_divide,
-)
+from ..utils.math_helpers import elo_expected, poisson_match_probabilities, safe_divide
 from .base import BaseFeatureComputer, MatchContext
 
 logger = logging.getLogger(__name__)
