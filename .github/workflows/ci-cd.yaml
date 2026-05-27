@@ -26,18 +26,24 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
+        # Pin versions so local + CI black/isort agree. Floating versions
+        # caused intermittent "would reformat" diffs between Mac (py3.9)
+        # and CI (py3.11) because black's target-version autodetect
+        # depends on the running interpreter.
         run: |
           pip install --upgrade pip
-          pip install flake8 black isort mypy
+          pip install flake8==7.1.1 black==25.11.0 isort==5.13.2 mypy==1.13.0
 
       - name: Run flake8
         run: flake8 services/api services/data-ingestion services/feature-engineering services/ml-models --max-line-length=120 --extend-ignore=E203,W503
 
       - name: Run black check
-        run: black --check services/api services/data-ingestion services/feature-engineering services/ml-models --line-length=120
+        # Show diffs in CI output so future drifts are debuggable.
+        # pyproject.toml at repo root pins target-version + line-length.
+        run: black --check --diff services/api services/data-ingestion services/feature-engineering services/ml-models
 
       - name: Run isort check
-        run: isort --check-only services/api services/data-ingestion services/feature-engineering services/ml-models --profile black
+        run: isort --check-only --diff services/api services/data-ingestion services/feature-engineering services/ml-models
 
       - name: Run mypy
         run: |
