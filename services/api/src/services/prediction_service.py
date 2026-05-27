@@ -120,7 +120,8 @@ class PredictionService:
     ) -> List[PredictionResponse]:
         """Get predictions for upcoming matches"""
 
-        query = text("""
+        query = text(
+            """
             SELECT p.id, p.match_id, p.predicted_outcome, p.confidence,
                    p.probabilities, p.model_name, p.model_version,
                    p.features_used, p.feature_importance,
@@ -137,7 +138,8 @@ class PredictionService:
             AND (:league IS NULL OR l.name = :league)
             ORDER BY m.match_date ASC
             LIMIT :limit
-        """)
+        """
+        )
 
         db = self._require_db()
         results = db.execute(query, {"sport": sport, "league": league, "limit": limit}).fetchall()
@@ -167,7 +169,8 @@ class PredictionService:
     def get_live_predictions(self) -> List[PredictionResponse]:
         """Get predictions for live matches"""
 
-        query = text("""
+        query = text(
+            """
             SELECT p.id, p.match_id, p.predicted_outcome, p.confidence,
                    p.probabilities, p.model_version,
                    m.match_date, m.venue,
@@ -180,7 +183,8 @@ class PredictionService:
             JOIN teams at ON m.away_team_id = at.id
             WHERE m.status = 'live'
             ORDER BY m.match_date ASC
-        """)
+        """
+        )
 
         db = self._require_db()
         results = db.execute(query).fetchall()
@@ -210,7 +214,8 @@ class PredictionService:
     def _get_match_data(self, match_id: str) -> Optional[Dict]:
         """Get match information from database"""
 
-        query = text("""
+        query = text(
+            """
             SELECT m.id, l.name as league_name,
                    ht.name as home_team, at.name as away_team,
                    m.match_date, m.venue
@@ -219,7 +224,8 @@ class PredictionService:
             JOIN teams ht ON m.home_team_id = ht.id
             JOIN teams at ON m.away_team_id = at.id
             WHERE m.id = :match_id
-        """)
+        """
+        )
 
         db = self._require_db()
         result = db.execute(query, {"match_id": match_id}).fetchone()
@@ -238,12 +244,14 @@ class PredictionService:
     def _get_match_features(self, match_id: str) -> Dict[str, Any]:
         """Get computed features for a match from cache"""
 
-        query = text("""
+        query = text(
+            """
             SELECT features FROM features_cache
             WHERE match_id = :match_id
             AND expires_at > NOW()
             ORDER BY computed_at DESC LIMIT 1
-        """)
+        """
+        )
 
         db = self._require_db()
         result = db.execute(query, {"match_id": match_id}).fetchone()
@@ -254,12 +262,14 @@ class PredictionService:
     def _get_stored_prediction(self, match_id: str) -> Optional[Dict]:
         """Get existing prediction from database"""
 
-        query = text("""
+        query = text(
+            """
             SELECT predicted_outcome, confidence, probabilities
             FROM predictions
             WHERE match_id = :match_id
             ORDER BY created_at DESC LIMIT 1
-        """)
+        """
+        )
 
         db = self._require_db()
         result = db.execute(query, {"match_id": match_id}).fetchone()
@@ -274,7 +284,8 @@ class PredictionService:
     def _store_prediction(self, match_id: str, prediction: Dict):
         """Store prediction in database"""
 
-        query = text("""
+        query = text(
+            """
             INSERT INTO predictions
             (match_id, model_name, model_version, prediction_type,
              predicted_outcome, confidence, probabilities)
@@ -286,7 +297,8 @@ class PredictionService:
                 confidence = EXCLUDED.confidence,
                 probabilities = EXCLUDED.probabilities,
                 updated_at = NOW()
-        """)
+        """
+        )
 
         try:
             import json

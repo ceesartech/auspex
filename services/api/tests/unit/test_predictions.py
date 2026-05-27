@@ -198,10 +198,12 @@ class TestCacheService:
             # Cache keys are now scoped by model version + feature hash, so
             # invalidation has to SCAN-and-delete across all variants for a
             # given match_id.
-            mock_redis.scan_iter.return_value = iter([
-                "prediction:match123:v0:nofeat",
-                "prediction:match123:ensemble_v1.0+12345:abc123",
-            ])
+            mock_redis.scan_iter.return_value = iter(
+                [
+                    "prediction:match123:v0:nofeat",
+                    "prediction:match123:ensemble_v1.0+12345:abc123",
+                ]
+            )
             mock_redis_cls.from_url.return_value = mock_redis
 
             from services.cache_service import CacheService
