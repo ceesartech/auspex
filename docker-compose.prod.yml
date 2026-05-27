@@ -1,0 +1,82 @@
+# Production overlay for the personal-VM deployment path.
+#
+# Usage on the VM:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Adds:
+#   - frontend: Next.js standalone server
+#   - caddy:    HTTPS reverse proxy with automatic Let's Encrypt certs.
+#               Routes:
+#                 ${AUSPEX_DOMAIN}            -> frontend:3000
+#                 ${AUSPEX_DOMAIN}/api/       -> api:8000/api/
+#                 ${AUSPEX_DOMAIN}/ws         -> api:8000/ws
+#                 ${AUSPEX_DOMAIN}/metrics    -> api:8000/metrics (basic auth)
+#                 grafana.${AUSPEX_DOMAIN}    -> grafana:3000
+#
+# Required env vars (set in .env):
+#   AUSPEX_DOMAIN         e.g. auspex.example.com
+#   AUSPEX_ACME_EMAIL     e.g. you@example.com (for Let's Encrypt)
+#
+# Local-only / dev: do NOT use this overlay; the base docker-compose.yml
+# exposes the API on :8000 and you can run frontend via `npm run dev`.
+
+services:
+  frontend:
+    build:
+      context: services/frontend
+      dockerfile: ../../docker/Dockerfile.frontend
+    container_name: auspex-frontend
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=https://${AUSPEX_DOMAIN}
+      - NEXT_PUBLIC_WS_URL=wss://${AUSPEX_DOMAIN}
+    networks:
+      - betting-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: auspex-caddy
+    environment:
+      - AUSPEX_DOMAIN=${AUSPEX_DOMAIN}
+      - AUSPEX_ACME_EMAIL=${AUSPEX_ACME_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infrastructure/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - frontend
+    networks:
+      - betting-network
+    restart: unless-stopped
+
+  # In production we don't want the raw API/Grafana ports exposed to the
+  # public internet — only Caddy should reach them. Override the upstream
+  # service definitions to drop their published ports.
+  api:
+    ports: []
+  grafana:
+    ports: []
+  prometheus:
+    ports: []
+  mlflow:
+    ports: []
+  redis:
+    ports: []
+  postgres:
+    ports: []
+
+volumes:
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local

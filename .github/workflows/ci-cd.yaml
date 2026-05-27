@@ -251,29 +251,63 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}:${{ github.sha }}
 
   deploy:
-    name: Deploy to Production
+    name: Deploy to VM
     runs-on: ubuntu-latest
     needs: build
-    # Skip deploy unless the GCP service account secret is configured.
-    # Setting `vars.DEPLOY_ENABLED=true` in the repo settings opts in.
+    # Personal-VM deployment via SSH + docker compose. Opt in by setting:
+    #   vars.DEPLOY_ENABLED=true
+    #   vars.DEPLOY_HOST=<vm-ip-or-hostname>
+    #   vars.DEPLOY_USER=<ssh-user>  (default: ubuntu)
+    #   vars.DEPLOY_PATH=<repo-path-on-vm> (default: /opt/auspex)
+    #   secrets.DEPLOY_SSH_KEY=<private-key-with-access-to-VM>
+    # GKE-based deployment is gone; configure the VM once via
+    # scripts/provision_vm.sh and CI just rolls images forward.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
     environment: production
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Authenticate to GCP
-        uses: google-github-actions/auth@v2
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.9.0
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
 
-      - name: Set up GKE credentials
-        uses: google-github-actions/get-gke-credentials@v2
-        with:
-          cluster_name: betting-system-cluster
-          location: us-central1-a
-
-      - name: Deploy to Kubernetes
+      - name: Trust host key
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
         run: |
-          kubectl set image deployment/betting-api api=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/api:${{ github.sha }} -n betting-system
-          kubectl rollout status deployment/betting-api -n betting-system --timeout=300s
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Pull new images and roll services
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER || 'ubuntu' }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/auspex' }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" bash -se <<EOF
+          set -euo pipefail
+          cd "$DEPLOY_PATH"
+          git fetch --depth 1 origin main
+          git checkout "$IMAGE_TAG"
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+          EOF
+
+      - name: Smoke test
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER || 'ubuntu' }}
+        run: |
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if ssh "$DEPLOY_USER@$DEPLOY_HOST" 'curl -fsS http://localhost:8000/health'; then
+              echo "API healthy"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "API failed to come up"; exit 1

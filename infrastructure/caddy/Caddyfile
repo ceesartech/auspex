@@ -1,0 +1,91 @@
+# Auspex production reverse proxy.
+#
+# Caddy handles TLS automatically via Let's Encrypt. The first request
+# to each hostname triggers cert issuance; subsequent requests use the
+# cached cert and renew in the background.
+#
+# Routes:
+#   /api/*    -> api:8000
+#   /ws/*     -> api:8000 (WebSocket upgrade)
+#   /docs     -> api:8000 (OpenAPI swagger)
+#   /metrics  -> api:8000 (Prometheus scrape — IP-restricted)
+#   /         -> frontend:3000 (Next.js)
+
+{
+	email {$AUSPEX_ACME_EMAIL}
+
+	# Enable HTTP/3 (QUIC) for lower-latency mobile clients.
+	servers {
+		protocols h1 h2 h3
+	}
+}
+
+{$AUSPEX_DOMAIN} {
+	encode zstd gzip
+
+	# API routes — forward to FastAPI on the internal docker network.
+	handle_path /api/* {
+		reverse_proxy api:8000 {
+			# Pass through trace headers if present so server-side
+			# tracing can stitch with the edge.
+			header_up X-Forwarded-Host {host}
+		}
+	}
+
+	# WebSocket upgrade for live predictions.
+	handle /ws* {
+		reverse_proxy api:8000
+	}
+
+	# OpenAPI docs — useful in personal-use mode for poking at the API.
+	handle /docs {
+		reverse_proxy api:8000
+	}
+	handle /openapi.json {
+		reverse_proxy api:8000
+	}
+
+	# Prometheus metrics — restricted to private/loopback so it isn't
+	# exposed to the public internet.
+	@metrics_allowed {
+		path /metrics*
+		remote_ip 127.0.0.1/32 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+	}
+	handle @metrics_allowed {
+		reverse_proxy api:8000
+	}
+	handle /metrics* {
+		respond "Forbidden" 403
+	}
+
+	# Health check — used by external uptime probes.
+	handle /health {
+		reverse_proxy api:8000
+	}
+
+	# Everything else -> Next.js frontend.
+	handle {
+		reverse_proxy frontend:3000
+	}
+
+	# Security headers. Avoid HSTS preload before you're confident TLS
+	# is stable on the domain.
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+# Grafana on a subdomain so cookies and CSRF don't collide with the
+# main app. Requires a wildcard or grafana.<domain> A record.
+grafana.{$AUSPEX_DOMAIN} {
+	reverse_proxy grafana:3000
+}

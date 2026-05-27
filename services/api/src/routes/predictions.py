@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from models.requests import BulkPredictionRequest, PredictionRequest
 from models.responses import PredictionResponse
 from services.cache_service import CacheService
-from services.prediction_service import PredictionService
+from services.prediction_service import PredictionService, get_model_version
 from sqlalchemy.orm import Session
 
 router = APIRouter()
@@ -27,7 +27,9 @@ async def get_prediction(
     logger.info(f"Prediction request for match {request.match_id}")
 
     cache_service = CacheService()
-    cached = cache_service.get_prediction(request.match_id)
+    model_version = get_model_version()
+
+    cached = cache_service.get_prediction(request.match_id, model_version=model_version)
     if cached:
         logger.info(f"Returning cached prediction for match {request.match_id}")
         return cached
@@ -41,7 +43,11 @@ async def get_prediction(
             include_alternate_models=request.include_alternate_models,
         )
 
-        cache_service.set_prediction(request.match_id, prediction.model_dump())
+        cache_service.set_prediction(
+            request.match_id,
+            prediction.model_dump(),
+            model_version=model_version,
+        )
 
         return prediction
 
@@ -67,10 +73,11 @@ async def get_bulk_predictions(
 
     prediction_service = PredictionService(db)
     cache_service = CacheService()
+    model_version = get_model_version()
 
     predictions = []
     for match_id in request.match_ids:
-        cached = cache_service.get_prediction(match_id)
+        cached = cache_service.get_prediction(match_id, model_version=model_version)
         if cached:
             predictions.append(cached)
         else:
@@ -79,7 +86,11 @@ async def get_bulk_predictions(
                     match_id=match_id,
                     include_explanation=request.include_explanation,
                 )
-                cache_service.set_prediction(match_id, prediction.model_dump())
+                cache_service.set_prediction(
+                    match_id,
+                    prediction.model_dump(),
+                    model_version=model_version,
+                )
                 predictions.append(prediction)
             except Exception as e:
                 logger.error(f"Failed to predict match {match_id}: {e}")

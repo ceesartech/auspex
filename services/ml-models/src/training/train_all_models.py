@@ -27,6 +27,7 @@ from models.model_registry import ModelRegistry
 from models.neural_network import NeuralNetworkMatchPredictor
 from models.poisson_models import DixonColesPredictor, PoissonMatchPredictor
 from models.xgboost_model import XGBoostMatchPredictor
+from inference.onnx_converter import ONNXConverter
 from training.calibration import ProbabilityCalibrator
 from utils.training_data import (
     get_feature_columns,
@@ -248,6 +249,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-ratio", type=float, default=0.7)
     parser.add_argument("--val-ratio", type=float, default=0.15)
     parser.add_argument("--no-calibration", action="store_true")
+    parser.add_argument(
+        "--export-onnx",
+        action="store_true",
+        help="Convert XGBoost/LightGBM/Neural-Network models to ONNX after training. "
+        "ONNX inference is 10-50x faster than the Python equivalents.",
+    )
     return parser
 
 
@@ -282,11 +289,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.error("Model training failed: %s", exc, exc_info=True)
         return 1
 
+    onnx_paths: Dict[str, str] = {}
+    if args.export_onnx:
+        onnx_paths = _export_onnx(
+            orchestrator.trained_models,
+            features=features,
+            output_dir=Path(args.output_dir) / "onnx",
+        )
+
     report = {
         "data_quality": quality.to_dict(),
         "trained_models": sorted(orchestrator.trained_models.keys()),
         "best_model": orchestrator.get_best_model(),
         "results": results,
+        "onnx_models": onnx_paths,
     }
 
     output_dir = Path(args.output_dir)
@@ -307,6 +323,40 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     print(json.dumps(report, indent=2, default=_json_default))
     return 0
+
+
+def _export_onnx(
+    trained_models: Dict[str, BaseModel],
+    features: List[str],
+    output_dir: Path,
+) -> Dict[str, str]:
+    """Best-effort ONNX export. Skips models whose backend isn't supported.
+
+    Failures are logged but don't fail the training run — ONNX is a
+    nice-to-have for latency, not a correctness requirement.
+    """
+    converter = ONNXConverter(output_dir=str(output_dir))
+    paths: Dict[str, str] = {}
+    for name, model in trained_models.items():
+        try:
+            backend = getattr(model, "model", None)
+            if backend is None:
+                continue
+            module = type(backend).__module__
+            if module.startswith("xgboost"):
+                p = converter.convert_xgboost(backend, features, name)
+            elif module.startswith("lightgbm"):
+                p = converter.convert_lightgbm(backend, features, name)
+            elif "torch" in module:
+                p = converter.convert_pytorch(backend, len(features), name)
+            else:
+                logger.info("ONNX export skipped for %s (backend=%s)", name, module)
+                continue
+            if p:
+                paths[name] = p
+        except Exception as exc:
+            logger.warning("ONNX export failed for %s: %s", name, exc)
+    return paths
 
 
 def _split_temporally(frame: pd.DataFrame, train_ratio: float, val_ratio: float) -> tuple[pd.DataFrame, pd.DataFrame]:

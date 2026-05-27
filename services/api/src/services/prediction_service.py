@@ -12,35 +12,69 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
+# Process-wide model registry. Populated once during app startup
+# (see services/api/src/main.py lifespan) and shared across requests.
+# Loading joblib pickles on every request adds ~10-50ms; this avoids that.
+_MODELS: Dict[str, Any] = {}
+_MODEL_VERSION: str = "ensemble_v1.0"
+
+
+def get_loaded_models() -> Dict[str, Any]:
+    """Return the process-wide loaded model registry."""
+    return _MODELS
+
+
+def get_model_version() -> str:
+    """Version string for the currently loaded ensemble. Used in cache keys."""
+    return _MODEL_VERSION
+
+
+def load_models_into_process(model_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Load ML models into the process-wide registry. Idempotent.
+
+    Called once from FastAPI's lifespan startup. Returns the loaded models.
+    Subsequent calls are no-ops if models are already loaded.
+    """
+    global _MODEL_VERSION
+
+    if _MODELS:
+        return _MODELS
+
+    model_path = model_dir or (Path(settings.MODEL_PATH) / "production")
+    try:
+        import joblib
+
+        ensemble_path = model_path / "ensemble_model.pkl"
+        if ensemble_path.exists():
+            _MODELS["ensemble"] = joblib.load(ensemble_path)
+            # Derive version from mtime to invalidate caches when artifacts change.
+            mtime = int(ensemble_path.stat().st_mtime)
+            _MODEL_VERSION = f"ensemble_v1.0+{mtime}"
+            logger.info("Loaded ensemble model (version=%s)", _MODEL_VERSION)
+        else:
+            logger.warning("Ensemble model not found at %s; serving from DB fallback", ensemble_path)
+    except Exception as e:
+        logger.error("Failed to load models: %s", e, exc_info=True)
+    return _MODELS
+
 
 class PredictionService:
     """Service for generating predictions"""
 
-    def __init__(self, db: Optional[Session] = None):
+    def __init__(self, db: Optional[Session] = None, models: Optional[Dict[str, Any]] = None):
         self.db = db
-        self.models: Dict[str, Any] = {}
+        # Default to the process-wide registry. Tests can pass their own.
+        self.models: Dict[str, Any] = models if models is not None else _MODELS
 
     def _require_db(self) -> Session:
         if self.db is None:
             raise RuntimeError("PredictionService requires a database session for this operation")
         return self.db
 
-    def load_models(self):
-        """Load trained ML models"""
-        model_path = Path(settings.MODEL_PATH) / "production"
-
-        try:
-            import joblib
-
-            ensemble_path = model_path / "ensemble_model.pkl"
-            if ensemble_path.exists():
-                self.models["ensemble"] = joblib.load(ensemble_path)
-                logger.info("Loaded ensemble model")
-            else:
-                logger.warning(f"Ensemble model not found at {ensemble_path}")
-
-        except Exception as e:
-            logger.error(f"Failed to load models: {e}")
+    def load_models(self) -> None:
+        """Compatibility shim. Real loading happens in load_models_into_process()."""
+        load_models_into_process()
+        self.models = _MODELS
 
     def predict_match(
         self,
@@ -69,7 +103,7 @@ class PredictionService:
             predicted_outcome=prediction["predicted_label"],
             probabilities=prediction["probabilities"],
             confidence=prediction["confidence"],
-            model_version="ensemble_v1.0",
+            model_version=_MODEL_VERSION,
             timestamp=datetime.utcnow(),
             explanation=prediction.get("explanation") if include_explanation else None,
         )

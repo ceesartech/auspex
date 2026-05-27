@@ -1,13 +1,59 @@
 # Deployment Guide
 
+> **Personal-VM path (default).** The system is sized and tuned for personal
+> use on a single small VM with $0 cloud bill (Oracle Cloud free tier) or
+> ~$5/mo (Hetzner). See [Personal-VM deployment](#personal-vm-deployment)
+> below for the recommended path.
+>
+> **Multi-tenant / GKE path.** The GKE/Cloud SQL/Memorystore instructions
+> further down still work but are unsupported for personal use — they cost
+> ~$90/mo idle and add operational overhead you don't need.
+
+## Personal-VM deployment
+
+The fastest way to get the system live on a single VM:
+
+```bash
+# On the VM (Ubuntu 22.04+):
+curl -fsSL https://raw.githubusercontent.com/ceesartech/auspex/main/scripts/provision_vm.sh | sudo -E bash
+```
+
+The script installs Docker, clones the repo to `/opt/auspex`, sets up UFW,
+swap, and unattended security upgrades. Then follow the printed next-steps:
+
+1. Fill in `/opt/auspex/.env` (secrets, domain, ACME email).
+2. Point your DNS A record at the VM's public IP.
+3. Bring the stack up:
+   ```bash
+   cd /opt/auspex
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+   ```
+4. Load historical training data:
+   ```bash
+   docker compose exec api python /app/scripts/load_football_data.py \
+     --leagues E0,D1,I1,SP1,F1 --seasons 10
+   docker compose exec api python /app/scripts/load_statsbomb.py --all-open
+   ```
+5. Train initial models (uses time-series CV + isotonic calibration + ONNX
+   export by default):
+   ```bash
+   docker compose exec api python -m training.train_all_models \
+     --output-dir /models/staging --export-onnx
+   mv /models/staging /models/production  # promote
+   docker compose restart api              # picks up new artifacts
+   ```
+6. Verify: `curl https://YOUR_DOMAIN/health`.
+
+After that, automated retraining runs weekly via the `retrain_models`
+Airflow DAG. CI auto-deploys are opt-in — see [CI/CD pipeline](#cicd-pipeline).
+
 ## Environments
 
 | Environment | Infrastructure | Purpose |
 |---|---|---|
 | Local | Docker Compose | Development and testing |
-| Dev | GKE (single-node) | CI preview deploys |
-| Staging | GKE (small cluster) | Pre-production validation |
-| Production | GKE + Cloud SQL + Memorystore | Live system |
+| Production (personal) | Single VM + Docker Compose + Caddy | Recommended for personal use |
+| Production (multi-tenant) | GKE + Cloud SQL + Memorystore | Optional — adds cost, removes simplicity |
 
 ---
 

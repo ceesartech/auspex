@@ -25,3 +25,10 @@ great-expectations==0.18.22
 
 # DVC — data and model versioning
 dvc==3.56.0
+
+# ONNX export + runtime — enables fast inference (10-50x speedup for
+# XGBoost/LightGBM/PyTorch served from the API). Required only if you
+# pass --export-onnx to train_all_models.py or if the API loads .onnx
+# artifacts.
+onnxmltools==1.13.0
+onnxruntime==1.20.1

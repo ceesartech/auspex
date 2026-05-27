@@ -32,11 +32,11 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Betting System API...")
     logger.info(f"Environment: {settings.API_VERSION}")
 
-    # Load ML models
-    from services.prediction_service import PredictionService
+    # Load ML models into the process-wide registry. Subsequent requests
+    # reuse the loaded artifacts instead of re-reading joblib pickles.
+    from services.prediction_service import load_models_into_process
 
-    prediction_service = PredictionService()
-    prediction_service.load_models()
+    load_models_into_process()
 
     logger.info("API ready to serve requests")
 

@@ -1,10 +1,14 @@
 """Hyperparameter optimization with Optuna."""
 
 import logging
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
+import numpy as np
 import optuna
+import pandas as pd
 from models.model_config import ModelType
+
+from training.cross_validation import TimeSeriesCV
 
 logger = logging.getLogger(__name__)
 
@@ -133,3 +137,59 @@ class HyperparameterOptimizer:
             return optuna.importance.get_param_importances(self.study)
         except Exception:
             return {}
+
+
+def make_time_series_cv_objective(
+    *,
+    model_class: type,
+    train_df: pd.DataFrame,
+    features: List[str],
+    target: str,
+    n_splits: int = 5,
+    date_column: str = "match_date",
+    metric: str = "log_loss",
+) -> Callable[[optuna.Trial], float]:
+    """Build an Optuna objective that scores trials by time-series CV.
+
+    Sports data is temporal: random k-fold CV leaks future information into
+    the training fold (a model can learn from games that hadn't happened yet
+    at training time). TimeSeriesCV enforces train_idx < val_idx by date so
+    each fold's validation set is strictly in the future of its training set.
+
+    Returns an objective function that, given a trial's suggested params,
+    fits `model_class(config_from_trial)` on each CV fold and averages the
+    metric. Pass the returned callable to `HyperparameterOptimizer.optimize`.
+    """
+    search_space = SEARCH_SPACES.get(getattr(model_class, "MODEL_TYPE", None))
+    if search_space is None:
+        raise ValueError(
+            f"No registered search space for {model_class.__name__}. "
+            "Add it to SEARCH_SPACES or write a custom objective."
+        )
+
+    cv = TimeSeriesCV(n_splits=n_splits, date_column=date_column)
+
+    def objective(trial: optuna.Trial) -> float:
+        params = search_space(trial)
+        fold_scores: List[float] = []
+        for fold in cv.split(train_df):
+            train_fold = fold["train"]
+            val_fold = fold["val"]
+            try:
+                model = model_class(params)
+                model.train(train_fold, val_df=val_fold, features=features, target=target)
+                metrics = getattr(model, "validation_metrics", {}) or {}
+                score = metrics.get(metric)
+                if score is None:
+                    # Pruning: if the model doesn't report the requested metric,
+                    # skip this trial rather than guess.
+                    raise optuna.TrialPruned()
+                fold_scores.append(float(score))
+            except optuna.TrialPruned:
+                raise
+            except Exception as exc:
+                logger.warning("CV fold failed for trial #%s: %s", trial.number, exc)
+                raise optuna.TrialPruned()
+        return float(np.mean(fold_scores))
+
+    return objective
