@@ -42,11 +42,13 @@ async def get_preferences(
 ) -> Dict[str, Any]:
     """Get all user preferences"""
 
-    query = text("""
+    query = text(
+        """
         SELECT preference_key, preference_value, description
         FROM user_preferences
         ORDER BY preference_key
-    """)
+    """
+    )
 
     results = db.execute(query).fetchall()
 
@@ -70,13 +72,15 @@ async def update_preferences(
 
     # Use SQL-standard CAST(); ":value::jsonb" confuses SQLAlchemy's named-
     # parameter parser (the trailing "::" looks like part of the bind name).
-    upsert_query = text("""
+    upsert_query = text(
+        """
         INSERT INTO user_preferences (preference_key, preference_value, description)
         VALUES (:key, CAST(:value AS jsonb), :description)
         ON CONFLICT (preference_key) DO UPDATE
         SET preference_value = EXCLUDED.preference_value,
             updated_at = NOW()
-    """)
+    """
+    )
 
     update_data = updates.model_dump(exclude_none=True)
 
@@ -119,7 +123,8 @@ async def get_betting_history(
 ) -> Dict[str, Any]:
     """Get user betting history with P&L"""
 
-    query = text("""
+    query = text(
+        """
         SELECT bh.id, bh.bookmaker, bh.bet_type, bh.selection,
                bh.odds, bh.stake, bh.potential_return, bh.actual_return,
                bh.status, bh.notes, bh.placed_at, bh.settled_at,
@@ -135,7 +140,8 @@ async def get_betting_history(
         AND (:bookmaker IS NULL OR bh.bookmaker = :bookmaker)
         ORDER BY bh.placed_at DESC
         LIMIT :limit OFFSET :offset
-    """)
+    """
+    )
 
     results = db.execute(
         query,
@@ -148,11 +154,13 @@ async def get_betting_history(
     ).fetchall()
 
     # Get total count
-    count_query = text("""
+    count_query = text(
+        """
         SELECT COUNT(*) as total FROM betting_history
         WHERE (:status_filter IS NULL OR status = :status_filter)
         AND (:bookmaker IS NULL OR bookmaker = :bookmaker)
-    """)
+    """
+    )
     count_result = db.execute(count_query, {"status_filter": status_filter, "bookmaker": bookmaker}).fetchone()
     total = count_result.total if count_result is not None else 0
 
@@ -196,14 +204,16 @@ async def record_bet(
 ) -> Dict[str, Any]:
     """Record a placed bet"""
 
-    query = text("""
+    query = text(
+        """
         INSERT INTO betting_history
         (recommendation_id, match_id, bookmaker, bet_type, selection,
          odds, stake, potential_return, notes)
         VALUES (:recommendation_id, :match_id, :bookmaker, :bet_type,
                 :selection, :odds, :stake, :potential_return, :notes)
         RETURNING id
-    """)
+    """
+    )
 
     result = db.execute(
         query,
@@ -238,7 +248,8 @@ async def get_dashboard(
 ) -> Dict[str, Any]:
     """Get user dashboard summary statistics"""
 
-    stats_query = text("""
+    stats_query = text(
+        """
         SELECT
             COUNT(*) as total_bets,
             COUNT(*) FILTER (WHERE status = 'pending') as active_bets,
@@ -256,7 +267,8 @@ async def get_dashboard(
                      COUNT(*) FILTER (WHERE status IN ('won', 'lost')) * 100)::numeric, 2)
                 ELSE 0 END as win_rate
         FROM betting_history
-    """)
+    """
+    )
 
     stats = db.execute(stats_query).fetchone()
     if stats is None:
@@ -266,18 +278,22 @@ async def get_dashboard(
         )
 
     # Count active recommendations
-    rec_query = text("""
+    rec_query = text(
+        """
         SELECT COUNT(*) as count FROM betting_recommendations
         WHERE status IN ('pending', 'placed')
-    """)
+    """
+    )
     active_recs_result = db.execute(rec_query).fetchone()
     active_recs = active_recs_result.count if active_recs_result is not None else 0
 
     # Count upcoming matches
-    upcoming_query = text("""
+    upcoming_query = text(
+        """
         SELECT COUNT(*) as count FROM matches
         WHERE status = 'scheduled' AND match_date > NOW()
-    """)
+    """
+    )
     upcoming_result = db.execute(upcoming_query).fetchone()
     upcoming = upcoming_result.count if upcoming_result is not None else 0
 

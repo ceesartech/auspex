@@ -25,11 +25,13 @@ class NotificationService:
     ) -> str:
         """Create a system notification"""
 
-        query = text("""
+        query = text(
+            """
             INSERT INTO system_notifications (type, title, message, source, metadata)
             VALUES (:type, :title, :message, :source, CAST(:metadata AS jsonb))
             RETURNING id
-        """)
+        """
+        )
 
         import json
 
@@ -53,13 +55,15 @@ class NotificationService:
     def get_unread_notifications(self, limit: int = 50) -> List[Dict]:
         """Get unread notifications"""
 
-        query = text("""
+        query = text(
+            """
             SELECT id, type, title, message, source, metadata, created_at
             FROM system_notifications
             WHERE is_read = false
             ORDER BY created_at DESC
             LIMIT :limit
-        """)
+        """
+        )
 
         results = self.db.execute(query, {"limit": limit}).fetchall()
 
@@ -79,17 +83,20 @@ class NotificationService:
     def mark_as_read(self, notification_id: str):
         """Mark a notification as read"""
 
-        query = text("""
+        query = text(
+            """
             UPDATE system_notifications SET is_read = true
             WHERE id = :id
-        """)
+        """
+        )
         self.db.execute(query, {"id": notification_id})
         self.db.commit()
 
     def check_high_value_bets(self, min_ev: float = 0.10) -> List[Dict]:
         """Check for high-value bet opportunities and create alerts"""
 
-        query = text("""
+        query = text(
+            """
             SELECT br.id, br.bet_type, br.selection, br.odds_at_recommendation,
                    br.expected_value, br.bookmaker,
                    m.match_date, ht.name as home_team, at.name as away_team,
@@ -103,7 +110,8 @@ class NotificationService:
             AND m.match_date > NOW()
             AND br.expected_value >= :min_ev
             ORDER BY br.expected_value DESC
-        """)
+        """
+        )
 
         results = self.db.execute(query, {"min_ev": min_ev}).fetchall()
 
@@ -138,7 +146,8 @@ class NotificationService:
     def check_model_drift(self, threshold: float = 0.05) -> List[Dict]:
         """Check for model performance drift and alert if degradation detected"""
 
-        query = text("""
+        query = text(
+            """
             WITH recent_performance AS (
                 SELECT model_name, model_version, metrics,
                        evaluation_date,
@@ -153,7 +162,8 @@ class NotificationService:
             FROM recent_performance curr
             JOIN recent_performance prev
                 ON curr.model_name = prev.model_name AND curr.rn = 1 AND prev.rn = 2
-        """)
+        """
+        )
 
         results = self.db.execute(query).fetchall()
 

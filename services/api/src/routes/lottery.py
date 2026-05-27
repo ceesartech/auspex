@@ -24,14 +24,16 @@ async def get_lottery_draws(
 ) -> List[LotteryDrawResponse]:
     """Get recent lottery draw results"""
 
-    query = text("""
+    query = text(
+        """
         SELECT id, game, draw_date, draw_number, numbers, bonus_number,
                multiplier, jackpot_amount
         FROM lottery_draws
         WHERE (:game IS NULL OR game = :game)
         ORDER BY draw_date DESC
         LIMIT :limit
-    """)
+    """
+    )
 
     results = db.execute(query, {"game": game, "limit": limit}).fetchall()
 
@@ -58,13 +60,15 @@ async def get_lottery_analysis(
 ) -> LotteryAnalysisResponse:
     """Get lottery number frequency analysis"""
 
-    query = text("""
+    query = text(
+        """
         SELECT numbers, bonus_number, draw_date
         FROM lottery_draws
         WHERE game = :game
         ORDER BY draw_date DESC
         LIMIT :num_draws
-    """)
+    """
+    )
 
     results = db.execute(query, {"game": game, "num_draws": num_draws}).fetchall()
 
@@ -165,13 +169,15 @@ async def get_lottery_recommendations(
     import random
 
     # Get frequency data
-    query = text("""
+    query = text(
+        """
         SELECT numbers, bonus_number
         FROM lottery_draws
         WHERE game = :game
         ORDER BY draw_date DESC
         LIMIT 200
-    """)
+    """
+    )
 
     results = db.execute(query, {"game": game}).fetchall()
 

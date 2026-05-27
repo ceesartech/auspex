@@ -17,38 +17,46 @@ def _seed_recommendation(db, *, confidence: str = "high", odds: float = 1.85) ->
     suffix = uuid.uuid4().hex[:8]
 
     league_id = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO leagues (name, country, sport)
             VALUES (:name, 'Spain', 'soccer')
             RETURNING id
-            """),
+            """
+        ),
         {"name": f"Rec League {suffix}"},
     ).scalar_one()
 
     home_id = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO teams (name, normalized_name, league_id, country, sport)
             VALUES (:n, :nn, :lid, 'Spain', 'soccer')
             RETURNING id
-            """),
+            """
+        ),
         {"n": f"Rec Home {suffix}", "nn": f"rec home {suffix}", "lid": league_id},
     ).scalar_one()
 
     away_id = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO teams (name, normalized_name, league_id, country, sport)
             VALUES (:n, :nn, :lid, 'Spain', 'soccer')
             RETURNING id
-            """),
+            """
+        ),
         {"n": f"Rec Away {suffix}", "nn": f"rec away {suffix}", "lid": league_id},
     ).scalar_one()
 
     match_id = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO matches (league_id, home_team_id, away_team_id, match_date, season, status)
             VALUES (:lid, :h, :a, :d, '2025-2026', 'scheduled')
             RETURNING id
-            """),
+            """
+        ),
         {
             "lid": league_id,
             "h": home_id,
@@ -58,18 +66,21 @@ def _seed_recommendation(db, *, confidence: str = "high", odds: float = 1.85) ->
     ).scalar_one()
 
     prediction_id = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO predictions (match_id, model_name, model_version, prediction_type,
                                      predicted_outcome, confidence, probabilities)
             VALUES (:mid, 'ensemble', 'v1.0', 'match_result', 'home', 0.72,
                     '{"home": 0.72, "draw": 0.18, "away": 0.10}'::jsonb)
             RETURNING id
-            """),
+            """
+        ),
         {"mid": match_id},
     ).scalar_one()
 
     recommendation_id = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO betting_recommendations
                 (prediction_id, match_id, bet_type, selection,
                  odds_at_recommendation, bookmaker, confidence_rating,
@@ -77,7 +88,8 @@ def _seed_recommendation(db, *, confidence: str = "high", odds: float = 1.85) ->
             VALUES (:pid, :mid, '1x2', 'home', :odds, 'bet365', :conf,
                     0.12, 25.0, 'Strong home form', 'pending')
             RETURNING id
-            """),
+            """
+        ),
         {"pid": prediction_id, "mid": match_id, "odds": odds, "conf": confidence},
     ).scalar_one()
 

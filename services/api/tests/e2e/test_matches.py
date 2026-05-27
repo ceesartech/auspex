@@ -13,46 +13,58 @@ def _seed_match(db, *, match_date=None) -> tuple[str, str, str, str]:
     if match_date is None:
         match_date = datetime.now(timezone.utc) + timedelta(days=2)
 
-    league_id = db.execute(text("""
+    league_id = db.execute(
+        text(
+            """
             INSERT INTO leagues (name, country, sport)
             VALUES ('E2E League', 'England', 'soccer')
             RETURNING id
-            """)).scalar_one()
+            """
+        )
+    ).scalar_one()
 
     home_id = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO teams (name, normalized_name, league_id, country, sport)
             VALUES ('E2E Home FC', 'e2e home fc', :lid, 'England', 'soccer')
             RETURNING id
-            """),
+            """
+        ),
         {"lid": league_id},
     ).scalar_one()
 
     away_id = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO teams (name, normalized_name, league_id, country, sport)
             VALUES ('E2E Away United', 'e2e away united', :lid, 'England', 'soccer')
             RETURNING id
-            """),
+            """
+        ),
         {"lid": league_id},
     ).scalar_one()
 
     match_id = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO matches (league_id, home_team_id, away_team_id, match_date, season, status)
             VALUES (:lid, :h, :a, :d, '2025-2026', 'scheduled')
             RETURNING id
-            """),
+            """
+        ),
         {"lid": league_id, "h": home_id, "a": away_id, "d": match_date},
     ).scalar_one()
 
     for selection, price in [("home", 1.85), ("draw", 3.50), ("away", 4.20)]:
         db.execute(
-            text("""
+            text(
+                """
                 INSERT INTO odds (match_id, bookmaker, market_type, selection,
                                   odds_decimal, implied_probability, timestamp, is_live)
                 VALUES (:mid, 'bet365', '1x2', :sel, :p, 1.0/:p, NOW(), false)
-                """),
+                """
+            ),
             {"mid": match_id, "sel": selection, "p": price},
         )
 

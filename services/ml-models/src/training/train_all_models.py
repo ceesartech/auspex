@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from inference.onnx_converter import ONNXConverter
 from models.base_model import BaseModel
 from models.ensemble import EnsemblePredictor
 from models.lightgbm_model import LightGBMMatchPredictor
@@ -27,7 +28,6 @@ from models.model_registry import ModelRegistry
 from models.neural_network import NeuralNetworkMatchPredictor
 from models.poisson_models import DixonColesPredictor, PoissonMatchPredictor
 from models.xgboost_model import XGBoostMatchPredictor
-from inference.onnx_converter import ONNXConverter
 from training.calibration import ProbabilityCalibrator
 from utils.training_data import (
     get_feature_columns,

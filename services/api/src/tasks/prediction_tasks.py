@@ -43,14 +43,16 @@ def generate_upcoming_predictions(self, days_ahead: int = 3):
     logger.info(f"Generating predictions for matches in next {days_ahead} days")
 
     with get_db_context() as db:
-        query = text("""
+        query = text(
+            """
             SELECT m.id FROM matches m
             LEFT JOIN predictions p ON m.id = p.match_id
             WHERE m.status = 'scheduled'
             AND m.match_date > NOW()
             AND m.match_date <= NOW() + make_interval(days => :days)
             AND p.id IS NULL
-        """)
+        """
+        )
 
         results = db.execute(query, {"days": days_ahead}).fetchall()
         match_ids = [str(row.id) for row in results]
@@ -77,12 +79,14 @@ def retrain_model(
 
     with get_db_context() as db:
         # Log retraining start
-        log_query = text("""
+        log_query = text(
+            """
             INSERT INTO model_retraining_logs
             (model_name, old_version, new_version, trigger_reason, status)
             VALUES (:model_name, :old_version, :new_version, :trigger_reason, 'started')
             RETURNING id
-        """)
+        """
+        )
 
         result = db.execute(
             log_query,
@@ -105,11 +109,13 @@ def retrain_model(
 
         # Update log to completed
         with get_db_context() as db:
-            update_query = text("""
+            update_query = text(
+                """
                 UPDATE model_retraining_logs
                 SET status = 'completed', completed_at = NOW()
                 WHERE id = :log_id
-            """)
+            """
+            )
             db.execute(update_query, {"log_id": str(log_id)})
             db.commit()
 
@@ -119,11 +125,13 @@ def retrain_model(
         logger.error(f"Retraining failed: {e}")
 
         with get_db_context() as db:
-            error_query = text("""
+            error_query = text(
+                """
                 UPDATE model_retraining_logs
                 SET status = 'failed', error_message = :error, completed_at = NOW()
                 WHERE id = :log_id
-            """)
+            """
+            )
             db.execute(error_query, {"log_id": str(log_id), "error": str(e)})
             db.commit()
 

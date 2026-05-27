@@ -29,7 +29,8 @@ class RecommendationService:
     ) -> List[RecommendationResponse]:
         """Get active betting recommendations from the vw_active_recommendations view"""
 
-        query = text("""
+        query = text(
+            """
             SELECT recommendation_id, match_date, league_name,
                    home_team, away_team, bet_type, selection,
                    odds_at_recommendation, bookmaker, confidence_rating,
@@ -41,7 +42,8 @@ class RecommendationService:
             AND (:min_odds IS NULL OR odds_at_recommendation >= :min_odds)
             AND (:max_odds IS NULL OR odds_at_recommendation <= :max_odds)
             LIMIT :limit
-        """)
+        """
+        )
 
         results = self.db.execute(
             query,
@@ -90,7 +92,8 @@ class RecommendationService:
     ) -> List[RecommendationResponse]:
         """Get highest expected value recommendations"""
 
-        query = text("""
+        query = text(
+            """
             SELECT br.id as recommendation_id, m.match_date,
                    l.name as league_name, ht.name as home_team,
                    at.name as away_team, br.bet_type, br.selection,
@@ -108,7 +111,8 @@ class RecommendationService:
             AND br.expected_value >= :min_ev
             ORDER BY br.expected_value DESC
             LIMIT :limit
-        """)
+        """
+        )
 
         results = self.db.execute(query, {"min_ev": min_ev, "limit": limit}).fetchall()
 
@@ -150,7 +154,8 @@ class RecommendationService:
         """Build optimized accumulator bet using available recommendations"""
 
         # Fetch high-confidence recommendations for accumulator legs
-        query = text("""
+        query = text(
+            """
             SELECT br.id as recommendation_id, m.id as match_id,
                    m.match_date, l.name as league_name,
                    ht.name as home_team, at.name as away_team,
@@ -169,7 +174,8 @@ class RecommendationService:
             AND p.confidence >= :confidence_threshold
             ORDER BY p.confidence DESC, br.expected_value DESC
             LIMIT :max_candidates
-        """)
+        """
+        )
 
         results = self.db.execute(
             query,
@@ -250,10 +256,12 @@ class RecommendationService:
 
     def _get_user_bankroll(self) -> float:
         """Get user bankroll from preferences"""
-        query = text("""
+        query = text(
+            """
             SELECT preference_value FROM user_preferences
             WHERE preference_key = 'bankroll'
-        """)
+        """
+        )
         result = self.db.execute(query).fetchone()
         if result and result.preference_value:
             val = result.preference_value
@@ -266,12 +274,14 @@ class RecommendationService:
         """Create accumulator and legs in database"""
         acc_id = uuid.uuid4()
 
-        query = text("""
+        query = text(
+            """
             INSERT INTO accumulators (id, name, total_odds, stake, potential_return,
                                       status, confidence_rating, reasoning)
             VALUES (:id, :name, :total_odds, :stake, :potential_return,
                     'pending', :confidence_rating, :reasoning)
-        """)
+        """
+        )
 
         self.db.execute(
             query,
@@ -287,10 +297,12 @@ class RecommendationService:
         )
 
         for i, leg in enumerate(legs):
-            leg_query = text("""
+            leg_query = text(
+                """
                 INSERT INTO accumulator_legs (accumulator_id, recommendation_id, leg_order)
                 VALUES (:acc_id, :rec_id, :leg_order)
-            """)
+            """
+            )
             self.db.execute(
                 leg_query,
                 {

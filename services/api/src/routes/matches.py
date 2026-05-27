@@ -24,7 +24,8 @@ async def get_upcoming_matches(
 ) -> List[Dict[str, Any]]:
     """Get upcoming matches with latest odds from the view"""
 
-    query = text("""
+    query = text(
+        """
         SELECT match_id, match_date, league_name, league_country,
                home_team, away_team, venue,
                home_odds, draw_odds, away_odds, bookmaker
@@ -34,7 +35,8 @@ async def get_upcoming_matches(
         AND (:sport IS NULL OR league_country IS NOT NULL)
         ORDER BY match_date ASC
         LIMIT :limit
-    """)
+    """
+    )
 
     results = db.execute(
         query,
@@ -72,7 +74,8 @@ async def get_match_detail(
 ) -> Dict[str, Any]:
     """Get detailed match information"""
 
-    query = text("""
+    query = text(
+        """
         SELECT m.id, m.match_date, m.status, m.home_score, m.away_score,
                m.half_time_home, m.half_time_away, m.season, m.round,
                m.venue, m.attendance,
@@ -86,7 +89,8 @@ async def get_match_detail(
         JOIN teams at ON m.away_team_id = at.id
         LEFT JOIN referees r ON m.referee_id = r.id
         WHERE m.id = :match_id
-    """)
+    """
+    )
 
     result = db.execute(query, {"match_id": match_id}).fetchone()
 
@@ -125,19 +129,23 @@ async def get_match_stats(
     """Get match statistics and team form"""
 
     # Get match stats
-    stats_query = text("""
+    stats_query = text(
+        """
         SELECT ms.*, t.name as team_name
         FROM match_stats ms
         JOIN teams t ON ms.team_id = t.id
         WHERE ms.match_id = :match_id
-    """)
+    """
+    )
 
     stats_results = db.execute(stats_query, {"match_id": match_id}).fetchall()
 
     # Get team IDs for form lookup
-    match_query = text("""
+    match_query = text(
+        """
         SELECT home_team_id, away_team_id FROM matches WHERE id = :match_id
-    """)
+    """
+    )
     match_result = db.execute(match_query, {"match_id": match_id}).fetchone()
 
     if not match_result:
@@ -184,14 +192,16 @@ async def get_match_odds(
 ) -> List[Dict[str, Any]]:
     """Get all odds for a match"""
 
-    query = text("""
+    query = text(
+        """
         SELECT id, bookmaker, market_type, selection, odds_decimal,
                odds_american, line, implied_probability,
                timestamp, is_opening, is_live
         FROM odds
         WHERE match_id = :match_id
         ORDER BY timestamp DESC
-    """)
+    """
+    )
 
     results = db.execute(query, {"match_id": match_id}).fetchall()
 
@@ -215,11 +225,13 @@ async def get_match_odds(
 
 def _get_team_form(db: Session, team_id: str, num_matches: int = 5) -> List[Dict]:
     """Call get_team_form() database function"""
-    query = text("""
+    query = text(
+        """
         SELECT match_id, match_date, opponent_id, is_home,
                goals_for, goals_against, result, points
         FROM get_team_form(:team_id, :num_matches)
-    """)
+    """
+    )
 
     results = db.execute(query, {"team_id": team_id, "num_matches": num_matches}).fetchall()
 
@@ -239,11 +251,13 @@ def _get_team_form(db: Session, team_id: str, num_matches: int = 5) -> List[Dict
 
 def _get_h2h_stats(db: Session, team1_id: str, team2_id: str, num_matches: int = 10) -> List[Dict]:
     """Call get_h2h_stats() database function"""
-    query = text("""
+    query = text(
+        """
         SELECT match_id, match_date, home_team_id, away_team_id,
                home_score, away_score, league_name
         FROM get_h2h_stats(:team1_id, :team2_id, :num_matches)
-    """)
+    """
+    )
 
     results = db.execute(
         query,

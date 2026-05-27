@@ -1,0 +1,12 @@
+# Tooling config. Pinning target-version stops black from producing
+# different output depending on which Python the CLI runs under (Python
+# 3.9 vs 3.11 auto-detection diverged on this repo and caused a CI-only
+# "would reformat" loop).
+
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 120

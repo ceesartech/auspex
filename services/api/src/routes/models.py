@@ -24,7 +24,8 @@ async def get_model_performance(
 ) -> List[ModelPerformanceResponse]:
     """Get model performance metrics"""
 
-    query = text("""
+    query = text(
+        """
         SELECT mpl.model_name, mpl.model_version, mpl.sport,
                mpl.evaluation_date, mpl.metrics, mpl.sample_size,
                mpl.date_range_start, mpl.date_range_end, mpl.notes,
@@ -35,7 +36,8 @@ async def get_model_performance(
         AND (:sport IS NULL OR mpl.sport = :sport)
         ORDER BY mpl.evaluation_date DESC
         LIMIT :limit
-    """)
+    """
+    )
 
     results = db.execute(query, {"model_name": model_name, "sport": sport, "limit": limit}).fetchall()
 
@@ -67,7 +69,8 @@ async def get_active_models(
 ) -> List[Dict[str, Any]]:
     """Get currently active models with latest performance"""
 
-    query = text("""
+    query = text(
+        """
         WITH latest_performance AS (
             SELECT model_name, model_version, metrics, evaluation_date, sample_size,
                    ROW_NUMBER() OVER (PARTITION BY model_name ORDER BY evaluation_date DESC) as rn
@@ -77,7 +80,8 @@ async def get_active_models(
         FROM latest_performance
         WHERE rn = 1
         ORDER BY model_name
-    """)
+    """
+    )
 
     results = db.execute(query).fetchall()
 
@@ -111,7 +115,8 @@ async def compare_models(
 
     names = [n.strip() for n in model_names.split(",")]
 
-    query = text("""
+    query = text(
+        """
         WITH latest AS (
             SELECT model_name, model_version, metrics, evaluation_date, sample_size,
                    ROW_NUMBER() OVER (PARTITION BY model_name ORDER BY evaluation_date DESC) as rn
@@ -122,7 +127,8 @@ async def compare_models(
         SELECT model_name, model_version, metrics, evaluation_date, sample_size
         FROM latest
         WHERE rn = 1
-    """)
+    """
+    )
 
     results = db.execute(query, {"names": names, "sport": sport}).fetchall()
 
@@ -171,7 +177,8 @@ async def get_retraining_history(
 ) -> List[Dict[str, Any]]:
     """Get model retraining history"""
 
-    query = text("""
+    query = text(
+        """
         SELECT model_name, old_version, new_version, trigger_reason,
                training_data_start, training_data_end, training_samples,
                validation_metrics, test_metrics, training_duration_seconds,
@@ -180,7 +187,8 @@ async def get_retraining_history(
         WHERE (:model_name IS NULL OR model_name = :model_name)
         ORDER BY created_at DESC
         LIMIT :limit
-    """)
+    """
+    )
 
     results = db.execute(query, {"model_name": model_name, "limit": limit}).fetchall()
 

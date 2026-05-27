@@ -23,7 +23,8 @@ async def get_live_odds(
 ) -> List[Dict[str, Any]]:
     """Get live odds for in-play matches"""
 
-    query = text("""
+    query = text(
+        """
         SELECT o.id, o.match_id, o.bookmaker, o.market_type, o.selection,
                o.odds_decimal, o.implied_probability, o.timestamp,
                m.match_date,
@@ -40,7 +41,8 @@ async def get_live_odds(
         AND (:bookmaker IS NULL OR o.bookmaker = :bookmaker)
         ORDER BY o.timestamp DESC
         LIMIT :limit
-    """)
+    """
+    )
 
     results = db.execute(query, {"sport": sport, "bookmaker": bookmaker, "limit": limit}).fetchall()
 
@@ -72,7 +74,8 @@ async def get_match_odds(
 ) -> List[Dict[str, Any]]:
     """Get all odds for a specific match"""
 
-    query = text("""
+    query = text(
+        """
         SELECT o.id, o.bookmaker, o.market_type, o.selection,
                o.odds_decimal, o.odds_american, o.line,
                o.implied_probability, o.timestamp,
@@ -82,7 +85,8 @@ async def get_match_odds(
         AND (:market_type IS NULL OR o.market_type = :market_type)
         AND (:bookmaker IS NULL OR o.bookmaker = :bookmaker)
         ORDER BY o.market_type, o.bookmaker, o.timestamp DESC
-    """)
+    """
+    )
 
     results = db.execute(
         query,
@@ -123,7 +127,8 @@ async def get_odds_movements(
 ) -> Dict[str, Any]:
     """Get odds movement history for a match"""
 
-    query = text("""
+    query = text(
+        """
         SELECT o.selection, o.odds_decimal, o.implied_probability,
                o.timestamp, o.bookmaker, o.is_opening
         FROM odds o
@@ -131,7 +136,8 @@ async def get_odds_movements(
         AND o.market_type = :market_type
         AND (:bookmaker IS NULL OR o.bookmaker = :bookmaker)
         ORDER BY o.selection, o.timestamp ASC
-    """)
+    """
+    )
 
     results = db.execute(
         query,

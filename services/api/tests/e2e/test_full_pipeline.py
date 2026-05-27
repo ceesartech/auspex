@@ -28,48 +28,60 @@ def _seed_match_with_odds(db, *, days_ahead: int = 2) -> dict:
     """Insert league + 2 teams + 1 scheduled match + 1x2 odds. Returns ids."""
     ids = {}
 
-    ids["league_id"] = db.execute(text("""
+    ids["league_id"] = db.execute(
+        text(
+            """
             INSERT INTO leagues (name, country, sport)
             VALUES ('Pipeline League', 'England', 'soccer')
             RETURNING id
-            """)).scalar_one()
+            """
+        )
+    ).scalar_one()
 
     ids["home_id"] = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO teams (name, normalized_name, league_id, country, sport)
             VALUES ('Pipeline Home', 'pipeline home', :lid, 'England', 'soccer')
             RETURNING id
-            """),
+            """
+        ),
         {"lid": ids["league_id"]},
     ).scalar_one()
 
     ids["away_id"] = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO teams (name, normalized_name, league_id, country, sport)
             VALUES ('Pipeline Away', 'pipeline away', :lid, 'England', 'soccer')
             RETURNING id
-            """),
+            """
+        ),
         {"lid": ids["league_id"]},
     ).scalar_one()
 
     match_date = datetime.now(timezone.utc) + timedelta(days=days_ahead)
     ids["match_id"] = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO matches (league_id, home_team_id, away_team_id,
                                  match_date, season, status)
             VALUES (:lid, :h, :a, :d, '2025-2026', 'scheduled')
             RETURNING id
-            """),
+            """
+        ),
         {"lid": ids["league_id"], "h": ids["home_id"], "a": ids["away_id"], "d": match_date},
     ).scalar_one()
 
     for selection, price in [("home", 1.85), ("draw", 3.40), ("away", 4.50)]:
         db.execute(
-            text("""
+            text(
+                """
                 INSERT INTO odds (match_id, bookmaker, market_type, selection,
                                   odds_decimal, implied_probability, timestamp, is_live)
                 VALUES (:mid, 'bet365', '1x2', :sel, :p, 1.0/:p, NOW(), false)
-                """),
+                """
+            ),
             {"mid": ids["match_id"], "sel": selection, "p": price},
         )
 
@@ -80,19 +92,22 @@ def _seed_match_with_odds(db, *, days_ahead: int = 2) -> dict:
 def _seed_prediction_and_recommendation(db, ids: dict) -> dict:
     """Insert a prediction + matching betting_recommendation. Returns row ids."""
     ids["prediction_id"] = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO predictions (match_id, model_name, model_version,
                                      prediction_type, predicted_outcome,
                                      confidence, probabilities)
             VALUES (:mid, 'ensemble', 'v1.0', 'match_result', 'home', 0.71,
                     '{"home": 0.71, "draw": 0.19, "away": 0.10}'::jsonb)
             RETURNING id
-            """),
+            """
+        ),
         {"mid": ids["match_id"]},
     ).scalar_one()
 
     ids["recommendation_id"] = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO betting_recommendations
                 (prediction_id, match_id, bet_type, selection,
                  odds_at_recommendation, bookmaker, confidence_rating,
@@ -100,7 +115,8 @@ def _seed_prediction_and_recommendation(db, ids: dict) -> dict:
             VALUES (:pid, :mid, '1x2', 'home', 1.85, 'bet365', 'high',
                     0.15, 30.0, 'Pipeline E2E recommendation', 'pending')
             RETURNING id
-            """),
+            """
+        ),
         {"pid": ids["prediction_id"], "mid": ids["match_id"]},
     ).scalar_one()
 
@@ -182,19 +198,22 @@ def test_recommendation_filters_compose(client, auth_headers, db):
 
     # Seed two predictions with two recommendations of different confidence.
     pred_a = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO predictions (match_id, model_name, model_version,
                                      prediction_type, predicted_outcome,
                                      confidence, probabilities)
             VALUES (:mid, 'ensemble', 'v1.0', 'match_result', 'home', 0.80,
                     '{"home": 0.80, "draw": 0.12, "away": 0.08}'::jsonb)
             RETURNING id
-            """),
+            """
+        ),
         {"mid": ids["match_id"]},
     ).scalar_one()
 
     high_rec = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO betting_recommendations
                 (prediction_id, match_id, bet_type, selection,
                  odds_at_recommendation, bookmaker, confidence_rating,
@@ -202,12 +221,14 @@ def test_recommendation_filters_compose(client, auth_headers, db):
             VALUES (:pid, :mid, '1x2', 'home', 2.20, 'bet365', 'high',
                     0.20, 40.0, 'high-confidence', 'pending')
             RETURNING id
-            """),
+            """
+        ),
         {"pid": pred_a, "mid": ids["match_id"]},
     ).scalar_one()
 
     low_rec = db.execute(
-        text("""
+        text(
+            """
             INSERT INTO betting_recommendations
                 (prediction_id, match_id, bet_type, selection,
                  odds_at_recommendation, bookmaker, confidence_rating,
@@ -215,7 +236,8 @@ def test_recommendation_filters_compose(client, auth_headers, db):
             VALUES (:pid, :mid, 'over_under', 'over_2.5', 1.55, 'betmgm', 'low',
                     0.05, 10.0, 'low-confidence', 'pending')
             RETURNING id
-            """),
+            """
+        ),
         {"pid": pred_a, "mid": ids["match_id"]},
     ).scalar_one()
 

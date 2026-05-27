@@ -113,11 +113,13 @@ class BaseScraper(ABC):
         driver = webdriver.Chrome(options=options)
         driver.execute_cdp_cmd(
             "Page.addScriptToEvaluateOnNewDocument",
-            {"source": """
+            {
+                "source": """
                 Object.defineProperty(navigator, 'webdriver', {
                     get: () => undefined
                 })
-            """},
+            """
+            },
         )
 
         try:
