@@ -8,13 +8,19 @@ import { Toaster } from '@/components/ui/toast';
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'CeesarBet Predict',
-  description: 'Personal sports betting analytics and predictions',
+  title: {
+    default: 'Auspex',
+    template: '%s · Auspex',
+  },
+  description: 'Auspex — sports prediction & recommendation analytics.',
   manifest: '/manifest.json',
+  icons: {
+    icon: [{ url: '/logo.svg', type: 'image/svg+xml' }],
+  },
 };
 
 export const viewport: Viewport = {
-  themeColor: '#0a0a0a',
+  themeColor: '#7c3aed',
   width: 'device-width',
   initialScale: 1,
 };

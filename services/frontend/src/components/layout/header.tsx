@@ -32,8 +32,12 @@ export function Header() {
   return (
     <header className="sticky top-0 z-40 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="container flex h-16 items-center">
-        <Link href="/" className="mr-6 flex items-center space-x-2">
-          <span className="text-xl font-bold">CeesarBet</span>
+        <Link href="/" className="mr-6 flex items-center gap-2">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/logo.svg" alt="" width={28} height={28} className="h-7 w-7" />
+          <span className="text-xl font-semibold tracking-tight bg-gradient-to-br from-violet-500 to-cyan-500 bg-clip-text text-transparent">
+            Auspex
+          </span>
         </Link>
 
         <nav className="hidden md:flex items-center space-x-6 text-sm font-medium">

@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     """Application settings"""
 
     # API
-    API_TITLE: str = "Betting System API"
+    API_TITLE: str = "Auspex API"
     API_VERSION: str = "1.0.0"
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000

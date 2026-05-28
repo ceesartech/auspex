@@ -7,10 +7,18 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+# Pulls finished matches with closing odds joined in, plus the most recent
+# features_cache row (when available). The odds-derived columns let us train
+# a working baseline model even before features_cache has been populated for
+# every historical match. Once compute_features.py has been run over the
+# corpus, the `features` JSON adds the richer 250+ feature set.
 DEFAULT_TRAINING_QUERY = """
     SELECT
         m.id::text AS match_id,
         m.match_date,
+        m.league_id::text AS league_id,
+        m.home_team_id::text AS home_team_id,
+        m.away_team_id::text AS away_team_id,
         ht.name AS home_team,
         at.name AS away_team,
         m.home_score,
@@ -20,6 +28,22 @@ DEFAULT_TRAINING_QUERY = """
             WHEN m.home_score = m.away_score THEN 1
             ELSE 2
         END AS match_outcome,
+        -- Closing 1x2 odds (Average of all books) and over/under 2.5.
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = '1x2'
+              AND o.selection = 'home' AND NOT o.is_live) AS odds_home,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = '1x2'
+              AND o.selection = 'draw' AND NOT o.is_live) AS odds_draw,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = '1x2'
+              AND o.selection = 'away' AND NOT o.is_live) AS odds_away,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'over_under'
+              AND o.selection = 'over'  AND o.line = 2.5 AND NOT o.is_live) AS odds_over25,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.market_type = 'over_under' AND o.match_id = m.id
+              AND o.selection = 'under' AND o.line = 2.5 AND NOT o.is_live) AS odds_under25,
         fc.features
     FROM matches m
     JOIN teams ht ON m.home_team_id = ht.id
@@ -38,9 +62,15 @@ DEFAULT_TRAINING_QUERY = """
 """
 
 TARGET_COLUMN = "match_outcome"
+# Columns that exist on the frame but should never be used as model
+# inputs — either identifiers, outcome-leaking columns, or the raw
+# features dict that we flatten elsewhere.
 NON_FEATURE_COLUMNS = {
     "match_id",
     "match_date",
+    "league_id",
+    "home_team_id",
+    "away_team_id",
     "home_team",
     "away_team",
     "home_score",
@@ -82,10 +112,15 @@ def load_training_frame(
     if input_csv:
         raw = pd.read_csv(input_csv)
     elif database_url:
-        import psycopg2
+        # SQLAlchemy engine to silence pandas' "only supports SQLAlchemy
+        # connectable" warning and avoid the deprecated psycopg2 path.
+        from sqlalchemy import create_engine
 
-        with psycopg2.connect(database_url) as conn:
-            raw = pd.read_sql(query, conn)
+        engine = create_engine(database_url)
+        try:
+            raw = pd.read_sql(query, engine)
+        finally:
+            engine.dispose()
     else:
         raise ValueError("Provide input_csv or database_url")
 
@@ -93,7 +128,7 @@ def load_training_frame(
 
 
 def prepare_training_frame(raw: pd.DataFrame) -> pd.DataFrame:
-    """Flatten feature JSON and derive target columns needed by model training."""
+    """Flatten feature JSON and derive target + baseline columns."""
     if raw.empty:
         return raw.copy()
 
@@ -117,7 +152,117 @@ def prepare_training_frame(raw: pd.DataFrame) -> pd.DataFrame:
     if "match_date" in frame.columns:
         frame["match_date"] = pd.to_datetime(frame["match_date"], errors="coerce")
 
+    # Even before features_cache is populated, we can derive a usable
+    # baseline feature set from closing odds + rolling team form.
+    frame = _add_implied_probabilities(frame)
+    frame = _add_rolling_team_form(frame)
+
     return frame
+
+
+def _add_implied_probabilities(frame: pd.DataFrame) -> pd.DataFrame:
+    """Add normalized implied probabilities + market margin from 1x2 odds."""
+    if not {"odds_home", "odds_draw", "odds_away"}.issubset(frame.columns):
+        return frame
+    inv_h = 1.0 / frame["odds_home"]
+    inv_d = 1.0 / frame["odds_draw"]
+    inv_a = 1.0 / frame["odds_away"]
+    margin = inv_h + inv_d + inv_a
+    frame["implied_prob_home"] = inv_h / margin
+    frame["implied_prob_draw"] = inv_d / margin
+    frame["implied_prob_away"] = inv_a / margin
+    frame["bookie_margin"] = margin - 1.0  # overround; ~0.04-0.08 typical
+    if {"odds_over25", "odds_under25"}.issubset(frame.columns):
+        inv_o = 1.0 / frame["odds_over25"]
+        inv_u = 1.0 / frame["odds_under25"]
+        ou_margin = inv_o + inv_u
+        frame["implied_prob_over25"] = inv_o / ou_margin
+    return frame
+
+
+def _add_rolling_team_form(frame: pd.DataFrame, window: int = 5) -> pd.DataFrame:
+    """Add per-team rolling form (goals/points) computed from prior matches.
+
+    Strictly pre-match: each row's rolling stats are computed from rows with
+    earlier match_date. Avoids leakage.
+    """
+    needed = {"match_date", "home_team_id", "away_team_id", "home_score", "away_score"}
+    if not needed.issubset(frame.columns):
+        return frame
+
+    # Build a long-format frame where each match contributes one row per
+    # team (home perspective + away perspective), sorted chronologically.
+    df = frame.sort_values("match_date").reset_index(drop=True)
+
+    home = pd.DataFrame({
+        "match_date": df["match_date"],
+        "team_id": df["home_team_id"],
+        "goals_for": df["home_score"].astype(float),
+        "goals_against": df["away_score"].astype(float),
+    })
+    home["points"] = np.where(
+        df["home_score"] > df["away_score"], 3.0,
+        np.where(df["home_score"] == df["away_score"], 1.0, 0.0),
+    )
+    away = pd.DataFrame({
+        "match_date": df["match_date"],
+        "team_id": df["away_team_id"],
+        "goals_for": df["away_score"].astype(float),
+        "goals_against": df["home_score"].astype(float),
+    })
+    away["points"] = np.where(
+        df["away_score"] > df["home_score"], 3.0,
+        np.where(df["home_score"] == df["away_score"], 1.0, 0.0),
+    )
+    team_rows = pd.concat([home, away], ignore_index=True)
+    team_rows = team_rows.sort_values(["team_id", "match_date"]).reset_index(drop=True)
+
+    # Rolling mean over the prior `window` matches, EXCLUDING the current row
+    # (shift(1) before rolling so we never peek at the current match's result).
+    grouped = team_rows.groupby("team_id", group_keys=False)
+    for col in ("goals_for", "goals_against", "points"):
+        team_rows[f"roll_{col}"] = (
+            grouped[col].shift(1).rolling(window=window, min_periods=1).mean()
+        )
+
+    # Join back to the original frame for home and away separately.
+    home_stats = team_rows.merge(
+        df[["match_date", "home_team_id"]].rename(columns={"home_team_id": "team_id"}),
+        on=["match_date", "team_id"],
+        how="inner",
+    )[["match_date", "team_id", "roll_goals_for", "roll_goals_against", "roll_points"]]
+    away_stats = team_rows.merge(
+        df[["match_date", "away_team_id"]].rename(columns={"away_team_id": "team_id"}),
+        on=["match_date", "team_id"],
+        how="inner",
+    )[["match_date", "team_id", "roll_goals_for", "roll_goals_against", "roll_points"]]
+
+    df = df.merge(
+        home_stats.rename(columns={
+            "team_id": "home_team_id",
+            "roll_goals_for": "home_roll_goals_for",
+            "roll_goals_against": "home_roll_goals_against",
+            "roll_points": "home_roll_points",
+        }),
+        on=["match_date", "home_team_id"],
+        how="left",
+    )
+    df = df.merge(
+        away_stats.rename(columns={
+            "team_id": "away_team_id",
+            "roll_goals_for": "away_roll_goals_for",
+            "roll_goals_against": "away_roll_goals_against",
+            "roll_points": "away_roll_points",
+        }),
+        on=["match_date", "away_team_id"],
+        how="left",
+    )
+
+    df["form_diff_points"] = df["home_roll_points"] - df["away_roll_points"]
+    df["form_diff_goals"] = (
+        df["home_roll_goals_for"] - df["away_roll_goals_for"]
+    )
+    return df
 
 
 def get_feature_columns(frame: pd.DataFrame, target: str = TARGET_COLUMN) -> List[str]:

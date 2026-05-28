@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" aria-label="Auspex">
+  <defs>
+    <linearGradient id="auspex-grad" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7c3aed"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+  <!-- Outer ring: the augur's circle -->
+  <circle cx="32" cy="32" r="28" stroke="url(#auspex-grad)" stroke-width="3"/>
+  <!-- Inner spiral: prediction / signal converging on a focal point -->
+  <path
+    d="M32 8
+       A24 24 0 1 1 8 32
+       A18 18 0 1 1 32 14
+       A12 12 0 1 1 14 32
+       A6 6 0 1 1 32 20"
+    stroke="url(#auspex-grad)"
+    stroke-width="2.5"
+    stroke-linecap="round"/>
+  <!-- Center: the focal "eye" / prediction -->
+  <circle cx="32" cy="32" r="3" fill="url(#auspex-grad)"/>
+</svg>

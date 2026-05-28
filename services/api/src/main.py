@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     # Startup
-    logger.info("Starting Betting System API...")
+    logger.info("Starting Auspex API...")
     logger.info(f"Environment: {settings.API_VERSION}")
 
     # Load ML models into the process-wide registry. Subsequent requests
@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.API_TITLE,
     version=settings.API_VERSION,
-    description="Personal Sports Betting & Lottery Recommendation System API",
+    description="Auspex — sports prediction & recommendation analytics API",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
@@ -119,7 +119,7 @@ async def health_check():
 async def root():
     """Root endpoint"""
     return {
-        "message": "Betting System API",
+        "message": "Auspex API",
         "version": settings.API_VERSION,
         "docs": "/docs",
         "health": "/health",

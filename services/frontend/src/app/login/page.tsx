@@ -28,11 +28,24 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center p-4">
-      <Card className="w-full max-w-md">
-        <CardHeader className="text-center">
-          <CardTitle className="text-2xl">CeesarBet Predict</CardTitle>
-          <CardDescription>Sign in to access your betting analytics</CardDescription>
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden p-4">
+      {/* Ambient gradient backdrop */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 -z-10
+                   bg-[radial-gradient(60%_50%_at_50%_0%,rgba(124,58,237,0.18),transparent_70%),
+                       radial-gradient(40%_40%_at_80%_80%,rgba(6,182,212,0.12),transparent_70%)]"
+      />
+      <Card className="w-full max-w-md border-border/60 shadow-xl shadow-violet-500/5 backdrop-blur">
+        <CardHeader className="items-center text-center">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/logo.svg" alt="" width={48} height={48} className="mb-3 h-12 w-12" />
+          <CardTitle className="text-2xl tracking-tight">
+            <span className="bg-gradient-to-br from-violet-500 to-cyan-500 bg-clip-text text-transparent">
+              Auspex
+            </span>
+          </CardTitle>
+          <CardDescription>Sign in to your prediction dashboard</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
