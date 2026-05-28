@@ -18,6 +18,8 @@ COPY services/api/ /app/services/api/
 COPY services/data-ingestion/src/ /app/services/data-ingestion/src/
 COPY services/feature-engineering/ /app/services/feature-engineering/
 COPY services/ml-models/ /app/services/ml-models/
+# Maintenance scripts (seed_users.py, load_football_data.py, load_statsbomb.py)
+COPY scripts/ /app/scripts/
 
 # Create non-root user
 RUN groupadd -r appuser && useradd -r -g appuser appuser
