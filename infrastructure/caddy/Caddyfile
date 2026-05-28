@@ -24,7 +24,9 @@
 	encode zstd gzip
 
 	# API routes — forward to FastAPI on the internal docker network.
-	handle_path /api/* {
+	# Use `handle` (not `handle_path`); FastAPI registers routes with the
+	# full /api/v1/... prefix, so stripping /api/ here would 404 every call.
+	handle /api/* {
 		reverse_proxy api:8000 {
 			# Pass through trace headers if present so server-side
 			# tracing can stitch with the edge.
