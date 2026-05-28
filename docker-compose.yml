@@ -91,6 +91,11 @@ services:
       context: .
       dockerfile: docker/Dockerfile.airflow
     container_name: betting-airflow-webserver
+    # Add the airflow user to the host's docker group so it can access
+    # the bind-mounted docker socket. 999 is the default docker GID on
+    # Ubuntu 22.04 (verify on the VM with `getent group docker`).
+    group_add:
+      - "${DOCKER_GID:-999}"
     environment:
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
@@ -102,6 +107,10 @@ services:
       - ./services/data-ingestion/logs:/opt/airflow/logs
       - ./services/data-ingestion/plugins:/opt/airflow/plugins
       - ./services/data-ingestion/src:/opt/airflow/scrapers
+      # Mount the host docker socket + the deploy dir so DAGs can run
+      # `docker compose -f /opt/auspex/docker-compose.yml exec api ...`.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/auspex:/opt/auspex:ro
     ports:
       - "8080:8080"
     depends_on:
@@ -127,6 +136,8 @@ services:
       context: .
       dockerfile: docker/Dockerfile.airflow
     container_name: betting-airflow-scheduler
+    group_add:
+      - "${DOCKER_GID:-999}"
     environment:
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
@@ -137,6 +148,8 @@ services:
       - ./services/data-ingestion/logs:/opt/airflow/logs
       - ./services/data-ingestion/plugins:/opt/airflow/plugins
       - ./services/data-ingestion/src:/opt/airflow/scrapers
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/auspex:/opt/auspex:ro
     depends_on:
       postgres:
         condition: service_healthy
