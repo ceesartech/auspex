@@ -119,7 +119,11 @@ def store_prediction(cur, match_id: str, prediction: dict, model_version: str) -
             "model_version": model_version,
             "predicted": prediction["predicted_label"],
             "confidence": prediction["confidence"],
-            "probs": json.dumps(prediction.get("probabilities") or {}),
+            # allow_nan=False raises a ValueError locally instead of
+            # silently producing "NaN" tokens that Postgres rejects with
+            # "invalid input syntax for type json". By the time we reach
+            # here we've already validated the prediction is finite.
+            "probs": json.dumps(prediction.get("probabilities") or {}, allow_nan=False),
         },
     )
 
@@ -170,9 +174,22 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                     return {"predicted": predicted, "notified": notified}
 
                 try:
+                    import numpy as np
                     import pandas as pd
 
                     proba = ensemble.predict_proba(pd.DataFrame([features]))[0]
+                    # When every feature is None/NaN (e.g. no live odds for
+                    # this match yet, no historical rolling form for the
+                    # team), the median-fill in each base model produces
+                    # NaN medians and the ensemble emits NaN probabilities.
+                    # Skip cleanly — predicting nonsense and storing it
+                    # would corrupt downstream analytics.
+                    if not np.all(np.isfinite(proba)):
+                        logger.info(
+                            "Skipping %s: features insufficient (predict produced NaN)",
+                            m["match_id"],
+                        )
+                        continue
                     labels = ["home", "draw", "away"]
                     idx = int(proba.argmax())
                     pred = {
