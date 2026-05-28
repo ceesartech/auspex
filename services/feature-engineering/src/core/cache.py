@@ -25,32 +25,40 @@ class FeatureCacheManager:
         self.db = db_manager
         self.redis = redis_client
 
-    def _make_key(self, match_id: str, feature_set: str = "full") -> str:
+    def _redis_key(self, match_id: str, feature_set: str = "full") -> str:
+        """Redis key. Composite (no SQL constraint) — namespaced to feature_version
+        so a model retrain that bumps the version invalidates the cache."""
         return f"features:{self.config.feature_version}:{match_id}:{feature_set}"
 
     def get(self, match_id: str, feature_set: str = "full") -> Optional[Dict[str, Optional[float]]]:
         """Try to get features from cache (Redis first, then DB)."""
-        key = self._make_key(match_id, feature_set)
+        redis_key = self._redis_key(match_id, feature_set)
 
         # Layer 1: Redis
         try:
-            cached = self.redis.get(key)
+            cached = self.redis.get(redis_key)
             if cached:
-                logger.debug(f"Cache hit (Redis): {key}")
+                logger.debug(f"Cache hit (Redis): {redis_key}")
                 return json.loads(cached)
         except Exception as e:
             logger.warning(f"Redis cache read failed: {e}")
 
-        # Layer 2: DB
+        # Layer 2: DB. The features_cache table's natural key is the
+        # 3-tuple (match_id, feature_set, feature_version); we pass it
+        # explicitly to CACHE_GET.
         try:
-            result = self.db.execute_query(CACHE_GET, (key, self.config.db_cache_ttl), fetch=True)
+            result = self.db.execute_query(
+                CACHE_GET,
+                (match_id, feature_set, self.config.feature_version),
+                fetch=True,
+            )
             if result:
                 data = result[0].get("feature_data")
                 if data:
                     features = json.loads(data) if isinstance(data, str) else data
                     # Warm up Redis cache
-                    self._set_redis(key, features)
-                    logger.debug(f"Cache hit (DB): {key}")
+                    self._set_redis(redis_key, features)
+                    logger.debug(f"Cache hit (DB): match=%s set=%s", match_id, feature_set)
                     return features
         except Exception as e:
             logger.warning(f"DB cache read failed: {e}")
@@ -64,36 +72,50 @@ class FeatureCacheManager:
         feature_set: str = "full",
     ) -> None:
         """Store features in both cache layers."""
-        key = self._make_key(match_id, feature_set)
+        redis_key = self._redis_key(match_id, feature_set)
 
         # Layer 1: Redis
-        self._set_redis(key, features)
+        self._set_redis(redis_key, features)
 
         # Layer 2: DB
         try:
-            self.db.execute_query(CACHE_SET, (key, json.dumps(features)))
-            logger.debug(f"Cache set (DB): {key}")
+            self.db.execute_query(
+                CACHE_SET,
+                (
+                    match_id,
+                    feature_set,
+                    self.config.feature_version,
+                    json.dumps(features),
+                    str(self.config.db_cache_ttl),
+                ),
+            )
+            logger.debug("Cache set (DB): match=%s set=%s", match_id, feature_set)
         except Exception as e:
             logger.warning(f"DB cache write failed: {e}")
 
     def invalidate(self, match_id: str, feature_set: str = "full") -> None:
         """Remove features from both caches."""
-        key = self._make_key(match_id, feature_set)
+        redis_key = self._redis_key(match_id, feature_set)
 
         try:
-            self.redis.delete(key)
+            self.redis.delete(redis_key)
         except Exception as e:
             logger.warning(f"Redis cache delete failed: {e}")
 
         try:
-            self.db.execute_query(CACHE_DELETE, (key,))
+            self.db.execute_query(
+                CACHE_DELETE,
+                (match_id, feature_set, self.config.feature_version),
+            )
         except Exception as e:
             logger.warning(f"DB cache delete failed: {e}")
 
     def cleanup_expired(self) -> int:
         """Remove expired entries from DB cache. Returns count deleted."""
         try:
-            return self.db.execute_query(CACHE_CLEANUP, (self.config.db_cache_ttl,))
+            # CACHE_CLEANUP now uses the schema's expires_at column rather
+            # than a Python-passed TTL.
+            return self.db.execute_query(CACHE_CLEANUP)
         except Exception as e:
             logger.warning(f"Cache cleanup failed: {e}")
             return 0

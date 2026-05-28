@@ -1,56 +1,81 @@
-"""SQL query constants for feature engineering."""
+"""SQL query constants for feature engineering.
+
+All queries target the canonical schema defined in
+services/data-ingestion/db/migrations/001_create_schema.sql:
+
+  - PK columns are named `id` everywhere (matches.id, teams.id, etc).
+    FK columns keep their natural names (home_team_id, league_id, ...).
+  - matches.status uses {'scheduled','live','finished','postponed','cancelled'}.
+    Use 'finished' for completed matches.
+  - match_stats has ONE ROW PER TEAM PER MATCH. To get home/away
+    side-by-side, JOIN match_stats twice, aliased msh + msa.
+  - matches.referee_id is a UUID FK (nullable) into a future
+    referees table; treat as opaque identifier here.
+  - features_cache uniqueness is (match_id, feature_set, feature_version);
+    there is no `cache_key` column. cache.py passes the 3-tuple.
+
+Output columns are intentionally aliased so the existing computer
+modules (categories/*.py) continue to consume `shots_home`,
+`shots_away`, `xg_home`, `feature_data`, etc. without modification.
+"""
 
 # ---------- Team Performance Queries ----------
 
 TEAM_RECENT_MATCHES = """
     SELECT
-        m.match_id,
+        m.id                AS match_id,
         m.match_date,
         m.home_team_id,
         m.away_team_id,
         m.home_score,
         m.away_score,
         m.season,
-        ms.possession_home,
-        ms.possession_away,
-        ms.shots_home,
-        ms.shots_away,
-        ms.shots_on_target_home,
-        ms.shots_on_target_away,
-        ms.corners_home,
-        ms.corners_away,
-        ms.fouls_home,
-        ms.fouls_away,
-        ms.yellow_cards_home,
-        ms.yellow_cards_away,
-        ms.red_cards_home,
-        ms.red_cards_away,
-        ms.xg_home,
-        ms.xg_away
+        msh.possession      AS possession_home,
+        msa.possession      AS possession_away,
+        msh.shots           AS shots_home,
+        msa.shots           AS shots_away,
+        msh.shots_on_target AS shots_on_target_home,
+        msa.shots_on_target AS shots_on_target_away,
+        msh.corners         AS corners_home,
+        msa.corners         AS corners_away,
+        msh.fouls           AS fouls_home,
+        msa.fouls           AS fouls_away,
+        msh.yellow_cards    AS yellow_cards_home,
+        msa.yellow_cards    AS yellow_cards_away,
+        msh.red_cards       AS red_cards_home,
+        msa.red_cards       AS red_cards_away,
+        msh.expected_goals  AS xg_home,
+        msa.expected_goals  AS xg_away
     FROM matches m
-    LEFT JOIN match_stats ms ON m.match_id = ms.match_id
+    LEFT JOIN match_stats msh
+        ON msh.match_id = m.id AND msh.team_id = m.home_team_id
+    LEFT JOIN match_stats msa
+        ON msa.match_id = m.id AND msa.team_id = m.away_team_id
     WHERE (m.home_team_id = %s OR m.away_team_id = %s)
-      AND m.status = 'completed'
+      AND m.status = 'finished'
       AND m.match_date < %s
     ORDER BY m.match_date DESC
     LIMIT %s
 """
 
+# Not currently consumed (categories/team_performance.py uses TEAM_RECENT_MATCHES)
+# but kept for completeness — they would join match_stats once, by side.
 TEAM_HOME_MATCHES = """
     SELECT
-        m.match_id,
+        m.id              AS match_id,
         m.match_date,
         m.home_score,
         m.away_score,
-        ms.possession_home AS possession,
-        ms.shots_home AS shots,
-        ms.shots_on_target_home AS shots_on_target,
-        ms.xg_home AS xg,
-        ms.corners_home AS corners
+        ms.possession     AS possession,
+        ms.shots          AS shots,
+        ms.shots_on_target AS shots_on_target,
+        ms.expected_goals AS xg,
+        ms.corners        AS corners
     FROM matches m
-    LEFT JOIN match_stats ms ON m.match_id = ms.match_id
+    LEFT JOIN match_stats ms
+        ON ms.match_id = m.id AND ms.team_id = m.home_team_id
     WHERE m.home_team_id = %s
-      AND m.status = 'completed'
+      AND m.status = 'finished'
       AND m.match_date < %s
     ORDER BY m.match_date DESC
     LIMIT %s
@@ -58,19 +83,20 @@ TEAM_HOME_MATCHES = """
 
 TEAM_AWAY_MATCHES = """
     SELECT
-        m.match_id,
+        m.id              AS match_id,
         m.match_date,
-        m.away_score AS goals_for,
-        m.home_score AS goals_against,
-        ms.possession_away AS possession,
-        ms.shots_away AS shots,
-        ms.shots_on_target_away AS shots_on_target,
-        ms.xg_away AS xg,
-        ms.corners_away AS corners
+        m.away_score      AS goals_for,
+        m.home_score      AS goals_against,
+        ms.possession     AS possession,
+        ms.shots          AS shots,
+        ms.shots_on_target AS shots_on_target,
+        ms.expected_goals AS xg,
+        ms.corners        AS corners
     FROM matches m
-    LEFT JOIN match_stats ms ON m.match_id = ms.match_id
+    LEFT JOIN match_stats ms
+        ON ms.match_id = m.id AND ms.team_id = m.away_team_id
     WHERE m.away_team_id = %s
-      AND m.status = 'completed'
+      AND m.status = 'finished'
       AND m.match_date < %s
     ORDER BY m.match_date DESC
     LIMIT %s
@@ -80,23 +106,26 @@ TEAM_AWAY_MATCHES = """
 
 H2H_MATCHES = """
     SELECT
-        m.match_id,
+        m.id                AS match_id,
         m.match_date,
         m.home_team_id,
         m.away_team_id,
         m.home_score,
         m.away_score,
-        ms.possession_home,
-        ms.possession_away,
-        ms.shots_home,
-        ms.shots_away,
-        ms.xg_home,
-        ms.xg_away
+        msh.possession      AS possession_home,
+        msa.possession      AS possession_away,
+        msh.shots           AS shots_home,
+        msa.shots           AS shots_away,
+        msh.expected_goals  AS xg_home,
+        msa.expected_goals  AS xg_away
     FROM matches m
-    LEFT JOIN match_stats ms ON m.match_id = ms.match_id
+    LEFT JOIN match_stats msh
+        ON msh.match_id = m.id AND msh.team_id = m.home_team_id
+    LEFT JOIN match_stats msa
+        ON msa.match_id = m.id AND msa.team_id = m.away_team_id
     WHERE ((m.home_team_id = %s AND m.away_team_id = %s)
         OR (m.home_team_id = %s AND m.away_team_id = %s))
-      AND m.status = 'completed'
+      AND m.status = 'finished'
       AND m.match_date < %s
     ORDER BY m.match_date DESC
     LIMIT %s
@@ -106,7 +135,7 @@ H2H_MATCHES = """
 
 TEAM_SQUAD = """
     SELECT
-        p.player_id,
+        p.id           AS player_id,
         p.name,
         p.position,
         p.market_value,
@@ -120,10 +149,10 @@ PLAYER_AVAILABILITY = """
     SELECT
         pa.player_id,
         pa.status,
-        pa.injury_type,
+        pa.reason       AS injury_type,
         pa.expected_return
     FROM player_availability pa
-    JOIN players p ON pa.player_id = p.player_id
+    JOIN players p ON pa.player_id = p.id
     WHERE p.team_id = %s
       AND pa.status IN ('injured', 'suspended', 'doubtful')
 """
@@ -134,14 +163,14 @@ PLAYER_RECENT_STATS = """
         pms.minutes_played,
         pms.goals,
         pms.assists,
-        pms.xg,
-        pms.xa,
+        pms.expected_goals    AS xg,
+        pms.expected_assists  AS xa,
         pms.rating,
         pms.key_passes,
         pms.shots,
         m.match_date
     FROM player_match_stats pms
-    JOIN matches m ON pms.match_id = m.match_id
+    JOIN matches m ON pms.match_id = m.id
     WHERE pms.player_id = %s
       AND m.match_date < %s
     ORDER BY m.match_date DESC
@@ -190,86 +219,112 @@ LATEST_ODDS = """
 
 MATCH_DETAILS = """
     SELECT
-        m.match_id,
+        m.id              AS match_id,
         m.match_date,
         m.home_team_id,
         m.away_team_id,
         m.league_id,
         m.season,
         m.venue,
-        m.referee,
+        m.referee_id      AS referee,
         m.attendance,
-        l.name AS league_name,
+        l.name            AS league_name,
         l.country,
-        ht.name AS home_team_name,
-        at.name AS away_team_name
+        ht.name           AS home_team_name,
+        at.name           AS away_team_name
     FROM matches m
-    JOIN leagues l ON m.league_id = l.league_id
-    JOIN teams ht ON m.home_team_id = ht.team_id
-    JOIN teams at ON m.away_team_id = at.team_id
-    WHERE m.match_id = %s
+    JOIN leagues l ON m.league_id = l.id
+    JOIN teams ht ON m.home_team_id = ht.id
+    JOIN teams at ON m.away_team_id = at.id
+    WHERE m.id = %s
 """
 
+# Sum yellow/red/foul cards across both teams. Pre-aggregated per match
+# in a CTE so the outer SELECT only averages once.
 REFEREE_STATS = """
+    WITH per_match AS (
+        SELECT
+            m.id AS match_id,
+            SUM(ms.yellow_cards) AS yellows,
+            SUM(ms.red_cards)    AS reds,
+            SUM(ms.fouls)        AS fouls
+        FROM matches m
+        JOIN match_stats ms ON ms.match_id = m.id
+        WHERE m.referee_id = %s
+          AND m.status = 'finished'
+        GROUP BY m.id
+    )
     SELECT
-        COUNT(*) AS matches_refereed,
-        AVG(ms.yellow_cards_home + ms.yellow_cards_away) AS avg_yellows,
-        AVG(ms.red_cards_home + ms.red_cards_away) AS avg_reds,
-        AVG(ms.fouls_home + ms.fouls_away) AS avg_fouls,
-        AVG(m.home_score + m.away_score) AS avg_goals
-    FROM matches m
-    JOIN match_stats ms ON m.match_id = ms.match_id
-    WHERE m.referee = %s
-      AND m.status = 'completed'
+        COUNT(*)                          AS matches_refereed,
+        AVG(yellows)                      AS avg_yellows,
+        AVG(reds)                         AS avg_reds,
+        AVG(fouls)                        AS avg_fouls,
+        AVG((SELECT m2.home_score + m2.away_score
+             FROM matches m2 WHERE m2.id = per_match.match_id)) AS avg_goals
+    FROM per_match
 """
 
 TEAM_LAST_MATCH_DATE = """
     SELECT MAX(m.match_date) AS last_match_date
     FROM matches m
     WHERE (m.home_team_id = %s OR m.away_team_id = %s)
-      AND m.status = 'completed'
+      AND m.status = 'finished'
       AND m.match_date < %s
 """
 
 LEAGUE_SEASON_STATS = """
     SELECT
         AVG(m.home_score + m.away_score) AS avg_goals,
-        AVG(m.home_score) AS avg_home_goals,
-        AVG(m.away_score) AS avg_away_goals,
+        AVG(m.home_score)                AS avg_home_goals,
+        AVG(m.away_score)                AS avg_away_goals,
         STDDEV(m.home_score + m.away_score) AS std_goals,
         SUM(CASE WHEN m.home_score > m.away_score THEN 1 ELSE 0 END)::FLOAT
-            / COUNT(*) AS home_win_rate,
+            / NULLIF(COUNT(*), 0) AS home_win_rate,
         SUM(CASE WHEN m.home_score = m.away_score THEN 1 ELSE 0 END)::FLOAT
-            / COUNT(*) AS draw_rate
+            / NULLIF(COUNT(*), 0) AS draw_rate
     FROM matches m
     WHERE m.league_id = %s
       AND m.season = %s
-      AND m.status = 'completed'
+      AND m.status = 'finished'
 """
 
 # ---------- Cache Queries ----------
+#
+# features_cache uniqueness is (match_id, feature_set, feature_version).
+# There is no `cache_key` column. cache.py passes the composite as a
+# tuple in the parameter list.
 
 CACHE_GET = """
-    SELECT feature_data, computed_at
+    SELECT features AS feature_data, computed_at
     FROM features_cache
-    WHERE cache_key = %s
-      AND computed_at > NOW() - INTERVAL '%s seconds'
+    WHERE match_id = %s
+      AND feature_set = %s
+      AND feature_version = %s
+      AND (expires_at IS NULL OR expires_at > NOW())
+    ORDER BY computed_at DESC
+    LIMIT 1
 """
 
 CACHE_SET = """
-    INSERT INTO features_cache (cache_key, feature_data, computed_at)
-    VALUES (%s, %s, NOW())
-    ON CONFLICT (cache_key)
-    DO UPDATE SET feature_data = EXCLUDED.feature_data,
-                  computed_at = EXCLUDED.computed_at
+    INSERT INTO features_cache
+        (match_id, feature_set, feature_version, features, computed_at, expires_at)
+    VALUES
+        (%s, %s, %s, %s::jsonb, NOW(), NOW() + (%s || ' seconds')::interval)
+    ON CONFLICT (match_id, feature_set, feature_version) DO UPDATE
+        SET features = EXCLUDED.features,
+            computed_at = NOW(),
+            expires_at = EXCLUDED.expires_at
 """
 
 CACHE_DELETE = """
     DELETE FROM features_cache
-    WHERE cache_key = %s
+    WHERE match_id = %s
+      AND feature_set = %s
+      AND feature_version = %s
 """
 
 CACHE_CLEANUP = """
     DELETE FROM features_cache
-    WHERE computed_at < NOW() - INTERVAL '%s seconds'
+    WHERE expires_at IS NOT NULL
+      AND expires_at < NOW()
 """
