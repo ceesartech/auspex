@@ -49,17 +49,17 @@ with DAG(
 
     fetch_upcoming = BashOperator(
         task_id="fetch_upcoming",
-        bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --days 30",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --days 14",
     )
 
     compute_features = BashOperator(
         task_id="compute_features",
-        bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features.py --days 30",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features.py --days 14",
     )
 
     precompute_predictions = BashOperator(
         task_id="precompute_predictions",
-        bash_command=f"{DOCKER_EXEC} python /app/scripts/precompute_predictions.py --days 30",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/precompute_predictions.py --days 14",
     )
 
     fetch_upcoming >> compute_features >> precompute_predictions

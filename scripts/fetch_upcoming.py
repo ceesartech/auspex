@@ -208,11 +208,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--days",
         type=int,
-        default=30,
-        help="How many days forward to look (default: 30 — keeps "
-        "tournament-format competitions like the World Cup in "
-        "the fixture window even when group stages are weeks "
-        "ahead).",
+        default=14,
+        help="How many days forward to look (default: 14 — wide enough "
+        "to start capturing tournament-format competitions like the "
+        "World Cup as group stages approach, narrow enough to keep "
+        "per-run feature compute cost low).",
     )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
