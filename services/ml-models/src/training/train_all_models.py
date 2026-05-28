@@ -56,15 +56,24 @@ class TrainingOrchestrator:
         features: List[str],
         target: str = "match_outcome",
         model_types: Optional[List[str]] = None,
+        skip: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Train all individual models and then the ensemble."""
+        """Train all individual models and then the ensemble.
+
+        `skip` is a list of model names to explicitly exclude even when
+        `model_types=['all']` or `['ensemble']` would otherwise include them.
+        """
         start = time.time()
         logger.info("Starting training of all models...")
         requested = set(model_types or ["all"])
+        skip_set = set(skip or [])
         train_everything = "all" in requested
         train_for_ensemble = "ensemble" in requested
 
         def should_train(name: str) -> bool:
+            if name in skip_set:
+                logger.info("Skipping %s (in --skip-models)", name)
+                return False
             return train_everything or train_for_ensemble or name in requested
 
         # 1. Train XGBoost
@@ -238,6 +247,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.getenv("MODEL_TYPE", "all"),
         choices=["all", "xgboost", "lightgbm", "neural_network", "poisson", "dixon_coles", "ensemble"],
     )
+    parser.add_argument(
+        "--skip-models",
+        default=os.getenv("SKIP_MODELS", ""),
+        help=(
+            "Comma-separated list of model names to skip when --model-type=all "
+            "(or ensemble). Useful for slow models — e.g. 'poisson,dixon_coles' "
+            "to bypass the per-team MLE fits that can take 30+ minutes."
+        ),
+    )
     parser.add_argument("--output-dir", default="./models")
     parser.add_argument("--target", default="match_outcome")
     parser.add_argument("--min-samples", type=int, default=100)
@@ -274,12 +292,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             registry_dir=args.output_dir,
             calibrate=not args.no_calibration,
         )
+        skip_list = [s.strip() for s in (args.skip_models or "").split(",") if s.strip()]
         results = orchestrator.train_all(
             train_df=train_df,
             val_df=val_df,
             features=features,
             target=args.target,
             model_types=[args.model_type],
+            skip=skip_list,
         )
     except Exception as exc:
         logger.error("Model training failed: %s", exc, exc_info=True)

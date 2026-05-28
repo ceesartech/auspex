@@ -58,7 +58,7 @@ class FeatureCacheManager:
                     features = json.loads(data) if isinstance(data, str) else data
                     # Warm up Redis cache
                     self._set_redis(redis_key, features)
-                    logger.debug(f"Cache hit (DB): match=%s set=%s", match_id, feature_set)
+                    logger.debug("Cache hit (DB): match=%s set=%s", match_id, feature_set)
                     return features
         except Exception as e:
             logger.warning(f"DB cache read failed: {e}")
