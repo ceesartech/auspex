@@ -427,57 +427,78 @@ def discover_games(season_str: str) -> dict[int, dict]:
     return games
 
 
+# How often to log progress inside the per-game loop. The discovery
+# step is chatty enough on its own; here we just need a heartbeat every
+# ~30s of work (0.3s/req × 100 games ≈ 30s) so a multi-season run
+# doesn't look hung between season-boundary banners.
+GAME_LOG_INTERVAL = 100
+
+
 def load_season(database_url: str, season_str: str, refetch: bool) -> dict[str, int]:
     counts = {"games_seen": 0, "games_loaded": 0, "games_skipped": 0, "games_failed": 0}
+    logger.info("=== season %s: discovering games ===", season_str)
     games = discover_games(season_str)
     counts["games_seen"] = len(games)
     if not games:
+        logger.info("=== season %s: no games discovered, skipping ===", season_str)
         return counts
 
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             league_id = ensure_nhl_league(cur)
             already = set() if refetch else already_loaded_game_ids(cur, season_str)
-            logger.info("season %s: %d games to consider (%d already loaded)",
-                        season_str, len(games), len(already))
+            total = len(games)
+            logger.info(
+                "=== season %s: %d games to consider (%d already loaded) ===",
+                season_str, total, len(already),
+            )
 
-            for gid, game in games.items():
+            for processed, (gid, game) in enumerate(games.items(), start=1):
                 if gid in already:
                     counts["games_skipped"] += 1
-                    continue
-                rr = get_json(f"{NHL_API}/gamecenter/{gid}/right-rail")
-                if rr is None:
-                    counts["games_failed"] += 1
-                    continue
-                try:
-                    home_stats = parse_team_game_stats(rr, "homeValue")
-                    away_stats = parse_team_game_stats(rr, "awayValue")
-                    reg_home, reg_away, reg_winner = regulation_outcome(
-                        home_stats.period_scores, away_stats.period_scores
-                    )
-                    home_team_id = ensure_nhl_team(cur, game["homeTeam"], league_id)
-                    away_team_id = ensure_nhl_team(cur, game["awayTeam"], league_id)
-                    if not (home_team_id and away_team_id):
+                else:
+                    rr = get_json(f"{NHL_API}/gamecenter/{gid}/right-rail")
+                    if rr is None:
                         counts["games_failed"] += 1
-                        continue
-                    match_id = upsert_match(
-                        cur, game, league_id, home_team_id, away_team_id,
-                        reg_home, reg_away, reg_winner, season_str,
-                    )
-                    if not match_id:
-                        counts["games_failed"] += 1
-                        continue
-                    upsert_team_stats(cur, match_id, home_team_id, home_stats, away_stats)
-                    upsert_team_stats(cur, match_id, away_team_id, away_stats, home_stats)
-                    counts["games_loaded"] += 1
-                except Exception as e:  # noqa: BLE001 — one bad game shouldn't kill the season
-                    logger.warning("game %s failed: %s", gid, e)
-                    counts["games_failed"] += 1
-                    continue
+                    else:
+                        try:
+                            home_stats = parse_team_game_stats(rr, "homeValue")
+                            away_stats = parse_team_game_stats(rr, "awayValue")
+                            reg_home, reg_away, reg_winner = regulation_outcome(
+                                home_stats.period_scores, away_stats.period_scores
+                            )
+                            home_team_id = ensure_nhl_team(cur, game["homeTeam"], league_id)
+                            away_team_id = ensure_nhl_team(cur, game["awayTeam"], league_id)
+                            if not (home_team_id and away_team_id):
+                                counts["games_failed"] += 1
+                            else:
+                                match_id = upsert_match(
+                                    cur, game, league_id, home_team_id, away_team_id,
+                                    reg_home, reg_away, reg_winner, season_str,
+                                )
+                                if not match_id:
+                                    counts["games_failed"] += 1
+                                else:
+                                    upsert_team_stats(cur, match_id, home_team_id, home_stats, away_stats)
+                                    upsert_team_stats(cur, match_id, away_team_id, away_stats, home_stats)
+                                    counts["games_loaded"] += 1
+                                    # Commit per game so a crash mid-season leaves a
+                                    # usable partial backfill instead of an aborted
+                                    # transaction.
+                                    conn.commit()
+                        except Exception as e:  # noqa: BLE001 — one bad game shouldn't kill the season
+                            logger.warning("game %s failed: %s", gid, e)
+                            counts["games_failed"] += 1
 
-                # Commit per game so a crash mid-season leaves a usable
-                # partial backfill instead of an aborted transaction.
-                conn.commit()
+                # Heartbeat so a long silent loop looks like progress
+                # instead of a hang. Fires on the interval and on the
+                # final game so the season-end count is always visible.
+                if processed % GAME_LOG_INTERVAL == 0 or processed == total:
+                    logger.info(
+                        "season %s: processed %d/%d (loaded=%d skipped=%d failed=%d)",
+                        season_str, processed, total,
+                        counts["games_loaded"], counts["games_skipped"], counts["games_failed"],
+                    )
 
     return counts
 
