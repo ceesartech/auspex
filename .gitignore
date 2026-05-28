@@ -32,9 +32,11 @@ ENV/
 env/
 .venv
 
-# Environment variables
+# Environment variables — never commit, contains secrets
+.env
 .env.local
 .env.*.local
+!.env.example
 
 # IDE
 .vscode/
