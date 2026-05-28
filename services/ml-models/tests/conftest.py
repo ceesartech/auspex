@@ -85,7 +85,7 @@ def train_val_test_split(sample_match_data):
 @pytest.fixture
 def xgboost_config():
     """XGBoost config for testing (fast settings)."""
-    from models.model_config import ModelConfig, ModelType, PredictionTask
+    from predictors.model_config import ModelConfig, ModelType, PredictionTask
 
     return ModelConfig(
         name="test_xgboost",
@@ -122,7 +122,7 @@ def xgboost_config():
 @pytest.fixture
 def lightgbm_config():
     """LightGBM config for testing (fast settings)."""
-    from models.model_config import ModelConfig, ModelType, PredictionTask
+    from predictors.model_config import ModelConfig, ModelType, PredictionTask
 
     return ModelConfig(
         name="test_lightgbm",
@@ -155,7 +155,7 @@ def lightgbm_config():
 @pytest.fixture
 def nn_config():
     """Neural network config for testing (fast settings)."""
-    from models.model_config import ModelConfig, ModelType, PredictionTask
+    from predictors.model_config import ModelConfig, ModelType, PredictionTask
 
     return ModelConfig(
         name="test_nn",
@@ -185,7 +185,7 @@ def nn_config():
 @pytest.fixture
 def poisson_config():
     """Poisson model config for testing."""
-    from models.model_config import ModelConfig, ModelType, PredictionTask
+    from predictors.model_config import ModelConfig, ModelType, PredictionTask
 
     return ModelConfig(
         name="test_poisson",
@@ -210,7 +210,7 @@ def poisson_config():
 @pytest.fixture
 def dixon_coles_config():
     """Dixon-Coles model config for testing."""
-    from models.model_config import ModelConfig, ModelType, PredictionTask
+    from predictors.model_config import ModelConfig, ModelType, PredictionTask
 
     return ModelConfig(
         name="test_dixon_coles",
@@ -237,7 +237,7 @@ def dixon_coles_config():
 @pytest.fixture
 def ensemble_config():
     """Ensemble config for testing."""
-    from models.model_config import ModelConfig, ModelType, PredictionTask
+    from predictors.model_config import ModelConfig, ModelType, PredictionTask
 
     return ModelConfig(
         name="test_ensemble",

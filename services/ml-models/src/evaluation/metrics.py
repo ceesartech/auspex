@@ -4,7 +4,7 @@ import logging
 from typing import Dict, Optional
 
 import numpy as np
-from models.model_config import PredictionTask
+from predictors.model_config import PredictionTask
 from sklearn.metrics import (
     accuracy_score,
     brier_score_loss,

@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from models.neural_network import MatchDataset, MatchPredictorNN, NeuralNetworkMatchPredictor
+from predictors.neural_network import MatchDataset, MatchPredictorNN, NeuralNetworkMatchPredictor
 
 
 class TestMatchDataset:

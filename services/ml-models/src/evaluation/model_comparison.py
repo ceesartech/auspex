@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
-from models.base_model import BaseModel
+from predictors.base_model import BaseModel
 
 from .metrics import compute_all_metrics, compute_roi
 

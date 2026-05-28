@@ -3,9 +3,9 @@
 import tempfile
 
 import numpy as np
-from models.model_registry import ModelRegistry, ModelVersion
-from models.poisson_models import PoissonMatchPredictor
-from models.xgboost_model import XGBoostMatchPredictor
+from predictors.model_registry import ModelRegistry, ModelVersion
+from predictors.poisson_models import PoissonMatchPredictor
+from predictors.xgboost_model import XGBoostMatchPredictor
 from training.calibration import ProbabilityCalibrator
 from training.cross_validation import TimeSeriesCV
 

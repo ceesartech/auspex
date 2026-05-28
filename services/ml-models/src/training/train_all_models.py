@@ -12,10 +12,10 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 from inference.onnx_converter import ONNXConverter
-from models.base_model import BaseModel
-from models.ensemble import EnsemblePredictor
-from models.lightgbm_model import LightGBMMatchPredictor
-from models.model_config import (
+from predictors.base_model import BaseModel
+from predictors.ensemble import EnsemblePredictor
+from predictors.lightgbm_model import LightGBMMatchPredictor
+from predictors.model_config import (
     DIXON_COLES_CONFIG,
     ENSEMBLE_CONFIG,
     LIGHTGBM_MATCH_OUTCOME,
@@ -24,10 +24,10 @@ from models.model_config import (
     XGBOOST_MATCH_OUTCOME,
     ModelConfig,
 )
-from models.model_registry import ModelRegistry
-from models.neural_network import NeuralNetworkMatchPredictor
-from models.poisson_models import DixonColesPredictor, PoissonMatchPredictor
-from models.xgboost_model import XGBoostMatchPredictor
+from predictors.model_registry import ModelRegistry
+from predictors.neural_network import NeuralNetworkMatchPredictor
+from predictors.poisson_models import DixonColesPredictor, PoissonMatchPredictor
+from predictors.xgboost_model import XGBoostMatchPredictor
 from training.calibration import ProbabilityCalibrator
 from utils.training_data import get_feature_columns, load_training_frame, validate_training_frame
 

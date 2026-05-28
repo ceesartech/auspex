@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 import optuna
 import pandas as pd
-from models.model_config import ModelType
+from predictors.model_config import ModelType
 from training.cross_validation import TimeSeriesCV
 
 logger = logging.getLogger(__name__)

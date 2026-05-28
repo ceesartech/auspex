@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 import numpy as np
 import pandas as pd
 import pytest
-from models.ensemble import EnsemblePredictor
-from models.poisson_models import DixonColesPredictor, PoissonMatchPredictor, dixon_coles_tau, poisson_pmf
+from predictors.ensemble import EnsemblePredictor
+from predictors.poisson_models import DixonColesPredictor, PoissonMatchPredictor, dixon_coles_tau, poisson_pmf
 
 
 class TestPoissonPMF:

@@ -6,7 +6,7 @@ import numpy as np
 from evaluation.metrics import compute_all_metrics, compute_roi, ranked_probability_score
 from evaluation.model_comparison import ABTestTracker
 from evaluation.performance_tracker import PerformanceTracker
-from models.model_config import PredictionTask
+from predictors.model_config import PredictionTask
 
 
 class TestComputeAllMetrics:
