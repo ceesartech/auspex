@@ -24,19 +24,17 @@ from dataclasses import dataclass
 
 import psycopg2
 
-# `passlib` ships with Auspex (requirements.txt). The hash_password helper
-# is reused so this script stays consistent with the runtime.
+# Reuse the runtime's hash_password helper so the hash format stays
+# consistent. Falls back to a minimal direct-bcrypt implementation when
+# this script runs outside the api container.
 sys.path.insert(0, "/app/services/api/src")
 try:
     from auth.jwt_handler import hash_password
 except ImportError:
-    # Fallback for running outside the api container.
-    from passlib.context import CryptContext
-
-    _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    import bcrypt
 
     def hash_password(password: str) -> str:  # type: ignore[no-redef]
-        return _pwd.hash(password)
+        return bcrypt.hashpw(password.encode("utf-8")[:72], bcrypt.gensalt()).decode("utf-8")
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
