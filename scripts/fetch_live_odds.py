@@ -216,7 +216,7 @@ def map_outcome(
     return None, None
 
 
-def process_event(cur, event: dict) -> int:
+def process_event(cur, event: dict, unmatched_log: list | None = None) -> int:
     home = event.get("home_team") or ""
     away = event.get("away_team") or ""
     commence = event.get("commence_time")
@@ -230,7 +230,8 @@ def process_event(cur, event: dict) -> int:
 
     match_id = find_match_id(cur, home, away, commence_dt)
     if not match_id:
-        logger.debug("No matching scheduled match for %s vs %s @ %s", home, away, commence)
+        if unmatched_log is not None:
+            unmatched_log.append(f"{home} vs {away} @ {commence}")
         return 0
 
     inserted = 0
@@ -271,11 +272,23 @@ def run(database_url: str, sports: list[str], api_key: str, regions: str) -> dic
                 events = fetch_sport_odds(sport_key, api_key, regions)
                 logger.info("%s: %d events returned", sport_key, len(events))
                 results["events_seen"] += len(events)
+                unmatched: list[str] = []
                 for event in events:
-                    inserted = process_event(cur, event)
+                    inserted = process_event(cur, event, unmatched_log=unmatched)
                     if inserted > 0:
                         results["events_matched"] += 1
                         results["odds_rows_inserted"] += inserted
+                # Log unmatched events for visibility — usually means no
+                # scheduled fixture in the matches table covering that
+                # date, or a team-name spelling mismatch.
+                if unmatched:
+                    logger.info(
+                        "%s: %d/%d events had no matching scheduled fixture. " "First 5: %s",
+                        sport_key,
+                        len(unmatched),
+                        len(events),
+                        unmatched[:5],
+                    )
                 conn.commit()
     return results
 

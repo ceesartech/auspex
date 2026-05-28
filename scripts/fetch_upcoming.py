@@ -44,29 +44,27 @@ ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 # sources.
 LEAGUE_MAP: dict[str, tuple[str, str, str]] = {
     # ── European top flights (active Aug-May) ───────────────────────
-    "eng.1":         ("E0",   "Premier League",         "England"),
-    "eng.2":         ("E1",   "Championship",           "England"),
-    "ger.1":         ("D1",   "Bundesliga",             "Germany"),
-    "ita.1":         ("I1",   "Serie A",                "Italy"),
-    "esp.1":         ("SP1",  "La Liga",                "Spain"),
-    "fra.1":         ("F1",   "Ligue 1",                "France"),
-    "ned.1":         ("N1",   "Eredivisie",             "Netherlands"),
-    "por.1":         ("P1",   "Primeira Liga",          "Portugal"),
-
+    "eng.1": ("E0", "Premier League", "England"),
+    "eng.2": ("E1", "Championship", "England"),
+    "ger.1": ("D1", "Bundesliga", "Germany"),
+    "ita.1": ("I1", "Serie A", "Italy"),
+    "esp.1": ("SP1", "La Liga", "Spain"),
+    "fra.1": ("F1", "Ligue 1", "France"),
+    "ned.1": ("N1", "Eredivisie", "Netherlands"),
+    "por.1": ("P1", "Primeira Liga", "Portugal"),
     # ── Summer-season leagues (active Apr-Nov) ──────────────────────
-    "usa.1":         ("MLS",  "MLS",                    "USA"),
-    "bra.1":         ("BR1",  "Brasileirão Série A",    "Brazil"),
-    "arg.1":         ("AR1",  "Primera División",       "Argentina"),
-    "mex.1":         ("MX1",  "Liga MX",                "Mexico"),
-    "nor.1":         ("NO1",  "Eliteserien",            "Norway"),
-    "swe.1":         ("SE1",  "Allsvenskan",            "Sweden"),
-    "jpn.1":         ("JP1",  "J1 League",              "Japan"),
-
+    "usa.1": ("MLS", "MLS", "USA"),
+    "bra.1": ("BR1", "Brasileirão Série A", "Brazil"),
+    "arg.1": ("AR1", "Primera División", "Argentina"),
+    "mex.1": ("MX1", "Liga MX", "Mexico"),
+    "nor.1": ("NO1", "Eliteserien", "Norway"),
+    "swe.1": ("SE1", "Allsvenskan", "Sweden"),
+    "jpn.1": ("JP1", "J1 League", "Japan"),
     # ── International competitions (mostly summer 2026) ─────────────
-    "fifa.world":    ("WC",   "FIFA World Cup",         "International"),
-    "concacaf.gold": ("GOLD", "CONCACAF Gold Cup",      "International"),
-    "uefa.champions":("UCL",  "UEFA Champions League",  "International"),
-    "uefa.europa":   ("UEL",  "UEFA Europa League",     "International"),
+    "fifa.world": ("WC", "FIFA World Cup", "International"),
+    "concacaf.gold": ("GOLD", "CONCACAF Gold Cup", "International"),
+    "uefa.champions": ("UCL", "UEFA Champions League", "International"),
+    "uefa.europa": ("UEL", "UEFA Europa League", "International"),
 }
 
 
@@ -202,10 +200,20 @@ def fetch_all(database_url: str, leagues: list[str], days: int) -> dict[str, int
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--leagues", default=",".join(LEAGUE_MAP.keys()),
-                   help="Comma-separated ESPN league slugs (default: all known soccer).")
-    p.add_argument("--days", type=int, default=7,
-                   help="How many days forward to look (default: 7).")
+    p.add_argument(
+        "--leagues",
+        default=",".join(LEAGUE_MAP.keys()),
+        help="Comma-separated ESPN league slugs (default: all known soccer).",
+    )
+    p.add_argument(
+        "--days",
+        type=int,
+        default=30,
+        help="How many days forward to look (default: 30 — keeps "
+        "tournament-format competitions like the World Cup in "
+        "the fixture window even when group stages are weeks "
+        "ahead).",
+    )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
 
