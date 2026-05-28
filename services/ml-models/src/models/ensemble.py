@@ -38,11 +38,15 @@ class EnsemblePredictor(BaseModel):
 
     def train(
         self,
-        train_df: pd.DataFrame,
+        train_df: Optional[pd.DataFrame] = None,
         val_df: Optional[pd.DataFrame] = None,
         **kwargs,
     ) -> Dict[str, Any]:
-        """Optimize ensemble weights on validation data."""
+        """Optimize ensemble weights on validation data.
+
+        `train_df` is accepted for API consistency with the base models
+        but the ensemble fits its blend weights from val_df only.
+        """
         if not self.models:
             raise ValueError("No models in ensemble")
 
