@@ -75,29 +75,49 @@ def _build_ensemble_from_registry(model_path: Path):
     artifact, and re-attach via add_model() before setting weights.
     """
     import json
-
-    # Make ml-models importable. The API container has it on PYTHONPATH
-    # (Dockerfile.api ENV PYTHONPATH=...:/app/services/ml-models/src) but
-    # be defensive in case a caller invokes this from a different shell.
     import sys
 
     ml_src = "/app/services/ml-models/src"
     if ml_src not in sys.path:
         sys.path.insert(0, ml_src)
 
-    from models.ensemble import EnsemblePredictor
-    from models.lightgbm_model import LightGBMMatchPredictor
-    from models.model_config import (
-        DIXON_COLES_CONFIG,
-        ENSEMBLE_CONFIG,
-        LIGHTGBM_MATCH_OUTCOME,
-        NEURAL_NETWORK_CONFIG,
-        POISSON_CONFIG,
-        XGBOOST_MATCH_OUTCOME,
-    )
-    from models.neural_network import NeuralNetworkMatchPredictor
-    from models.poisson_models import DixonColesPredictor, PoissonMatchPredictor
-    from models.xgboost_model import XGBoostMatchPredictor
+    # Name collision: both /app/services/api/src/models/ (pydantic
+    # response/request schemas) and /app/services/ml-models/src/models/
+    # (ML predictor classes) use the top-level package name `models`.
+    # The api package was cached in sys.modules at this file's own
+    # import (services/api/src/services/prediction_service.py imports
+    # `models.responses`), so a plain `from models.ensemble import X`
+    # here would resolve to the api package and fail.
+    #
+    # Solution: pop the api's `models.*` entries, do the ml-models
+    # imports (which now resolve via the freshly-searched sys.path),
+    # then restore the api package so the rest of the route handlers
+    # still find their schemas.
+    api_models_cache = {k: sys.modules[k] for k in list(sys.modules) if k == "models" or k.startswith("models.")}
+    for k in api_models_cache:
+        del sys.modules[k]
+
+    try:
+        from models.ensemble import EnsemblePredictor
+        from models.lightgbm_model import LightGBMMatchPredictor
+        from models.model_config import (
+            DIXON_COLES_CONFIG,
+            ENSEMBLE_CONFIG,
+            LIGHTGBM_MATCH_OUTCOME,
+            NEURAL_NETWORK_CONFIG,
+            POISSON_CONFIG,
+            XGBOOST_MATCH_OUTCOME,
+        )
+        from models.neural_network import NeuralNetworkMatchPredictor
+        from models.poisson_models import DixonColesPredictor, PoissonMatchPredictor
+        from models.xgboost_model import XGBoostMatchPredictor
+    finally:
+        # Remove the ml-models cache entries we just created, then put
+        # the api's package back so route handlers stay happy.
+        for k in list(sys.modules):
+            if k == "models" or k.startswith("models."):
+                del sys.modules[k]
+        sys.modules.update(api_models_cache)
 
     ensemble_meta = _latest_model_bin(model_path / "ensemble")
     if ensemble_meta is None:
