@@ -29,6 +29,32 @@ def get_model_version() -> str:
     return _MODEL_VERSION
 
 
+def _find_ensemble_artifact(model_path: Path) -> Optional[Path]:
+    """Locate the ensemble model file in `model_path`.
+
+    The training pipeline writes via ModelRegistry, producing
+    `{model_path}/ensemble/{version}/model.bin`. Older deployments
+    wrote a single `{model_path}/ensemble_model.pkl`. Look for the
+    new layout first (picking the most recent by mtime so an
+    in-place retrain that doesn't bump the version still wins),
+    then fall back to the legacy path.
+    """
+    new_layout_root = model_path / "ensemble"
+    if new_layout_root.is_dir():
+        candidates = sorted(
+            new_layout_root.glob("*/model.bin"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if candidates:
+            return candidates[0]
+
+    legacy = model_path / "ensemble_model.pkl"
+    if legacy.exists():
+        return legacy
+    return None
+
+
 def load_models_into_process(model_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Load ML models into the process-wide registry. Idempotent.
 
@@ -44,15 +70,22 @@ def load_models_into_process(model_dir: Optional[Path] = None) -> Dict[str, Any]
     try:
         import joblib
 
-        ensemble_path = model_path / "ensemble_model.pkl"
-        if ensemble_path.exists():
+        ensemble_path = _find_ensemble_artifact(model_path)
+        if ensemble_path is not None:
             _MODELS["ensemble"] = joblib.load(ensemble_path)
-            # Derive version from mtime to invalidate caches when artifacts change.
+            # Version string includes the registry version dir + mtime so
+            # both an explicit retrain (new version dir) and an in-place
+            # retrain (mtime bump) invalidate the prediction cache.
             mtime = int(ensemble_path.stat().st_mtime)
-            _MODEL_VERSION = f"ensemble_v1.0+{mtime}"
-            logger.info("Loaded ensemble model (version=%s)", _MODEL_VERSION)
+            version_label = ensemble_path.parent.name if ensemble_path.parent.name != "production" else "v1.0"
+            _MODEL_VERSION = f"ensemble_{version_label}+{mtime}"
+            logger.info("Loaded ensemble model from %s (version=%s)", ensemble_path, _MODEL_VERSION)
         else:
-            logger.warning("Ensemble model not found at %s; serving from DB fallback", ensemble_path)
+            logger.warning(
+                "Ensemble model not found under %s (looked for ensemble/*/model.bin and "
+                "ensemble_model.pkl); serving from DB fallback",
+                model_path,
+            )
     except Exception as e:
         logger.error("Failed to load models: %s", e, exc_info=True)
     return _MODELS
