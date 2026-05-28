@@ -76,7 +76,7 @@ DEFAULT_SPORTS = [
     "soccer_france_ligue_one",
     "soccer_netherlands_eredivisie",
     "soccer_portugal_primeira_liga",
-    "soccer_belgium_first_div_a",
+    "soccer_belgium_first_div",  # actual the-odds-api key (no "_a" suffix)
     "soccer_turkey_super_league",
     "soccer_greece_super_league",
     "soccer_scotland_premiership",
@@ -127,8 +127,10 @@ def fetch_sport_odds(sport_key: str, api_key: str, regions: str) -> list[dict]:
     r = requests.get(url, params=params, timeout=30)
     if r.status_code == 401:
         raise RuntimeError("the-odds-api: invalid API key (401)")
-    if r.status_code == 422:
-        logger.warning("the-odds-api: %s — sport not in season or unknown", sport_key)
+    # 422 = sport off-season, 404 = unknown sport key — both mean "skip
+    # this sport, keep going on the others" rather than crashing the run.
+    if r.status_code in (404, 422):
+        logger.warning("the-odds-api: %s — sport not available (HTTP %d)", sport_key, r.status_code)
         return []
     r.raise_for_status()
 

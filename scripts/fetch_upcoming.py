@@ -65,8 +65,8 @@ LEAGUE_MAP: dict[str, tuple[str, str, str]] = {
     "chi.1": ("CL1", "Primera División", "Chile"),
     "col.1": ("CO1", "Primera A", "Colombia"),
     # ── Asia-Pacific (varies) ───────────────────────────────────────
+    # ESPN doesn't carry K League — `kor.1` returns HTTP 400. Removed.
     "jpn.1": ("JP1", "J1 League", "Japan"),
-    "kor.1": ("KR1", "K League 1", "South Korea"),
     "chn.1": ("CN1", "Chinese Super League", "China"),
     "aus.1": ("AU1", "A-League", "Australia"),
     # ── Nordic (summer-active filler) ───────────────────────────────
