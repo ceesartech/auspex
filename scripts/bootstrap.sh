@@ -69,9 +69,21 @@ START_TS=$(date +%s)
 if [ "$SKIP_LOAD" = "1" ]; then
   log "SKIP_LOAD=1 → skipping football-data loader"
 else
-  step "Step 1/7  Load football-data.co.uk ($LEAGUES, $SEASONS seasons)"
+  step "Step 1a  Load football-data.co.uk EU leagues ($LEAGUES, $SEASONS seasons)"
   docker compose exec -T api python /app/scripts/load_football_data.py \
       --leagues "$LEAGUES" --seasons "$SEASONS"
+
+  step "Step 1b  Load football-data.co.uk extra leagues (MLS/Brasileirão/etc.)"
+  # Extra-leagues files are one-CSV-per-country covering all seasons,
+  # so no --seasons flag. Default is every known country; override with
+  # EXTRA_COUNTRIES=USA,BRA,ARG to narrow scope.
+  if [ -n "${EXTRA_COUNTRIES:-}" ]; then
+    docker compose exec -T api python /app/scripts/load_football_data_extra.py \
+        --countries "$EXTRA_COUNTRIES" || warn "extra-leagues load had errors (continuing)"
+  else
+    docker compose exec -T api python /app/scripts/load_football_data_extra.py \
+        || warn "extra-leagues load had errors (continuing)"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────

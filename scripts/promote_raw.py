@@ -34,28 +34,49 @@ from psycopg2.extras import Json, RealDictCursor, execute_values
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("promote_raw")
 
-# football-data.co.uk league codes → canonical (name, country).
+# League code → canonical (name, country).
+# Codes here MUST stay aligned with fetch_upcoming.LEAGUE_MAP and the
+# country codes used by load_football_data_extra.py.
 LEAGUE_MAP: dict[str, tuple[str, str]] = {
-    "E0":  ("Premier League",  "England"),
-    "E1":  ("Championship",    "England"),
-    "E2":  ("League One",      "England"),
-    "E3":  ("League Two",      "England"),
-    "EC":  ("National League", "England"),
-    "D1":  ("Bundesliga",      "Germany"),
-    "D2":  ("2. Bundesliga",   "Germany"),
-    "I1":  ("Serie A",         "Italy"),
-    "I2":  ("Serie B",         "Italy"),
-    "SP1": ("La Liga",         "Spain"),
-    "SP2": ("La Liga 2",       "Spain"),
-    "F1":  ("Ligue 1",         "France"),
-    "F2":  ("Ligue 2",         "France"),
-    "N1":  ("Eredivisie",      "Netherlands"),
-    "B1":  ("Pro League",      "Belgium"),
-    "P1":  ("Primeira Liga",   "Portugal"),
-    "SC0": ("Premiership",     "Scotland"),
-    "SC1": ("Championship",    "Scotland"),
-    "T1":  ("Süper Lig",       "Turkey"),
-    "G1":  ("Super League",    "Greece"),
+    # ── European top flights (from load_football_data.py) ───────────
+    "E0":  ("Premier League",         "England"),
+    "E1":  ("Championship",           "England"),
+    "E2":  ("League One",             "England"),
+    "E3":  ("League Two",             "England"),
+    "EC":  ("National League",        "England"),
+    "D1":  ("Bundesliga",             "Germany"),
+    "D2":  ("2. Bundesliga",          "Germany"),
+    "I1":  ("Serie A",                "Italy"),
+    "I2":  ("Serie B",                "Italy"),
+    "SP1": ("La Liga",                "Spain"),
+    "SP2": ("La Liga 2",              "Spain"),
+    "F1":  ("Ligue 1",                "France"),
+    "F2":  ("Ligue 2",                "France"),
+    "N1":  ("Eredivisie",             "Netherlands"),
+    "B1":  ("Pro League",             "Belgium"),
+    "P1":  ("Primeira Liga",          "Portugal"),
+    "SC0": ("Premiership",            "Scotland"),
+    "SC1": ("Championship",           "Scotland"),
+    "T1":  ("Süper Lig",              "Turkey"),
+    "G1":  ("Super League",           "Greece"),
+
+    # ── Summer / non-European leagues (from load_football_data_extra.py) ──
+    "MLS": ("MLS",                    "USA"),
+    "BR1": ("Brasileirão Série A",    "Brazil"),
+    "AR1": ("Primera División",       "Argentina"),
+    "MX1": ("Liga MX",                "Mexico"),
+    "NO1": ("Eliteserien",            "Norway"),
+    "SE1": ("Allsvenskan",            "Sweden"),
+    "JP1": ("J1 League",              "Japan"),
+    "AT1": ("Bundesliga",             "Austria"),
+    "CH1": ("Super League",           "Switzerland"),
+    "CN1": ("Chinese Super League",   "China"),
+    "DK1": ("Superliga",              "Denmark"),
+    "FI1": ("Veikkausliiga",          "Finland"),
+    "IE1": ("Premier Division",       "Ireland"),
+    "PL1": ("Ekstraklasa",            "Poland"),
+    "RO1": ("Liga I",                 "Romania"),
+    "RU1": ("Premier League",         "Russia"),
 }
 
 
