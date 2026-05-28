@@ -91,3 +91,26 @@
 grafana.{$AUSPEX_DOMAIN} {
 	reverse_proxy grafana:3000
 }
+
+# Airflow webserver. Requires an A record `airflow.<AUSPEX_DOMAIN>`
+# pointing at this VM, and the Airflow admin password changed away
+# from the docker-compose default of 'admin' via the Airflow UI's
+# Security → List Users page before this route goes live.
+airflow.{$AUSPEX_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy airflow-webserver:8080 {
+		# Airflow generates absolute URLs in some views; pass through
+		# the original host + scheme so its base_url config matches.
+		header_up X-Forwarded-Host {host}
+		header_up X-Forwarded-Proto https
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+	log {
+		output stdout
+		format json
+	}
+}

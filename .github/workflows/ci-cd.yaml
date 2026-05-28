@@ -257,7 +257,12 @@ jobs:
             dockerfile: docker/Dockerfile.airflow
           - service: frontend
             context: services/frontend
-            dockerfile: ../../docker/Dockerfile.frontend
+            # docker/build-push-action resolves `file:` relative to the
+            # workflow's working directory (the repo root), NOT the
+            # context. Use the root-relative path; the `../../` form
+            # docker-compose uses only works when compose itself parses
+            # the build directive.
+            dockerfile: docker/Dockerfile.frontend
 
     steps:
       - uses: actions/checkout@v4
@@ -283,10 +288,12 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
           # For the frontend, the public URL has to be baked in at
-          # build time (NEXT_PUBLIC_* are inlined by next build).
+          # build time (NEXT_PUBLIC_* are inlined by next build). Falls
+          # back to the canonical domain if vars.AUSPEX_DOMAIN isn't
+          # set — set the repo variable to override on a custom domain.
           build-args: |
-            NEXT_PUBLIC_API_URL=https://${{ vars.AUSPEX_DOMAIN }}
-            NEXT_PUBLIC_WS_URL=wss://${{ vars.AUSPEX_DOMAIN }}
+            NEXT_PUBLIC_API_URL=https://${{ vars.AUSPEX_DOMAIN || 'auspex.ceesartech.com' }}
+            NEXT_PUBLIC_WS_URL=wss://${{ vars.AUSPEX_DOMAIN || 'auspex.ceesartech.com' }}
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}:latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}:${{ github.sha }}
