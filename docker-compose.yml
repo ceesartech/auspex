@@ -168,7 +168,7 @@ services:
       - ENVIRONMENT=production
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - ./models:/app/models:ro
+      - ./models:/app/models
       - ./services/api:/app/services/api
     ports:
       - "${API_PORT:-8000}:8000"
@@ -200,7 +200,7 @@ services:
       - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/2
     volumes:
       - ./services/api:/app/services/api
-      - ./models:/app/models:ro
+      - ./models:/app/models
     command: celery -A services.api.celery_app worker --loglevel=info --concurrency=4
     depends_on:
       - redis

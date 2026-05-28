@@ -116,7 +116,7 @@ else
     cd /app/services/ml-models && \
     PYTHONPATH=src python -m training.train_all_models \
         --database-url "$DATABASE_URL" \
-        --output-dir /models/staging
+        --output-dir /app/models/staging
   '
 
   # ───────────────────────────────────────────────────────────────────
@@ -124,9 +124,9 @@ else
   # ───────────────────────────────────────────────────────────────────
   step "Step 5/7  Promote staging models → production + reload API"
   docker compose exec -T api bash -c '
-    mkdir -p /models/production
-    cp -r /models/staging/* /models/production/ 2>/dev/null || true
-    ls -la /models/production/
+    mkdir -p /app/models/production
+    cp -r /app/models/staging/* /app/models/production/ 2>/dev/null || true
+    ls -la /app/models/production/
   '
   docker compose restart api
   # Wait for the API to come back healthy.
