@@ -190,6 +190,11 @@ services:
       - MODEL_PATH=/app/models
       - ENVIRONMENT=production
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Third-party data sources used by scripts/.
+      - THE_ODDS_API_KEY=${THE_ODDS_API_KEY:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - ENABLE_TELEGRAM_NOTIFICATIONS=${ENABLE_TELEGRAM_NOTIFICATIONS:-false}
     volumes:
       - ./models:/app/models
       - ./services/api:/app/services/api
