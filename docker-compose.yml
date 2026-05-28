@@ -198,6 +198,11 @@ services:
     volumes:
       - ./models:/app/models
       - ./services/api:/app/services/api
+      # Bind-mount scripts/ so edits to fetch_live_odds.py /
+      # promote_raw.py / etc. flow into the container without
+      # rebuilding the image. The Dockerfile still COPYs them in for
+      # production deploys where the image is rolled forward.
+      - ./scripts:/app/scripts
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
