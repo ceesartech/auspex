@@ -35,8 +35,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(me
 logger = logging.getLogger("promote_raw")
 
 # League code → canonical (name, country).
-# Codes here MUST stay aligned with fetch_upcoming.LEAGUE_MAP and the
-# country codes used by load_football_data_extra.py.
+# Codes here MUST stay aligned with fetch_upcoming.SOCCER_LEAGUES and
+# the country codes used by load_football_data_extra.py.
 LEAGUE_MAP: dict[str, tuple[str, str]] = {
     # ── European top flights (from load_football_data.py) ───────────
     "E0": ("Premier League", "England"),

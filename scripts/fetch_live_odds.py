@@ -1,38 +1,28 @@
 """Fetch live (pre-match) odds from the-odds-api.com.
 
-the-odds-api.com (https://the-odds-api.com) free tier: 500 requests per
-month, no card required. Each call returns all upcoming events for one
-sport + one region. We default to one region ("us") and one call per
-sport per run = 1 quota unit / sport / run. With the configured 9
-sports the daily DAG burns 270 quota / month — well under the limit.
+the-odds-api.com (https://the-odds-api.com) bills 1 quota unit per
+(region × market) per call. We default to one region ("us") and send
+the sport's full market basket in a single call, so a soccer run costs
+2 units (h2h + totals) and an NHL run costs 3 units (h2h + spreads +
+totals). With the configured sport list and one daily run this is well
+under both the 500-unit free tier and the 20,000-unit paid tier.
 
 The script:
   1. Pulls /v4/sports/{sport_key}/odds for each configured sport.
   2. For each returned event, looks up the matching match in our
-     `matches` table by (home_team_name, away_team_name, match_date).
-     Team-name matching falls back through {exact, normalized, fuzzy}.
-  3. Inserts one row per (bookmaker × market × selection) into the
-     odds table with is_opening=false, is_live=false. Duplicate rows
+     `matches` table by (home_team_name, away_team_name, match_date)
+     scoped to the event's sport.
+  3. Inserts one row per (bookmaker × market × selection [× line]) into
+     the odds table with is_opening=false, is_live=false. Duplicate rows
      within the same window are skipped via the NOT EXISTS guard.
 
 Sport keys (https://the-odds-api.com/sports-odds-data/sports-apis.html):
-    soccer_epl                   English Premier League
-    soccer_germany_bundesliga    Bundesliga
-    soccer_italy_serie_a         Serie A
-    soccer_spain_la_liga         La Liga
-    soccer_france_ligue_one      Ligue 1
-    soccer_usa_mls               MLS
-    soccer_brazil_campeonato     Brasileirão
-    soccer_argentina_primera_division  Primera División
-    soccer_uefa_champs_league    UEFA Champions League
-    soccer_uefa_europa_league    UEFA Europa League
-    soccer_fifa_world_cup        FIFA World Cup
-    soccer_conmebol_copa_america Copa América
-    soccer_concacaf_gold_cup     CONCACAF Gold Cup
+    soccer_*                     27+ soccer leagues
+    icehockey_nhl                NHL
 
 Usage:
     python scripts/fetch_live_odds.py                 # all configured sports
-    python scripts/fetch_live_odds.py --sports soccer_epl,soccer_usa_mls
+    python scripts/fetch_live_odds.py --sports soccer_epl,icehockey_nhl
     python scripts/fetch_live_odds.py --regions eu     # default 'us'
     python scripts/fetch_live_odds.py --quota-only     # check remaining quota
 """
@@ -43,7 +33,7 @@ import argparse
 import logging
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 
 import psycopg2
@@ -55,18 +45,17 @@ logger = logging.getLogger("fetch_live_odds")
 
 BASE_URL = "https://api.the-odds-api.com/v4"
 
-# the-odds-api sport keys we pull. Comprehensive global soccer coverage
-# so there's always something in season. Each entry costs 1 quota per
-# daily run × 30 days = 30 quota/month. Full list = ~28 × 30 = 840
-# quota/month — well within both the 500 free-tier ceiling (if you're
-# on it) and the 20,000 Recommended-tier ceiling. The script gracefully
-# handles 422 (sport not in season) so off-season leagues no-op.
+# the-odds-api sport keys we pull. Each entry costs (markets × regions)
+# quota per daily run × 30 days/month. With ~28 soccer keys (2 markets)
+# + 1 NHL key (3 markets) at one region, the full default list is
+# (28×2 + 1×3) × 30 = ~1,770 quota/month — well within the 20,000-unit
+# paid tier. The script gracefully handles 422 (sport off-season) so
+# leagues outside their window no-op.
 #
-# To trim back: comment out leagues you don't care about. To add more
-# sports (non-soccer), see https://the-odds-api.com/sports-odds-data/sports-apis.html
-# — but note that auspex's ensemble model is trained on soccer-only
-# 3-class outcomes and can't predict on NFL/NBA/etc. without a separate
-# model and feature pipeline per sport.
+# To trim back: comment out sports you don't care about. To add more
+# sports (NBA, NFL, MLB, tennis), see the sport-keys reference linked
+# in the module docstring AND register the sport's market mapper below.
+# An unregistered sport will be skipped with a warning.
 DEFAULT_SPORTS = [
     # European top flights (in season Aug-May)
     "soccer_epl",
@@ -101,13 +90,38 @@ DEFAULT_SPORTS = [
     "soccer_fifa_world_cup",
     "soccer_conmebol_copa_america",
     "soccer_concacaf_gold_cup",
+    # NHL (in season Oct-Jun, including playoffs)
+    "icehockey_nhl",
 ]
 
-# Map the-odds-api market_key + outcome.name → our (market_type, selection).
-MARKET_TYPE_MAP = {
-    "h2h": "1x2",
-    "totals": "over_under",
+
+# ── Sport dispatch ────────────────────────────────────────────────────
+# the-odds-api keys are prefixed by sport family (`soccer_*`, `icehockey_*`,
+# `americanfootball_*`, etc.). We derive auspex's internal sport label
+# from the key prefix to pick the right outcome mapper and team scope.
+SPORT_KEY_PREFIXES: dict[str, str] = {
+    "soccer_": "soccer",
+    "icehockey_": "nhl",
 }
+
+
+# Per-sport market basket sent to the-odds-api. Each market costs 1 quota
+# unit per region per call. Soccer uses the 1x2 + over/under 2.5 pair the
+# soccer ensemble was trained on; NHL adds spreads (puck line) since the
+# planned NHL ensemble covers all three markets.
+SPORT_MARKETS: dict[str, str] = {
+    "soccer": "h2h,totals",
+    "nhl": "h2h,spreads,totals",
+}
+
+
+def sport_for_key(sport_key: str) -> str | None:
+    """Return the auspex sport label for a the-odds-api sport key, or
+    None if the key isn't from a registered sport family."""
+    for prefix, sport in SPORT_KEY_PREFIXES.items():
+        if sport_key.startswith(prefix):
+            return sport
+    return None
 
 
 def normalize_name(name: str) -> str:
@@ -115,12 +129,12 @@ def normalize_name(name: str) -> str:
     return " ".join(name.lower().replace(".", "").replace("&", "and").split())
 
 
-def fetch_sport_odds(sport_key: str, api_key: str, regions: str) -> list[dict]:
+def fetch_sport_odds(sport_key: str, markets: str, api_key: str, regions: str) -> list[dict]:
     url = f"{BASE_URL}/sports/{sport_key}/odds"
     params = {
         "apiKey": api_key,
         "regions": regions,
-        "markets": "h2h,totals",
+        "markets": markets,
         "oddsFormat": "decimal",
         "dateFormat": "iso",
     }
@@ -141,9 +155,11 @@ def fetch_sport_odds(sport_key: str, api_key: str, regions: str) -> list[dict]:
     return r.json()
 
 
-def find_match_id(cur, home_team: str, away_team: str, commence_time: datetime) -> str | None:
-    """Locate the matching match row. The-odds-api uses team names that
-    don't always match what's in our `teams` table; try three strategies:
+def find_match_id(cur, sport: str, home_team: str, away_team: str, commence_time: datetime) -> str | None:
+    """Locate the matching match row in `matches`, scoped to `sport`.
+
+    The-odds-api uses team names that don't always match what's in our
+    `teams` table; try three strategies:
       1. Exact normalized match on home + away.
       2. Fuzzy match (SequenceMatcher >= 0.8) on each side, within ±2 days.
     """
@@ -159,9 +175,10 @@ def find_match_id(cur, home_team: str, away_team: str, commence_time: datetime) 
         JOIN teams ht ON ht.id = m.home_team_id
         JOIN teams at ON at.id = m.away_team_id
         WHERE m.status = 'scheduled'
+          AND ht.sport = %s
           AND m.match_date BETWEEN %s AND %s
         """,
-        (window_start, window_end),
+        (sport, window_start, window_end),
     )
     candidates = cur.fetchall()
     if not candidates:
@@ -221,37 +238,82 @@ def insert_odds_row(
     return cur.rowcount > 0
 
 
+def _team_side(outcome_name: str, home_team_name: str, away_team_name: str) -> str | None:
+    """Resolve a team-named outcome (e.g. 'Toronto Maple Leafs') to 'home'
+    or 'away' relative to the event. Returns None if neither side matches."""
+    n = outcome_name.strip().lower()
+    if n == home_team_name.strip().lower():
+        return "home"
+    if n == away_team_name.strip().lower():
+        return "away"
+    return None
+
+
 def map_outcome(
-    market_key: str, outcome_name: str, home_team_name: str, away_team_name: str
-) -> tuple[str | None, str | None]:
+    sport: str,
+    market_key: str,
+    outcome_name: str,
+    home_team_name: str,
+    away_team_name: str,
+    point: float | None,
+) -> tuple[str | None, str | None, bool]:
     """Translate the-odds-api's market.key + outcome.name into our
-    (market_type, selection) format. Returns (None, None) if unmappable.
+    (market_type, selection) format, and report whether the row's
+    `line` should be kept.
+
+    Returns (market_type, selection, keep_line). market_type=None means
+    the outcome isn't representable in our schema and should be skipped.
+
+    Soccer: h2h → 1x2 (home/draw/away, no line); totals → over_under
+    keyed on the 2.5 line only (the soccer training features expect
+    implied_prob_over25).
+
+    NHL: h2h → moneyline (home/away, no draw); spreads → spread (puck
+    line, home/away with ±1.5 line); totals → total (over/under, every
+    available line — the NHL model hasn't picked a canonical line yet).
     """
-    market_type = MARKET_TYPE_MAP.get(market_key)
-    if market_type is None:
-        return None, None
+    if sport == "soccer":
+        if market_key == "h2h":
+            if outcome_name == home_team_name:
+                return "1x2", "home", False
+            if outcome_name == away_team_name:
+                return "1x2", "away", False
+            if outcome_name.lower() == "draw":
+                return "1x2", "draw", False
+            return None, None, False
+        if market_key == "totals":
+            n = outcome_name.lower()
+            if n not in ("over", "under"):
+                return None, None, False
+            # Soccer training data only uses the 2.5 line; drop other lines
+            # to avoid bloating the table with rows we never read.
+            if point is None or abs(float(point) - 2.5) > 0.01:
+                return None, None, False
+            return "over_under", n, True
+        return None, None, False
 
-    if market_type == "1x2":
-        if outcome_name == home_team_name:
-            return market_type, "home"
-        if outcome_name == away_team_name:
-            return market_type, "away"
-        if outcome_name.lower() == "draw":
-            return market_type, "draw"
-        return None, None
+    if sport == "nhl":
+        if market_key == "h2h":
+            side = _team_side(outcome_name, home_team_name, away_team_name)
+            if side is None:
+                return None, None, False
+            return "moneyline", side, False
+        if market_key == "spreads":
+            side = _team_side(outcome_name, home_team_name, away_team_name)
+            if side is None or point is None:
+                return None, None, False
+            return "spread", side, True
+        if market_key == "totals":
+            n = outcome_name.lower()
+            if n not in ("over", "under") or point is None:
+                return None, None, False
+            return "total", n, True
+        return None, None, False
 
-    if market_type == "over_under":
-        name = outcome_name.lower()
-        if name == "over":
-            return market_type, "over"
-        if name == "under":
-            return market_type, "under"
-        return None, None
-
-    return None, None
+    return None, None, False
 
 
-def process_event(cur, event: dict, unmatched_log: list | None = None) -> int:
+def process_event(cur, sport: str, event: dict, unmatched_log: list | None = None) -> int:
     home = event.get("home_team") or ""
     away = event.get("away_team") or ""
     commence = event.get("commence_time")
@@ -263,7 +325,7 @@ def process_event(cur, event: dict, unmatched_log: list | None = None) -> int:
     except ValueError:
         return 0
 
-    match_id = find_match_id(cur, home, away, commence_dt)
+    match_id = find_match_id(cur, sport, home, away, commence_dt)
     if not match_id:
         if unmatched_log is not None:
             unmatched_log.append(f"{home} vs {away} @ {commence}")
@@ -275,17 +337,17 @@ def process_event(cur, event: dict, unmatched_log: list | None = None) -> int:
         for market in bm.get("markets", []):
             market_key = market.get("key")
             for outcome in market.get("outcomes", []):
-                market_type, selection = map_outcome(market_key, outcome.get("name", ""), home, away)
+                point = outcome.get("point")
+                point_f = float(point) if point is not None else None
+                market_type, selection, keep_line = map_outcome(
+                    sport, market_key, outcome.get("name", ""), home, away, point_f
+                )
                 if not market_type:
                     continue
                 price = outcome.get("price")
                 if price is None:
                     continue
-                line = outcome.get("point")  # over/under threshold
-                # We only care about the 2.5 line for over/under (matches
-                # how training_data extracts implied_prob_over25).
-                if market_type == "over_under" and line is not None and abs(float(line) - 2.5) > 0.01:
-                    continue
+                line = point_f if keep_line else None
                 if insert_odds_row(
                     cur,
                     match_id,
@@ -293,7 +355,7 @@ def process_event(cur, event: dict, unmatched_log: list | None = None) -> int:
                     market_type,
                     selection,
                     float(price),
-                    float(line) if line is not None else None,
+                    line,
                 ):
                     inserted += 1
     return inserted
@@ -304,12 +366,21 @@ def run(database_url: str, sports: list[str], api_key: str, regions: str) -> dic
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for sport_key in sports:
-                events = fetch_sport_odds(sport_key, api_key, regions)
-                logger.info("%s: %d events returned", sport_key, len(events))
+                sport = sport_for_key(sport_key)
+                if sport is None:
+                    logger.warning(
+                        "%s: no registered sport family for this key — skipping. "
+                        "Register the prefix in SPORT_KEY_PREFIXES and add a map_outcome branch.",
+                        sport_key,
+                    )
+                    continue
+                markets = SPORT_MARKETS[sport]
+                events = fetch_sport_odds(sport_key, markets, api_key, regions)
+                logger.info("%s (%s): %d events returned", sport_key, sport, len(events))
                 results["events_seen"] += len(events)
                 unmatched: list[str] = []
                 for event in events:
-                    inserted = process_event(cur, event, unmatched_log=unmatched)
+                    inserted = process_event(cur, sport, event, unmatched_log=unmatched)
                     if inserted > 0:
                         results["events_matched"] += 1
                         results["odds_rows_inserted"] += inserted
@@ -318,7 +389,7 @@ def run(database_url: str, sports: list[str], api_key: str, regions: str) -> dic
                 # date, or a team-name spelling mismatch.
                 if unmatched:
                     logger.info(
-                        "%s: %d/%d events had no matching scheduled fixture. " "First 5: %s",
+                        "%s: %d/%d events had no matching scheduled fixture. First 5: %s",
                         sport_key,
                         len(unmatched),
                         len(events),
@@ -352,7 +423,7 @@ def main(argv=None):
         r = requests.get(f"{BASE_URL}/sports", params={"apiKey": args.api_key}, timeout=10)
         r.raise_for_status()
         print(
-            f"Quota — used: {r.headers.get('x-requests-used')}, " f"remaining: {r.headers.get('x-requests-remaining')}"
+            f"Quota — used: {r.headers.get('x-requests-used')}, remaining: {r.headers.get('x-requests-remaining')}"
         )
         return 0
 
