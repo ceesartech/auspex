@@ -8,8 +8,8 @@ test.describe('Authentication Flow', () => {
 
   test('login page renders correctly', async ({ page }) => {
     await page.goto('/login');
-    await expect(page.getByText('CeesarBet Predict')).toBeVisible();
-    await expect(page.getByPlaceholder('Enter your username')).toBeVisible();
+    await expect(page.getByText('Auspex')).toBeVisible();
+    await expect(page.getByPlaceholder('admin or you@example.com')).toBeVisible();
     await expect(page.getByPlaceholder('Enter your password')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Sign In' })).toBeVisible();
   });
@@ -18,7 +18,7 @@ test.describe('Authentication Flow', () => {
     await page.goto('/login');
     await page.getByRole('button', { name: 'Sign In' }).click();
     // Form validation should prevent submission
-    await expect(page.getByPlaceholder('Enter your username')).toBeVisible();
+    await expect(page.getByPlaceholder('admin or you@example.com')).toBeVisible();
   });
 });
 

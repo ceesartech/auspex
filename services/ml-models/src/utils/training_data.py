@@ -194,24 +194,30 @@ def _add_rolling_team_form(frame: pd.DataFrame, window: int = 5) -> pd.DataFrame
     # team (home perspective + away perspective), sorted chronologically.
     df = frame.sort_values("match_date").reset_index(drop=True)
 
-    home = pd.DataFrame({
-        "match_date": df["match_date"],
-        "team_id": df["home_team_id"],
-        "goals_for": df["home_score"].astype(float),
-        "goals_against": df["away_score"].astype(float),
-    })
+    home = pd.DataFrame(
+        {
+            "match_date": df["match_date"],
+            "team_id": df["home_team_id"],
+            "goals_for": df["home_score"].astype(float),
+            "goals_against": df["away_score"].astype(float),
+        }
+    )
     home["points"] = np.where(
-        df["home_score"] > df["away_score"], 3.0,
+        df["home_score"] > df["away_score"],
+        3.0,
         np.where(df["home_score"] == df["away_score"], 1.0, 0.0),
     )
-    away = pd.DataFrame({
-        "match_date": df["match_date"],
-        "team_id": df["away_team_id"],
-        "goals_for": df["away_score"].astype(float),
-        "goals_against": df["home_score"].astype(float),
-    })
+    away = pd.DataFrame(
+        {
+            "match_date": df["match_date"],
+            "team_id": df["away_team_id"],
+            "goals_for": df["away_score"].astype(float),
+            "goals_against": df["home_score"].astype(float),
+        }
+    )
     away["points"] = np.where(
-        df["away_score"] > df["home_score"], 3.0,
+        df["away_score"] > df["home_score"],
+        3.0,
         np.where(df["home_score"] == df["away_score"], 1.0, 0.0),
     )
     team_rows = pd.concat([home, away], ignore_index=True)
@@ -221,9 +227,7 @@ def _add_rolling_team_form(frame: pd.DataFrame, window: int = 5) -> pd.DataFrame
     # (shift(1) before rolling so we never peek at the current match's result).
     grouped = team_rows.groupby("team_id", group_keys=False)
     for col in ("goals_for", "goals_against", "points"):
-        team_rows[f"roll_{col}"] = (
-            grouped[col].shift(1).rolling(window=window, min_periods=1).mean()
-        )
+        team_rows[f"roll_{col}"] = grouped[col].shift(1).rolling(window=window, min_periods=1).mean()
 
     # Join back to the original frame for home and away separately.
     home_stats = team_rows.merge(
@@ -238,30 +242,32 @@ def _add_rolling_team_form(frame: pd.DataFrame, window: int = 5) -> pd.DataFrame
     )[["match_date", "team_id", "roll_goals_for", "roll_goals_against", "roll_points"]]
 
     df = df.merge(
-        home_stats.rename(columns={
-            "team_id": "home_team_id",
-            "roll_goals_for": "home_roll_goals_for",
-            "roll_goals_against": "home_roll_goals_against",
-            "roll_points": "home_roll_points",
-        }),
+        home_stats.rename(
+            columns={
+                "team_id": "home_team_id",
+                "roll_goals_for": "home_roll_goals_for",
+                "roll_goals_against": "home_roll_goals_against",
+                "roll_points": "home_roll_points",
+            }
+        ),
         on=["match_date", "home_team_id"],
         how="left",
     )
     df = df.merge(
-        away_stats.rename(columns={
-            "team_id": "away_team_id",
-            "roll_goals_for": "away_roll_goals_for",
-            "roll_goals_against": "away_roll_goals_against",
-            "roll_points": "away_roll_points",
-        }),
+        away_stats.rename(
+            columns={
+                "team_id": "away_team_id",
+                "roll_goals_for": "away_roll_goals_for",
+                "roll_goals_against": "away_roll_goals_against",
+                "roll_points": "away_roll_points",
+            }
+        ),
         on=["match_date", "away_team_id"],
         how="left",
     )
 
     df["form_diff_points"] = df["home_roll_points"] - df["away_roll_points"]
-    df["form_diff_goals"] = (
-        df["home_roll_goals_for"] - df["away_roll_goals_for"]
-    )
+    df["form_diff_goals"] = df["home_roll_goals_for"] - df["away_roll_goals_for"]
     return df
 
 

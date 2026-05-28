@@ -192,7 +192,6 @@ _TEST_PASSWORD = "TestPass@1234"
 def seeded_user(_apply_migrations) -> dict:
     """Insert a known user before login so the e2e flow can authenticate."""
     import psycopg2
-
     from auth.jwt_handler import hash_password
 
     with psycopg2.connect(os.environ["DATABASE_URL"]) as conn:
