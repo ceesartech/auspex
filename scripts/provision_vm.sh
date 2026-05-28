@@ -25,7 +25,17 @@ set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/ceesartech/auspex.git}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/auspex}"
-TARGET_USER="${TARGET_USER:-$(whoami)}"
+# When the script is invoked via `sudo`, $(whoami) returns "root" — which is
+# never the user we want to own files or join the docker group. Prefer the
+# invoking user from $SUDO_USER, falling back to whoami only when not under sudo.
+TARGET_USER="${TARGET_USER:-${SUDO_USER:-$(whoami)}}"
+if [ "$TARGET_USER" = "root" ]; then
+  printf '\033[1;31m[provision]\033[0m %s\n' \
+    "Refusing to provision as root. Re-run as a non-root user with sudo, e.g.:" >&2
+  printf '\033[1;31m[provision]\033[0m %s\n' \
+    "  ssh auspex@<host> 'curl -fsSL <script-url> | sudo -E bash'" >&2
+  exit 1
+fi
 
 log() { printf '\033[1;34m[provision]\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m[provision]\033[0m %s\n' "$*" >&2; }
