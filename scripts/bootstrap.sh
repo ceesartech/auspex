@@ -84,6 +84,11 @@ else
     docker compose exec -T api python /app/scripts/load_football_data_extra.py \
         || warn "extra-leagues load had errors (continuing)"
   fi
+
+  step "Step 1c  Load international competitions (WC + qualifiers + continental)"
+  # No odds data for international comps; rows still useful for outcome/Elo features.
+  docker compose exec -T api python /app/scripts/load_international.py \
+      || warn "international load had errors (continuing)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────

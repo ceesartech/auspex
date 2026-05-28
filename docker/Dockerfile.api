@@ -40,7 +40,13 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-ENV PYTHONPATH=/app/services/api/src
+# PYTHONPATH includes all four service trees the API may need to
+# import from at runtime: its own src/, ml-models (so joblib can
+# unpickle ensemble class references), feature-engineering (so the
+# api can call the orchestrator if/when needed), and data-ingestion
+# (for shared config types). Order matters — api/src first because
+# `config` and `services.*` names are common to multiple trees.
+ENV PYTHONPATH=/app/services/api/src:/app/services/ml-models/src:/app/services/feature-engineering:/app/services/data-ingestion/src
 WORKDIR /app/services/api/src
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]

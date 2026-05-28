@@ -25,8 +25,12 @@ from psycopg2.extras import RealDictCursor
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("compute_features")
 
-# Make the feature-engineering package importable.
-sys.path.insert(0, "/app/services/feature-engineering/src")
+# Make the feature-engineering package importable. orchestrator.py and
+# its siblings use relative imports (from .categories.base import …),
+# which requires them to load as part of a package — not as top-level
+# modules. So we put the *parent* of src/ on sys.path and import the
+# modules via the `src.*` namespace.
+sys.path.insert(0, "/app/services/feature-engineering")
 
 
 def list_target_matches(database_url: str, days: int) -> list[str]:
@@ -51,10 +55,10 @@ def list_target_matches(database_url: str, days: int) -> list[str]:
 
 def compute(match_ids: list[str]) -> dict[str, int]:
     """Run the orchestrator for each match id. Returns {ok,fail} counts."""
-    from core.config import FeatureConfig  # type: ignore
-    from core.database import DatabaseManager  # type: ignore
-    from orchestrator import RealTimeFeatureComputer  # type: ignore
     from redis import Redis
+    from src.core.config import FeatureConfig  # type: ignore
+    from src.core.database import DatabaseManager  # type: ignore
+    from src.orchestrator import RealTimeFeatureComputer  # type: ignore
 
     config = FeatureConfig()
     db = DatabaseManager(config)

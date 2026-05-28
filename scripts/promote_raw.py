@@ -77,6 +77,21 @@ LEAGUE_MAP: dict[str, tuple[str, str]] = {
     "PL1": ("Ekstraklasa",            "Poland"),
     "RO1": ("Liga I",                 "Romania"),
     "RU1": ("Premier League",         "Russia"),
+
+    # ── International competitions (from load_international.py) ─────
+    # martj42/international_results dataset. No odds data — these rows
+    # will have NULL closing-odds columns and the model trains on
+    # match outcome + team identity alone.
+    "WC":       ("FIFA World Cup",            "International"),
+    "WCQ":      ("FIFA World Cup Qualifiers", "International"),
+    "EURO":     ("UEFA Euro",                 "International"),
+    "EUROQ":    ("UEFA Euro Qualifiers",      "International"),
+    "UNL":      ("UEFA Nations League",       "International"),
+    "COPA":     ("Copa América",              "International"),
+    "GOLD":     ("CONCACAF Gold Cup",         "International"),
+    "AFCON":    ("Africa Cup of Nations",     "International"),
+    "AFCASIAN": ("AFC Asian Cup",             "International"),
+    "CONFED":   ("FIFA Confederations Cup",   "International"),
 }
 
 
