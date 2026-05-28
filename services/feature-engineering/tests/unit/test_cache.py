@@ -16,8 +16,11 @@ class TestFeatureCacheManager:
     def sample_features(self):
         return {"f1": 0.5, "f2": 1.0, "f3": None}
 
-    def test_make_key(self, cache):
-        key = cache._make_key("match-123", "full")
+    def test_redis_key(self, cache):
+        # _make_key was renamed to _redis_key when DB cache moved to the
+        # natural composite key (match_id, feature_set, feature_version).
+        # Redis still uses the concatenated string since it has no schema.
+        key = cache._redis_key("match-123", "full")
         assert key == "features:v1:match-123:full"
 
     def test_get_redis_hit(self, cache, mock_redis, sample_features):
