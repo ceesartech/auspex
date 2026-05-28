@@ -140,47 +140,46 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────
-# Step 6 — Warm the prediction cache for upcoming matches
+# Step 6 — Fetch upcoming fixtures from ESPN (free public API)
+# ─────────────────────────────────────────────────────────────────────
+step "Step 6/9  Fetch upcoming fixtures (next 7 days)"
+docker compose exec -T api python /app/scripts/fetch_upcoming.py --days 7 \
+  || warn "fetch_upcoming had errors (continuing — historical-only is still usable)"
+
+# ─────────────────────────────────────────────────────────────────────
+# Step 7 — Compute features for those upcoming matches
+# ─────────────────────────────────────────────────────────────────────
+step "Step 7/9  Compute features for matches missing them"
+docker compose exec -T api python /app/scripts/compute_features.py --days 7 \
+  || warn "compute_features had errors (continuing)"
+
+# ─────────────────────────────────────────────────────────────────────
+# Step 8 — Precompute predictions + Telegram alerts
 # ─────────────────────────────────────────────────────────────────────
 if [ "$SKIP_WARM" = "1" ]; then
-  log "SKIP_WARM=1 → skipping cache warm"
+  log "SKIP_WARM=1 → skipping precompute"
 else
-  step "Step 6/7  Warm prediction cache for next 7 days of matches"
-  DOMAIN=$(grep -E "^AUSPEX_DOMAIN=" .env 2>/dev/null | head -1 | cut -d= -f2-)
-  if [ -z "${DOMAIN:-}" ]; then
-    warn "AUSPEX_DOMAIN not set; skipping warm via public URL"
-  else
-    # We need a JWT to hit the predictions endpoint. Use the admin
-    # account we seeded earlier. If the password changed, override via
-    # ADMIN_PW=...
-    ADMIN_PW="${ADMIN_PW:-Admin@1234}"
-    TOKEN=$(curl -sf -X POST "https://${DOMAIN}/api/v1/user/login" \
-      -H "Content-Type: application/json" \
-      -d "{\"username\":\"admin\",\"password\":\"${ADMIN_PW}\"}" \
-      | python3 -c "import json,sys;print(json.load(sys.stdin).get('access_token',''))")
-    if [ -z "$TOKEN" ]; then
-      warn "Could not get JWT for cache-warm; skipping. Login manually to verify auth."
-    else
-      curl -sf -H "Authorization: Bearer $TOKEN" \
-        "https://${DOMAIN}/api/v1/predictions/upcoming?limit=200" \
-        | python3 -c "
-import json,sys
-data = json.load(sys.stdin)
-print(f'Warmed {len(data)} upcoming predictions')
-" || warn "Warm request failed (no upcoming matches yet is OK on a historical-only DB)"
-    fi
-  fi
+  step "Step 8/9  Precompute predictions + Telegram alerts"
+  # --notify-threshold 0.65 = only high-confidence picks ping you.
+  # Use --no-notify env override for a silent first run.
+  EXTRA=""
+  [ "${SILENT_BOOTSTRAP:-0}" = "1" ] && EXTRA="--no-notify"
+  docker compose exec -T api python /app/scripts/precompute_predictions.py \
+      --days 7 --notify-threshold "${NOTIFY_THRESHOLD:-0.65}" $EXTRA \
+      || warn "precompute_predictions had errors"
 fi
 
 # ─────────────────────────────────────────────────────────────────────
-# Step 7 — Smoke test
+# Step 9 — Smoke test
 # ─────────────────────────────────────────────────────────────────────
-step "Step 7/7  Smoke test"
+step "Step 9/9  Smoke test"
 docker compose exec -T postgres psql -U betting_user -d betting_system -c "
-  SELECT 'matches'   AS table, COUNT(*) FROM matches UNION ALL
-  SELECT 'teams'     AS table, COUNT(*) FROM teams   UNION ALL
-  SELECT 'odds'      AS table, COUNT(*) FROM odds    UNION ALL
-  SELECT 'users'     AS table, COUNT(*) FROM users;
+  SELECT 'matches'     AS table, COUNT(*) FROM matches UNION ALL
+  SELECT 'matches:scheduled' AS table, COUNT(*) FROM matches WHERE status='scheduled' UNION ALL
+  SELECT 'teams'       AS table, COUNT(*) FROM teams   UNION ALL
+  SELECT 'odds'        AS table, COUNT(*) FROM odds    UNION ALL
+  SELECT 'users'       AS table, COUNT(*) FROM users   UNION ALL
+  SELECT 'predictions' AS table, COUNT(*) FROM predictions;
 "
 
 ELAPSED=$(( $(date +%s) - START_TS ))

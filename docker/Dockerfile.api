@@ -9,9 +9,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy requirements and install Python dependencies. torch is split out
+# because it's installed from a custom index (CPU-only wheel) and adds
+# ~200MB to the image — fine for personal use on a single VM.
+COPY requirements.txt requirements-torch.txt ./
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -r requirements-torch.txt
+
+# Matplotlib + huggingface caches default to $HOME/.config, but the
+# non-root `appuser` has no writable home — point them at /tmp.
+ENV MPLCONFIGDIR=/tmp/matplotlib \
+    XDG_CACHE_HOME=/tmp/.cache \
+    HF_HOME=/tmp/.cache/huggingface
 
 # Copy application code
 COPY services/api/ /app/services/api/
