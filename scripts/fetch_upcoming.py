@@ -34,15 +34,39 @@ ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 # ESPN league slug -> our canonical (football-data code, league name, country).
 # Keep these aligned with promote_raw.LEAGUE_MAP so the same `leagues` row
 # is reused regardless of which loader wrote it first.
+#
+# European leagues run Aug-May; summer-season leagues (MLS, Brasileirão,
+# Eliteserien, Allsvenskan) plus international tournaments fill the
+# May-Aug gap so the pipeline always has fixtures to predict on. The
+# football-data codes for non-European leagues are best-effort labels —
+# football-data.co.uk doesn't publish CSVs for these, so models trained
+# on EU data won't be accurate on them until we add additional historical
+# sources.
 LEAGUE_MAP: dict[str, tuple[str, str, str]] = {
-    "eng.1": ("E0",  "Premier League",  "England"),
-    "eng.2": ("E1",  "Championship",    "England"),
-    "ger.1": ("D1",  "Bundesliga",      "Germany"),
-    "ita.1": ("I1",  "Serie A",         "Italy"),
-    "esp.1": ("SP1", "La Liga",         "Spain"),
-    "fra.1": ("F1",  "Ligue 1",         "France"),
-    "ned.1": ("N1",  "Eredivisie",      "Netherlands"),
-    "por.1": ("P1",  "Primeira Liga",   "Portugal"),
+    # ── European top flights (active Aug-May) ───────────────────────
+    "eng.1":         ("E0",   "Premier League",         "England"),
+    "eng.2":         ("E1",   "Championship",           "England"),
+    "ger.1":         ("D1",   "Bundesliga",             "Germany"),
+    "ita.1":         ("I1",   "Serie A",                "Italy"),
+    "esp.1":         ("SP1",  "La Liga",                "Spain"),
+    "fra.1":         ("F1",   "Ligue 1",                "France"),
+    "ned.1":         ("N1",   "Eredivisie",             "Netherlands"),
+    "por.1":         ("P1",   "Primeira Liga",          "Portugal"),
+
+    # ── Summer-season leagues (active Apr-Nov) ──────────────────────
+    "usa.1":         ("MLS",  "MLS",                    "USA"),
+    "bra.1":         ("BR1",  "Brasileirão Série A",    "Brazil"),
+    "arg.1":         ("AR1",  "Primera División",       "Argentina"),
+    "mex.1":         ("MX1",  "Liga MX",                "Mexico"),
+    "nor.1":         ("NO1",  "Eliteserien",            "Norway"),
+    "swe.1":         ("SE1",  "Allsvenskan",            "Sweden"),
+    "jpn.1":         ("JP1",  "J1 League",              "Japan"),
+
+    # ── International competitions (mostly summer 2026) ─────────────
+    "fifa.world":    ("WC",   "FIFA World Cup",         "International"),
+    "concacaf.gold": ("GOLD", "CONCACAF Gold Cup",      "International"),
+    "uefa.champions":("UCL",  "UEFA Champions League",  "International"),
+    "uefa.europa":   ("UEL",  "UEFA Europa League",     "International"),
 }
 
 
