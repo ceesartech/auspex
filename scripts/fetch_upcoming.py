@@ -53,19 +53,31 @@ LEAGUE_MAP: dict[str, tuple[str, str, str]] = {
     "fra.1": ("F1", "Ligue 1", "France"),
     "ned.1": ("N1", "Eredivisie", "Netherlands"),
     "por.1": ("P1", "Primeira Liga", "Portugal"),
-    # ── Summer-season leagues (active Apr-Nov) ──────────────────────
+    "bel.1": ("B1", "Pro League", "Belgium"),
+    "tur.1": ("T1", "Süper Lig", "Turkey"),
+    "gre.1": ("G1", "Super League", "Greece"),
+    "sco.1": ("SC0", "Premiership", "Scotland"),
+    # ── Americas (active Feb-Dec / Apr-Nov, varies) ─────────────────
     "usa.1": ("MLS", "MLS", "USA"),
     "bra.1": ("BR1", "Brasileirão Série A", "Brazil"),
     "arg.1": ("AR1", "Primera División", "Argentina"),
     "mex.1": ("MX1", "Liga MX", "Mexico"),
+    "chi.1": ("CL1", "Primera División", "Chile"),
+    "col.1": ("CO1", "Primera A", "Colombia"),
+    # ── Asia-Pacific (varies) ───────────────────────────────────────
+    "jpn.1": ("JP1", "J1 League", "Japan"),
+    "kor.1": ("KR1", "K League 1", "South Korea"),
+    "chn.1": ("CN1", "Chinese Super League", "China"),
+    "aus.1": ("AU1", "A-League", "Australia"),
+    # ── Nordic (summer-active filler) ───────────────────────────────
     "nor.1": ("NO1", "Eliteserien", "Norway"),
     "swe.1": ("SE1", "Allsvenskan", "Sweden"),
-    "jpn.1": ("JP1", "J1 League", "Japan"),
-    # ── International competitions (mostly summer 2026) ─────────────
+    # ── International competitions ─────────────────────────────────
     "fifa.world": ("WC", "FIFA World Cup", "International"),
     "concacaf.gold": ("GOLD", "CONCACAF Gold Cup", "International"),
     "uefa.champions": ("UCL", "UEFA Champions League", "International"),
     "uefa.europa": ("UEL", "UEFA Europa League", "International"),
+    "conmebol.libertadores": ("LIB", "Copa Libertadores", "International"),
 }
 
 

@@ -55,29 +55,52 @@ logger = logging.getLogger("fetch_live_odds")
 
 BASE_URL = "https://api.the-odds-api.com/v4"
 
-# the-odds-api sport keys we pull. Aligned with the in-season leagues in
-# fetch_upcoming.LEAGUE_MAP. Each entry costs 1 quota / day × 30 = 30/mo
-# so the full list below = 14 × 30 = 420 quota / month — within the
-# 500 free-tier ceiling. The script gracefully handles 422 (sport not
-# in season) so off-season EU leagues here just no-op.
+# the-odds-api sport keys we pull. Comprehensive global soccer coverage
+# so there's always something in season. Each entry costs 1 quota per
+# daily run × 30 days = 30 quota/month. Full list = ~28 × 30 = 840
+# quota/month — well within both the 500 free-tier ceiling (if you're
+# on it) and the 20,000 Recommended-tier ceiling. The script gracefully
+# handles 422 (sport not in season) so off-season leagues no-op.
+#
+# To trim back: comment out leagues you don't care about. To add more
+# sports (non-soccer), see https://the-odds-api.com/sports-odds-data/sports-apis.html
+# — but note that auspex's ensemble model is trained on soccer-only
+# 3-class outcomes and can't predict on NFL/NBA/etc. without a separate
+# model and feature pipeline per sport.
 DEFAULT_SPORTS = [
-    # European top flights
+    # European top flights (in season Aug-May)
     "soccer_epl",
     "soccer_germany_bundesliga",
     "soccer_italy_serie_a",
     "soccer_spain_la_liga",
     "soccer_france_ligue_one",
-    # Summer-season leagues with historical data in our DB
+    "soccer_netherlands_eredivisie",
+    "soccer_portugal_primeira_liga",
+    "soccer_belgium_first_div_a",
+    "soccer_turkey_super_league",
+    "soccer_greece_super_league",
+    "soccer_scotland_premiership",
+    # Americas
     "soccer_usa_mls",
     "soccer_brazil_campeonato",
-    "soccer_norway_eliteserien",
-    "soccer_sweden_allsvenskan",
-    "soccer_japan_j_league",
     "soccer_argentina_primera_division",
     "soccer_mexico_ligamx",
+    "soccer_chile_campeonato",
+    "soccer_colombia_primera_a",
+    # Asia-Pacific
+    "soccer_japan_j_league",
+    "soccer_korea_kleague1",
+    "soccer_china_superleague",
+    "soccer_australia_aleague",
+    # Nordic (summer-active filler)
+    "soccer_norway_eliteserien",
+    "soccer_sweden_allsvenskan",
     # International competitions
     "soccer_uefa_champs_league",
+    "soccer_uefa_europa_league",
     "soccer_fifa_world_cup",
+    "soccer_conmebol_copa_america",
+    "soccer_concacaf_gold_cup",
 ]
 
 # Map the-odds-api market_key + outcome.name → our (market_type, selection).

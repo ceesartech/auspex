@@ -39,59 +39,65 @@ logger = logging.getLogger("promote_raw")
 # country codes used by load_football_data_extra.py.
 LEAGUE_MAP: dict[str, tuple[str, str]] = {
     # ── European top flights (from load_football_data.py) ───────────
-    "E0":  ("Premier League",         "England"),
-    "E1":  ("Championship",           "England"),
-    "E2":  ("League One",             "England"),
-    "E3":  ("League Two",             "England"),
-    "EC":  ("National League",        "England"),
-    "D1":  ("Bundesliga",             "Germany"),
-    "D2":  ("2. Bundesliga",          "Germany"),
-    "I1":  ("Serie A",                "Italy"),
-    "I2":  ("Serie B",                "Italy"),
-    "SP1": ("La Liga",                "Spain"),
-    "SP2": ("La Liga 2",              "Spain"),
-    "F1":  ("Ligue 1",                "France"),
-    "F2":  ("Ligue 2",                "France"),
-    "N1":  ("Eredivisie",             "Netherlands"),
-    "B1":  ("Pro League",             "Belgium"),
-    "P1":  ("Primeira Liga",          "Portugal"),
-    "SC0": ("Premiership",            "Scotland"),
-    "SC1": ("Championship",           "Scotland"),
-    "T1":  ("Süper Lig",              "Turkey"),
-    "G1":  ("Super League",           "Greece"),
-
+    "E0": ("Premier League", "England"),
+    "E1": ("Championship", "England"),
+    "E2": ("League One", "England"),
+    "E3": ("League Two", "England"),
+    "EC": ("National League", "England"),
+    "D1": ("Bundesliga", "Germany"),
+    "D2": ("2. Bundesliga", "Germany"),
+    "I1": ("Serie A", "Italy"),
+    "I2": ("Serie B", "Italy"),
+    "SP1": ("La Liga", "Spain"),
+    "SP2": ("La Liga 2", "Spain"),
+    "F1": ("Ligue 1", "France"),
+    "F2": ("Ligue 2", "France"),
+    "N1": ("Eredivisie", "Netherlands"),
+    "B1": ("Pro League", "Belgium"),
+    "P1": ("Primeira Liga", "Portugal"),
+    "SC0": ("Premiership", "Scotland"),
+    "SC1": ("Championship", "Scotland"),
+    "T1": ("Süper Lig", "Turkey"),
+    "G1": ("Super League", "Greece"),
     # ── Summer / non-European leagues (from load_football_data_extra.py) ──
-    "MLS": ("MLS",                    "USA"),
-    "BR1": ("Brasileirão Série A",    "Brazil"),
-    "AR1": ("Primera División",       "Argentina"),
-    "MX1": ("Liga MX",                "Mexico"),
-    "NO1": ("Eliteserien",            "Norway"),
-    "SE1": ("Allsvenskan",            "Sweden"),
-    "JP1": ("J1 League",              "Japan"),
-    "AT1": ("Bundesliga",             "Austria"),
-    "CH1": ("Super League",           "Switzerland"),
-    "CN1": ("Chinese Super League",   "China"),
-    "DK1": ("Superliga",              "Denmark"),
-    "FI1": ("Veikkausliiga",          "Finland"),
-    "IE1": ("Premier Division",       "Ireland"),
-    "PL1": ("Ekstraklasa",            "Poland"),
-    "RO1": ("Liga I",                 "Romania"),
-    "RU1": ("Premier League",         "Russia"),
-
+    "MLS": ("MLS", "USA"),
+    "BR1": ("Brasileirão Série A", "Brazil"),
+    "AR1": ("Primera División", "Argentina"),
+    "MX1": ("Liga MX", "Mexico"),
+    "NO1": ("Eliteserien", "Norway"),
+    "SE1": ("Allsvenskan", "Sweden"),
+    "JP1": ("J1 League", "Japan"),
+    "AT1": ("Bundesliga", "Austria"),
+    "CH1": ("Super League", "Switzerland"),
+    "CN1": ("Chinese Super League", "China"),
+    "DK1": ("Superliga", "Denmark"),
+    "FI1": ("Veikkausliiga", "Finland"),
+    "IE1": ("Premier Division", "Ireland"),
+    "PL1": ("Ekstraklasa", "Poland"),
+    "RO1": ("Liga I", "Romania"),
+    "RU1": ("Premier League", "Russia"),
+    # ── Additional leagues from fetch_upcoming (ESPN-only, no
+    # football-data historical CSVs yet). Kept here so promote_raw +
+    # ensure_team can resolve their league_id correctly.
+    "CL1": ("Primera División", "Chile"),
+    "CO1": ("Primera A", "Colombia"),
+    "KR1": ("K League 1", "South Korea"),
+    "AU1": ("A-League", "Australia"),
     # ── International competitions (from load_international.py) ─────
     # martj42/international_results dataset. No odds data — these rows
     # will have NULL closing-odds columns and the model trains on
     # match outcome + team identity alone.
-    "WC":       ("FIFA World Cup",            "International"),
-    "WCQ":      ("FIFA World Cup Qualifiers", "International"),
-    "EURO":     ("UEFA Euro",                 "International"),
-    "EUROQ":    ("UEFA Euro Qualifiers",      "International"),
-    "UNL":      ("UEFA Nations League",       "International"),
-    "COPA":     ("Copa América",              "International"),
-    "GOLD":     ("CONCACAF Gold Cup",         "International"),
-    "AFCON":    ("Africa Cup of Nations",     "International"),
-    "AFCASIAN": ("AFC Asian Cup",             "International"),
-    "CONFED":   ("FIFA Confederations Cup",   "International"),
+    "WC": ("FIFA World Cup", "International"),
+    "LIB": ("Copa Libertadores", "International"),
+    "WCQ": ("FIFA World Cup Qualifiers", "International"),
+    "EURO": ("UEFA Euro", "International"),
+    "EUROQ": ("UEFA Euro Qualifiers", "International"),
+    "UNL": ("UEFA Nations League", "International"),
+    "COPA": ("Copa América", "International"),
+    "GOLD": ("CONCACAF Gold Cup", "International"),
+    "AFCON": ("Africa Cup of Nations", "International"),
+    "AFCASIAN": ("AFC Asian Cup", "International"),
+    "CONFED": ("FIFA Confederations Cup", "International"),
 }
 
 
@@ -165,12 +171,10 @@ def upsert_leagues(cur, codes: set[str]) -> dict[str, str]:
         ON CONFLICT (name, country, sport) DO UPDATE
             SET external_ids = leagues.external_ids || EXCLUDED.external_ids
         """,
-        [(name, country, sport, Json({"football_data": code}))
-         for name, country, sport, code in rows],
+        [(name, country, sport, Json({"football_data": code})) for name, country, sport, code in rows],
     )
     cur.execute(
-        "SELECT id, external_ids->>'football_data' AS code "
-        "FROM leagues WHERE external_ids ? 'football_data'"
+        "SELECT id, external_ids->>'football_data' AS code " "FROM leagues WHERE external_ids ? 'football_data'"
     )
     return {r["code"]: r["id"] for r in cur.fetchall()}
 
@@ -179,10 +183,7 @@ def upsert_teams(cur, team_names: set[str], league_id_by_team: dict[str, str]) -
     """Insert all teams referenced; return {normalized_name: team_id}."""
     if not team_names:
         return {}
-    rows = [
-        (name, normalize_team_name(name), league_id_by_team.get(name), "soccer")
-        for name in team_names
-    ]
+    rows = [(name, normalize_team_name(name), league_id_by_team.get(name), "soccer") for name in team_names]
     execute_values(
         cur,
         """
@@ -197,8 +198,9 @@ def upsert_teams(cur, team_names: set[str], league_id_by_team: dict[str, str]) -
     return {r["normalized_name"]: r["id"] for r in cur.fetchall()}
 
 
-def insert_match(cur, *, league_id, home_id, away_id, match_dt, season, home_score,
-                 away_score, ht_home, ht_away) -> str | None:
+def insert_match(
+    cur, *, league_id, home_id, away_id, match_dt, season, home_score, away_score, ht_home, ht_away
+) -> str | None:
     cur.execute(
         """
         INSERT INTO matches (
@@ -221,8 +223,9 @@ def insert_match(cur, *, league_id, home_id, away_id, match_dt, season, home_sco
     return r["id"] if r else None
 
 
-def insert_match_stats(cur, match_id, team_id, *, shots, shots_on_target, corners,
-                       fouls, yellow_cards, red_cards) -> None:
+def insert_match_stats(
+    cur, match_id, team_id, *, shots, shots_on_target, corners, fouls, yellow_cards, red_cards
+) -> None:
     cur.execute(
         """
         INSERT INTO match_stats (
@@ -266,8 +269,21 @@ def insert_odds(cur, match_id, rows: list[tuple]) -> int:
                   AND is_opening = %s
             )
             """,
-            (match_id, bookmaker, market_type, selection, odds_decimal, line, is_opening,
-             match_id, bookmaker, market_type, selection, line, is_opening),
+            (
+                match_id,
+                bookmaker,
+                market_type,
+                selection,
+                odds_decimal,
+                line,
+                is_opening,
+                match_id,
+                bookmaker,
+                market_type,
+                selection,
+                line,
+                is_opening,
+            ),
         )
         inserted += cur.rowcount
     return inserted
@@ -278,10 +294,10 @@ def odds_rows_for(row: dict) -> list[tuple]:
     out: list[tuple] = []
     # 1x2 (home / draw / away)
     odds_specs = [
-        ("Bet365",   "B365H", "B365D", "B365A"),
-        ("Pinnacle", "PSCH",  "PSCD",  "PSCA"),
-        ("Average",  "AvgH",  "AvgD",  "AvgA"),
-        ("Max",      "MaxH",  "MaxD",  "MaxA"),
+        ("Bet365", "B365H", "B365D", "B365A"),
+        ("Pinnacle", "PSCH", "PSCD", "PSCA"),
+        ("Average", "AvgH", "AvgD", "AvgA"),
+        ("Max", "MaxH", "MaxD", "MaxA"),
     ]
     for book, h_col, d_col, a_col in odds_specs:
         out += [
@@ -291,11 +307,11 @@ def odds_rows_for(row: dict) -> list[tuple]:
         ]
     # Over/Under 2.5
     for book, over_col, under_col in [
-        ("Bet365",  "B365>2.5", "B365<2.5"),
-        ("Average", "Avg>2.5",  "Avg<2.5"),
+        ("Bet365", "B365>2.5", "B365<2.5"),
+        ("Average", "Avg>2.5", "Avg<2.5"),
     ]:
         out += [
-            (book, "over_under", "over",  to_float(row.get(over_col)),  2.5, False),
+            (book, "over_under", "over", to_float(row.get(over_col)), 2.5, False),
             (book, "over_under", "under", to_float(row.get(under_col)), 2.5, False),
         ]
     return out
@@ -381,7 +397,9 @@ def promote(database_url: str, *, batch_size: int = 1000) -> Promotion:
                 # Per-team stats (home then away)
                 for tid, prefix in [(home_id, "H"), (away_id, "A")]:
                     insert_match_stats(
-                        cur, match_id, tid,
+                        cur,
+                        match_id,
+                        tid,
                         shots=to_int(r.get(f"{prefix}S")),
                         shots_on_target=to_int(r.get(f"{prefix}ST")),
                         corners=to_int(r.get(f"{prefix}C")),
@@ -395,8 +413,7 @@ def promote(database_url: str, *, batch_size: int = 1000) -> Promotion:
 
                 if stats.matches % batch_size == 0:
                     conn.commit()
-                    logger.info("Committed batch: matches=%d odds=%d",
-                                stats.matches, stats.odds)
+                    logger.info("Committed batch: matches=%d odds=%d", stats.matches, stats.odds)
 
             conn.commit()
     return stats
@@ -404,8 +421,9 @@ def promote(database_url: str, *, batch_size: int = 1000) -> Promotion:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"),
-                   help="Postgres URL. Defaults to $DATABASE_URL.")
+    p.add_argument(
+        "--database-url", default=os.environ.get("DATABASE_URL"), help="Postgres URL. Defaults to $DATABASE_URL."
+    )
     p.add_argument("--batch-size", type=int, default=1000)
     return p.parse_args(argv)
 
@@ -418,7 +436,11 @@ def main(argv: list[str] | None = None) -> int:
     stats = promote(args.database_url, batch_size=args.batch_size)
     logger.info(
         "Promotion complete: leagues=%d teams=%d matches=%d match_stats=%d odds=%d",
-        stats.leagues, stats.teams, stats.matches, stats.match_stats, stats.odds,
+        stats.leagues,
+        stats.teams,
+        stats.matches,
+        stats.match_stats,
+        stats.odds,
     )
     return 0
 
