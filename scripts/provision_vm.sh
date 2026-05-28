@@ -140,7 +140,15 @@ ensure_swap() {
 
 ensure_unattended_upgrades() {
   log "Enabling unattended security upgrades..."
-  sudo dpkg-reconfigure -plow unattended-upgrades >/dev/null 2>&1 || true
+  # dpkg-reconfigure can hang waiting on a debconf prompt that the
+  # >/dev/null redirection hides. Force the non-interactive frontend
+  # and pre-seed the package, then make sure the timers are enabled.
+  echo 'unattended-upgrades unattended-upgrades/enable_auto_updates boolean true' \
+    | sudo debconf-set-selections
+  sudo DEBIAN_FRONTEND=noninteractive dpkg-reconfigure \
+    -f noninteractive unattended-upgrades >/dev/null 2>&1 || true
+  sudo systemctl enable --now unattended-upgrades.service >/dev/null 2>&1 || true
+  sudo systemctl enable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
 }
 
 print_next_steps() {
