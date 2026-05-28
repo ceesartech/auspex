@@ -227,7 +227,11 @@ jobs:
     name: Build Docker Images
     runs-on: ubuntu-latest
     needs: [test, frontend]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Optional ghcr.io push of per-service images. The personal-VM
+    # deploy path rebuilds locally on the VM via deploy_remote.sh, so
+    # this is only useful if you want SHA-pinned images for rollback.
+    # Opt in by setting vars.GHCR_BUILD_ENABLED=true.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.GHCR_BUILD_ENABLED == 'true'
     permissions:
       contents: read
       packages: write
@@ -259,7 +263,7 @@ jobs:
   deploy:
     name: Deploy to VM
     runs-on: ubuntu-latest
-    needs: build
+    needs: [test, frontend]
     # Personal-VM deployment via SSH + docker compose. Opt in by setting:
     #   vars.DEPLOY_ENABLED=true
     #   vars.DEPLOY_HOST=<vm-ip-or-hostname>
@@ -286,34 +290,38 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
 
-      - name: Pull new images and roll services
+      - name: Run scripts/deploy_remote.sh on the VM
         env:
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ vars.DEPLOY_USER || 'ubuntu' }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER || 'auspex' }}
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/auspex' }}
-          IMAGE_TAG: ${{ github.sha }}
+          DEPLOY_REMOTE: ${{ vars.DEPLOY_REMOTE || 'caesar' }}
+          DEPLOY_BRANCH: ${{ vars.DEPLOY_BRANCH || 'main' }}
         run: |
           set -euo pipefail
-          ssh "$DEPLOY_USER@$DEPLOY_HOST" bash -se <<EOF
-          set -euo pipefail
-          cd "$DEPLOY_PATH"
-          git fetch --depth 1 origin main
-          git checkout "$IMAGE_TAG"
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
-          EOF
+          # The deploy logic lives in scripts/deploy_remote.sh in the
+          # repo on the VM. We just SSH in, cd, and call it. Output
+          # streams back to the GitHub Actions log.
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd $DEPLOY_PATH && \
+             REMOTE=$DEPLOY_REMOTE BRANCH=$DEPLOY_BRANCH \
+             ./scripts/deploy_remote.sh"
 
-      - name: Smoke test
+      - name: Smoke test from CI side
         env:
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ vars.DEPLOY_USER || 'ubuntu' }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER || 'auspex' }}
         run: |
-          for i in 1 2 3 4 5 6 7 8 9 10; do
-            if ssh "$DEPLOY_USER@$DEPLOY_HOST" 'curl -fsS http://localhost:8000/health'; then
-              echo "API healthy"
+          # The remote script already verifies /health from inside the
+          # VM. We add one cross-network probe to catch reverse-proxy
+          # issues (Caddy, DNS, firewall) too. If AUSPEX_DOMAIN isn't
+          # set, just call the host's API port via SSH.
+          for i in $(seq 1 10); do
+            if ssh "$DEPLOY_USER@$DEPLOY_HOST" \
+                "curl -fsS http://localhost:8000/health" >/dev/null 2>&1; then
+              echo "API healthy on VM"
               exit 0
             fi
             sleep 5
           done
-          echo "API failed to come up"; exit 1
+          echo "API didn't return healthy from the VM"; exit 1
