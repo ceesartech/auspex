@@ -2,7 +2,8 @@ FROM apache/airflow:2.8.0-python3.11
 
 USER root
 
-# Install system dependencies
+# Install system dependencies (kept in case a future DAG needs psycopg2
+# wheels to compile or a libpq linkage).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
@@ -10,12 +11,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 USER airflow
 
-# Copy requirements and install additional Python dependencies
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+# DO NOT install the root requirements.txt here. It pins
+# sqlalchemy==2.0.36, which Airflow 2.8 is incompatible with — that
+# upgrade triggers
+#   sqlalchemy.exc.ArgumentError: Invalid value for 'executemany_mode': 'values'
+# at startup. Our DAGs run via BashOperator that exec's the api
+# container (which already has the full Python stack), so the Airflow
+# image only needs what apache/airflow:2.8.0-python3.11 ships with.
+#
+# If a future DAG needs to import Python deps directly inside the
+# Airflow container, add a curated requirements-airflow-runtime.txt
+# constrained to Airflow's own pin set:
+#   pip install --constraint \
+#     https://raw.githubusercontent.com/apache/airflow/constraints-2.8.0/constraints-3.11.txt \
+#     -r /tmp/requirements-airflow-runtime.txt
 
-# Copy DAGs and scraper code
+# Copy DAGs only. The scraper code lives in the api image; DAGs invoke
+# it via `docker compose exec api python ...` rather than importing it.
 COPY services/data-ingestion/dags/ /opt/airflow/dags/
-COPY services/data-ingestion/src/ /opt/airflow/scrapers/
 
 EXPOSE 8080
