@@ -50,6 +50,55 @@ WINDOW = 5
 # How long a computed feature row stays valid before recompute.
 CACHE_TTL_SECONDS = 3600
 
+# Neutral defaults for each feature, used when the source data is missing
+# (no live odds for this match, no rolling form for the team). Without
+# these the value would be NULL; downstream predict_proba then runs
+# fillna(X.median()) on a single-row DataFrame, gets median=NULL, and
+# emits NaN probabilities — the prediction gets skipped and we never
+# learn anything about the match. With neutral defaults the model still
+# predicts but converges toward the league prior, which is the right
+# behaviour for sparse-data fixtures. As real data comes in via
+# fetch_live_odds and the historical loaders, predictions diverge from
+# the prior with actual signal.
+NEUTRAL_DEFAULTS: dict[str, float] = {
+    # Closing 1x2 odds — roughly the league-average implied probs.
+    "odds_home": 2.40,
+    "odds_draw": 3.30,
+    "odds_away": 3.10,
+    "odds_over25": 1.95,
+    "odds_under25": 1.95,
+    # Derived implied probabilities.
+    "implied_prob_home": 0.43,
+    "implied_prob_draw": 0.27,
+    "implied_prob_away": 0.30,
+    "implied_prob_over25": 0.52,
+    "bookie_margin": 0.05,
+    # Rolling team form — mid-table averages (~1.4 pts/game ≈ ~5 pts/5).
+    "home_roll_goals_for": 1.40,
+    "home_roll_goals_against": 1.40,
+    "home_roll_points": 1.40,
+    "away_roll_goals_for": 1.40,
+    "away_roll_goals_against": 1.40,
+    "away_roll_points": 1.40,
+    "form_diff_points": 0.0,
+    "form_diff_goals": 0.0,
+}
+
+
+def _with_defaults(features: dict) -> dict:
+    """Replace any None / non-numeric value with the neutral default for that
+    key. Guarantees every model input is finite."""
+    out: dict = {}
+    for k, default in NEUTRAL_DEFAULTS.items():
+        v = features.get(k)
+        out[k] = v if isinstance(v, (int, float)) and v is not None else default
+    # Pass through any extra keys (model can't use them but features_cache
+    # is just JSONB — keeping them lets us add features without losing data).
+    for k, v in features.items():
+        if k not in out:
+            out[k] = v
+    return out
+
 
 def list_target_matches(conn, days: int) -> list[str]:
     """Scheduled matches in the next N days lacking a fresh features_cache row."""
@@ -237,6 +286,10 @@ def compute_all(database_url: str, match_ids: list[str]) -> dict:
                     if features is None:
                         fail += 1
                         continue
+                    # Fill any None values with neutral defaults before
+                    # persisting — guarantees downstream predict_proba
+                    # gets finite inputs and never NaN-skips a match.
+                    features = _with_defaults(features)
                     write_features(cur, mid, features)
                     ok += 1
                 except Exception as e:
