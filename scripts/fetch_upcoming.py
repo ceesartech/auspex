@@ -21,6 +21,7 @@ import logging
 import os
 import sys
 from datetime import date, datetime, timedelta, timezone
+from difflib import SequenceMatcher
 
 import psycopg2
 import requests
@@ -68,8 +69,43 @@ LEAGUE_MAP: dict[str, tuple[str, str, str]] = {
 }
 
 
+CLUB_SUFFIXES = {
+    "fc",
+    "bk",
+    "sk",
+    "ac",
+    "cf",
+    "sc",
+    "afc",
+    "rfc",
+    "cfc",
+    "fk",
+    "if",
+    "tf",
+    "se",
+    "kc",
+    "fk",
+    "bc",
+    "ks",
+}
+CLUB_PREFIXES = {"fc", "afc", "as", "sc", "ks"}
+
+
 def normalize_team(name: str) -> str:
+    """Loose normalisation for the teams.normalized_name unique key."""
     return " ".join(name.strip().lower().split())
+
+
+def _strip_club_tokens(norm: str) -> str:
+    """Aggressive normalisation: drop common club abbreviation tokens so
+    'rosenborg bk' and 'rosenborg' compare equal. Used only for fuzzy
+    matching, not as the persisted normalized_name."""
+    tokens = norm.split()
+    while tokens and tokens[-1] in CLUB_SUFFIXES:
+        tokens.pop()
+    while tokens and tokens[0] in CLUB_PREFIXES:
+        tokens.pop(0)
+    return " ".join(tokens) if tokens else norm
 
 
 def fetch_day(league_slug: str, day: date) -> list[dict]:
@@ -100,7 +136,54 @@ def ensure_league(cur, code: str, name: str, country: str) -> str | None:
 
 
 def ensure_team(cur, name: str, league_id: str) -> str | None:
+    """Resolve `name` to a team_id, reusing an existing row when possible.
+
+    The match strategy is three-tier so ESPN team names (often
+    "Rosenborg BK") reuse the same row as football-data names ("Rosenborg")
+    instead of creating an orphan that has no historical matches:
+
+      1. Exact normalised match on (normalized_name, sport).
+      2. Fuzzy match against teams in the same league: drop common club
+         abbreviation tokens (BK, FC, etc.) from both sides and compare
+         via SequenceMatcher. Reuse if ratio >= 0.85.
+      3. INSERT a new row only if neither lookup found a candidate.
+    """
     norm = normalize_team(name)
+
+    # 1. Exact normalised match
+    cur.execute(
+        "SELECT id FROM teams WHERE normalized_name = %s AND sport = 'soccer'",
+        (norm,),
+    )
+    row = cur.fetchone()
+    if row:
+        return row["id"]
+
+    # 2. Fuzzy match within the same league, after stripping club tokens.
+    if league_id:
+        cur.execute(
+            "SELECT id, normalized_name FROM teams " "WHERE league_id = %s AND sport = 'soccer'",
+            (league_id,),
+        )
+        candidates = cur.fetchall()
+        if candidates:
+            target = _strip_club_tokens(norm)
+            best_id = None
+            best_score = 0.0
+            for c in candidates:
+                c_stripped = _strip_club_tokens(c["normalized_name"])
+                # Skip empty after stripping (would match everything)
+                if not target or not c_stripped:
+                    continue
+                score = SequenceMatcher(None, c_stripped, target).ratio()
+                if score > best_score:
+                    best_score = score
+                    best_id = c["id"]
+            if best_id and best_score >= 0.85:
+                return best_id
+
+    # 3. Insert new team. ON CONFLICT guard for race conditions on the
+    # unique (normalized_name, sport) constraint.
     cur.execute(
         """
         INSERT INTO teams (name, normalized_name, league_id, sport)

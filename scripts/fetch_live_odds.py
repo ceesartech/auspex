@@ -56,16 +56,26 @@ logger = logging.getLogger("fetch_live_odds")
 BASE_URL = "https://api.the-odds-api.com/v4"
 
 # the-odds-api sport keys we pull. Aligned with the in-season leagues in
-# fetch_upcoming.LEAGUE_MAP. Keep this list short — every entry costs
-# ~30 quota / month.
+# fetch_upcoming.LEAGUE_MAP. Each entry costs 1 quota / day × 30 = 30/mo
+# so the full list below = 14 × 30 = 420 quota / month — within the
+# 500 free-tier ceiling. The script gracefully handles 422 (sport not
+# in season) so off-season EU leagues here just no-op.
 DEFAULT_SPORTS = [
+    # European top flights
     "soccer_epl",
     "soccer_germany_bundesliga",
     "soccer_italy_serie_a",
     "soccer_spain_la_liga",
     "soccer_france_ligue_one",
+    # Summer-season leagues with historical data in our DB
     "soccer_usa_mls",
     "soccer_brazil_campeonato",
+    "soccer_norway_eliteserien",
+    "soccer_sweden_allsvenskan",
+    "soccer_japan_j_league",
+    "soccer_argentina_primera_division",
+    "soccer_mexico_ligamx",
+    # International competitions
     "soccer_uefa_champs_league",
     "soccer_fifa_world_cup",
 ]
