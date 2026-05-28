@@ -121,20 +121,31 @@ ensure_airflow_dirs() {
 
 ensure_env_file() {
   local env_file="$INSTALL_DIR/.env"
-  if [ -f "$env_file" ]; then
-    log ".env already exists; leaving it alone."
-    return
-  fi
-  log "Seeding $env_file from .env.example. Fill in secrets before starting!"
-  cp "$INSTALL_DIR/.env.example" "$env_file"
-  cat >> "$env_file" <<'EOF'
+  if [ ! -f "$env_file" ]; then
+    log "Seeding $env_file from .env.example. Fill in secrets before starting!"
+    sudo cp "$INSTALL_DIR/.env.example" "$env_file"
+    sudo tee -a "$env_file" >/dev/null <<'EOF'
 
 # --- Added by provision_vm.sh ---
 # Domain Caddy will issue TLS for (set this before bringing up the prod overlay)
 AUSPEX_DOMAIN=
 AUSPEX_ACME_EMAIL=
 EOF
-  chmod 600 "$env_file"
+  else
+    log ".env already exists; leaving its contents alone (permissions reset below)."
+  fi
+
+  # .env must be readable by `docker compose` when invoked from inside
+  # the airflow scheduler container (the DAG does `docker compose -f
+  # /opt/auspex/docker-compose.yml exec api …` which loads .env for
+  # variable interpolation). Set group=docker so that any process in
+  # the docker group — including the airflow user via group_add — can
+  # read it without exposing it to other VM users.
+  local docker_gid
+  docker_gid="$(getent group docker | cut -d: -f3 || true)"
+  docker_gid="${docker_gid:-999}"
+  sudo chown "$TARGET_USER":"$docker_gid" "$env_file"
+  sudo chmod 640 "$env_file"
 }
 
 ensure_firewall() {
