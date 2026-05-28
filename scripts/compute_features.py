@@ -183,11 +183,29 @@ def compute_match_features(cur, match_id: str):
     odds_over = _odds_avg(cur, match_id, "over_under", "over", 2.5)
     odds_under = _odds_avg(cur, match_id, "over_under", "under", 2.5)
 
+    # Raw odds — what the currently-trained model references directly.
+    features["odds_home"] = odds_h
+    features["odds_draw"] = odds_d
+    features["odds_away"] = odds_a
+    features["odds_over25"] = odds_over
+    features["odds_under25"] = odds_under
+
     features.update(_compute_implied_probs(odds_h, odds_d, odds_a))
     features["implied_prob_over25"] = _compute_over_under(odds_over, odds_under)
 
-    features.update(_rolling_team_form(cur, m["h"], m["d"], "home"))
-    features.update(_rolling_team_form(cur, m["a"], m["d"], "away"))
+    home_form = _rolling_team_form(cur, m["h"], m["d"], "home")
+    away_form = _rolling_team_form(cur, m["a"], m["d"], "away")
+    features.update(home_form)
+    features.update(away_form)
+
+    # form_diff_* — what the currently-trained model references.
+    def _safe_diff(a, b):
+        if a is None or b is None:
+            return None
+        return float(a) - float(b)
+
+    features["form_diff_points"] = _safe_diff(home_form.get("home_roll_points"), away_form.get("away_roll_points"))
+    features["form_diff_goals"] = _safe_diff(home_form.get("home_roll_goals_for"), away_form.get("away_roll_goals_for"))
 
     return features
 

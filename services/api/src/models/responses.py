@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class MatchInfo(BaseModel):
@@ -19,6 +19,11 @@ class MatchInfo(BaseModel):
 
 class PredictionResponse(BaseModel):
     """Prediction response"""
+
+    # `model_version` collides with pydantic's protected `model_` namespace
+    # in v2. Suppress the warning — the field name is part of our API
+    # contract and we don't want to rename it.
+    model_config = ConfigDict(protected_namespaces=())
 
     match_info: MatchInfo
     predicted_outcome: str
@@ -60,6 +65,9 @@ class AccumulatorResponse(BaseModel):
 
 class ModelPerformanceResponse(BaseModel):
     """Model performance metrics"""
+
+    # See PredictionResponse for context on protected_namespaces.
+    model_config = ConfigDict(protected_namespaces=())
 
     model_name: str
     model_version: str
