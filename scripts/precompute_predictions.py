@@ -128,17 +128,54 @@ def store_prediction(cur, match_id: str, prediction: dict, model_version: str) -
     )
 
 
+def compute_feature_medians(database_url: str) -> dict[str, float]:
+    """Compute per-column median across every features_cache row.
+
+    Used as a fallback to fill missing/None values before a model
+    predicts on a single row. The base models do fillna(X.median()) at
+    predict time, which yields NaN when X is a single row and the
+    column is None — single-row median of None is None, NaN
+    propagates, the ensemble emits NaN probabilities, and the match
+    gets skipped. By pre-filling None values with a corpus-wide
+    median, we avoid the trap and still produce a sensible prediction
+    (just a more conservative one when some features are missing).
+    """
+    medians: dict[str, float] = {}
+    with psycopg2.connect(database_url) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT features FROM features_cache WHERE features IS NOT NULL")
+            rows = cur.fetchall()
+    if not rows:
+        return medians
+    # Aggregate values per key across all rows.
+    by_key: dict[str, list[float]] = {}
+    for r in rows:
+        for k, v in (r["features"] or {}).items():
+            if isinstance(v, (int, float)) and v is not None:
+                # JSONB numbers come back as int/float; ignore strings/None
+                by_key.setdefault(k, []).append(float(v))
+    import statistics
+
+    for k, vals in by_key.items():
+        if vals:
+            medians[k] = float(statistics.median(vals))
+    return medians
+
+
 def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> dict:
     from services.cache_service import CacheService  # type: ignore
     from services.prediction_service import (  # type: ignore
         PredictionService,
-        load_models_into_process,
         get_model_version,
+        load_models_into_process,
     )
 
     load_models_into_process()
     model_version = get_model_version()
     cache = CacheService()
+
+    feature_medians = compute_feature_medians(database_url)
+    logger.info("Loaded %d feature-medians for NaN fallback", len(feature_medians))
 
     upcoming = list_upcoming(database_url, days)
     if not upcoming:
@@ -177,16 +214,21 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                     import numpy as np
                     import pandas as pd
 
-                    proba = ensemble.predict_proba(pd.DataFrame([features]))[0]
-                    # When every feature is None/NaN (e.g. no live odds for
-                    # this match yet, no historical rolling form for the
-                    # team), the median-fill in each base model produces
-                    # NaN medians and the ensemble emits NaN probabilities.
-                    # Skip cleanly — predicting nonsense and storing it
-                    # would corrupt downstream analytics.
+                    # Fill missing/None values with the corpus-wide median
+                    # for that feature. Without this, a single None in the
+                    # row poisons the base models' per-row median-fill and
+                    # produces NaN predictions. With it, we degrade
+                    # gracefully — the model gets a sensible neutral value
+                    # for the missing column and still emits a finite prob.
+                    filled = {
+                        k: (v if isinstance(v, (int, float)) and v is not None else feature_medians.get(k))
+                        for k, v in features.items()
+                    }
+
+                    proba = ensemble.predict_proba(pd.DataFrame([filled]))[0]
                     if not np.all(np.isfinite(proba)):
                         logger.info(
-                            "Skipping %s: features insufficient (predict produced NaN)",
+                            "Skipping %s: features insufficient even after median fill",
                             m["match_id"],
                         )
                         continue
