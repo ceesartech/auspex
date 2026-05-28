@@ -1,32 +1,30 @@
 """E2E: login + auth-required endpoint behavior."""
 
-import os
 
-
-def test_login_with_correct_dob_returns_token(client):
+def test_login_with_correct_password_returns_token(client, seeded_user):
     response = client.post(
         "/api/v1/user/login",
-        json={
-            "username": "owner",
-            "password": "any-password-of-eight-or-more",
-            "date_of_birth": os.environ["USER_DOB"],
-        },
+        json={"username": seeded_user["username"], "password": seeded_user["password"]},
     )
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["token_type"] == "bearer"
     assert isinstance(body["access_token"], str) and body["access_token"]
-    assert body["user"]["username"] == "owner"
+    assert body["user"]["username"] == seeded_user["username"]
 
 
-def test_login_with_wrong_dob_is_unauthorized(client):
+def test_login_with_wrong_password_is_unauthorized(client, seeded_user):
     response = client.post(
         "/api/v1/user/login",
-        json={
-            "username": "owner",
-            "password": "any-password-of-eight-or-more",
-            "date_of_birth": "1900-01-01",
-        },
+        json={"username": seeded_user["username"], "password": "wrong-password"},
+    )
+    assert response.status_code == 401
+
+
+def test_login_with_unknown_user_is_unauthorized(client, _apply_migrations):
+    response = client.post(
+        "/api/v1/user/login",
+        json={"username": "nobody-known", "password": "anything-password"},
     )
     assert response.status_code == 401
 

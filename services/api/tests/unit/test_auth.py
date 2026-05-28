@@ -109,23 +109,27 @@ class TestVerifyToken:
         assert exc_info.value.status_code == 401
 
 
-class TestVerifyDateOfBirth:
-    """Test DOB verification"""
+class TestPasswordHashing:
+    """Test bcrypt password hashing + verification."""
 
-    def test_correct_dob(self, mock_settings):
-        from auth.jwt_handler import verify_date_of_birth
+    def test_round_trip(self):
+        from auth.jwt_handler import hash_password, verify_password
 
-        assert verify_date_of_birth("1994-05-09") is True
+        h = hash_password("Admin@1234")
+        assert verify_password("Admin@1234", h) is True
 
-    def test_incorrect_dob(self, mock_settings):
-        from auth.jwt_handler import verify_date_of_birth
+    def test_wrong_password(self):
+        from auth.jwt_handler import hash_password, verify_password
 
-        assert verify_date_of_birth("1990-01-01") is False
+        h = hash_password("Admin@1234")
+        assert verify_password("wrong-password", h) is False
 
-    def test_empty_dob(self, mock_settings):
-        from auth.jwt_handler import verify_date_of_birth
+    def test_hash_is_not_plaintext(self):
+        from auth.jwt_handler import hash_password
 
-        assert verify_date_of_birth("") is False
+        h = hash_password("Admin@1234")
+        assert h != "Admin@1234"
+        assert h.startswith("$2") and len(h) >= 50
 
 
 class TestAuthDependencies:

@@ -2,7 +2,6 @@
 
 import sys
 import uuid
-from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,48 +23,36 @@ def mock_settings():
 
 
 class TestLoginFlow:
-    """Test DOB-based login"""
+    """Test username + password login."""
 
     def test_login_request_validation(self, mock_settings):
         from models.requests import LoginRequest
 
-        # Valid request
-        req = LoginRequest(
-            username="ceesar",
-            password="password123",
-            date_of_birth=date(1994, 5, 9),
-        )
+        req = LoginRequest(username="ceesar", password="password123")
         assert req.username == "ceesar"
-        assert req.date_of_birth == date(1994, 5, 9)
+        assert req.password == "password123"
 
-    def test_login_request_underage_rejected(self, mock_settings):
+    def test_login_request_rejects_short_username(self, mock_settings):
         from models.requests import LoginRequest
 
-        with pytest.raises(ValueError, match="21 years"):
-            LoginRequest(
-                username="younguser",
-                password="password123",
-                date_of_birth=date(2010, 1, 1),  # Too young
-            )
+        with pytest.raises(ValueError):
+            LoginRequest(username="ab", password="password123")
 
-    def test_login_correct_dob(self, mock_settings):
-        from auth.jwt_handler import verify_date_of_birth
+    def test_login_request_rejects_short_password(self, mock_settings):
+        from models.requests import LoginRequest
 
-        assert verify_date_of_birth("1994-05-09") is True
-
-    def test_login_wrong_dob(self, mock_settings):
-        from auth.jwt_handler import verify_date_of_birth
-
-        assert verify_date_of_birth("1990-01-01") is False
+        with pytest.raises(ValueError):
+            LoginRequest(username="ceesar", password="short")
 
     def test_token_created_on_login(self, mock_settings):
         from auth.jwt_handler import create_access_token, verify_token
 
-        token = create_access_token(data={"user_id": "owner", "username": "ceesar"})
+        token = create_access_token(data={"user_id": "u-1", "username": "ceesar", "role": "admin"})
         payload = verify_token(token)
 
-        assert payload["user_id"] == "owner"
+        assert payload["user_id"] == "u-1"
         assert payload["username"] == "ceesar"
+        assert payload["role"] == "admin"
 
 
 class TestUserPreferences:

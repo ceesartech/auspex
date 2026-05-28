@@ -1,4 +1,4 @@
-"""JWT token handling"""
+"""JWT + password handling"""
 
 from datetime import datetime, timedelta
 from typing import Dict, Optional
@@ -6,6 +6,10 @@ from typing import Dict, Optional
 import jwt
 from config import settings
 from fastapi import HTTPException, status
+from passlib.context import CryptContext
+
+# bcrypt is the only scheme we accept. Cost is left at passlib's default (12).
+_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -35,6 +39,11 @@ def verify_token(token: str) -> Dict:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 
-def verify_date_of_birth(dob: str) -> bool:
-    """Verify user's date of birth matches"""
-    return dob == settings.USER_DOB
+def hash_password(password: str) -> str:
+    """Return a bcrypt hash suitable for storage in users.password_hash."""
+    return _pwd_context.hash(password)
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """Constant-time bcrypt verification."""
+    return _pwd_context.verify(password, password_hash)

@@ -5,7 +5,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from auth.dependencies import require_auth
-from auth.jwt_handler import create_access_token, verify_date_of_birth
+from auth.jwt_handler import create_access_token, verify_password
 from database import get_db
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from models.requests import BettingHistoryRecord, LoginRequest, UserPreferencesUpdate
@@ -18,20 +18,61 @@ logger = logging.getLogger(__name__)
 
 @router.post("/login")
 async def login(request: LoginRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
-    """Authenticate user with DOB verification"""
+    """Authenticate by username-or-email + password.
 
-    if not verify_date_of_birth(request.date_of_birth.isoformat()):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-        )
+    Returns the same 401 for "unknown user" and "wrong password" so the
+    endpoint doesn't leak which usernames exist.
+    """
 
-    token = create_access_token(data={"user_id": "owner", "username": request.username})
+    row = db.execute(
+        text(
+            """
+            SELECT id, username, email, password_hash, role, is_active
+            FROM users
+            WHERE LOWER(username) = LOWER(:identifier)
+               OR LOWER(email) = LOWER(:identifier)
+            LIMIT 1
+            """
+        ),
+        {"identifier": request.username},
+    ).fetchone()
+
+    invalid = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid credentials",
+    )
+
+    if row is None or not row.is_active:
+        # Still call verify_password against a dummy hash so the response
+        # time doesn't fingerprint "user exists vs. user missing".
+        verify_password(request.password, "$2b$12$" + "x" * 53)
+        raise invalid
+
+    if not verify_password(request.password, row.password_hash):
+        raise invalid
+
+    db.execute(
+        text("UPDATE users SET last_login = NOW() WHERE id = :id"),
+        {"id": row.id},
+    )
+    db.commit()
+
+    token = create_access_token(
+        data={
+            "user_id": str(row.id),
+            "username": row.username,
+            "role": row.role,
+        }
+    )
 
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {"username": request.username, "role": "owner"},
+        "user": {
+            "username": row.username,
+            "email": row.email,
+            "role": row.role,
+        },
     }
 
 

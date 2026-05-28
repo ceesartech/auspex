@@ -37,10 +37,10 @@ export default function LoginPage() {
         <CardContent>
           <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
             <div>
-              <label className="text-sm font-medium">Username</label>
+              <label className="text-sm font-medium">Username or email</label>
               <Input
                 {...register('username')}
-                placeholder="Enter your username"
+                placeholder="admin or you@example.com"
                 error={errors.username?.message}
               />
             </div>
@@ -51,14 +51,6 @@ export default function LoginPage() {
                 {...register('password')}
                 placeholder="Enter your password"
                 error={errors.password?.message}
-              />
-            </div>
-            <div>
-              <label className="text-sm font-medium">Date of Birth</label>
-              <Input
-                type="date"
-                {...register('date_of_birth')}
-                error={errors.date_of_birth?.message}
               />
             </div>
             <Button type="submit" className="w-full" loading={login.isPending}>

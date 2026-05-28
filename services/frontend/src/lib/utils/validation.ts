@@ -1,9 +1,8 @@
 import { z } from 'zod';
 
 export const loginSchema = z.object({
-  username: z.string().min(3, 'Username must be at least 3 characters'),
+  username: z.string().min(3, 'Enter at least 3 characters'),
   password: z.string().min(8, 'Password must be at least 8 characters'),
-  date_of_birth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be YYYY-MM-DD format'),
 });
 
 export const preferencesSchema = z.object({

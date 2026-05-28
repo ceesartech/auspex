@@ -1,25 +1,15 @@
 """Request schemas"""
 
-from datetime import date, datetime
 from typing import List, Optional
 
 from pydantic import BaseModel, Field, validator
 
 
 class LoginRequest(BaseModel):
-    """Login request"""
+    """Login request. `username` may be either the username or the email."""
 
-    username: str = Field(..., min_length=3, max_length=50)
-    password: str = Field(..., min_length=8)
-    date_of_birth: date
-
-    @validator("date_of_birth")
-    def validate_age(cls, v):
-        """Ensure user is 21+"""
-        age = (datetime.now().date() - v).days / 365.25
-        if age < 21:
-            raise ValueError("Must be 21 years or older")
-        return v
+    username: str = Field(..., min_length=3, max_length=255)
+    password: str = Field(..., min_length=8, max_length=255)
 
 
 class PredictionRequest(BaseModel):

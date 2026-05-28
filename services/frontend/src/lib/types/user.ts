@@ -1,5 +1,6 @@
 export interface User {
   username: string;
+  email?: string;
   role: string;
 }
 
@@ -12,7 +13,6 @@ export interface AuthResponse {
 export interface LoginRequest {
   username: string;
   password: string;
-  date_of_birth: string;
 }
 
 export interface UserPreferences {

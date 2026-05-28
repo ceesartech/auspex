@@ -31,24 +31,27 @@ class TestAuthToPredictionFlow:
     """Test full auth -> predict flow"""
 
     def test_login_generates_valid_token(self, mock_settings):
-        """Login with correct DOB returns a valid JWT"""
-        from auth.jwt_handler import create_access_token, verify_date_of_birth, verify_token
+        """Username + correct password returns a valid JWT."""
+        from auth.jwt_handler import create_access_token, hash_password, verify_password, verify_token
 
-        # Step 1: Verify DOB
-        assert verify_date_of_birth("1994-05-09") is True
+        # Step 1: A stored bcrypt hash verifies the user's password.
+        stored = hash_password("Admin@1234")
+        assert verify_password("Admin@1234", stored) is True
 
-        # Step 2: Create token
-        token = create_access_token(data={"user_id": "owner", "username": "ceesar"})
-
-        # Step 3: Token is valid
+        # Step 2: Token contains user_id/username/role and round-trips.
+        token = create_access_token(
+            data={"user_id": "u-1", "username": "ceesar", "role": "admin"},
+        )
         payload = verify_token(token)
-        assert payload["user_id"] == "owner"
+        assert payload["user_id"] == "u-1"
+        assert payload["role"] == "admin"
 
-    def test_invalid_dob_blocks_login(self, mock_settings):
-        """Wrong DOB prevents token creation"""
-        from auth.jwt_handler import verify_date_of_birth
+    def test_invalid_password_blocks_login(self, mock_settings):
+        """Wrong password is rejected by verify_password."""
+        from auth.jwt_handler import hash_password, verify_password
 
-        assert verify_date_of_birth("2000-01-01") is False
+        stored = hash_password("Admin@1234")
+        assert verify_password("wrong-password", stored) is False
 
     def test_prediction_requires_auth(self, mock_settings):
         """Prediction endpoint requires valid auth"""

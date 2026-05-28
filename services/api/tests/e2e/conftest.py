@@ -8,7 +8,6 @@ Required environment variables (CI provides them; locally use docker compose):
     DATABASE_URL  postgresql://user:pass@host:port/db
     REDIS_URL     redis://host:port/db_index
     JWT_SECRET    any non-empty string (defaults to a fixed test value)
-    USER_DOB      YYYY-MM-DD (defaults to 1994-05-09)
 
 Each test runs against a freshly-truncated database, so order does not matter.
 """
@@ -20,11 +19,9 @@ from typing import Iterator
 
 import pytest
 
-# The default DOB and JWT secret used by the tests when not set in the
-# environment. We set them BEFORE importing the app so config.Settings picks
-# them up at module load.
+# Default JWT secret used by the tests when not set in the environment.
+# Set BEFORE importing the app so config.Settings picks it up at module load.
 os.environ.setdefault("JWT_SECRET", "e2e-test-secret-key")
-os.environ.setdefault("USER_DOB", "1994-05-09")
 os.environ.setdefault("DATABASE_URL", "postgresql://test_user:test_password@localhost:5432/betting_system_test")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")
 
@@ -187,16 +184,39 @@ def client(_apply_migrations, redis_client):
         yield c
 
 
+_TEST_USERNAME = "e2e-tester"
+_TEST_PASSWORD = "TestPass@1234"
+
+
 @pytest.fixture
-def auth_headers(client) -> dict:
+def seeded_user(_apply_migrations) -> dict:
+    """Insert a known user before login so the e2e flow can authenticate."""
+    import psycopg2
+
+    from auth.jwt_handler import hash_password
+
+    with psycopg2.connect(os.environ["DATABASE_URL"]) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users (username, email, password_hash, role, is_active)
+                VALUES (%s, %s, %s, 'admin', true)
+                ON CONFLICT (username) DO UPDATE SET
+                    password_hash = EXCLUDED.password_hash,
+                    is_active = true
+                """,
+                (_TEST_USERNAME, f"{_TEST_USERNAME}@example.com", hash_password(_TEST_PASSWORD)),
+            )
+        conn.commit()
+    return {"username": _TEST_USERNAME, "password": _TEST_PASSWORD}
+
+
+@pytest.fixture
+def auth_headers(client, seeded_user) -> dict:
     """Hit the real /login endpoint and return Authorization headers."""
     response = client.post(
         "/api/v1/user/login",
-        json={
-            "username": "owner",
-            "password": "any-password-of-eight-or-more",
-            "date_of_birth": os.environ["USER_DOB"],
-        },
+        json={"username": seeded_user["username"], "password": seeded_user["password"]},
     )
     assert response.status_code == 200, response.text
     token = response.json()["access_token"]
