@@ -67,19 +67,16 @@ with DAG(
 
     train_models = BashOperator(
         task_id="train_models",
-        # --skip-models poisson,dixon_coles: those two run a per-team MLE
-        # fit that can take 30+ min on a full season corpus and routinely
-        # times out Airflow's default task SLA. XGBoost + LightGBM +
-        # NeuralNet train in ~10s combined and already deliver the bulk
-        # of the ensemble's predictive power. Add them back to the
-        # weekly retrain by removing this flag once we have a faster
-        # Poisson implementation.
+        # Poisson + Dixon-Coles do per-team MLE fits that can take 20-30
+        # minutes on a full corpus. They're part of the ensemble so we
+        # train them — but the task needs enough execution time. Default
+        # Airflow task SLA is too short on a fresh worker; bump explicitly.
+        execution_timeout=timedelta(minutes=90),
         bash_command=(
             f"{DOCKER_EXEC} bash -c '"
             "cd /app/services/ml-models && "
             "PYTHONPATH=src python -m training.train_all_models "
             "--model-type all "
-            "--skip-models poisson,dixon_coles "
             '--database-url "$DATABASE_URL" '
             "--output-dir /app/models/staging "
             "--export-onnx"
