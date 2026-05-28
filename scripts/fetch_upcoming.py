@@ -146,7 +146,11 @@ SPORT_CONFIGS: dict[str, SportConfig] = {
     ),
     "nhl": SportConfig(
         sport="nhl",
-        espn_path="hockey/nhl",
+        # ESPN's hockey API path: /sports/hockey/{league_slug}/scoreboard.
+        # The slug "nhl" supplies the second segment, so espn_path here
+        # is just "hockey" (NOT "hockey/nhl" — that would double up to
+        # /sports/hockey/nhl/nhl/scoreboard and 404).
+        espn_path="hockey",
         leagues=NHL_LEAGUES,
         season_func=_season_nhl,
     ),

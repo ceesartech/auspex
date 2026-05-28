@@ -47,9 +47,10 @@ with DAG(
     # already is per docker-compose.yml's airflow-scheduler service).
     DOCKER_EXEC = "docker compose -f /opt/auspex/docker-compose.yml exec -T api"
 
+    # ── Soccer branch (the original pipeline) ──────────────────────
     fetch_upcoming = BashOperator(
         task_id="fetch_upcoming",
-        bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --days 14",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport soccer --days 14",
     )
 
     compute_features = BashOperator(
@@ -63,3 +64,19 @@ with DAG(
     )
 
     fetch_upcoming >> compute_features >> precompute_predictions
+
+    # ── NHL branch (Phase 2: ingestion + features only) ───────────
+    # Prediction task lands when the NHL ensemble ships in Phase 3.
+    # Until then this branch just keeps matches + features fresh so
+    # the model has a target to train against the moment it's ready.
+    fetch_upcoming_nhl = BashOperator(
+        task_id="fetch_upcoming_nhl",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport nhl --days 14",
+    )
+
+    compute_features_nhl = BashOperator(
+        task_id="compute_features_nhl",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_nhl.py --days 14",
+    )
+
+    fetch_upcoming_nhl >> compute_features_nhl

@@ -54,11 +54,28 @@ class TestSportConfigs:
     def test_nhl_config_uses_hockey_path(self):
         cfg = fetch_upcoming.SPORT_CONFIGS["nhl"]
         assert cfg.sport == "nhl"
-        assert cfg.espn_path == "hockey/nhl"
+        # ESPN URL is /sports/hockey/nhl/scoreboard — the "nhl" segment
+        # comes from the league slug, NOT espn_path. Double-checking
+        # this here because a bad value silently 404s every fetch.
+        assert cfg.espn_path == "hockey"
         assert "nhl" in cfg.leagues
         # NHL team names are unambiguous — no token stripping.
         assert not cfg.club_suffixes
         assert not cfg.club_prefixes
+
+    @pytest.mark.parametrize(
+        "sport, slug, expected_suffix",
+        [
+            ("soccer", "eng.1", "/sports/soccer/eng.1/scoreboard"),
+            ("nhl", "nhl", "/sports/hockey/nhl/scoreboard"),
+        ],
+    )
+    def test_constructed_scoreboard_url(self, sport, slug, expected_suffix):
+        """Lock in the ESPN URL shape per sport. Regression guard for
+        the "hockey/nhl" + "nhl" double-segment bug."""
+        cfg = fetch_upcoming.SPORT_CONFIGS[sport]
+        url = f"{fetch_upcoming.ESPN_BASE}/{cfg.espn_path}/{slug}/scoreboard"
+        assert url.endswith(expected_suffix)
 
 
 class TestSeasonFunctions:
