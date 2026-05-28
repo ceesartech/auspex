@@ -80,7 +80,13 @@ escape_sed_replacement() {
   printf '%s' "$1" | sed -e 's/[\/&]/\\&/g'
 }
 
-while IFS='=' read -r KEY VAL; do
+# Read each line as a whole and split on the FIRST `=` via parameter
+# expansion. Using `IFS='=' read -r KEY VAL` strips trailing `=` chars
+# from the value, which corrupts base64-padded Fernet keys.
+while IFS= read -r LINE || [ -n "$LINE" ]; do
+  [ -z "${LINE// /}" ] && continue
+  KEY="${LINE%%=*}"
+  VAL="${LINE#*=}"
   [ -z "${KEY// /}" ] && continue
   ESC="$(escape_sed_replacement "$VAL")"
   if grep -qE "^${KEY}=" "$ENV_FILE"; then
