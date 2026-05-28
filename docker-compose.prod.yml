@@ -25,11 +25,14 @@ services:
     build:
       context: services/frontend
       dockerfile: ../../docker/Dockerfile.frontend
+      # NEXT_PUBLIC_* must be passed as build args, not runtime env —
+      # Next.js inlines them into the JS bundle at `npm run build`.
+      args:
+        NEXT_PUBLIC_API_URL: https://${AUSPEX_DOMAIN}
+        NEXT_PUBLIC_WS_URL: wss://${AUSPEX_DOMAIN}
     container_name: auspex-frontend
     environment:
       - NODE_ENV=production
-      - NEXT_PUBLIC_API_URL=https://${AUSPEX_DOMAIN}
-      - NEXT_PUBLIC_WS_URL=wss://${AUSPEX_DOMAIN}
     networks:
       - betting-network
     restart: unless-stopped
