@@ -100,6 +100,25 @@ ensure_dirs() {
   sudo chown -R "$TARGET_USER":"$TARGET_USER" /models /data /var/log/auspex
 }
 
+ensure_airflow_dirs() {
+  # The apache/airflow image runs as uid 50000. Our bind-mounts for
+  # logs/plugins/dags need to be writable by that uid or the scheduler
+  # crashes with "Permission denied: /opt/airflow/logs/...".
+  # Group 0 (root) matches the airflow image's primary group.
+  local airflow_uid=50000
+  log "Setting ownership on Airflow bind-mount dirs (uid=$airflow_uid)..."
+  local dirs=(
+    "$INSTALL_DIR/services/data-ingestion/logs"
+    "$INSTALL_DIR/services/data-ingestion/plugins"
+    "$INSTALL_DIR/services/data-ingestion/dags"
+  )
+  for d in "${dirs[@]}"; do
+    sudo mkdir -p "$d"
+    sudo chown -R "$airflow_uid":0 "$d"
+    sudo chmod -R 775 "$d"
+  done
+}
+
 ensure_env_file() {
   local env_file="$INSTALL_DIR/.env"
   if [ -f "$env_file" ]; then
@@ -209,6 +228,7 @@ main() {
   ensure_docker
   ensure_repo
   ensure_dirs
+  ensure_airflow_dirs
   ensure_env_file
   ensure_swap
   ensure_firewall
