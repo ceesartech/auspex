@@ -59,7 +59,7 @@ with DAG(
         bash_command=(
             f"{DOCKER_EXEC} bash -c '"
             "cd /app/services/ml-models && "
-            'PYTHONPATH=src python -m validation.validate_training_data '
+            "PYTHONPATH=src python -m validation.validate_training_data "
             '--database-url "$DATABASE_URL"'
             "'"
         ),
