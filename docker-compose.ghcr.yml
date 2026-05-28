@@ -1,0 +1,37 @@
+# Image-pull overlay for CI-driven deploys.
+#
+# Usage:
+#   IMAGE_TAG=<sha> docker compose \
+#       -f docker-compose.yml \
+#       -f docker-compose.prod.yml \
+#       -f docker-compose.ghcr.yml \
+#       pull
+#   ... up -d
+#
+# Each buildable service gets pointed at its prebuilt image on ghcr.io.
+# `build:` is intentionally cleared so `docker compose pull` doesn't try
+# to fall back to a local build. Local dev should NOT layer this file in.
+#
+# The IMAGE_TAG variable comes from the deploy step (github.sha). On a
+# fresh VM with no prior pull, the latest tag is a safe default.
+
+services:
+  api:
+    image: ghcr.io/ceesartech/auspex/api:${IMAGE_TAG:-latest}
+    build: !reset null
+
+  celery-worker:
+    image: ghcr.io/ceesartech/auspex/api:${IMAGE_TAG:-latest}
+    build: !reset null
+
+  airflow-webserver:
+    image: ghcr.io/ceesartech/auspex/airflow:${IMAGE_TAG:-latest}
+    build: !reset null
+
+  airflow-scheduler:
+    image: ghcr.io/ceesartech/auspex/airflow:${IMAGE_TAG:-latest}
+    build: !reset null
+
+  frontend:
+    image: ghcr.io/ceesartech/auspex/frontend:${IMAGE_TAG:-latest}
+    build: !reset null

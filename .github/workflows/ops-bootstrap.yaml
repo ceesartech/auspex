@@ -1,0 +1,67 @@
+name: Ops — Bootstrap pipeline
+
+# Click "Run workflow" in the GitHub Actions UI to run scripts/bootstrap.sh
+# on the VM. Use this after a fresh deploy or whenever you want to refresh
+# the full historical corpus + retrain from scratch.
+#
+# Day-to-day refreshes are handled by the auspex_pipeline Airflow DAG
+# running on the VM every 15 minutes — you should NOT need this often.
+
+on:
+  workflow_dispatch:
+    inputs:
+      leagues:
+        description: 'Comma-separated league codes (default: top-5)'
+        required: false
+        default: 'E0,E1,D1,I1,SP1,F1'
+      seasons:
+        description: 'Number of seasons of history to load'
+        required: false
+        default: '10'
+      skip_load:
+        description: 'Skip data ingest (re-train on existing raw_* tables)'
+        required: false
+        default: 'false'
+        type: boolean
+      skip_train:
+        description: 'Skip training (just refresh data + features)'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  bootstrap:
+    name: Run bootstrap.sh on VM
+    runs-on: ubuntu-latest
+    if: vars.DEPLOY_ENABLED == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Trust host key
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Run bootstrap on VM
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER || 'auspex' }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/auspex' }}
+          LEAGUES: ${{ github.event.inputs.leagues }}
+          SEASONS: ${{ github.event.inputs.seasons }}
+          SKIP_LOAD: ${{ github.event.inputs.skip_load == 'true' && '1' || '0' }}
+          SKIP_TRAIN: ${{ github.event.inputs.skip_train == 'true' && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd $DEPLOY_PATH && \
+             LEAGUES='$LEAGUES' SEASONS='$SEASONS' \
+             SKIP_LOAD='$SKIP_LOAD' SKIP_TRAIN='$SKIP_TRAIN' \
+             ./scripts/bootstrap.sh"

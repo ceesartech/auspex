@@ -1,33 +1,33 @@
 #!/usr/bin/env bash
-# Pull-and-redeploy. Runs ON THE VM, invoked by CI over SSH.
+# Pull-and-redeploy from ghcr.io. Runs ON THE VM, invoked by CI over SSH.
 #
 # Flow:
-#   1. Stash any local changes (none should exist, but be defensive).
-#   2. git pull --ff-only from the configured remote/branch.
-#   3. Determine which services need rebuilding by diffing changed
-#      paths against a small file→service map. (Avoids rebuilding
-#      the frontend on a Python-only change, etc.)
-#   4. Rebuild the affected images.
-#   5. up -d --no-deps for those services.
-#   6. Run /health to verify the API is still healthy. If not,
-#      print recent logs.
+#   1. Defensive stash + git pull --ff-only to bring code (compose files,
+#      scripts, DAGs) in sync with the deployed SHA.
+#   2. docker login to ghcr.io with the token CI provides.
+#   3. docker compose pull (layered with docker-compose.ghcr.yml so it
+#      pulls images from ghcr.io/ceesartech/auspex/{api,airflow,frontend}
+#      at the tag CI built).
+#   4. docker compose up -d to swap in the new containers. Compose's
+#      built-in rolling start handles dependency order.
+#   5. Health-check the api container for up to 60s. Print recent logs
+#      on failure so CI shows the smoking gun.
 #
-# Idempotent. Safe to call repeatedly. Designed so CI can pipe its
-# output back to GitHub Actions logs.
+# Environment variables expected (set by CI):
+#   IMAGE_TAG        — git SHA, used to tag images
+#   GHCR_USER        — github actor (for docker login)
+#   GHCR_TOKEN       — GITHUB_TOKEN (for docker login)
+#   REMOTE / BRANCH  — git remote/branch on the VM (default: origin/main)
 #
-# Usage:
-#   ./scripts/deploy_remote.sh                       # deploy from current HEAD's commit
-#   FORCE_ALL=1 ./scripts/deploy_remote.sh           # rebuild every service
-#   SKIP_BUILD=1 ./scripts/deploy_remote.sh          # just restart, no rebuild
-#
-# Run from the project root.
+# Manual usage on the VM (without ghcr.io, fall back to local build):
+#   FORCE_LOCAL_BUILD=1 ./scripts/deploy_remote.sh
 
 set -euo pipefail
 
-REMOTE="${REMOTE:-caesar}"
+REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-main}"
-FORCE_ALL="${FORCE_ALL:-0}"
-SKIP_BUILD="${SKIP_BUILD:-0}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+FORCE_LOCAL_BUILD="${FORCE_LOCAL_BUILD:-0}"
 
 log()  { printf '\033[1;34m[deploy]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[deploy]\033[0m %s\n' "$*" >&2; }
@@ -38,110 +38,67 @@ if [ ! -f docker-compose.yml ]; then
   exit 2
 fi
 
+# Compose file stack. ghcr overlay is added only when not falling back
+# to local build, since the overlay clears `build:` directives.
 COMPOSE=(docker compose -f docker-compose.yml)
 if [ -f docker-compose.prod.yml ]; then
   COMPOSE+=(-f docker-compose.prod.yml)
+fi
+if [ "$FORCE_LOCAL_BUILD" != "1" ] && [ -f docker-compose.ghcr.yml ]; then
+  COMPOSE+=(-f docker-compose.ghcr.yml)
 fi
 
 # 1. Capture the SHA BEFORE the pull so we can diff against it.
 OLD_SHA="$(git rev-parse HEAD)"
 log "Currently at: $OLD_SHA"
 
-# 2. Pull.
-log "Fetching $REMOTE/$BRANCH..."
-git fetch --quiet "$REMOTE" "$BRANCH"
-NEW_SHA="$(git rev-parse "$REMOTE/$BRANCH")"
-
-if [ "$OLD_SHA" = "$NEW_SHA" ]; then
-  log "Already up to date at $OLD_SHA. Nothing to do."
-  exit 0
-fi
-
-# Be defensive: stash any local changes so the pull doesn't fail.
+# Defensive stash if there are any working-tree changes.
 if ! git diff --quiet HEAD -- || ! git diff --cached --quiet; then
   warn "Local changes detected; stashing before pull."
   git stash push -m "auto-stash before deploy_remote $(date -Iseconds)" >/dev/null
 fi
 
-git pull --ff-only "$REMOTE" "$BRANCH"
-log "Now at: $NEW_SHA"
+log "Fetching $REMOTE/$BRANCH..."
+git fetch --quiet "$REMOTE" "$BRANCH"
+NEW_SHA="$(git rev-parse "$REMOTE/$BRANCH")"
 
-# 3. Determine which services need rebuilding.
-declare -a SERVICES_TO_REBUILD=()
-
-if [ "$FORCE_ALL" = "1" ] || [ "$SKIP_BUILD" = "1" ]; then
-  : # handled below
+if [ "$OLD_SHA" = "$NEW_SHA" ] && [ "$FORCE_LOCAL_BUILD" != "1" ]; then
+  log "Already up to date at $OLD_SHA. Will still pull/swap in case IMAGE_TAG changed."
 else
-  # File-prefix → service name map. If any file under the prefix changed,
-  # the matching service rebuilds.
-  CHANGED_FILES="$(git diff --name-only "$OLD_SHA" "$NEW_SHA")"
-  declare -A PREFIX_TO_SERVICE=(
-    ["services/api/"]="api"
-    ["services/data-ingestion/"]="api"   # api image bundles data-ingestion src
-    ["services/feature-engineering/"]="api"
-    ["services/ml-models/"]="api"
-    ["scripts/"]="api"
-    ["requirements.txt"]="api"
-    ["requirements-torch.txt"]="api"
-    ["docker/Dockerfile.api"]="api"
-    ["services/frontend/"]="frontend"
-    ["docker/Dockerfile.frontend"]="frontend"
-    ["docker/Dockerfile.airflow"]="airflow-webserver airflow-scheduler"
-    ["infrastructure/caddy/Caddyfile"]="caddy"
-  )
-
-  declare -A AFFECTED=()
-  while IFS= read -r file; do
-    [ -z "$file" ] && continue
-    for prefix in "${!PREFIX_TO_SERVICE[@]}"; do
-      case "$file" in
-        "$prefix"*)
-          for svc in ${PREFIX_TO_SERVICE[$prefix]}; do
-            AFFECTED[$svc]=1
-          done
-          break
-          ;;
-      esac
-    done
-  done <<< "$CHANGED_FILES"
-
-  SERVICES_TO_REBUILD=("${!AFFECTED[@]}")
+  git pull --ff-only "$REMOTE" "$BRANCH"
+  log "Now at: $NEW_SHA"
 fi
 
-if [ "$FORCE_ALL" = "1" ]; then
-  log "FORCE_ALL=1 — rebuilding all services."
-  SERVICES_TO_REBUILD=(api frontend)
+# 2. Login to ghcr.io (only if using prebuilt images).
+if [ "$FORCE_LOCAL_BUILD" != "1" ]; then
+  if [ -z "${GHCR_USER:-}" ] || [ -z "${GHCR_TOKEN:-}" ]; then
+    warn "GHCR_USER / GHCR_TOKEN not set; assuming docker is already logged in."
+  else
+    log "Logging into ghcr.io as $GHCR_USER..."
+    echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+  fi
 fi
 
-# 4. Rebuild.
-if [ "$SKIP_BUILD" = "1" ] || [ "${#SERVICES_TO_REBUILD[@]}" -eq 0 ]; then
-  log "No service rebuilds needed."
+# 3. Pull / rebuild.
+export IMAGE_TAG
+if [ "$FORCE_LOCAL_BUILD" = "1" ]; then
+  log "FORCE_LOCAL_BUILD=1 — rebuilding all images on the VM"
+  "${COMPOSE[@]}" build
 else
-  log "Rebuilding: ${SERVICES_TO_REBUILD[*]}"
-  for svc in "${SERVICES_TO_REBUILD[@]}"; do
-    # caddy is image-based, no build context
-    [ "$svc" = "caddy" ] && continue
-    log "build $svc"
-    "${COMPOSE[@]}" build "$svc"
-  done
+  log "Pulling images for tag=$IMAGE_TAG..."
+  "${COMPOSE[@]}" pull
 fi
 
-# 5. Up.
-log "Bringing services up..."
-if [ "${#SERVICES_TO_REBUILD[@]}" -eq 0 ] && [ "$SKIP_BUILD" != "1" ]; then
-  "${COMPOSE[@]}" up -d
-else
-  # --no-deps avoids restarting healthy dependencies like postgres/redis.
-  # Compose still respects depends_on healthchecks for new starts.
-  "${COMPOSE[@]}" up -d --no-deps "${SERVICES_TO_REBUILD[@]}"
-fi
+# 4. Up.
+log "Bringing services up with IMAGE_TAG=$IMAGE_TAG..."
+"${COMPOSE[@]}" up -d --remove-orphans
 
-# 6. Health check.
+# 5. Health check.
 log "Verifying API health..."
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   if "${COMPOSE[@]}" exec -T api curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
     log "API healthy ✓"
-    log "Deploy complete: $OLD_SHA → $NEW_SHA"
+    log "Deploy complete: $OLD_SHA → $NEW_SHA (image tag: $IMAGE_TAG)"
     exit 0
   fi
   sleep 2

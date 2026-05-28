@@ -1,0 +1,57 @@
+name: Ops — Retrain models
+
+# Trigger an ad-hoc model retrain on the VM. Runs scripts/bootstrap.sh
+# with SKIP_LOAD=1 and SKIP_STATSBOMB=1, so only steps 3-7 (promote raw
+# → canonical, train, promote to production, fetch fixtures, compute
+# features, precompute predictions) execute. Takes 10-20 min.
+
+on:
+  workflow_dispatch:
+    inputs:
+      notify_threshold:
+        description: 'Confidence threshold for Telegram alerts (0.0-1.0)'
+        required: false
+        default: '0.65'
+      silent:
+        description: 'Skip Telegram notifications for this run'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  retrain:
+    name: Retrain on VM
+    runs-on: ubuntu-latest
+    if: vars.DEPLOY_ENABLED == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Trust host key
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Run retrain on VM
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER || 'auspex' }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/auspex' }}
+          NOTIFY_THRESHOLD: ${{ github.event.inputs.notify_threshold }}
+          SILENT_BOOTSTRAP: ${{ github.event.inputs.silent == 'true' && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          # SKIP_LOAD=1 and SKIP_STATSBOMB=1 skip the slow data-fetch
+          # steps. Training reads whatever is already in raw_* tables.
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd $DEPLOY_PATH && \
+             SKIP_LOAD=1 SKIP_STATSBOMB=1 \
+             NOTIFY_THRESHOLD='$NOTIFY_THRESHOLD' \
+             SILENT_BOOTSTRAP='$SILENT_BOOTSTRAP' \
+             ./scripts/bootstrap.sh"

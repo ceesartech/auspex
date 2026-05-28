@@ -1,0 +1,62 @@
+name: Ops — Reset database
+
+# DESTRUCTIVE — drops the public schema in the configured Postgres
+# database, then re-applies every migration in
+# services/data-ingestion/db/migrations/. ALL DATA in the database is
+# lost.
+#
+# Required typed confirmation: type RESET in the input field below.
+# Anything else aborts.
+#
+# Use after a Fernet-key rotation (Airflow's encrypted rows become
+# undecryptable) or any other unrecoverable schema state.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type RESET (case-sensitive) to confirm DATA LOSS'
+        required: true
+      reseed_users:
+        description: 'Re-run seed_users.py after the reset'
+        required: false
+        default: 'true'
+        type: boolean
+
+jobs:
+  reset:
+    name: Reset DB on VM
+    runs-on: ubuntu-latest
+    if: vars.DEPLOY_ENABLED == 'true' && github.event.inputs.confirmation == 'RESET'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Trust host key
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Reset + re-migrate + reseed
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER || 'auspex' }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/auspex' }}
+          RESEED: ${{ github.event.inputs.reseed_users }}
+        run: |
+          set -euo pipefail
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" bash -se <<EOF
+            set -euo pipefail
+            cd "$DEPLOY_PATH"
+            ./scripts/reset_database.sh --yes
+            ./scripts/restart_services.sh
+            if [ "$RESEED" = "true" ]; then
+              docker compose exec -T api python /app/scripts/seed_users.py
+            fi
+          EOF
