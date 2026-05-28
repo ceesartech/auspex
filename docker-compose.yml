@@ -142,6 +142,10 @@ services:
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
+      # Webserver and scheduler must share this so the webserver's HTTP
+      # log-fetch from the scheduler's task-runner endpoint is allowed.
+      # Without it: 403 FORBIDDEN on "Could not read served logs".
+      - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW__WEBSERVER__SECRET_KEY}
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
       # Long-running CPU-bound tasks (e.g. Poisson MLE in train_all_models)
       # hold the GIL, which starves the LocalTaskJob heartbeat thread.
