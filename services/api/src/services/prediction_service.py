@@ -29,30 +29,120 @@ def get_model_version() -> str:
     return _MODEL_VERSION
 
 
-def _find_ensemble_artifact(model_path: Path) -> Optional[Path]:
-    """Locate the ensemble model file in `model_path`.
+def _predict_one(model, features: Dict[str, Any]) -> Dict[str, Any]:
+    """Adapter from the (features dict) call shape used by the route + DAG
+    to EnsemblePredictor.predict_proba(DataFrame).
 
-    The training pipeline writes via ModelRegistry, producing
-    `{model_path}/ensemble/{version}/model.bin`. Older deployments
-    wrote a single `{model_path}/ensemble_model.pkl`. Look for the
-    new layout first (picking the most recent by mtime so an
-    in-place retrain that doesn't bump the version still wins),
-    then fall back to the legacy path.
+    The previous code called ensemble.predict_single() which doesn't exist
+    on EnsemblePredictor or its base class — it was a non-existent API.
     """
-    new_layout_root = model_path / "ensemble"
-    if new_layout_root.is_dir():
-        candidates = sorted(
-            new_layout_root.glob("*/model.bin"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if candidates:
-            return candidates[0]
+    import pandas as pd
 
-    legacy = model_path / "ensemble_model.pkl"
-    if legacy.exists():
-        return legacy
-    return None
+    X = pd.DataFrame([features])
+    proba = model.predict_proba(X)[0]  # shape (3,) — [home, draw, away]
+    labels = ["home", "draw", "away"]
+    idx = int(proba.argmax())
+    return {
+        "predicted_label": labels[idx],
+        "confidence": float(proba[idx]),
+        "probabilities": {labels[i]: float(proba[i]) for i in range(3)},
+    }
+
+
+def _latest_model_bin(root: Path) -> Optional[Path]:
+    """Return the most recent `*/model.bin` under `root` (by mtime), or None."""
+    if not root.is_dir():
+        return None
+    candidates = sorted(root.glob("*/model.bin"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
+
+
+def _build_ensemble_from_registry(model_path: Path):
+    """Reconstitute the EnsemblePredictor + its base models from the
+    ModelRegistry layout under `model_path`.
+
+    The training pipeline writes:
+      {model_path}/ensemble/{version}/model.bin   (JSON: weights + model_names)
+      {model_path}/xgboost/{version}/model.bin    (XGBoost UBJSON)
+      {model_path}/lightgbm/{version}/model.bin   (LightGBM text)
+      {model_path}/neural_network/{version}/model.bin (PyTorch pickle)
+      {model_path}/poisson/{version}/model.bin    (JSON)
+      {model_path}/dixon_coles/{version}/model.bin (JSON)
+
+    EnsemblePredictor.save() only persists weights + base-model names —
+    not the base models themselves — so reloading requires us to walk
+    the registry, instantiate each base model class, load its
+    artifact, and re-attach via add_model() before setting weights.
+    """
+    import json
+
+    # Make ml-models importable. The API container has it on PYTHONPATH
+    # (Dockerfile.api ENV PYTHONPATH=...:/app/services/ml-models/src) but
+    # be defensive in case a caller invokes this from a different shell.
+    import sys
+
+    ml_src = "/app/services/ml-models/src"
+    if ml_src not in sys.path:
+        sys.path.insert(0, ml_src)
+
+    from models.ensemble import EnsemblePredictor
+    from models.lightgbm_model import LightGBMMatchPredictor
+    from models.model_config import (
+        DIXON_COLES_CONFIG,
+        ENSEMBLE_CONFIG,
+        LIGHTGBM_MATCH_OUTCOME,
+        NEURAL_NETWORK_CONFIG,
+        POISSON_CONFIG,
+        XGBOOST_MATCH_OUTCOME,
+    )
+    from models.neural_network import NeuralNetworkMatchPredictor
+    from models.poisson_models import DixonColesPredictor, PoissonMatchPredictor
+    from models.xgboost_model import XGBoostMatchPredictor
+
+    ensemble_meta = _latest_model_bin(model_path / "ensemble")
+    if ensemble_meta is None:
+        return None, None
+
+    with open(ensemble_meta) as f:
+        meta = json.load(f)
+
+    # name -> (class, config) for every base-model type the ensemble
+    # might reference. Anything else in meta["model_names"] is skipped
+    # with a warning.
+    klass_for: Dict[str, tuple] = {
+        "xgboost": (XGBoostMatchPredictor, XGBOOST_MATCH_OUTCOME),
+        "lightgbm": (LightGBMMatchPredictor, LIGHTGBM_MATCH_OUTCOME),
+        "neural_network": (NeuralNetworkMatchPredictor, NEURAL_NETWORK_CONFIG),
+        "poisson": (PoissonMatchPredictor, POISSON_CONFIG),
+        "dixon_coles": (DixonColesPredictor, DIXON_COLES_CONFIG),
+    }
+
+    ensemble = EnsemblePredictor(ENSEMBLE_CONFIG)
+    loaded_names = []
+    for name in meta.get("model_names", []):
+        if name not in klass_for:
+            logger.warning("Ensemble references unknown base model %r; skipping", name)
+            continue
+        artifact = _latest_model_bin(model_path / name)
+        if artifact is None:
+            logger.warning("Ensemble references %r but no artifact under %s/%s/", name, model_path, name)
+            continue
+        cls, cfg = klass_for[name]
+        try:
+            model = cls(cfg)
+            model.load(str(artifact))
+            ensemble.add_model(name, model)
+            loaded_names.append(name)
+        except Exception as e:
+            logger.error("Failed to load base model %r from %s: %s", name, artifact, e)
+
+    if not loaded_names:
+        logger.error("Could not reconstitute any base models for the ensemble")
+        return None, None
+
+    # ensemble.load() restores the blend weights from JSON metadata.
+    ensemble.load(str(ensemble_meta))
+    return ensemble, ensemble_meta
 
 
 def load_models_into_process(model_dir: Optional[Path] = None) -> Dict[str, Any]:
@@ -68,22 +158,21 @@ def load_models_into_process(model_dir: Optional[Path] = None) -> Dict[str, Any]
 
     model_path = model_dir or (Path(settings.MODEL_PATH) / "production")
     try:
-        import joblib
-
-        ensemble_path = _find_ensemble_artifact(model_path)
-        if ensemble_path is not None:
-            _MODELS["ensemble"] = joblib.load(ensemble_path)
-            # Version string includes the registry version dir + mtime so
-            # both an explicit retrain (new version dir) and an in-place
-            # retrain (mtime bump) invalidate the prediction cache.
-            mtime = int(ensemble_path.stat().st_mtime)
-            version_label = ensemble_path.parent.name if ensemble_path.parent.name != "production" else "v1.0"
+        ensemble, ensemble_meta_path = _build_ensemble_from_registry(model_path)
+        if ensemble is not None:
+            _MODELS["ensemble"] = ensemble
+            mtime = int(ensemble_meta_path.stat().st_mtime)
+            version_label = ensemble_meta_path.parent.name
             _MODEL_VERSION = f"ensemble_{version_label}+{mtime}"
-            logger.info("Loaded ensemble model from %s (version=%s)", ensemble_path, _MODEL_VERSION)
+            logger.info(
+                "Loaded ensemble model from %s (version=%s, base_models=%s)",
+                ensemble_meta_path,
+                _MODEL_VERSION,
+                list(ensemble.models.keys()),
+            )
         else:
             logger.warning(
-                "Ensemble model not found under %s (looked for ensemble/*/model.bin and "
-                "ensemble_model.pkl); serving from DB fallback",
+                "Ensemble model not found under %s/ensemble/*/model.bin; serving from DB fallback",
                 model_path,
             )
     except Exception as e:
@@ -124,7 +213,7 @@ class PredictionService:
         features = self._get_match_features(match_id)
 
         if "ensemble" in self.models:
-            prediction = self.models["ensemble"].predict_single(features, explain=include_explanation)
+            prediction = _predict_one(self.models["ensemble"], features)
         else:
             # Fallback: return stored prediction from DB
             prediction = self._get_stored_prediction(match_id)

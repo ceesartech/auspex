@@ -85,8 +85,7 @@ def send_telegram(prediction: dict, match: dict, threshold: float) -> bool:
         f"\U0001F551 {match['match_date'].strftime('%Y-%m-%d %H:%M %Z')}\n\n"
         f"Predicted: <b>{prediction['predicted_label']}</b>\n"
         f"Confidence: <b>{prediction['confidence']:.1%}</b>\n"
-        f"Probabilities: " +
-        ", ".join(f"{k} {v:.1%}" for k, v in (prediction.get('probabilities') or {}).items())
+        f"Probabilities: " + ", ".join(f"{k} {v:.1%}" for k, v in (prediction.get("probabilities") or {}).items())
     )
     try:
         r = requests.post(
@@ -128,7 +127,9 @@ def store_prediction(cur, match_id: str, prediction: dict, model_version: str) -
 def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> dict:
     from services.cache_service import CacheService  # type: ignore
     from services.prediction_service import (  # type: ignore
-        PredictionService, load_models_into_process, get_model_version,
+        PredictionService,
+        load_models_into_process,
+        get_model_version,
     )
 
     load_models_into_process()
@@ -169,7 +170,16 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                     return {"predicted": predicted, "notified": notified}
 
                 try:
-                    pred = ensemble.predict_single(features, explain=False)
+                    import pandas as pd
+
+                    proba = ensemble.predict_proba(pd.DataFrame([features]))[0]
+                    labels = ["home", "draw", "away"]
+                    idx = int(proba.argmax())
+                    pred = {
+                        "predicted_label": labels[idx],
+                        "confidence": float(proba[idx]),
+                        "probabilities": {labels[i]: float(proba[i]) for i in range(3)},
+                    }
                 except Exception as e:
                     logger.warning("Predict failed for %s: %s", m["match_id"], e)
                     continue
@@ -198,8 +208,12 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--days", type=int, default=7)
-    p.add_argument("--notify-threshold", type=float, default=0.65,
-                   help="Min confidence to trigger a Telegram alert (default: 0.65).")
+    p.add_argument(
+        "--notify-threshold",
+        type=float,
+        default=0.65,
+        help="Min confidence to trigger a Telegram alert (default: 0.65).",
+    )
     p.add_argument("--no-notify", action="store_true")
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
