@@ -2,7 +2,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.11-blue.svg)
 ![Node](https://img.shields.io/badge/node-18%2B-green.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
+![License](https://img.shields.io/badge/license-None-green.svg)
 
 An enterprise-grade sports betting and lottery recommendation system built with machine learning, real-time data pipelines, and a full observability stack.
 
