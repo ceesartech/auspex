@@ -198,6 +198,12 @@ services:
     volumes:
       - ./models:/app/models
       - ./services/api:/app/services/api
+      # Bind-mount services/ml-models so edits to training/, predictors/,
+      # utils/ flow into the container without rebuilding the image —
+      # otherwise `docker compose exec api python -m training.train_all_models`
+      # would still run yesterday's baked-in code after a git pull. The
+      # Dockerfile still COPYs ml-models in for production image deploys.
+      - ./services/ml-models:/app/services/ml-models
       # Bind-mount scripts/ so edits to fetch_live_odds.py /
       # promote_raw.py / etc. flow into the container without
       # rebuilding the image. The Dockerfile still COPYs them in for
@@ -233,6 +239,9 @@ services:
       - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/2
     volumes:
       - ./services/api:/app/services/api
+      # Match api's mount so celery workers also run the latest
+      # training/predictor code after a git pull.
+      - ./services/ml-models:/app/services/ml-models
       - ./models:/app/models
     command: celery -A services.api.celery_app worker --loglevel=info --concurrency=4
     depends_on:

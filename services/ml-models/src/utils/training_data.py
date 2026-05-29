@@ -471,9 +471,7 @@ def prepare_nhl_moneyline_frame(raw: pd.DataFrame) -> pd.DataFrame:
     if NHL_MONEYLINE_TARGET not in frame.columns and {"home_score", "away_score"}.issubset(frame.columns):
         # SQL query derives this for us; this is a defensive fallback
         # for CSV inputs that bypass the query.
-        frame[NHL_MONEYLINE_TARGET] = np.where(
-            frame["home_score"] > frame["away_score"], 0, 1
-        )
+        frame[NHL_MONEYLINE_TARGET] = np.where(frame["home_score"] > frame["away_score"], 0, 1)
 
     if "match_date" in frame.columns:
         frame["match_date"] = pd.to_datetime(frame["match_date"], errors="coerce")

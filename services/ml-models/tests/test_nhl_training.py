@@ -21,7 +21,6 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -38,11 +37,7 @@ from predictors.model_config import (  # noqa: E402
     ModelType,
     PredictionTask,
 )
-from training.train_all_models import (  # noqa: E402
-    NHL_MONEYLINE_BUNDLE,
-    SOCCER_BUNDLE,
-    SPORT_BUNDLES,
-)
+from training.train_all_models import NHL_MONEYLINE_BUNDLE, SOCCER_BUNDLE, SPORT_BUNDLES  # noqa: E402
 from utils.training_data import (  # noqa: E402
     NHL_MONEYLINE_TARGET,
     NHL_MONEYLINE_TRAINING_QUERY,
@@ -50,7 +45,6 @@ from utils.training_data import (  # noqa: E402
     get_nhl_feature_columns,
     prepare_nhl_moneyline_frame,
 )
-
 
 # ── Query shape ──────────────────────────────────────────────────────
 
