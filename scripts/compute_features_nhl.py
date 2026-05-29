@@ -150,40 +150,72 @@ def _with_defaults(features: dict) -> dict:
     return out
 
 
-def list_target_matches(conn, days: int) -> list[str]:
+def list_target_matches(conn, days: int, force: bool = False) -> list[str]:
     """Scheduled NHL matches in the next N days that lack a fresh
-    nhl_baseline features_cache row."""
+    nhl_baseline features_cache row. With force=True, drops the cache-
+    freshness filter so every match in the window is recomputed."""
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            """
-            SELECT m.id::text AS id
-            FROM matches m
-            JOIN leagues l ON l.id = m.league_id
-            LEFT JOIN features_cache f
-              ON f.match_id = m.id
-             AND f.feature_set = %s
-             AND f.feature_version = %s
-             AND f.expires_at > NOW()
-            WHERE m.status = 'scheduled'
-              AND l.sport = 'nhl'
-              AND m.match_date BETWEEN NOW() AND NOW() + (%s || ' days')::interval
-              AND f.id IS NULL
-            ORDER BY m.match_date ASC
-            """,
-            (FEATURE_SET, FEATURE_VERSION, str(days)),
-        )
+        if force:
+            cur.execute(
+                """
+                SELECT m.id::text AS id
+                FROM matches m
+                JOIN leagues l ON l.id = m.league_id
+                WHERE m.status = 'scheduled'
+                  AND l.sport = 'nhl'
+                  AND m.match_date BETWEEN NOW() AND NOW() + (%s || ' days')::interval
+                ORDER BY m.match_date ASC
+                """,
+                (str(days),),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT m.id::text AS id
+                FROM matches m
+                JOIN leagues l ON l.id = m.league_id
+                LEFT JOIN features_cache f
+                  ON f.match_id = m.id
+                 AND f.feature_set = %s
+                 AND f.feature_version = %s
+                 AND f.expires_at > NOW()
+                WHERE m.status = 'scheduled'
+                  AND l.sport = 'nhl'
+                  AND m.match_date BETWEEN NOW() AND NOW() + (%s || ' days')::interval
+                  AND f.id IS NULL
+                ORDER BY m.match_date ASC
+                """,
+                (FEATURE_SET, FEATURE_VERSION, str(days)),
+            )
         return [r["id"] for r in cur.fetchall()]
 
 
-def list_all_finished_matches(conn) -> list[str]:
-    """Every finished NHL match without a fresh nhl_baseline features
-    row. Used to backfill the training set after a historical load —
-    the cache TTL means re-running this is idempotent (rows whose
-    expires_at hasn't passed are skipped via the LEFT JOIN filter).
+def list_all_finished_matches(conn, force: bool = False) -> list[str]:
+    """Every finished NHL match. Without force, skips matches that
+    already have a fresh nhl_baseline features_cache row (1-hour TTL).
+    With force=True, drops the cache-freshness filter — needed after a
+    historical odds backfill, where the existing features_cache rows
+    are still within their TTL but reflect the pre-backfill defaults
+    rather than the new market lines. The ON CONFLICT clause in
+    write_features upserts cleanly, so re-running with --force is safe.
     Ordered ASC so a crash mid-run leaves an early-seasons-first
     partial cache that's still useful for early training experiments.
     """
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        if force:
+            cur.execute(
+                """
+                SELECT m.id::text AS id
+                FROM matches m
+                JOIN leagues l ON l.id = m.league_id
+                WHERE m.status = 'finished'
+                  AND l.sport = 'nhl'
+                  AND m.home_score IS NOT NULL
+                  AND m.away_score IS NOT NULL
+                ORDER BY m.match_date ASC
+                """,
+            )
+            return [r["id"] for r in cur.fetchall()]
         cur.execute(
             """
             SELECT m.id::text AS id
@@ -348,9 +380,7 @@ def _team_schedule_context(cur, team_id: str, before_date, side: str) -> dict:
     days_rest = row.get("days_rest")
     return {
         f"{side}_days_rest": float(days_rest) if days_rest is not None else None,
-        f"{side}_back_to_back": (
-            1.0 if days_rest is not None and float(days_rest) <= BACK_TO_BACK_DAYS else 0.0
-        ),
+        f"{side}_back_to_back": (1.0 if days_rest is not None and float(days_rest) <= BACK_TO_BACK_DAYS else 0.0),
         f"{side}_games_in_last_7": int(row.get("games_last_7") or 0),
     }
 
@@ -362,8 +392,7 @@ def compute_match_features(cur, match_id: str):
     """Return the feature dict for one NHL match, or None if the match
     has no team ids."""
     cur.execute(
-        "SELECT home_team_id::text AS h, away_team_id::text AS a, match_date AS d "
-        "FROM matches WHERE id = %s",
+        "SELECT home_team_id::text AS h, away_team_id::text AS a, match_date AS d " "FROM matches WHERE id = %s",
         (match_id,),
     )
     m = cur.fetchone()
@@ -418,14 +447,26 @@ def compute_match_features(cur, match_id: str):
             return None
         return float(a) - float(b)
 
-    features["form_diff_goals_for"] = _safe_diff(home_form.get("home_roll_goals_for"), away_form.get("away_roll_goals_for"))
-    features["form_diff_goals_against"] = _safe_diff(home_form.get("home_roll_goals_against"), away_form.get("away_roll_goals_against"))
-    features["form_diff_shots_for"] = _safe_diff(home_form.get("home_roll_shots_for"), away_form.get("away_roll_shots_for"))
-    features["form_diff_shots_against"] = _safe_diff(home_form.get("home_roll_shots_against"), away_form.get("away_roll_shots_against"))
+    features["form_diff_goals_for"] = _safe_diff(
+        home_form.get("home_roll_goals_for"), away_form.get("away_roll_goals_for")
+    )
+    features["form_diff_goals_against"] = _safe_diff(
+        home_form.get("home_roll_goals_against"), away_form.get("away_roll_goals_against")
+    )
+    features["form_diff_shots_for"] = _safe_diff(
+        home_form.get("home_roll_shots_for"), away_form.get("away_roll_shots_for")
+    )
+    features["form_diff_shots_against"] = _safe_diff(
+        home_form.get("home_roll_shots_against"), away_form.get("away_roll_shots_against")
+    )
     features["form_diff_pp_pct"] = _safe_diff(home_form.get("home_roll_pp_pct"), away_form.get("away_roll_pp_pct"))
     features["form_diff_pk_pct"] = _safe_diff(home_form.get("home_roll_pk_pct"), away_form.get("away_roll_pk_pct"))
-    features["form_diff_save_pct"] = _safe_diff(home_form.get("home_roll_save_pct"), away_form.get("away_roll_save_pct"))
-    features["form_diff_standings_pts"] = _safe_diff(home_form.get("home_roll_standings_pts"), away_form.get("away_roll_standings_pts"))
+    features["form_diff_save_pct"] = _safe_diff(
+        home_form.get("home_roll_save_pct"), away_form.get("away_roll_save_pct")
+    )
+    features["form_diff_standings_pts"] = _safe_diff(
+        home_form.get("home_roll_standings_pts"), away_form.get("away_roll_standings_pts")
+    )
     features["rest_diff"] = _safe_diff(features.get("home_days_rest"), features.get("away_days_rest"))
 
     return features
@@ -479,6 +520,15 @@ def parse_args(argv=None):
         "fresh nhl_baseline row. Use this once after a historical load to populate the "
         "training set; the daily DAG handles upcoming matches via --days.",
     )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Ignore the cache-freshness filter and recompute features for every match in "
+        "scope. Use this after a backfill_historical_odds run: the existing features_cache "
+        "rows are still within their 1-hour TTL but reflect the pre-backfill default odds, "
+        "so the default --all-finished would skip them and the model would re-train on the "
+        "same stale features. The write path uses ON CONFLICT upsert so repeats are safe.",
+    )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
 
@@ -489,17 +539,23 @@ def main(argv=None):
         logger.error("DATABASE_URL not set")
         return 2
 
+    force_note = " (force=on, ignoring cache TTL)" if args.force else ""
+
     if args.match_ids:
         match_ids = [s.strip() for s in args.match_ids.split(",") if s.strip()]
-        scope_desc = f"{len(match_ids)} explicit match id(s)"
+        scope_desc = f"{len(match_ids)} explicit match id(s){force_note}"
     elif args.all_finished:
         with psycopg2.connect(args.database_url) as conn:
-            match_ids = list_all_finished_matches(conn)
-        scope_desc = f"{len(match_ids)} finished NHL match(es) without fresh features"
+            match_ids = list_all_finished_matches(conn, force=args.force)
+        scope_desc = (
+            f"{len(match_ids)} finished NHL match(es)" + force_note
+            if args.force
+            else f"{len(match_ids)} finished NHL match(es) without fresh features"
+        )
     else:
         with psycopg2.connect(args.database_url) as conn:
-            match_ids = list_target_matches(conn, args.days)
-        scope_desc = f"{len(match_ids)} upcoming NHL match(es) in next {args.days} day(s)"
+            match_ids = list_target_matches(conn, args.days, force=args.force)
+        scope_desc = f"{len(match_ids)} upcoming NHL match(es) in next {args.days} day(s){force_note}"
 
     if not match_ids:
         logger.info("No NHL matches to compute features for (%s)", scope_desc)
