@@ -41,9 +41,10 @@ Stored in features_cache.features as JSONB keyed on
 (match_id, feature_set='nhl_baseline', feature_version='v1').
 
 Usage:
-    python /app/scripts/compute_features_nhl.py             # next 7 days
+    python /app/scripts/compute_features_nhl.py                 # next 7 days
     python /app/scripts/compute_features_nhl.py --days 14
     python /app/scripts/compute_features_nhl.py --match-ids id1,id2,id3
+    python /app/scripts/compute_features_nhl.py --all-finished  # backfill training-set features
 """
 
 from __future__ import annotations
@@ -170,6 +171,37 @@ def list_target_matches(conn, days: int) -> list[str]:
             ORDER BY m.match_date ASC
             """,
             (FEATURE_SET, FEATURE_VERSION, str(days)),
+        )
+        return [r["id"] for r in cur.fetchall()]
+
+
+def list_all_finished_matches(conn) -> list[str]:
+    """Every finished NHL match without a fresh nhl_baseline features
+    row. Used to backfill the training set after a historical load —
+    the cache TTL means re-running this is idempotent (rows whose
+    expires_at hasn't passed are skipped via the LEFT JOIN filter).
+    Ordered ASC so a crash mid-run leaves an early-seasons-first
+    partial cache that's still useful for early training experiments.
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT m.id::text AS id
+            FROM matches m
+            JOIN leagues l ON l.id = m.league_id
+            LEFT JOIN features_cache f
+              ON f.match_id = m.id
+             AND f.feature_set = %s
+             AND f.feature_version = %s
+             AND f.expires_at > NOW()
+            WHERE m.status = 'finished'
+              AND l.sport = 'nhl'
+              AND m.home_score IS NOT NULL
+              AND m.away_score IS NOT NULL
+              AND f.id IS NULL
+            ORDER BY m.match_date ASC
+            """,
+            (FEATURE_SET, FEATURE_VERSION),
         )
         return [r["id"] for r in cur.fetchall()]
 
@@ -439,7 +471,14 @@ def compute_all(database_url: str, match_ids: list[str]) -> dict:
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--days", type=int, default=7)
-    p.add_argument("--match-ids", help="Comma-separated UUIDs (overrides --days).")
+    p.add_argument("--match-ids", help="Comma-separated UUIDs (overrides --days / --all-finished).")
+    p.add_argument(
+        "--all-finished",
+        action="store_true",
+        help="Backfill features for every finished NHL match that doesn't already have a "
+        "fresh nhl_baseline row. Use this once after a historical load to populate the "
+        "training set; the daily DAG handles upcoming matches via --days.",
+    )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
 
@@ -452,15 +491,21 @@ def main(argv=None):
 
     if args.match_ids:
         match_ids = [s.strip() for s in args.match_ids.split(",") if s.strip()]
+        scope_desc = f"{len(match_ids)} explicit match id(s)"
+    elif args.all_finished:
+        with psycopg2.connect(args.database_url) as conn:
+            match_ids = list_all_finished_matches(conn)
+        scope_desc = f"{len(match_ids)} finished NHL match(es) without fresh features"
     else:
         with psycopg2.connect(args.database_url) as conn:
             match_ids = list_target_matches(conn, args.days)
+        scope_desc = f"{len(match_ids)} upcoming NHL match(es) in next {args.days} day(s)"
 
     if not match_ids:
-        logger.info("No NHL matches needing features in the next %d days", args.days)
+        logger.info("No NHL matches to compute features for (%s)", scope_desc)
         return 0
 
-    logger.info("Computing NHL features for %d match(es)...", len(match_ids))
+    logger.info("Computing NHL features for %s...", scope_desc)
     counts = compute_all(args.database_url, match_ids)
     logger.info("Done: %d ok / %d failed", counts["ok"], counts["fail"])
     return 0 if counts["fail"] == 0 else 1
