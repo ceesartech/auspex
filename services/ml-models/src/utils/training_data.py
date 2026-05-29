@@ -80,6 +80,98 @@ NON_FEATURE_COLUMNS = {
 }
 
 
+# ============= NHL MONEYLINE TRAINING =============
+
+# NHL moneyline target column. 0 = home won (incl. OT/SO), 1 = away won.
+NHL_MONEYLINE_TARGET = "nhl_moneyline"
+
+# NHL training query. Differs from the soccer DEFAULT_TRAINING_QUERY in
+# three ways:
+#   1. Joins on the NHL market types: 'moneyline', 'spread' (line ±1.5),
+#      and 'total' (line 5.5) instead of '1x2' and 'over_under' (line 2.5).
+#   2. Filters to leagues.sport = 'nhl' so the query never picks up
+#      soccer rows even though they share the matches/odds tables.
+#   3. Pulls features_cache rows keyed on feature_set = 'nhl_baseline'
+#      (the Phase 2 set) — the soccer query takes the most-recent row
+#      regardless of feature_set, which would mix incompatible schemas
+#      for a sport that has both. NHL never overlaps but pinning by
+#      feature_set is the load-bearing invariant going forward.
+NHL_MONEYLINE_TRAINING_QUERY = """
+    SELECT
+        m.id::text AS match_id,
+        m.match_date,
+        m.season,
+        m.league_id::text AS league_id,
+        m.home_team_id::text AS home_team_id,
+        m.away_team_id::text AS away_team_id,
+        ht.name AS home_team,
+        at.name AS away_team,
+        m.home_score,
+        m.away_score,
+        CASE
+            WHEN m.home_score > m.away_score THEN 0
+            ELSE 1
+        END AS nhl_moneyline,
+        -- Closing moneyline (averaged across books)
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'moneyline'
+              AND o.selection = 'home' AND NOT o.is_live) AS odds_home_ml,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'moneyline'
+              AND o.selection = 'away' AND NOT o.is_live) AS odds_away_ml,
+        -- Puck line ±1.5 (averaged across books)
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'spread'
+              AND o.selection = 'home' AND o.line = -1.5 AND NOT o.is_live) AS odds_home_pl15,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'spread'
+              AND o.selection = 'away' AND o.line = 1.5 AND NOT o.is_live) AS odds_away_pl15,
+        -- Totals 5.5 (canonical NHL line)
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'total'
+              AND o.selection = 'over'  AND o.line = 5.5 AND NOT o.is_live) AS odds_over55,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'total'
+              AND o.selection = 'under' AND o.line = 5.5 AND NOT o.is_live) AS odds_under55,
+        fc.features
+    FROM matches m
+    JOIN leagues l ON l.id = m.league_id
+    JOIN teams ht ON m.home_team_id = ht.id
+    JOIN teams at ON m.away_team_id = at.id
+    LEFT JOIN LATERAL (
+        SELECT features
+        FROM features_cache
+        WHERE match_id = m.id AND feature_set = 'nhl_baseline'
+        ORDER BY computed_at DESC
+        LIMIT 1
+    ) fc ON true
+    WHERE l.sport = 'nhl'
+      AND m.status = 'finished'
+      AND m.home_score IS NOT NULL
+      AND m.away_score IS NOT NULL
+      AND m.home_score <> m.away_score  -- NHL always has a winner; ties = data error
+    ORDER BY m.match_date ASC
+"""
+
+# Columns exposed by NHL_MONEYLINE_TRAINING_QUERY that must NOT be used
+# as model inputs. Includes the target itself, identifiers, raw scores
+# (outcome leakage), and the JSON features blob (flattened separately).
+NHL_NON_FEATURE_COLUMNS = {
+    "match_id",
+    "match_date",
+    "season",
+    "league_id",
+    "home_team_id",
+    "away_team_id",
+    "home_team",
+    "away_team",
+    "home_score",
+    "away_score",
+    NHL_MONEYLINE_TARGET,
+    "features",
+}
+
+
 @dataclass(frozen=True)
 class TrainingDataQuality:
     """Validation summary for a prepared training frame."""
@@ -325,6 +417,77 @@ def validate_training_frame(
         date_max=date_max.isoformat() if pd.notna(date_max) else None,
         missing_feature_rate=missing_feature_rate,
     )
+
+
+def load_nhl_moneyline_frame(
+    *,
+    database_url: Optional[str] = None,
+    input_csv: Optional[str] = None,
+) -> pd.DataFrame:
+    """Load NHL moneyline training data from CSV or PostgreSQL.
+
+    Returns a frame ready for model training: features_cache JSON
+    flattened to columns, target column `nhl_moneyline` derived,
+    match_date parsed. Unlike the soccer loader, this does NOT
+    recompute rolling-form or implied-probability features in pandas —
+    those already exist as columns in features_cache via
+    compute_features_nhl.py, so re-deriving them would duplicate (and
+    risk diverging from) the canonical pre-match values that prediction
+    time will use.
+    """
+    if input_csv:
+        raw = pd.read_csv(input_csv)
+    elif database_url:
+        from sqlalchemy import create_engine
+
+        engine = create_engine(database_url)
+        try:
+            raw = pd.read_sql(NHL_MONEYLINE_TRAINING_QUERY, engine)
+        finally:
+            engine.dispose()
+    else:
+        raise ValueError("Provide input_csv or database_url")
+
+    return prepare_nhl_moneyline_frame(raw)
+
+
+def prepare_nhl_moneyline_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    """Flatten features_cache JSON, parse dates, ensure target column.
+
+    Skips the soccer-specific implied-probability and rolling-form
+    derivations — those live in features_cache as nhl_baseline columns,
+    already devigged and rolling-aware (see scripts/compute_features_nhl.py).
+    """
+    if raw.empty:
+        return raw.copy()
+
+    frame = raw.copy()
+
+    if "features" in frame.columns:
+        feature_rows = [_flatten_features(value) for value in frame["features"]]
+        flattened = pd.DataFrame(feature_rows, index=frame.index)
+        frame = pd.concat([frame.drop(columns=["features"]), flattened], axis=1)
+
+    if NHL_MONEYLINE_TARGET not in frame.columns and {"home_score", "away_score"}.issubset(frame.columns):
+        # SQL query derives this for us; this is a defensive fallback
+        # for CSV inputs that bypass the query.
+        frame[NHL_MONEYLINE_TARGET] = np.where(
+            frame["home_score"] > frame["away_score"], 0, 1
+        )
+
+    if "match_date" in frame.columns:
+        frame["match_date"] = pd.to_datetime(frame["match_date"], errors="coerce")
+
+    return frame
+
+
+def get_nhl_feature_columns(frame: pd.DataFrame, target: str = NHL_MONEYLINE_TARGET) -> List[str]:
+    """Numeric training features for the NHL frame (excludes identifiers,
+    raw scores, and the target)."""
+    excluded = set(NHL_NON_FEATURE_COLUMNS)
+    excluded.add(target)
+    numeric = frame.select_dtypes(include=[np.number, bool]).columns.tolist()
+    return [column for column in numeric if column not in excluded]
 
 
 def _flatten_features(value: Any, prefix: str = "feature") -> Dict[str, float]:

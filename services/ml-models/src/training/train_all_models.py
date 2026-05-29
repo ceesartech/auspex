@@ -6,8 +6,9 @@ import logging
 import os
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -18,10 +19,14 @@ from predictors.lightgbm_model import LightGBMMatchPredictor
 from predictors.model_config import (
     DIXON_COLES_CONFIG,
     ENSEMBLE_CONFIG,
+    ENSEMBLE_NHL_MONEYLINE,
     LIGHTGBM_MATCH_OUTCOME,
+    LIGHTGBM_NHL_MONEYLINE,
     NEURAL_NETWORK_CONFIG,
+    NEURAL_NETWORK_NHL_MONEYLINE,
     POISSON_CONFIG,
     XGBOOST_MATCH_OUTCOME,
+    XGBOOST_NHL_MONEYLINE,
     ModelConfig,
 )
 from predictors.model_registry import ModelRegistry
@@ -29,9 +34,89 @@ from predictors.neural_network import NeuralNetworkMatchPredictor
 from predictors.poisson_models import DixonColesPredictor, PoissonMatchPredictor
 from predictors.xgboost_model import XGBoostMatchPredictor
 from training.calibration import ProbabilityCalibrator
-from utils.training_data import get_feature_columns, load_training_frame, validate_training_frame
+from utils.training_data import (
+    NHL_MONEYLINE_TARGET,
+    TARGET_COLUMN,
+    get_feature_columns,
+    get_nhl_feature_columns,
+    load_nhl_moneyline_frame,
+    load_training_frame,
+    validate_training_frame,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# ── Sport bundles ─────────────────────────────────────────────────────
+# Each bundle wires up the four sport-specific pieces of a training run:
+#   * how to load the frame (different SQL queries / target columns)
+#   * which feature-selection helper to use
+#   * which (model_name, model_class, ModelConfig) triples to train
+#   * which default target column to pass through
+# Adding a new sport/task = adding a SportBundle entry. The orchestrator
+# itself stays sport-agnostic.
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """One model in a sport bundle: registry name + class + config."""
+
+    name: str
+    cls: type
+    config: ModelConfig
+    needs_team_columns: bool = False  # True only for Poisson / Dixon-Coles
+
+
+@dataclass(frozen=True)
+class SportBundle:
+    sport: str  # CLI value: 'soccer', 'nhl_moneyline'
+    target_column: str
+    load_frame: Callable[..., pd.DataFrame]
+    feature_columns: Callable[[pd.DataFrame, str], List[str]]
+    base_models: List[ModelSpec]
+    ensemble_config: ModelConfig
+    ensemble_name: str  # registry name for the ensemble
+
+
+SOCCER_BUNDLE = SportBundle(
+    sport="soccer",
+    target_column=TARGET_COLUMN,
+    load_frame=load_training_frame,
+    feature_columns=get_feature_columns,
+    base_models=[
+        ModelSpec("xgboost", XGBoostMatchPredictor, XGBOOST_MATCH_OUTCOME),
+        ModelSpec("lightgbm", LightGBMMatchPredictor, LIGHTGBM_MATCH_OUTCOME),
+        ModelSpec("neural_network", NeuralNetworkMatchPredictor, NEURAL_NETWORK_CONFIG),
+        ModelSpec("poisson", PoissonMatchPredictor, POISSON_CONFIG, needs_team_columns=True),
+        ModelSpec("dixon_coles", DixonColesPredictor, DIXON_COLES_CONFIG, needs_team_columns=True),
+    ],
+    ensemble_config=ENSEMBLE_CONFIG,
+    ensemble_name="ensemble",
+)
+
+
+NHL_MONEYLINE_BUNDLE = SportBundle(
+    sport="nhl_moneyline",
+    target_column=NHL_MONEYLINE_TARGET,
+    load_frame=load_nhl_moneyline_frame,
+    feature_columns=get_nhl_feature_columns,
+    base_models=[
+        ModelSpec("xgboost_nhl_ml", XGBoostMatchPredictor, XGBOOST_NHL_MONEYLINE),
+        ModelSpec("lightgbm_nhl_ml", LightGBMMatchPredictor, LIGHTGBM_NHL_MONEYLINE),
+        ModelSpec("neural_network_nhl_ml", NeuralNetworkMatchPredictor, NEURAL_NETWORK_NHL_MONEYLINE),
+        # Poisson / Dixon-Coles intentionally absent — both assume soccer
+        # scoring rules. The hockey-Poisson ports to feed NHL totals is
+        # Phase 3d work.
+    ],
+    ensemble_config=ENSEMBLE_NHL_MONEYLINE,
+    ensemble_name="ensemble_nhl_ml",
+)
+
+
+SPORT_BUNDLES: Dict[str, SportBundle] = {
+    "soccer": SOCCER_BUNDLE,
+    "nhl_moneyline": NHL_MONEYLINE_BUNDLE,
+}
 
 
 class TrainingOrchestrator:
@@ -57,94 +142,71 @@ class TrainingOrchestrator:
         target: str = "match_outcome",
         model_types: Optional[List[str]] = None,
         skip: Optional[List[str]] = None,
+        bundle: Optional[SportBundle] = None,
     ) -> Dict[str, Any]:
         """Train all individual models and then the ensemble.
 
-        `skip` is a list of model names to explicitly exclude even when
+        `bundle` selects which sport's model registry to iterate over
+        (defaults to SOCCER_BUNDLE for backwards compatibility). `skip`
+        is a list of model names to explicitly exclude even when
         `model_types=['all']` or `['ensemble']` would otherwise include them.
         """
+        bundle = bundle or SOCCER_BUNDLE
         start = time.time()
-        logger.info("Starting training of all models...")
+        logger.info("Starting training for sport=%s...", bundle.sport)
         requested = set(model_types or ["all"])
         skip_set = set(skip or [])
         train_everything = "all" in requested
         train_for_ensemble = "ensemble" in requested
 
-        def should_train(name: str) -> bool:
-            if name in skip_set:
-                logger.info("Skipping %s (in --skip-models)", name)
+        def should_train(spec: ModelSpec) -> bool:
+            # CLI --model-type aliases match the model TYPE (xgboost,
+            # lightgbm, neural_network, poisson, dixon_coles), not the
+            # sport-specific registry name. Otherwise --model-type
+            # xgboost would only train the soccer config.
+            type_alias = spec.config.model_type.value
+            if spec.name in skip_set or type_alias in skip_set:
+                logger.info("Skipping %s (in --skip-models)", spec.name)
                 return False
-            return train_everything or train_for_ensemble or name in requested
+            if train_everything or train_for_ensemble:
+                return True
+            return spec.name in requested or type_alias in requested
 
-        # 1. Train XGBoost
-        if should_train("xgboost"):
-            self._train_model(
-                "xgboost",
-                XGBoostMatchPredictor,
-                XGBOOST_MATCH_OUTCOME,
-                train_df,
-                val_df,
-                features,
-                target,
-            )
+        team_cols_present = "home_team" in train_df.columns
 
-        # 2. Train LightGBM
-        if should_train("lightgbm"):
-            self._train_model(
-                "lightgbm",
-                LightGBMMatchPredictor,
-                LIGHTGBM_MATCH_OUTCOME,
-                train_df,
-                val_df,
-                features,
-                target,
-            )
-
-        # 3. Train Neural Network
-        if should_train("neural_network"):
-            self._train_model(
-                "neural_network",
-                NeuralNetworkMatchPredictor,
-                NEURAL_NETWORK_CONFIG,
-                train_df,
-                val_df,
-                features,
-                target,
-            )
-
-        # 4. Train Poisson (needs team columns)
-        if "home_team" in train_df.columns:
-            if should_train("poisson"):
-                self._train_model(
-                    "poisson",
-                    PoissonMatchPredictor,
-                    POISSON_CONFIG,
-                    train_df,
-                    val_df,
-                    None,
-                    target,
+        for spec in bundle.base_models:
+            if not should_train(spec):
+                continue
+            if spec.needs_team_columns and not team_cols_present:
+                logger.warning(
+                    "Skipping %s because team columns are missing from the frame",
+                    spec.name,
                 )
+                continue
+            # Poisson-family models ignore `features` and read team
+            # columns directly; pass None for those.
+            features_for_model = None if spec.needs_team_columns else features
+            self._train_model(
+                spec.name,
+                spec.cls,
+                spec.config,
+                train_df,
+                val_df,
+                features_for_model,
+                target,
+            )
 
-            # 5. Train Dixon-Coles
-            if should_train("dixon_coles"):
-                self._train_model(
-                    "dixon_coles",
-                    DixonColesPredictor,
-                    DIXON_COLES_CONFIG,
-                    train_df,
-                    val_df,
-                    None,
-                    target,
-                )
-        elif should_train("poisson") or should_train("dixon_coles"):
-            logger.warning("Skipping Poisson-family models because team columns are missing")
-
-        # 6. Train Ensemble
-        if (train_everything or "ensemble" in requested) and len(self.trained_models) >= 2:
-            self._train_ensemble(val_df, target)
+        # Ensemble — needs ≥2 base models trained successfully.
+        if (train_everything or train_for_ensemble) and len(self.trained_models) >= 2:
+            self._train_ensemble(
+                val_df,
+                target,
+                ensemble_config=bundle.ensemble_config,
+                ensemble_name=bundle.ensemble_name,
+            )
 
         duration = time.time() - start
-        logger.info(f"All training completed in {duration:.1f}s")
+        logger.info(f"All training for sport={bundle.sport} completed in {duration:.1f}s")
 
         return self.results
 
@@ -201,27 +263,33 @@ class TrainingOrchestrator:
             logger.error(f"Failed to train {name}: {e}", exc_info=True)
             self.results[name] = {"error": str(e)}
 
-    def _train_ensemble(self, val_df: pd.DataFrame, target: str) -> None:
-        logger.info("Training ensemble...")
+    def _train_ensemble(
+        self,
+        val_df: pd.DataFrame,
+        target: str,
+        ensemble_config: ModelConfig = ENSEMBLE_CONFIG,
+        ensemble_name: str = "ensemble",
+    ) -> None:
+        logger.info("Training ensemble (%s)...", ensemble_name)
 
-        ensemble = EnsemblePredictor(ENSEMBLE_CONFIG)
+        ensemble = EnsemblePredictor(ensemble_config)
         for name, model in self.trained_models.items():
             ensemble.add_model(name, model)
 
         try:
             result = ensemble.train(val_df=val_df, target=target)
-            self.trained_models["ensemble"] = ensemble
-            self.results["ensemble"] = result
+            self.trained_models[ensemble_name] = ensemble
+            self.results[ensemble_name] = result
 
             self.registry.register_model(
                 model=ensemble,
-                name="ensemble",
-                version=ENSEMBLE_CONFIG.version,
+                name=ensemble_name,
+                version=ensemble_config.version,
                 metrics=result.get("validation_metrics", {}),
             )
         except Exception as e:
             logger.error(f"Ensemble training failed: {e}", exc_info=True)
-            self.results["ensemble"] = {"error": str(e)}
+            self.results[ensemble_name] = {"error": str(e)}
 
     def get_best_model(self, metric: str = "accuracy") -> Optional[str]:
         """Get the name of the best model by a metric."""
@@ -240,6 +308,13 @@ class TrainingOrchestrator:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--sport",
+        default=os.getenv("TRAIN_SPORT", "soccer"),
+        choices=sorted(SPORT_BUNDLES.keys()),
+        help="Which sport/task bundle to train. Picks the data loader, "
+        "feature selector, model list, and ensemble config.",
+    )
     parser.add_argument("--database-url", default=os.getenv("DATABASE_URL"))
     parser.add_argument("--input-csv")
     parser.add_argument(
@@ -251,13 +326,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-models",
         default=os.getenv("SKIP_MODELS", ""),
         help=(
-            "Comma-separated list of model names to skip when --model-type=all "
-            "(or ensemble). Useful for slow models — e.g. 'poisson,dixon_coles' "
-            "to bypass the per-team MLE fits that can take 30+ minutes."
+            "Comma-separated list of model names (or type aliases) to skip when "
+            "--model-type=all (or ensemble). Useful for slow models — e.g. "
+            "'poisson,dixon_coles' to bypass the per-team MLE fits."
         ),
     )
     parser.add_argument("--output-dir", default="./models")
-    parser.add_argument("--target", default="match_outcome")
+    parser.add_argument(
+        "--target",
+        default=None,
+        help="Target column. Defaults to the bundle's target (match_outcome "
+        "for soccer, nhl_moneyline for nhl_moneyline).",
+    )
     parser.add_argument("--min-samples", type=int, default=100)
     parser.add_argument("--min-feature-count", type=int, default=5)
     parser.add_argument("--train-ratio", type=float, default=0.7)
@@ -278,16 +358,19 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
+    bundle = SPORT_BUNDLES[args.sport]
+    target = args.target or bundle.target_column
+
     try:
-        frame = load_training_frame(database_url=args.database_url, input_csv=args.input_csv)
+        frame = bundle.load_frame(database_url=args.database_url, input_csv=args.input_csv)
         quality = validate_training_frame(
             frame,
-            target=args.target,
+            target=target,
             min_samples=args.min_samples,
             min_feature_count=args.min_feature_count,
         )
         train_df, val_df = _split_temporally(frame, args.train_ratio, args.val_ratio)
-        features = get_feature_columns(frame, target=args.target)
+        features = bundle.feature_columns(frame, target)
         orchestrator = TrainingOrchestrator(
             registry_dir=args.output_dir,
             calibrate=not args.no_calibration,
@@ -297,9 +380,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             train_df=train_df,
             val_df=val_df,
             features=features,
-            target=args.target,
+            target=target,
             model_types=[args.model_type],
             skip=skip_list,
+            bundle=bundle,
         )
     except Exception as exc:
         logger.error("Model training failed: %s", exc, exc_info=True)

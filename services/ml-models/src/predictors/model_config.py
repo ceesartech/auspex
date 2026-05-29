@@ -19,11 +19,18 @@ class ModelType(Enum):
 class PredictionTask(Enum):
     """Prediction tasks."""
 
-    MATCH_OUTCOME = "match_outcome"  # 3-class: home/draw/away
-    OVER_UNDER = "over_under"  # Binary: over/under 2.5
-    BTTS = "btts"  # Binary: both teams score
-    CORRECT_SCORE = "correct_score"  # Multi-class
-    ASIAN_HANDICAP = "asian_handicap"  # Multi-class
+    MATCH_OUTCOME = "match_outcome"  # 3-class: home/draw/away (soccer)
+    OVER_UNDER = "over_under"  # Binary: over/under 2.5 (soccer)
+    BTTS = "btts"  # Binary: both teams score (soccer)
+    CORRECT_SCORE = "correct_score"  # Multi-class (soccer)
+    ASIAN_HANDICAP = "asian_handicap"  # Multi-class (soccer)
+    # NHL tasks. All modeled as 2-class softmax (num_class=2, NOT binary
+    # objective) so they pass 2D probability arrays through the ensemble
+    # — the ensemble's optimizer indexes proba[:, y] which requires 2D.
+    NHL_MONEYLINE = "nhl_moneyline"  # 2-class: home/away game winner incl. OT/SO
+    NHL_REGULATION = "nhl_regulation"  # 3-class: home reg / tie / away reg
+    NHL_PUCK_LINE = "nhl_puck_line"  # 2-class: home covers -1.5 / not
+    NHL_TOTAL = "nhl_total"  # 2-class: over 5.5 / under 5.5
 
 
 @dataclass
@@ -231,4 +238,124 @@ MODEL_CONFIGS = {
     "poisson_goals": POISSON_CONFIG,
     "dixon_coles": DIXON_COLES_CONFIG,
     "ensemble_match_outcome": ENSEMBLE_CONFIG,
+}
+
+
+# ============= NHL MODEL CONFIGURATIONS =============
+#
+# Hyperparameters intentionally close to the soccer baselines so the
+# first NHL training run inherits proven defaults; tune per-task once
+# we have holdout numbers. Two structural differences from soccer:
+#   * num_class=2 (not 3) for moneyline / puck-line / totals.
+#   * objective="multi:softprob" / "multiclass" (NOT "binary") so the
+#     model emits 2D (N, 2) probability arrays — the EnsemblePredictor
+#     optimizer indexes proba[:, y], which requires 2D input.
+
+XGBOOST_NHL_MONEYLINE = ModelConfig(
+    name="xgboost_nhl_moneyline",
+    model_type=ModelType.XGBOOST,
+    prediction_task=PredictionTask.NHL_MONEYLINE,
+    version="1.0.0",
+    hyperparameters={
+        "objective": "multi:softprob",
+        "num_class": 2,
+        "max_depth": 6,  # shallower than soccer — less feature interaction
+        "learning_rate": 0.05,
+        "n_estimators": 400,
+        "subsample": 0.85,
+        "colsample_bytree": 0.85,
+        "min_child_weight": 5,
+        "gamma": 0.1,
+        "reg_alpha": 0.01,
+        "reg_lambda": 1.0,
+        "tree_method": "hist",
+        "random_state": 42,
+    },
+    features=[],
+    target_column="nhl_moneyline",
+    loss_function="multi:softprob",
+    metrics=["accuracy", "log_loss", "brier_score"],
+    training_config={
+        "early_stopping_rounds": 50,
+        "eval_metric": "mlogloss",
+        "verbose": 100,
+    },
+)
+
+LIGHTGBM_NHL_MONEYLINE = ModelConfig(
+    name="lightgbm_nhl_moneyline",
+    model_type=ModelType.LIGHTGBM,
+    prediction_task=PredictionTask.NHL_MONEYLINE,
+    version="1.0.0",
+    hyperparameters={
+        "objective": "multiclass",
+        "num_class": 2,
+        "boosting_type": "gbdt",
+        "num_leaves": 48,  # smaller than soccer's 64
+        "learning_rate": 0.05,
+        "n_estimators": 400,
+        "subsample": 0.85,
+        "colsample_bytree": 0.85,
+        "min_child_samples": 25,
+        "reg_alpha": 0.01,
+        "reg_lambda": 1.0,
+        "random_state": 42,
+    },
+    features=[],
+    target_column="nhl_moneyline",
+    loss_function="multiclass",
+    metrics=["accuracy", "log_loss", "brier_score"],
+    training_config={"early_stopping_rounds": 50, "verbose": 100},
+)
+
+NEURAL_NETWORK_NHL_MONEYLINE = ModelConfig(
+    name="neural_network_nhl_moneyline",
+    model_type=ModelType.NEURAL_NETWORK,
+    prediction_task=PredictionTask.NHL_MONEYLINE,
+    version="1.0.0",
+    hyperparameters={
+        "hidden_layers": [128, 64, 32],  # smaller than soccer — fewer features
+        "dropout_rate": 0.3,
+        "learning_rate": 0.001,
+        "batch_size": 256,
+        "epochs": 100,
+        "optimizer": "adam",
+        "activation": "relu",
+        "output_activation": "softmax",
+        "batch_norm": True,
+    },
+    features=[],
+    target_column="nhl_moneyline",
+    loss_function="categorical_crossentropy",
+    metrics=["accuracy", "log_loss"],
+    training_config={
+        "early_stopping_patience": 15,
+        "reduce_lr_patience": 5,
+        "verbose": 1,
+    },
+)
+
+ENSEMBLE_NHL_MONEYLINE = ModelConfig(
+    name="ensemble_nhl_moneyline",
+    model_type=ModelType.ENSEMBLE,
+    prediction_task=PredictionTask.NHL_MONEYLINE,
+    version="1.0.0",
+    hyperparameters={
+        "combination_method": "weighted_average",
+        "optimize_weights": True,
+        "weight_optimization_metric": "log_loss",
+        "min_weight": 0.05,
+    },
+    features=[],
+    target_column="nhl_moneyline",
+    loss_function="ensemble",
+    metrics=["accuracy", "log_loss", "brier_score", "roi"],
+    training_config={},
+)
+
+NHL_MONEYLINE_CONFIGS = {
+    "xgboost_nhl_ml": XGBOOST_NHL_MONEYLINE,
+    "lightgbm_nhl_ml": LIGHTGBM_NHL_MONEYLINE,
+    "neural_network_nhl_ml": NEURAL_NETWORK_NHL_MONEYLINE,
+    "ensemble_nhl_ml": ENSEMBLE_NHL_MONEYLINE,
 }
