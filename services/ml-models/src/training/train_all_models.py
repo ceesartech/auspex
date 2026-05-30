@@ -20,17 +20,25 @@ from predictors.model_config import (
     DIXON_COLES_CONFIG,
     ENSEMBLE_CONFIG,
     ENSEMBLE_NHL_MONEYLINE,
+    ENSEMBLE_NHL_PUCK_LINE,
     ENSEMBLE_NHL_REGULATION,
+    ENSEMBLE_NHL_TOTAL,
     LIGHTGBM_MATCH_OUTCOME,
     LIGHTGBM_NHL_MONEYLINE,
+    LIGHTGBM_NHL_PUCK_LINE,
     LIGHTGBM_NHL_REGULATION,
+    LIGHTGBM_NHL_TOTAL,
     NEURAL_NETWORK_CONFIG,
     NEURAL_NETWORK_NHL_MONEYLINE,
+    NEURAL_NETWORK_NHL_PUCK_LINE,
     NEURAL_NETWORK_NHL_REGULATION,
+    NEURAL_NETWORK_NHL_TOTAL,
     POISSON_CONFIG,
     XGBOOST_MATCH_OUTCOME,
     XGBOOST_NHL_MONEYLINE,
+    XGBOOST_NHL_PUCK_LINE,
     XGBOOST_NHL_REGULATION,
+    XGBOOST_NHL_TOTAL,
     ModelConfig,
 )
 from predictors.model_registry import ModelRegistry
@@ -40,13 +48,19 @@ from predictors.xgboost_model import XGBoostMatchPredictor
 from training.calibration import ProbabilityCalibrator
 from utils.training_data import (
     NHL_MONEYLINE_TARGET,
+    NHL_PUCK_LINE_TARGET,
     NHL_REGULATION_TARGET,
+    NHL_TOTAL_TARGET,
     TARGET_COLUMN,
     get_feature_columns,
     get_nhl_feature_columns,
+    get_nhl_puck_line_feature_columns,
     get_nhl_regulation_feature_columns,
+    get_nhl_total_feature_columns,
     load_nhl_moneyline_frame,
+    load_nhl_puck_line_frame,
     load_nhl_regulation_frame,
+    load_nhl_total_frame,
     load_training_frame,
     validate_training_frame,
 )
@@ -135,10 +149,42 @@ NHL_REGULATION_BUNDLE = SportBundle(
 )
 
 
+NHL_PUCK_LINE_BUNDLE = SportBundle(
+    sport="nhl_puck_line",
+    target_column=NHL_PUCK_LINE_TARGET,
+    load_frame=load_nhl_puck_line_frame,
+    feature_columns=get_nhl_puck_line_feature_columns,
+    base_models=[
+        ModelSpec("xgboost_nhl_pl", XGBoostMatchPredictor, XGBOOST_NHL_PUCK_LINE),
+        ModelSpec("lightgbm_nhl_pl", LightGBMMatchPredictor, LIGHTGBM_NHL_PUCK_LINE),
+        ModelSpec("neural_network_nhl_pl", NeuralNetworkMatchPredictor, NEURAL_NETWORK_NHL_PUCK_LINE),
+    ],
+    ensemble_config=ENSEMBLE_NHL_PUCK_LINE,
+    ensemble_name="ensemble_nhl_pl",
+)
+
+
+NHL_TOTAL_BUNDLE = SportBundle(
+    sport="nhl_total",
+    target_column=NHL_TOTAL_TARGET,
+    load_frame=load_nhl_total_frame,
+    feature_columns=get_nhl_total_feature_columns,
+    base_models=[
+        ModelSpec("xgboost_nhl_tot", XGBoostMatchPredictor, XGBOOST_NHL_TOTAL),
+        ModelSpec("lightgbm_nhl_tot", LightGBMMatchPredictor, LIGHTGBM_NHL_TOTAL),
+        ModelSpec("neural_network_nhl_tot", NeuralNetworkMatchPredictor, NEURAL_NETWORK_NHL_TOTAL),
+    ],
+    ensemble_config=ENSEMBLE_NHL_TOTAL,
+    ensemble_name="ensemble_nhl_tot",
+)
+
+
 SPORT_BUNDLES: Dict[str, SportBundle] = {
     "soccer": SOCCER_BUNDLE,
     "nhl_moneyline": NHL_MONEYLINE_BUNDLE,
     "nhl_regulation": NHL_REGULATION_BUNDLE,
+    "nhl_puck_line": NHL_PUCK_LINE_BUNDLE,
+    "nhl_total": NHL_TOTAL_BUNDLE,
 }
 
 

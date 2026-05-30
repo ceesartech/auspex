@@ -30,21 +30,33 @@ if str(SRC) not in sys.path:
 
 from predictors.model_config import (  # noqa: E402
     ENSEMBLE_NHL_MONEYLINE,
+    ENSEMBLE_NHL_PUCK_LINE,
     ENSEMBLE_NHL_REGULATION,
+    ENSEMBLE_NHL_TOTAL,
     LIGHTGBM_NHL_MONEYLINE,
+    LIGHTGBM_NHL_PUCK_LINE,
     LIGHTGBM_NHL_REGULATION,
+    LIGHTGBM_NHL_TOTAL,
     NEURAL_NETWORK_NHL_MONEYLINE,
+    NEURAL_NETWORK_NHL_PUCK_LINE,
     NEURAL_NETWORK_NHL_REGULATION,
+    NEURAL_NETWORK_NHL_TOTAL,
     NHL_MONEYLINE_CONFIGS,
+    NHL_PUCK_LINE_CONFIGS,
     NHL_REGULATION_CONFIGS,
+    NHL_TOTAL_CONFIGS,
     XGBOOST_NHL_MONEYLINE,
+    XGBOOST_NHL_PUCK_LINE,
     XGBOOST_NHL_REGULATION,
+    XGBOOST_NHL_TOTAL,
     ModelType,
     PredictionTask,
 )
 from training.train_all_models import (  # noqa: E402
     NHL_MONEYLINE_BUNDLE,
+    NHL_PUCK_LINE_BUNDLE,
     NHL_REGULATION_BUNDLE,
+    NHL_TOTAL_BUNDLE,
     SOCCER_BUNDLE,
     SPORT_BUNDLES,
 )
@@ -52,12 +64,18 @@ from utils.training_data import (  # noqa: E402
     NHL_MONEYLINE_TARGET,
     NHL_MONEYLINE_TRAINING_QUERY,
     NHL_NON_FEATURE_COLUMNS,
+    NHL_PUCK_LINE_TARGET,
+    NHL_PUCK_LINE_TRAINING_QUERY,
     NHL_REGULATION_TARGET,
     NHL_REGULATION_TRAINING_QUERY,
+    NHL_TOTAL_TARGET,
+    NHL_TOTAL_TRAINING_QUERY,
     get_nhl_feature_columns,
     get_nhl_regulation_feature_columns,
     prepare_nhl_moneyline_frame,
+    prepare_nhl_puck_line_frame,
     prepare_nhl_regulation_frame,
+    prepare_nhl_total_frame,
 )
 
 # ── Query shape ──────────────────────────────────────────────────────
@@ -236,7 +254,13 @@ class TestSportBundles:
         # Lock the exact set so a sport added but not threaded through
         # the orchestrator fails this test rather than ghost-loading at
         # train time.
-        assert set(SPORT_BUNDLES.keys()) == {"soccer", "nhl_moneyline", "nhl_regulation"}
+        assert set(SPORT_BUNDLES.keys()) == {
+            "soccer",
+            "nhl_moneyline",
+            "nhl_regulation",
+            "nhl_puck_line",
+            "nhl_total",
+        }
 
     def test_nhl_bundle_uses_nhl_loader_and_target(self):
         assert NHL_MONEYLINE_BUNDLE.target_column == NHL_MONEYLINE_TARGET
@@ -432,3 +456,177 @@ class TestNhlRegulationBundle:
     def test_ensemble_name_and_config_match(self):
         assert NHL_REGULATION_BUNDLE.ensemble_name == "ensemble_nhl_reg"
         assert NHL_REGULATION_BUNDLE.ensemble_config is ENSEMBLE_NHL_REGULATION
+
+
+# ── Puck-line (binary, home covers -1.5) ─────────────────────────────
+
+
+class TestNhlPuckLineQuery:
+    def test_scopes_to_nhl_sport(self):
+        assert "l.sport = 'nhl'" in NHL_PUCK_LINE_TRAINING_QUERY
+
+    def test_pins_features_cache_to_nhl_baseline(self):
+        assert "feature_set = 'nhl_baseline'" in NHL_PUCK_LINE_TRAINING_QUERY
+
+    def test_target_uses_score_margin_threshold(self):
+        # Bet settles on FINAL score (incl. OT/SO), so the target uses
+        # m.home_score - m.away_score, not regulation-only scores. The
+        # threshold is 2 because puck-line is -1.5 — home must win by
+        # 2+ to cover.
+        assert "(m.home_score - m.away_score) >= 2" in NHL_PUCK_LINE_TRAINING_QUERY
+
+    def test_does_not_drop_close_games(self):
+        # Unlike moneyline (which dropped ties for being data errors),
+        # puck-line keeps every finished NHL game — 1-goal games are
+        # the modal "does not cover" outcome and we need them for the
+        # negative class.
+        assert "m.home_score <> m.away_score" not in NHL_PUCK_LINE_TRAINING_QUERY
+
+
+class TestNhlPuckLineFramePrep:
+    def test_empty_in_empty_out(self):
+        assert prepare_nhl_puck_line_frame(pd.DataFrame()).empty
+
+    def test_flattens_features_json(self):
+        raw = pd.DataFrame(
+            {
+                "match_id": ["m1"],
+                "match_date": ["2025-01-15T00:00:00Z"],
+                "nhl_puck_line": [0],
+                "features": [json.dumps({"odds_home_pl15": 2.30})],
+            }
+        )
+        out = prepare_nhl_puck_line_frame(raw)
+        assert "feature__odds_home_pl15" in out.columns
+
+
+class TestNhlPuckLineConfigs:
+    def test_xgboost_is_2_class_softmax(self):
+        assert XGBOOST_NHL_PUCK_LINE.hyperparameters["objective"] == "multi:softprob"
+        assert XGBOOST_NHL_PUCK_LINE.hyperparameters["num_class"] == 2
+
+    def test_lightgbm_is_2_class_multiclass(self):
+        assert LIGHTGBM_NHL_PUCK_LINE.hyperparameters["objective"] == "multiclass"
+        assert LIGHTGBM_NHL_PUCK_LINE.hyperparameters["num_class"] == 2
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            XGBOOST_NHL_PUCK_LINE,
+            LIGHTGBM_NHL_PUCK_LINE,
+            NEURAL_NETWORK_NHL_PUCK_LINE,
+            ENSEMBLE_NHL_PUCK_LINE,
+        ],
+    )
+    def test_all_configs_target_nhl_puck_line(self, config):
+        assert config.prediction_task == PredictionTask.NHL_PUCK_LINE
+        assert config.target_column == NHL_PUCK_LINE_TARGET
+
+    def test_configs_dict_complete(self):
+        assert set(NHL_PUCK_LINE_CONFIGS.keys()) == {
+            "xgboost_nhl_pl",
+            "lightgbm_nhl_pl",
+            "neural_network_nhl_pl",
+            "ensemble_nhl_pl",
+        }
+
+
+class TestNhlPuckLineBundle:
+    def test_uses_puck_line_loader_and_target(self):
+        assert NHL_PUCK_LINE_BUNDLE.target_column == NHL_PUCK_LINE_TARGET
+        assert NHL_PUCK_LINE_BUNDLE.load_frame.__name__ == "load_nhl_puck_line_frame"
+        assert NHL_PUCK_LINE_BUNDLE.feature_columns.__name__ == "get_nhl_puck_line_feature_columns"
+
+    def test_three_base_models_no_poisson(self):
+        types = {m.config.model_type for m in NHL_PUCK_LINE_BUNDLE.base_models}
+        assert ModelType.POISSON not in types
+        assert ModelType.DIXON_COLES not in types
+        names = [m.name for m in NHL_PUCK_LINE_BUNDLE.base_models]
+        assert names == ["xgboost_nhl_pl", "lightgbm_nhl_pl", "neural_network_nhl_pl"]
+
+    def test_ensemble_name_and_config(self):
+        assert NHL_PUCK_LINE_BUNDLE.ensemble_name == "ensemble_nhl_pl"
+        assert NHL_PUCK_LINE_BUNDLE.ensemble_config is ENSEMBLE_NHL_PUCK_LINE
+
+
+# ── Total (binary, over 5.5) ─────────────────────────────────────────
+
+
+class TestNhlTotalQuery:
+    def test_scopes_to_nhl_sport(self):
+        assert "l.sport = 'nhl'" in NHL_TOTAL_TRAINING_QUERY
+
+    def test_pins_features_cache_to_nhl_baseline(self):
+        assert "feature_set = 'nhl_baseline'" in NHL_TOTAL_TRAINING_QUERY
+
+    def test_target_uses_score_sum_threshold(self):
+        # NHL convention: SO winner is credited with +1 goal, so the
+        # bet settles on sum of final home_score + away_score. Line is
+        # 5.5, so threshold is 6 for "over".
+        assert "(m.home_score + m.away_score) >= 6" in NHL_TOTAL_TRAINING_QUERY
+
+
+class TestNhlTotalFramePrep:
+    def test_empty_in_empty_out(self):
+        assert prepare_nhl_total_frame(pd.DataFrame()).empty
+
+    def test_flattens_features_json(self):
+        raw = pd.DataFrame(
+            {
+                "match_id": ["m1"],
+                "match_date": ["2025-01-15T00:00:00Z"],
+                "nhl_total": [0],
+                "features": [json.dumps({"odds_over55": 1.95})],
+            }
+        )
+        out = prepare_nhl_total_frame(raw)
+        assert "feature__odds_over55" in out.columns
+
+
+class TestNhlTotalConfigs:
+    def test_xgboost_is_2_class_softmax(self):
+        assert XGBOOST_NHL_TOTAL.hyperparameters["objective"] == "multi:softprob"
+        assert XGBOOST_NHL_TOTAL.hyperparameters["num_class"] == 2
+
+    def test_lightgbm_is_2_class_multiclass(self):
+        assert LIGHTGBM_NHL_TOTAL.hyperparameters["objective"] == "multiclass"
+        assert LIGHTGBM_NHL_TOTAL.hyperparameters["num_class"] == 2
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            XGBOOST_NHL_TOTAL,
+            LIGHTGBM_NHL_TOTAL,
+            NEURAL_NETWORK_NHL_TOTAL,
+            ENSEMBLE_NHL_TOTAL,
+        ],
+    )
+    def test_all_configs_target_nhl_total(self, config):
+        assert config.prediction_task == PredictionTask.NHL_TOTAL
+        assert config.target_column == NHL_TOTAL_TARGET
+
+    def test_configs_dict_complete(self):
+        assert set(NHL_TOTAL_CONFIGS.keys()) == {
+            "xgboost_nhl_tot",
+            "lightgbm_nhl_tot",
+            "neural_network_nhl_tot",
+            "ensemble_nhl_tot",
+        }
+
+
+class TestNhlTotalBundle:
+    def test_uses_total_loader_and_target(self):
+        assert NHL_TOTAL_BUNDLE.target_column == NHL_TOTAL_TARGET
+        assert NHL_TOTAL_BUNDLE.load_frame.__name__ == "load_nhl_total_frame"
+        assert NHL_TOTAL_BUNDLE.feature_columns.__name__ == "get_nhl_total_feature_columns"
+
+    def test_three_base_models_no_poisson(self):
+        types = {m.config.model_type for m in NHL_TOTAL_BUNDLE.base_models}
+        assert ModelType.POISSON not in types
+        assert ModelType.DIXON_COLES not in types
+        names = [m.name for m in NHL_TOTAL_BUNDLE.base_models]
+        assert names == ["xgboost_nhl_tot", "lightgbm_nhl_tot", "neural_network_nhl_tot"]
+
+    def test_ensemble_name_and_config(self):
+        assert NHL_TOTAL_BUNDLE.ensemble_name == "ensemble_nhl_tot"
+        assert NHL_TOTAL_BUNDLE.ensemble_config is ENSEMBLE_NHL_TOTAL

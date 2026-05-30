@@ -645,6 +645,250 @@ def get_nhl_regulation_feature_columns(frame: pd.DataFrame, target: str = NHL_RE
     return [column for column in numeric if column not in excluded]
 
 
+# ============= NHL PUCK LINE (home covers -1.5) =============
+
+# Puck-line target. 0 = home covers -1.5 (won by 2+ goals INCLUDING OT/SO
+# goals), 1 = home does not cover (won by 1 OR lost).
+NHL_PUCK_LINE_TARGET = "nhl_puck_line"
+
+# Identical to the moneyline query except for the CASE target —
+# everything else (sport scoping, features_cache pin, market joins,
+# defensive filters) carries over verbatim because the feature inputs
+# don't change between NHL classification tasks. The target swap is
+# what makes each task its own model.
+NHL_PUCK_LINE_TRAINING_QUERY = """
+    SELECT
+        m.id::text AS match_id,
+        m.match_date,
+        m.season,
+        m.league_id::text AS league_id,
+        m.home_team_id::text AS home_team_id,
+        m.away_team_id::text AS away_team_id,
+        ht.name AS home_team,
+        at.name AS away_team,
+        m.home_score,
+        m.away_score,
+        CASE
+            WHEN (m.home_score - m.away_score) >= 2 THEN 0
+            ELSE 1
+        END AS nhl_puck_line,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'moneyline'
+              AND o.selection = 'home' AND NOT o.is_live) AS odds_home_ml,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'moneyline'
+              AND o.selection = 'away' AND NOT o.is_live) AS odds_away_ml,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'spread'
+              AND o.selection = 'home' AND o.line = -1.5 AND NOT o.is_live) AS odds_home_pl15,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'spread'
+              AND o.selection = 'away' AND o.line = 1.5 AND NOT o.is_live) AS odds_away_pl15,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'total'
+              AND o.selection = 'over'  AND o.line = 5.5 AND NOT o.is_live) AS odds_over55,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'total'
+              AND o.selection = 'under' AND o.line = 5.5 AND NOT o.is_live) AS odds_under55,
+        fc.features
+    FROM matches m
+    JOIN leagues l ON l.id = m.league_id
+    JOIN teams ht ON m.home_team_id = ht.id
+    JOIN teams at ON m.away_team_id = at.id
+    LEFT JOIN LATERAL (
+        SELECT features
+        FROM features_cache
+        WHERE match_id = m.id AND feature_set = 'nhl_baseline'
+        ORDER BY computed_at DESC
+        LIMIT 1
+    ) fc ON true
+    WHERE l.sport = 'nhl'
+      AND m.status = 'finished'
+      AND m.home_score IS NOT NULL
+      AND m.away_score IS NOT NULL
+    ORDER BY m.match_date ASC
+"""
+
+NHL_PUCK_LINE_NON_FEATURE_COLUMNS = {
+    "match_id",
+    "match_date",
+    "season",
+    "league_id",
+    "home_team_id",
+    "away_team_id",
+    "home_team",
+    "away_team",
+    "home_score",
+    "away_score",
+    NHL_PUCK_LINE_TARGET,
+    "features",
+}
+
+
+# ============= NHL TOTAL (over 5.5) =============
+
+# Total-goals target. 0 = over 5.5 (sum of final scores >= 6 INCLUDING
+# OT/SO goals — the SO winner is credited with +1 toward the total per
+# NHL convention), 1 = under 5.5 (sum <= 5).
+NHL_TOTAL_TARGET = "nhl_total"
+
+NHL_TOTAL_TRAINING_QUERY = """
+    SELECT
+        m.id::text AS match_id,
+        m.match_date,
+        m.season,
+        m.league_id::text AS league_id,
+        m.home_team_id::text AS home_team_id,
+        m.away_team_id::text AS away_team_id,
+        ht.name AS home_team,
+        at.name AS away_team,
+        m.home_score,
+        m.away_score,
+        CASE
+            WHEN (m.home_score + m.away_score) >= 6 THEN 0
+            ELSE 1
+        END AS nhl_total,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'moneyline'
+              AND o.selection = 'home' AND NOT o.is_live) AS odds_home_ml,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'moneyline'
+              AND o.selection = 'away' AND NOT o.is_live) AS odds_away_ml,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'spread'
+              AND o.selection = 'home' AND o.line = -1.5 AND NOT o.is_live) AS odds_home_pl15,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'spread'
+              AND o.selection = 'away' AND o.line = 1.5 AND NOT o.is_live) AS odds_away_pl15,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'total'
+              AND o.selection = 'over'  AND o.line = 5.5 AND NOT o.is_live) AS odds_over55,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'total'
+              AND o.selection = 'under' AND o.line = 5.5 AND NOT o.is_live) AS odds_under55,
+        fc.features
+    FROM matches m
+    JOIN leagues l ON l.id = m.league_id
+    JOIN teams ht ON m.home_team_id = ht.id
+    JOIN teams at ON m.away_team_id = at.id
+    LEFT JOIN LATERAL (
+        SELECT features
+        FROM features_cache
+        WHERE match_id = m.id AND feature_set = 'nhl_baseline'
+        ORDER BY computed_at DESC
+        LIMIT 1
+    ) fc ON true
+    WHERE l.sport = 'nhl'
+      AND m.status = 'finished'
+      AND m.home_score IS NOT NULL
+      AND m.away_score IS NOT NULL
+    ORDER BY m.match_date ASC
+"""
+
+NHL_TOTAL_NON_FEATURE_COLUMNS = {
+    "match_id",
+    "match_date",
+    "season",
+    "league_id",
+    "home_team_id",
+    "away_team_id",
+    "home_team",
+    "away_team",
+    "home_score",
+    "away_score",
+    NHL_TOTAL_TARGET,
+    "features",
+}
+
+
+def _flatten_nhl_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    """Shared frame preparation for NHL puck-line and total tasks:
+    flatten features_cache JSON, parse match_date. Targets are computed
+    in the SQL query — no in-pandas fallback needed for either task
+    because both are pure functions of home_score/away_score that the
+    query CASE handles."""
+    if raw.empty:
+        return raw.copy()
+
+    frame = raw.copy()
+
+    if "features" in frame.columns:
+        feature_rows = [_flatten_features(value) for value in frame["features"]]
+        flattened = pd.DataFrame(feature_rows, index=frame.index)
+        frame = pd.concat([frame.drop(columns=["features"]), flattened], axis=1)
+
+    if "match_date" in frame.columns:
+        frame["match_date"] = pd.to_datetime(frame["match_date"], errors="coerce")
+
+    return frame
+
+
+def load_nhl_puck_line_frame(
+    *,
+    database_url: Optional[str] = None,
+    input_csv: Optional[str] = None,
+) -> pd.DataFrame:
+    """Load NHL puck-line (home covers -1.5) training data."""
+    if input_csv:
+        raw = pd.read_csv(input_csv)
+    elif database_url:
+        from sqlalchemy import create_engine
+
+        engine = create_engine(database_url)
+        try:
+            raw = pd.read_sql(NHL_PUCK_LINE_TRAINING_QUERY, engine)
+        finally:
+            engine.dispose()
+    else:
+        raise ValueError("Provide input_csv or database_url")
+
+    return prepare_nhl_puck_line_frame(raw)
+
+
+def prepare_nhl_puck_line_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    return _flatten_nhl_frame(raw)
+
+
+def get_nhl_puck_line_feature_columns(frame: pd.DataFrame, target: str = NHL_PUCK_LINE_TARGET) -> List[str]:
+    excluded = set(NHL_PUCK_LINE_NON_FEATURE_COLUMNS)
+    excluded.add(target)
+    numeric = frame.select_dtypes(include=[np.number, bool]).columns.tolist()
+    return [column for column in numeric if column not in excluded]
+
+
+def load_nhl_total_frame(
+    *,
+    database_url: Optional[str] = None,
+    input_csv: Optional[str] = None,
+) -> pd.DataFrame:
+    """Load NHL total-goals (over 5.5) training data."""
+    if input_csv:
+        raw = pd.read_csv(input_csv)
+    elif database_url:
+        from sqlalchemy import create_engine
+
+        engine = create_engine(database_url)
+        try:
+            raw = pd.read_sql(NHL_TOTAL_TRAINING_QUERY, engine)
+        finally:
+            engine.dispose()
+    else:
+        raise ValueError("Provide input_csv or database_url")
+
+    return prepare_nhl_total_frame(raw)
+
+
+def prepare_nhl_total_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    return _flatten_nhl_frame(raw)
+
+
+def get_nhl_total_feature_columns(frame: pd.DataFrame, target: str = NHL_TOTAL_TARGET) -> List[str]:
+    excluded = set(NHL_TOTAL_NON_FEATURE_COLUMNS)
+    excluded.add(target)
+    numeric = frame.select_dtypes(include=[np.number, bool]).columns.tolist()
+    return [column for column in numeric if column not in excluded]
+
+
 def _flatten_features(value: Any, prefix: str = "feature") -> Dict[str, float]:
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return {}

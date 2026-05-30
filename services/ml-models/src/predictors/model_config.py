@@ -485,3 +485,230 @@ NHL_REGULATION_CONFIGS = {
     "neural_network_nhl_reg": NEURAL_NETWORK_NHL_REGULATION,
     "ensemble_nhl_reg": ENSEMBLE_NHL_REGULATION,
 }
+
+
+# ── NHL PUCK LINE (home covers -1.5) ─────────────────────────────────
+#
+# 2-class binary classifier framed as 2-class softmax (same reasoning
+# as NHL_MONEYLINE — ensemble needs 2D proba). Target derived from
+# final score margin INCLUDING OT/SO goals (puck-line bets settle on
+# the full game's final score, not regulation alone):
+#   * 0 = home covers -1.5 (home_score - away_score >= 2)
+#   * 1 = home does NOT cover (home wins by 1 OR any away win)
+# Class distribution is roughly 50/50 because NHL margins cluster
+# tightly around 1-2 goals. Hyperparameters cloned from moneyline.
+
+XGBOOST_NHL_PUCK_LINE = ModelConfig(
+    name="xgboost_nhl_puck_line",
+    model_type=ModelType.XGBOOST,
+    prediction_task=PredictionTask.NHL_PUCK_LINE,
+    version="1.0.0",
+    hyperparameters={
+        "objective": "multi:softprob",
+        "num_class": 2,
+        "max_depth": 6,
+        "learning_rate": 0.05,
+        "n_estimators": 400,
+        "subsample": 0.85,
+        "colsample_bytree": 0.85,
+        "min_child_weight": 5,
+        "gamma": 0.1,
+        "reg_alpha": 0.01,
+        "reg_lambda": 1.0,
+        "tree_method": "hist",
+        "random_state": 42,
+    },
+    features=[],
+    target_column="nhl_puck_line",
+    loss_function="multi:softprob",
+    metrics=["accuracy", "log_loss", "brier_score"],
+    training_config={"early_stopping_rounds": 50, "eval_metric": "mlogloss", "verbose": 100},
+)
+
+LIGHTGBM_NHL_PUCK_LINE = ModelConfig(
+    name="lightgbm_nhl_puck_line",
+    model_type=ModelType.LIGHTGBM,
+    prediction_task=PredictionTask.NHL_PUCK_LINE,
+    version="1.0.0",
+    hyperparameters={
+        "objective": "multiclass",
+        "num_class": 2,
+        "boosting_type": "gbdt",
+        "num_leaves": 48,
+        "learning_rate": 0.05,
+        "n_estimators": 400,
+        "subsample": 0.85,
+        "colsample_bytree": 0.85,
+        "min_child_samples": 25,
+        "reg_alpha": 0.01,
+        "reg_lambda": 1.0,
+        "random_state": 42,
+    },
+    features=[],
+    target_column="nhl_puck_line",
+    loss_function="multiclass",
+    metrics=["accuracy", "log_loss", "brier_score"],
+    training_config={"early_stopping_rounds": 50, "verbose": 100},
+)
+
+NEURAL_NETWORK_NHL_PUCK_LINE = ModelConfig(
+    name="neural_network_nhl_puck_line",
+    model_type=ModelType.NEURAL_NETWORK,
+    prediction_task=PredictionTask.NHL_PUCK_LINE,
+    version="1.0.0",
+    hyperparameters={
+        "hidden_layers": [128, 64, 32],
+        "dropout_rate": 0.3,
+        "learning_rate": 0.001,
+        "batch_size": 256,
+        "epochs": 100,
+        "optimizer": "adam",
+        "activation": "relu",
+        "output_activation": "softmax",
+        "batch_norm": True,
+    },
+    features=[],
+    target_column="nhl_puck_line",
+    loss_function="categorical_crossentropy",
+    metrics=["accuracy", "log_loss"],
+    training_config={"early_stopping_patience": 15, "reduce_lr_patience": 5, "verbose": 1},
+)
+
+ENSEMBLE_NHL_PUCK_LINE = ModelConfig(
+    name="ensemble_nhl_puck_line",
+    model_type=ModelType.ENSEMBLE,
+    prediction_task=PredictionTask.NHL_PUCK_LINE,
+    version="1.0.0",
+    hyperparameters={
+        "combination_method": "weighted_average",
+        "optimize_weights": True,
+        "weight_optimization_metric": "log_loss",
+        "min_weight": 0.05,
+    },
+    features=[],
+    target_column="nhl_puck_line",
+    loss_function="ensemble",
+    metrics=["accuracy", "log_loss", "brier_score", "roi"],
+    training_config={},
+)
+
+NHL_PUCK_LINE_CONFIGS = {
+    "xgboost_nhl_pl": XGBOOST_NHL_PUCK_LINE,
+    "lightgbm_nhl_pl": LIGHTGBM_NHL_PUCK_LINE,
+    "neural_network_nhl_pl": NEURAL_NETWORK_NHL_PUCK_LINE,
+    "ensemble_nhl_pl": ENSEMBLE_NHL_PUCK_LINE,
+}
+
+
+# ── NHL TOTAL (over 5.5) ─────────────────────────────────────────────
+#
+# 2-class binary classifier for the canonical 5.5-goal NHL total. As
+# with puck line, the bet settles on the full game total INCLUDING
+# OT/SO goals (NHL convention: shootout winner is credited with +1
+# goal toward the total). Target:
+#   * 0 = over  5.5  (home_score + away_score >= 6)
+#   * 1 = under 5.5  (home_score + away_score <= 5)
+# League average NHL total is ~6.0, so the line is moderately tilted
+# toward over but the class split is close enough to balanced that we
+# don't need explicit class weighting.
+
+XGBOOST_NHL_TOTAL = ModelConfig(
+    name="xgboost_nhl_total",
+    model_type=ModelType.XGBOOST,
+    prediction_task=PredictionTask.NHL_TOTAL,
+    version="1.0.0",
+    hyperparameters={
+        "objective": "multi:softprob",
+        "num_class": 2,
+        "max_depth": 6,
+        "learning_rate": 0.05,
+        "n_estimators": 400,
+        "subsample": 0.85,
+        "colsample_bytree": 0.85,
+        "min_child_weight": 5,
+        "gamma": 0.1,
+        "reg_alpha": 0.01,
+        "reg_lambda": 1.0,
+        "tree_method": "hist",
+        "random_state": 42,
+    },
+    features=[],
+    target_column="nhl_total",
+    loss_function="multi:softprob",
+    metrics=["accuracy", "log_loss", "brier_score"],
+    training_config={"early_stopping_rounds": 50, "eval_metric": "mlogloss", "verbose": 100},
+)
+
+LIGHTGBM_NHL_TOTAL = ModelConfig(
+    name="lightgbm_nhl_total",
+    model_type=ModelType.LIGHTGBM,
+    prediction_task=PredictionTask.NHL_TOTAL,
+    version="1.0.0",
+    hyperparameters={
+        "objective": "multiclass",
+        "num_class": 2,
+        "boosting_type": "gbdt",
+        "num_leaves": 48,
+        "learning_rate": 0.05,
+        "n_estimators": 400,
+        "subsample": 0.85,
+        "colsample_bytree": 0.85,
+        "min_child_samples": 25,
+        "reg_alpha": 0.01,
+        "reg_lambda": 1.0,
+        "random_state": 42,
+    },
+    features=[],
+    target_column="nhl_total",
+    loss_function="multiclass",
+    metrics=["accuracy", "log_loss", "brier_score"],
+    training_config={"early_stopping_rounds": 50, "verbose": 100},
+)
+
+NEURAL_NETWORK_NHL_TOTAL = ModelConfig(
+    name="neural_network_nhl_total",
+    model_type=ModelType.NEURAL_NETWORK,
+    prediction_task=PredictionTask.NHL_TOTAL,
+    version="1.0.0",
+    hyperparameters={
+        "hidden_layers": [128, 64, 32],
+        "dropout_rate": 0.3,
+        "learning_rate": 0.001,
+        "batch_size": 256,
+        "epochs": 100,
+        "optimizer": "adam",
+        "activation": "relu",
+        "output_activation": "softmax",
+        "batch_norm": True,
+    },
+    features=[],
+    target_column="nhl_total",
+    loss_function="categorical_crossentropy",
+    metrics=["accuracy", "log_loss"],
+    training_config={"early_stopping_patience": 15, "reduce_lr_patience": 5, "verbose": 1},
+)
+
+ENSEMBLE_NHL_TOTAL = ModelConfig(
+    name="ensemble_nhl_total",
+    model_type=ModelType.ENSEMBLE,
+    prediction_task=PredictionTask.NHL_TOTAL,
+    version="1.0.0",
+    hyperparameters={
+        "combination_method": "weighted_average",
+        "optimize_weights": True,
+        "weight_optimization_metric": "log_loss",
+        "min_weight": 0.05,
+    },
+    features=[],
+    target_column="nhl_total",
+    loss_function="ensemble",
+    metrics=["accuracy", "log_loss", "brier_score", "roi"],
+    training_config={},
+)
+
+NHL_TOTAL_CONFIGS = {
+    "xgboost_nhl_tot": XGBOOST_NHL_TOTAL,
+    "lightgbm_nhl_tot": LIGHTGBM_NHL_TOTAL,
+    "neural_network_nhl_tot": NEURAL_NETWORK_NHL_TOTAL,
+    "ensemble_nhl_tot": ENSEMBLE_NHL_TOTAL,
+}
