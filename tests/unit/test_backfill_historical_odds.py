@@ -31,19 +31,36 @@ fetch_live_odds = backfill.fetch_live_odds  # re-exported via the dynamic import
 
 
 class TestSnapshotTimestamp:
-    def test_default_hour_is_22_utc(self):
-        # 22:00 UTC = 5pm ET = before the 7pm ET evening NHL slate.
-        # Locked in here so a future drift to a worse time triggers a
-        # test failure rather than silently shifting which lines we pull.
-        assert backfill.DEFAULT_SNAPSHOT_HOUR_UTC == 22
+    def test_defaults_capture_nhl_closing_lines(self):
+        # 03:00 UTC of game-date+1 = 11pm ET = AFTER most evening NHL
+        # games have started, so the-odds-api returns closing lines.
+        # Locked in here so a future drift to a worse time (the old
+        # 22:00 UTC same-day = 5pm ET pre-game lines bug) triggers a
+        # test failure rather than silently degrading model signal.
+        assert backfill.DEFAULT_SNAPSHOT_HOUR_UTC == 3
+        assert backfill.DEFAULT_SNAPSHOT_DAY_OFFSET == 1
 
-    def test_iso_format(self):
+    def test_default_iso_format_uses_next_day(self):
+        # Game-date April 1 → snapshot at 03:00 UTC on April 2.
         ts = backfill.snapshot_timestamp(date(2024, 4, 1))
+        assert ts == "2024-04-02T03:00:00Z"
+
+    def test_custom_hour_only(self):
+        ts = backfill.snapshot_timestamp(date(2024, 4, 1), hour_utc=19)
+        # Still uses the default offset (+1 day).
+        assert ts == "2024-04-02T19:00:00Z"
+
+    def test_custom_offset_zero(self):
+        # day_offset=0 means same-day snapshot (legacy behavior). Useful
+        # for sports whose evening slate finishes before UTC rollover.
+        ts = backfill.snapshot_timestamp(date(2024, 4, 1), hour_utc=22, day_offset=0)
         assert ts == "2024-04-01T22:00:00Z"
 
-    def test_custom_hour(self):
-        ts = backfill.snapshot_timestamp(date(2024, 4, 1), hour_utc=19)
-        assert ts == "2024-04-01T19:00:00Z"
+    def test_custom_offset_crosses_month_boundary(self):
+        # Game-date April 30 + 1 day offset → May 1. Date arithmetic
+        # must roll cleanly across month boundaries.
+        ts = backfill.snapshot_timestamp(date(2024, 4, 30))
+        assert ts == "2024-05-01T03:00:00Z"
 
 
 # ── Cost math ────────────────────────────────────────────────────────

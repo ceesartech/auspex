@@ -60,11 +60,21 @@ logger = logging.getLogger("backfill_historical_odds")
 BASE_URL = "https://api.the-odds-api.com/v4"
 # the-odds-api documents a 10x quota multiplier for the historical API.
 HISTORICAL_COST_MULTIPLIER = 10
-# Snapshot taken at this UTC hour on each game-day. 22:00 UTC = 5pm ET
-# = before all evening NHL games (the modal start slot is 7pm ET).
-# Afternoon games (1-3pm ET, mostly holidays) may have closed by then
-# and would inherit whatever line was live at that snapshot.
-DEFAULT_SNAPSHOT_HOUR_UTC = 22
+# Snapshot is taken at this UTC hour on (game-date + day_offset). For NHL
+# the modal evening slate runs 23:00 UTC - 02:00 UTC (7pm-10pm ET, plus
+# West Coast late games). The default 03:00 UTC of the NEXT day = 11pm
+# ET puts the snapshot AFTER most games have started, so the-odds-api
+# returns the line that was live right at puck drop for Eastern games
+# (true closing) and the line ~30min before tip for the few Western
+# games still pending. Override per-sport with --snapshot-hour /
+# --snapshot-day-offset if a sport has a different slate cadence.
+#
+# The "ideal" alternative is per-game snapshots (one call per match at
+# commence_time - 5min). That's ~30 credits × games-in-window = ~114k
+# credits for 3 seasons of NHL — over the 100k tier — so we defer it
+# to a future enhancement and use the best single-snapshot timing today.
+DEFAULT_SNAPSHOT_HOUR_UTC = 3
+DEFAULT_SNAPSHOT_DAY_OFFSET = 1
 
 
 # Reuse fetch_live_odds.py helpers without a hard package import.
@@ -141,12 +151,22 @@ def game_dates_in_range(database_url: str, sport_key: str, start: date, end: dat
             return [row["d"] for row in cur.fetchall()]
 
 
-def snapshot_timestamp(d: date, hour_utc: int = DEFAULT_SNAPSHOT_HOUR_UTC) -> str:
+def snapshot_timestamp(
+    d: date,
+    hour_utc: int = DEFAULT_SNAPSHOT_HOUR_UTC,
+    day_offset: int = DEFAULT_SNAPSHOT_DAY_OFFSET,
+) -> str:
     """ISO-8601 timestamp for the snapshot to fetch for game-day `d`.
     The-odds-api returns the most recent snapshot at-or-before this
-    timestamp, so picking 22:00 UTC gets us close-to-closing lines for
-    the evening NHL slate."""
-    return datetime(d.year, d.month, d.day, hour_utc, 0, 0, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    timestamp. With NHL defaults (hour=3, offset=+1) we ask for
+    11pm-ET-of-game-day, which sits AFTER most evening games started
+    and returns their closing lines."""
+    snapshot_date = d + timedelta(days=day_offset)
+    return (
+        datetime(snapshot_date.year, snapshot_date.month, snapshot_date.day, hour_utc, 0, 0, tzinfo=timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def process_snapshot_response(cur, sport: str, response: dict) -> tuple[int, int]:
@@ -181,6 +201,8 @@ def run(
     api_key: str,
     regions: str,
     dry_run: bool,
+    snapshot_hour: int = DEFAULT_SNAPSHOT_HOUR_UTC,
+    snapshot_day_offset: int = DEFAULT_SNAPSHOT_DAY_OFFSET,
 ) -> dict[str, int]:
     sport = fetch_live_odds.sport_for_key(sport_key)
     if sport is None:
@@ -219,7 +241,7 @@ def run(
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for d in dates:
-                snap = snapshot_timestamp(d)
+                snap = snapshot_timestamp(d, hour_utc=snapshot_hour, day_offset=snapshot_day_offset)
                 response = fetch_historical_snapshot(sport_key, snap, markets, api_key, regions)
                 if response is None:
                     totals["dates_skipped"] += 1
@@ -246,6 +268,21 @@ def parse_args(argv=None):
     p.add_argument("--regions", default="us", help="the-odds-api region (default 'us').")
     p.add_argument("--api-key", default=os.environ.get("THE_ODDS_API_KEY"))
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
+    p.add_argument(
+        "--snapshot-hour",
+        type=int,
+        default=DEFAULT_SNAPSHOT_HOUR_UTC,
+        help=f"UTC hour of the snapshot timestamp (default {DEFAULT_SNAPSHOT_HOUR_UTC}). "
+        "For NHL, 3 sits 11pm ET = after most evening games start = closing lines.",
+    )
+    p.add_argument(
+        "--snapshot-day-offset",
+        type=int,
+        default=DEFAULT_SNAPSHOT_DAY_OFFSET,
+        help=f"Days added to game-date when picking the snapshot timestamp "
+        f"(default {DEFAULT_SNAPSHOT_DAY_OFFSET}). Combined with --snapshot-hour, "
+        "this lets each sport target a slate-appropriate close-of-play time.",
+    )
     p.add_argument(
         "--dry-run",
         action="store_true",
@@ -289,6 +326,8 @@ def main(argv=None):
         api_key=args.api_key or "",
         regions=args.regions,
         dry_run=args.dry_run,
+        snapshot_hour=args.snapshot_hour,
+        snapshot_day_offset=args.snapshot_day_offset,
     )
     logger.info("Done. %s", totals)
     return 0
