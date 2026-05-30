@@ -24,12 +24,17 @@ const confidenceOptions = [
   { value: 'LOW', label: 'Low' },
 ];
 
+// Values must equal the `bet_type` written by generate_recommendations.py
+// (which mirrors the odds `market_type`). Only markets we actually price are
+// listed here so the filter never yields an empty result set.
 const marketOptions = [
   { value: '', label: 'All Markets' },
   { value: '1x2', label: '1X2' },
+  { value: 'double_chance', label: 'Double Chance' },
+  { value: 'draw_no_bet', label: 'Draw No Bet' },
   { value: 'over_under', label: 'Over/Under' },
   { value: 'btts', label: 'BTTS' },
-  { value: 'handicap', label: 'Handicap' },
+  { value: 'asian_handicap', label: 'Asian Handicap' },
   { value: 'correct_score', label: 'Correct Score' },
 ];
 

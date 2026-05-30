@@ -21,8 +21,6 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
-from typing import Optional
 
 import psycopg2
 import requests
@@ -108,7 +106,7 @@ def store_prediction(cur, match_id: str, prediction: dict, model_version: str) -
          predicted_outcome, confidence, probabilities)
         VALUES (%(match_id)s, 'ensemble', %(model_version)s, 'match_result',
                 %(predicted)s, %(confidence)s, %(probs)s::jsonb)
-        ON CONFLICT (match_id, model_name, model_version) DO UPDATE
+        ON CONFLICT (match_id, model_name, model_version, prediction_type) DO UPDATE
             SET predicted_outcome = EXCLUDED.predicted_outcome,
                 confidence = EXCLUDED.confidence,
                 probabilities = EXCLUDED.probabilities,
@@ -126,6 +124,78 @@ def store_prediction(cur, match_id: str, prediction: dict, model_version: str) -
             "probs": json.dumps(prediction.get("probabilities") or {}, allow_nan=False),
         },
     )
+
+
+# Engine market_type -> DB predictions.prediction_type. The engine's "1x2"
+# market is intentionally absent: the ensemble `match_result` row already
+# carries the (reconciled-against) home/draw/away prediction, so re-storing it
+# would be redundant.
+MARKET_PREDICTION_TYPE: dict[str, str] = {
+    "over_under": "over_under",
+    "btts": "btts",
+    "correct_score": "correct_score",
+    "double_chance": "double_chance",
+    "draw_no_bet": "draw_no_bet",
+    "asian_handicap": "asian_handicap",
+    "team_total": "team_total",
+    "clean_sheet": "clean_sheet",
+    "win_to_nil": "win_to_nil",
+    "odd_even": "odd_even",
+    "winning_margin": "winning_margin",
+    "total_goals": "total_goals",
+    "result_btts": "result_btts",
+    "result_over_under": "result_over_under",
+}
+
+
+def store_market_predictions(cur, match_id: str, markets: dict, model_version: str) -> int:
+    """Upsert one `predictions` row per derived market_type.
+
+    `markets` is the {market_type: {selection: prob}} dict from the derivation
+    engine. Each row stores the full selection dict in `probabilities`
+    (JSONB); `predicted_outcome`/`confidence` are the argmax selection and its
+    probability. Returns the number of rows written.
+
+    Multi-line markets (over_under, asian_handicap, team_total) keep every
+    line's selections in the single JSONB blob — consumers (the recommendation
+    generator) read the full dict, so the row-level argmax is just a headline.
+    asian_handicap `*_push` keys are kept in `probabilities` (the recommender
+    needs them for push-aware EV) but excluded from the argmax since a push
+    isn't a backable outcome.
+    """
+    written = 0
+    for engine_mt, probs in markets.items():
+        ptype = MARKET_PREDICTION_TYPE.get(engine_mt)
+        if ptype is None or not probs:
+            continue
+        selectable = {k: v for k, v in probs.items() if not k.endswith("_push")}
+        if not selectable:
+            continue
+        top_sel = max(selectable, key=selectable.get)
+        cur.execute(
+            """
+            INSERT INTO predictions
+            (match_id, model_name, model_version, prediction_type,
+             predicted_outcome, confidence, probabilities)
+            VALUES (%(match_id)s, 'ensemble', %(model_version)s, %(ptype)s,
+                    %(predicted)s, %(confidence)s, %(probs)s::jsonb)
+            ON CONFLICT (match_id, model_name, model_version, prediction_type) DO UPDATE
+                SET predicted_outcome = EXCLUDED.predicted_outcome,
+                    confidence = EXCLUDED.confidence,
+                    probabilities = EXCLUDED.probabilities,
+                    updated_at = NOW()
+            """,
+            {
+                "match_id": match_id,
+                "model_version": model_version,
+                "ptype": ptype,
+                "predicted": top_sel,
+                "confidence": float(selectable[top_sel]),
+                "probs": json.dumps(probs, allow_nan=False),
+            },
+        )
+        written += 1
+    return written
 
 
 def compute_feature_medians(database_url: str) -> dict[str, float]:
@@ -174,15 +244,25 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
     model_version = get_model_version()
     cache = CacheService()
 
+    # Market-derivation engine lives in ml-models/src, whose path is added to
+    # sys.path by load_models_into_process(). If it's unavailable we still
+    # produce the 1x2 match_result prediction below — derivation just no-ops.
+    try:
+        from predictors.market_derivation import derive_from_lambdas  # type: ignore
+    except Exception as e:  # pragma: no cover - defensive import guard
+        derive_from_lambdas = None
+        logger.warning("market_derivation unavailable (%s); storing match_result only", e)
+
     feature_medians = compute_feature_medians(database_url)
     logger.info("Loaded %d feature-medians for NaN fallback", len(feature_medians))
 
     upcoming = list_upcoming(database_url, days)
     if not upcoming:
         logger.info("No upcoming matches with features in the next %d days", days)
-        return {"predicted": 0, "notified": 0}
+        return {"predicted": 0, "market_rows": 0, "notified": 0}
 
     predicted = 0
+    market_rows = 0
     notified = 0
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -208,7 +288,7 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                 ensemble = models.get("ensemble")
                 if not ensemble:
                     logger.error("No ensemble model loaded; aborting")
-                    return {"predicted": predicted, "notified": notified}
+                    return {"predicted": predicted, "market_rows": market_rows, "notified": notified}
 
                 try:
                     import numpy as np
@@ -256,12 +336,35 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                 )
                 predicted += 1
 
+                # Derive the wider market catalog from the Dixon-Coles
+                # scoreline, reconciled to the ensemble 1x2 so every market's
+                # home/draw/away split matches `match_result`. Best-effort: any
+                # failure leaves the match_result prediction intact.
+                dc = ensemble.models.get("dixon_coles") if derive_from_lambdas else None
+                if dc is not None and getattr(dc, "is_fitted", False):
+                    try:
+                        h_lam, a_lam = dc.lambdas_for_match(m["home_team"], m["away_team"])
+                        markets = derive_from_lambdas(
+                            h_lam,
+                            a_lam,
+                            float(getattr(dc, "rho", 0.0) or 0.0),
+                            target_1x2=(float(proba[0]), float(proba[1]), float(proba[2])),
+                        )
+                        market_rows += store_market_predictions(cur, m["match_id"], markets, model_version)
+                    except Exception as e:
+                        logger.warning("Market derivation failed for %s: %s", m["match_id"], e)
+
                 if notify and send_telegram(pred, m, notify_threshold):
                     notified += 1
 
             conn.commit()
-    logger.info("Stored %d predictions, sent %d Telegram alerts", predicted, notified)
-    return {"predicted": predicted, "notified": notified}
+    logger.info(
+        "Stored %d match-result predictions (+%d market rows), sent %d Telegram alerts",
+        predicted,
+        market_rows,
+        notified,
+    )
+    return {"predicted": predicted, "market_rows": market_rows, "notified": notified}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

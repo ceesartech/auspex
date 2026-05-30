@@ -3,9 +3,13 @@
 the-odds-api.com (https://the-odds-api.com) bills 1 quota unit per
 (region × market) per call. We default to one region ("us") and send
 the sport's full market basket in a single call, so a soccer run costs
-2 units (h2h + totals) and an NHL run costs 3 units (h2h + spreads +
-totals). With the configured sport list and one daily run this is well
-under both the 500-unit free tier and the 20,000-unit paid tier.
+3 units (h2h + totals + spreads) and an NHL run costs 3 units (h2h +
+spreads + totals). With the configured sport list and one daily run this
+is well under both the 500-unit free tier and the 20,000-unit paid tier.
+
+Secondary soccer markets (BTTS, double chance, draw-no-bet) live on a
+separate PER-EVENT endpoint and are opt-in via --additional-markets; they
+cost quota per event, so they're off by default and quota-guarded.
 
 The script:
   1. Pulls /v4/sports/{sport_key}/odds for each configured sport.
@@ -105,13 +109,30 @@ SPORT_KEY_PREFIXES: dict[str, str] = {
 }
 
 
-# Per-sport market basket sent to the-odds-api. Each market costs 1 quota
-# unit per region per call. Soccer uses the 1x2 + over/under 2.5 pair the
-# soccer ensemble was trained on; NHL adds spreads (puck line) since the
-# planned NHL ensemble covers all three markets.
+# Per-sport market basket sent to the-odds-api bulk /odds endpoint. Each
+# market costs 1 quota unit per region per call. Soccer pulls h2h (1x2),
+# totals (over/under — ALL lines, the derivation layer offers 0.5…5.5) and
+# spreads (goal handicap → asian_handicap); NHL keeps its three markets.
 SPORT_MARKETS: dict[str, str] = {
-    "soccer": "h2h,totals",
+    "soccer": "h2h,totals,spreads",
     "nhl": "h2h,spreads,totals",
+}
+
+# Secondary markets only available via the-odds-api PER-EVENT "additional
+# markets" endpoint (not the bulk /odds call). Each costs quota per
+# (region × market) PER EVENT, so fetching them is opt-in (--additional-markets)
+# and quota-guarded. Coverage is region/bookmaker dependent (uk/eu books price
+# these far more than us), hence a separate region knob (--additional-regions).
+SPORT_ADDITIONAL_MARKETS: dict[str, str] = {
+    "soccer": "btts,double_chance,draw_no_bet",
+}
+
+# Market keys we know how to map per sport. Anything else returned by the API
+# is skipped and logged once per run (so new opportunities surface without
+# crashing the job).
+KNOWN_MARKET_KEYS: dict[str, set[str]] = {
+    "soccer": {"h2h", "totals", "spreads", "btts", "double_chance", "draw_no_bet"},
+    "nhl": {"h2h", "spreads", "totals"},
 }
 
 
@@ -255,6 +276,27 @@ def _team_side(outcome_name: str, home_team_name: str, away_team_name: str) -> s
     return None
 
 
+def _double_chance_code(outcome_name: str, home_team_name: str, away_team_name: str) -> str | None:
+    """Map a the-odds-api double_chance outcome to our 1X/12/X2 code.
+
+    the-odds-api formats double-chance outcomes as the two covered results
+    joined by '/', using the actual team names and the literal 'Draw'
+    (e.g. 'Arsenal/Draw', 'Arsenal/Chelsea', 'Draw/Chelsea'). We detect which
+    of {home, away, draw} the name covers. Returns None if it doesn't resolve
+    to a known pair (so the caller skips it rather than guessing)."""
+    name = outcome_name.strip().lower()
+    has_home = home_team_name.strip().lower() in name
+    has_away = away_team_name.strip().lower() in name
+    has_draw = "draw" in name
+    if has_home and has_draw:
+        return "1X"
+    if has_home and has_away:
+        return "12"
+    if has_draw and has_away:
+        return "X2"
+    return None
+
+
 def map_outcome(
     sport: str,
     market_key: str,
@@ -271,8 +313,11 @@ def map_outcome(
     the outcome isn't representable in our schema and should be skipped.
 
     Soccer: h2h → 1x2 (home/draw/away, no line); totals → over_under
-    keyed on the 2.5 line only (the soccer training features expect
-    implied_prob_over25).
+    (over/under, EVERY line — the derivation layer offers 0.5…5.5); spreads
+    → asian_handicap (home/away, line = the outcome's own signed goal
+    handicap). Secondary per-event markets: btts → btts (yes/no);
+    double_chance → double_chance (1X/12/X2); draw_no_bet → draw_no_bet
+    (home/away).
 
     NHL: h2h → moneyline (home/away, no draw); spreads → spread (puck
     line, home/away with ±1.5 line); totals → total (over/under, every
@@ -289,13 +334,35 @@ def map_outcome(
             return None, None, False
         if market_key == "totals":
             n = outcome_name.lower()
-            if n not in ("over", "under"):
+            if n not in ("over", "under") or point is None:
                 return None, None, False
-            # Soccer training data only uses the 2.5 line; drop other lines
-            # to avoid bloating the table with rows we never read.
-            if point is None or abs(float(point) - 2.5) > 0.01:
-                return None, None, False
+            # Keep every line — the derivation/recommendation layer prices
+            # over/under at 0.5 … 5.5, so we store all lines the book offers.
             return "over_under", n, True
+        if market_key == "spreads":
+            side = _team_side(outcome_name, home_team_name, away_team_name)
+            if side is None or point is None:
+                return None, None, False
+            # Goal handicap → asian_handicap. `line` is the outcome's OWN
+            # signed point; home and away carry opposite signs. The
+            # recommendation matcher converts the away point to the
+            # home-perspective line.
+            return "asian_handicap", side, True
+        if market_key == "btts":
+            n = outcome_name.strip().lower()
+            if n not in ("yes", "no"):
+                return None, None, False
+            return "btts", n, False
+        if market_key == "double_chance":
+            code = _double_chance_code(outcome_name, home_team_name, away_team_name)
+            if code is None:
+                return None, None, False
+            return "double_chance", code, False
+        if market_key == "draw_no_bet":
+            side = _team_side(outcome_name, home_team_name, away_team_name)
+            if side is None:
+                return None, None, False
+            return "draw_no_bet", side, False
         return None, None, False
 
     if sport == "nhl":
@@ -319,29 +386,48 @@ def map_outcome(
     return None, None, False
 
 
-def process_event(cur, sport: str, event: dict, unmatched_log: list | None = None) -> int:
+def _match_event(cur, sport: str, event: dict, unmatched_log: list | None = None) -> tuple[str | None, str, str]:
+    """Resolve an event payload to (match_id, home, away). Returns
+    (None, home, away) when the event can't be tied to a fixture in our
+    `matches` table (logged to unmatched_log if provided)."""
     home = event.get("home_team") or ""
     away = event.get("away_team") or ""
     commence = event.get("commence_time")
     if not (home and away and commence):
-        return 0
+        return None, home, away
 
     try:
         commence_dt = datetime.fromisoformat(commence.replace("Z", "+00:00"))
     except ValueError:
-        return 0
+        return None, home, away
 
     match_id = find_match_id(cur, sport, home, away, commence_dt)
-    if not match_id:
-        if unmatched_log is not None:
-            unmatched_log.append(f"{home} vs {away} @ {commence}")
-        return 0
+    if not match_id and unmatched_log is not None:
+        unmatched_log.append(f"{home} vs {away} @ {commence}")
+    return match_id, home, away
 
+
+def insert_event_odds(
+    cur,
+    match_id: str,
+    event: dict,
+    sport: str,
+    home: str,
+    away: str,
+    unknown_markets: set | None = None,
+) -> int:
+    """Insert every representable odds row from one event payload. The bulk
+    /odds response and the per-event additional-markets response share the
+    same bookmakers → markets → outcomes shape, so both feed through here.
+    Unhandled market keys are collected into `unknown_markets` for one-time
+    logging. Returns the number of rows inserted."""
     inserted = 0
     for bm in event.get("bookmakers", []):
         bookmaker_name = bm.get("title") or bm.get("key") or "unknown"
         for market in bm.get("markets", []):
             market_key = market.get("key")
+            if unknown_markets is not None and market_key and market_key not in KNOWN_MARKET_KEYS.get(sport, set()):
+                unknown_markets.add(market_key)
             for outcome in market.get("outcomes", []):
                 point = outcome.get("point")
                 point_f = float(point) if point is not None else None
@@ -367,8 +453,83 @@ def process_event(cur, sport: str, event: dict, unmatched_log: list | None = Non
     return inserted
 
 
-def run(database_url: str, sports: list[str], api_key: str, regions: str) -> dict[str, int]:
-    results = {"events_seen": 0, "events_matched": 0, "odds_rows_inserted": 0}
+def process_event(
+    cur,
+    sport: str,
+    event: dict,
+    unmatched_log: list | None = None,
+    unknown_markets: set | None = None,
+) -> int:
+    """Resolve an event to a fixture and insert its bulk-market odds rows.
+    Returns rows inserted (0 if the event can't be matched). Kept as the
+    single-call entry point used by backfill_historical_odds.py."""
+    match_id, home, away = _match_event(cur, sport, event, unmatched_log=unmatched_log)
+    if not match_id:
+        return 0
+    return insert_event_odds(cur, match_id, event, sport, home, away, unknown_markets=unknown_markets)
+
+
+def fetch_event_markets(
+    sport_key: str, event_id: str, markets: str, api_key: str, regions: str
+) -> tuple[dict, str | None] | None:
+    """Fetch secondary (per-event) markets for one event from the-odds-api.
+
+    Returns (event_payload, x_requests_remaining) on success — the payload is a
+    single event object with the same shape as a bulk event — or None on any
+    error / unavailable market, so the caller falls back to the bulk-only rows.
+    Raises only on a 401 (bad key), which should abort the whole run."""
+    if not event_id:
+        return None
+    url = f"{BASE_URL}/sports/{sport_key}/events/{event_id}/odds"
+    params = {
+        "apiKey": api_key,
+        "regions": regions,
+        "markets": markets,
+        "oddsFormat": "decimal",
+        "dateFormat": "iso",
+    }
+    try:
+        r = requests.get(url, params=params, timeout=30)
+    except requests.RequestException as e:
+        logger.warning("the-odds-api event %s: request failed (%s)", event_id, e)
+        return None
+    if r.status_code == 401:
+        raise RuntimeError("the-odds-api: invalid API key (401)")
+    # 404 = event expired/unknown, 422 = market unavailable for this event —
+    # both mean "no secondary markets here", skip quietly.
+    if r.status_code in (404, 422):
+        return None
+    try:
+        r.raise_for_status()
+    except requests.RequestException as e:
+        logger.warning("the-odds-api event %s: HTTP error (%s)", event_id, e)
+        return None
+
+    remaining = r.headers.get("x-requests-remaining")
+    try:
+        payload = r.json()
+    except ValueError:
+        return None
+    return payload, remaining
+
+
+def run(
+    database_url: str,
+    sports: list[str],
+    api_key: str,
+    regions: str,
+    *,
+    additional_markets: bool = False,
+    additional_regions: str = "eu",
+    max_additional_events: int | None = None,
+    quota_floor: int = 0,
+) -> dict[str, int]:
+    results = {
+        "events_seen": 0,
+        "events_matched": 0,
+        "odds_rows_inserted": 0,
+        "additional_rows_inserted": 0,
+    }
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for sport_key in sports:
@@ -384,12 +545,51 @@ def run(database_url: str, sports: list[str], api_key: str, regions: str) -> dic
                 events = fetch_sport_odds(sport_key, markets, api_key, regions)
                 logger.info("%s (%s): %d events returned", sport_key, sport, len(events))
                 results["events_seen"] += len(events)
+
+                # Secondary markets (per-event endpoint) — opt-in + quota-guarded.
+                add_markets = SPORT_ADDITIONAL_MARKETS.get(sport) if additional_markets else None
+                add_calls = 0
+                stop_additional = False
+
                 unmatched: list[str] = []
+                unknown: set[str] = set()
                 for event in events:
-                    inserted = process_event(cur, sport, event, unmatched_log=unmatched)
+                    match_id, home, away = _match_event(cur, sport, event, unmatched_log=unmatched)
+                    if not match_id:
+                        continue
+                    inserted = insert_event_odds(cur, match_id, event, sport, home, away, unknown_markets=unknown)
                     if inserted > 0:
                         results["events_matched"] += 1
                         results["odds_rows_inserted"] += inserted
+
+                    # Per-event additional markets for matched fixtures.
+                    if add_markets and not stop_additional:
+                        if max_additional_events is not None and add_calls >= max_additional_events:
+                            stop_additional = True
+                        else:
+                            res = fetch_event_markets(
+                                sport_key, event.get("id", ""), add_markets, api_key, additional_regions
+                            )
+                            add_calls += 1
+                            if res is not None:
+                                payload, remaining = res
+                                if payload:
+                                    results["additional_rows_inserted"] += insert_event_odds(
+                                        cur, match_id, payload, sport, home, away, unknown_markets=unknown
+                                    )
+                                if quota_floor and remaining is not None:
+                                    try:
+                                        if int(remaining) < quota_floor:
+                                            logger.warning(
+                                                "Quota remaining %s below floor %d — stopping "
+                                                "additional-market fetches for this run.",
+                                                remaining,
+                                                quota_floor,
+                                            )
+                                            stop_additional = True
+                                    except ValueError:
+                                        pass
+
                 # Log unmatched events for visibility — usually means no
                 # scheduled fixture in the matches table covering that
                 # date, or a team-name spelling mismatch.
@@ -401,6 +601,8 @@ def run(database_url: str, sports: list[str], api_key: str, regions: str) -> dic
                         len(events),
                         unmatched[:5],
                     )
+                if unknown:
+                    logger.info("%s: skipped unhandled market keys %s", sport_key, sorted(unknown))
                 conn.commit()
     return results
 
@@ -412,6 +614,30 @@ def parse_args(argv=None):
     p.add_argument("--api-key", default=os.environ.get("THE_ODDS_API_KEY"))
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     p.add_argument("--quota-only", action="store_true", help="Make a single call to check remaining quota and exit.")
+    p.add_argument(
+        "--additional-markets",
+        action="store_true",
+        help="Also fetch secondary soccer markets (btts, double_chance, draw_no_bet) via the "
+        "per-event endpoint. Costs extra quota per event — off by default.",
+    )
+    p.add_argument(
+        "--additional-regions",
+        default="eu",
+        help="Region(s) for the per-event additional-markets call (default 'eu' — soccer "
+        "secondary markets have better coverage on uk/eu books).",
+    )
+    p.add_argument(
+        "--max-additional-events",
+        type=int,
+        default=None,
+        help="Cap how many events get a per-event additional-markets call (quota guard).",
+    )
+    p.add_argument(
+        "--quota-floor",
+        type=int,
+        default=0,
+        help="Stop additional-market fetches once x-requests-remaining drops below this (0 = no floor).",
+    )
     return p.parse_args(argv)
 
 
@@ -432,12 +658,22 @@ def main(argv=None):
         return 0
 
     sports = [s.strip() for s in args.sports.split(",") if s.strip()]
-    results = run(args.database_url, sports, args.api_key, args.regions)
+    results = run(
+        args.database_url,
+        sports,
+        args.api_key,
+        args.regions,
+        additional_markets=args.additional_markets,
+        additional_regions=args.additional_regions,
+        max_additional_events=args.max_additional_events,
+        quota_floor=args.quota_floor,
+    )
     logger.info(
-        "Done. events_seen=%d events_matched=%d odds_rows_inserted=%d",
+        "Done. events_seen=%d events_matched=%d odds_rows_inserted=%d additional_rows_inserted=%d",
         results["events_seen"],
         results["events_matched"],
         results["odds_rows_inserted"],
+        results["additional_rows_inserted"],
     )
     return 0
 

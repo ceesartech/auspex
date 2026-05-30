@@ -194,6 +194,13 @@ class PoissonMatchPredictor(BaseModel):
 
         return home_lambda, away_lambda
 
+    def lambdas_for_match(self, home_team: str, away_team: str) -> Tuple[float, float]:
+        """Public accessor for the (home_lambda, away_lambda) expected-goals
+        pair. Used by the market-derivation pipeline to build a scoreline
+        matrix without reaching into the private _expected_goals(). Unseen
+        teams fall back to attack=defense=1.0 (a neutral lambda)."""
+        return self._expected_goals(home_team, away_team)
+
     def _score_matrix(self, home_lambda: float, away_lambda: float) -> np.ndarray:
         mg = self.max_goals + 1
         matrix = np.zeros((mg, mg))
