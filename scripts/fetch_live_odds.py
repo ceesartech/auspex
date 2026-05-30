@@ -168,13 +168,19 @@ def find_match_id(cur, sport: str, home_team: str, away_team: str, commence_time
     window_start = commence_time - timedelta(days=2)
     window_end = commence_time + timedelta(days=2)
 
+    # Status filter includes both 'scheduled' (live-odds path) and
+    # 'finished' (historical backfill path). Both insert pre-match
+    # odds with is_opening=false / is_live=false, so the row semantics
+    # don't change based on which path matched. Excluding 'finished'
+    # was the silent bug behind 0 NHL odds rows after the first
+    # backfill run — historical games are 'finished' by definition.
     cur.execute(
         """
         SELECT m.id::text AS id, ht.name AS home_name, at.name AS away_name, m.match_date
         FROM matches m
         JOIN teams ht ON ht.id = m.home_team_id
         JOIN teams at ON at.id = m.away_team_id
-        WHERE m.status = 'scheduled'
+        WHERE m.status IN ('scheduled', 'finished')
           AND ht.sport = %s
           AND m.match_date BETWEEN %s AND %s
         """,
@@ -422,9 +428,7 @@ def main(argv=None):
         # /v4/sports is a free endpoint that still returns quota headers.
         r = requests.get(f"{BASE_URL}/sports", params={"apiKey": args.api_key}, timeout=10)
         r.raise_for_status()
-        print(
-            f"Quota — used: {r.headers.get('x-requests-used')}, remaining: {r.headers.get('x-requests-remaining')}"
-        )
+        print(f"Quota — used: {r.headers.get('x-requests-used')}, remaining: {r.headers.get('x-requests-remaining')}")
         return 0
 
     sports = [s.strip() for s in args.sports.split(",") if s.strip()]

@@ -16,7 +16,6 @@ from pathlib import Path
 
 import pytest
 
-
 SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 
 
@@ -123,6 +122,26 @@ class TestStripClubTokens:
 # ── fetch_live_odds: key → sport dispatch + market mapping ───────────
 
 
+class TestFindMatchIdStatusScope:
+    """Regression guard: find_match_id was filtering to status='scheduled'
+    only, which silently dropped every historical-backfill event because
+    those games are status='finished'. The fix broadens the scope to
+    IN ('scheduled', 'finished') so both pipelines (live odds for
+    upcoming games, historical odds for finished games) hit. Test
+    inspects the rendered SQL so a future refactor that drops 'finished'
+    fails loudly here instead of silently inserting zero rows."""
+
+    def test_includes_both_scheduled_and_finished(self):
+        import inspect
+
+        src = inspect.getsource(fetch_live_odds.find_match_id)
+        # Must include both statuses — not just 'scheduled' (the
+        # pre-bug state) and not just 'finished' (would break live
+        # odds).
+        assert "'scheduled'" in src and "'finished'" in src
+        assert "IN ('scheduled', 'finished')" in src or "IN ( 'scheduled', 'finished' )" in src
+
+
 class TestSportForKey:
     @pytest.mark.parametrize(
         "key, expected",
@@ -177,9 +196,7 @@ class TestNhlMarketMapping:
     def test_h2h_draw_outcome_rejected(self):
         # NHL moneyline never settles as a draw — if the-odds-api ever
         # emits one, we should drop it rather than store an illegal row.
-        mt, _, _ = fetch_live_odds.map_outcome(
-            "nhl", "h2h", "Draw", "Toronto Maple Leafs", "Boston Bruins", None
-        )
+        mt, _, _ = fetch_live_odds.map_outcome("nhl", "h2h", "Draw", "Toronto Maple Leafs", "Boston Bruins", None)
         assert mt is None
 
     def test_spreads_puck_line(self):
