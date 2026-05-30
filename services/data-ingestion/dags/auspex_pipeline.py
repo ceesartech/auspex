@@ -63,7 +63,17 @@ with DAG(
         bash_command=f"{DOCKER_EXEC} python /app/scripts/precompute_predictions.py --days 14",
     )
 
-    fetch_upcoming >> compute_features >> precompute_predictions
+    # Turn the per-market predictions into value-bet recommendations by
+    # comparing them against the latest ingested odds. Reads the most recent
+    # odds snapshot — fetch_live_odds runs on its own cadence (its quota cost
+    # makes it a poor fit for the 15-min loop), so recommendations are as
+    # fresh as the last odds pull.
+    generate_recommendations = BashOperator(
+        task_id="generate_recommendations",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/generate_recommendations.py --days 14",
+    )
+
+    fetch_upcoming >> compute_features >> precompute_predictions >> generate_recommendations
 
     # ── NHL branch (Phase 2: ingestion + features only) ───────────
     # Prediction task lands when the NHL ensemble ships in Phase 3.
