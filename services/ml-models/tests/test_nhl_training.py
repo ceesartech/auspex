@@ -30,20 +30,34 @@ if str(SRC) not in sys.path:
 
 from predictors.model_config import (  # noqa: E402
     ENSEMBLE_NHL_MONEYLINE,
+    ENSEMBLE_NHL_REGULATION,
     LIGHTGBM_NHL_MONEYLINE,
+    LIGHTGBM_NHL_REGULATION,
     NEURAL_NETWORK_NHL_MONEYLINE,
+    NEURAL_NETWORK_NHL_REGULATION,
     NHL_MONEYLINE_CONFIGS,
+    NHL_REGULATION_CONFIGS,
     XGBOOST_NHL_MONEYLINE,
+    XGBOOST_NHL_REGULATION,
     ModelType,
     PredictionTask,
 )
-from training.train_all_models import NHL_MONEYLINE_BUNDLE, SOCCER_BUNDLE, SPORT_BUNDLES  # noqa: E402
+from training.train_all_models import (  # noqa: E402
+    NHL_MONEYLINE_BUNDLE,
+    NHL_REGULATION_BUNDLE,
+    SOCCER_BUNDLE,
+    SPORT_BUNDLES,
+)
 from utils.training_data import (  # noqa: E402
     NHL_MONEYLINE_TARGET,
     NHL_MONEYLINE_TRAINING_QUERY,
     NHL_NON_FEATURE_COLUMNS,
+    NHL_REGULATION_TARGET,
+    NHL_REGULATION_TRAINING_QUERY,
     get_nhl_feature_columns,
+    get_nhl_regulation_feature_columns,
     prepare_nhl_moneyline_frame,
+    prepare_nhl_regulation_frame,
 )
 
 # ── Query shape ──────────────────────────────────────────────────────
@@ -218,8 +232,11 @@ class TestNhlModelConfigs:
 
 
 class TestSportBundles:
-    def test_both_sports_registered(self):
-        assert set(SPORT_BUNDLES.keys()) == {"soccer", "nhl_moneyline"}
+    def test_all_sports_registered(self):
+        # Lock the exact set so a sport added but not threaded through
+        # the orchestrator fails this test rather than ghost-loading at
+        # train time.
+        assert set(SPORT_BUNDLES.keys()) == {"soccer", "nhl_moneyline", "nhl_regulation"}
 
     def test_nhl_bundle_uses_nhl_loader_and_target(self):
         assert NHL_MONEYLINE_BUNDLE.target_column == NHL_MONEYLINE_TARGET
@@ -255,3 +272,163 @@ class TestSportBundles:
         assert SOCCER_BUNDLE.ensemble_name == "ensemble"
         names = [m.name for m in SOCCER_BUNDLE.base_models]
         assert names == ["xgboost", "lightgbm", "neural_network", "poisson", "dixon_coles"]
+
+
+# ── Regulation 3-way: query shape, prep, configs, bundle ─────────────
+
+
+class TestNhlRegulationQuery:
+    def test_scopes_to_nhl_sport(self):
+        assert "l.sport = 'nhl'" in NHL_REGULATION_TRAINING_QUERY
+
+    def test_pins_features_cache_to_nhl_baseline(self):
+        # Reuses the moneyline feature set — only the target differs.
+        assert "feature_set = 'nhl_baseline'" in NHL_REGULATION_TRAINING_QUERY
+
+    def test_keeps_regulation_ties(self):
+        # Unlike moneyline (which excludes ties — every NHL game has a
+        # winner), regulation 3-way KEEPS ties as the second class. The
+        # query must NOT contain the moneyline tie-exclusion clause.
+        assert "m.home_score <> m.away_score" not in NHL_REGULATION_TRAINING_QUERY
+
+    def test_target_derived_from_metadata_regulation_winner(self):
+        # Target comes from matches.metadata->>'regulation_winner', not
+        # from final home_score/away_score (those include OT/SO).
+        assert "metadata->>'regulation_winner'" in NHL_REGULATION_TRAINING_QUERY
+
+    def test_filters_to_games_with_regulation_winner(self):
+        # Defensive: skip rows where regulation_winner wasn't recorded
+        # (shouldn't happen with current loader but a schema-evolution
+        # safety net).
+        assert "metadata ? 'regulation_winner'" in NHL_REGULATION_TRAINING_QUERY
+
+    def test_encodes_3_classes(self):
+        # 0=home, 1=tie, 2=away — same numeric convention as soccer's
+        # MATCH_OUTCOME so the LabelEncoder + ensemble indexer behave
+        # identically across the two 3-class tasks.
+        assert "WHEN 'home' THEN 0" in NHL_REGULATION_TRAINING_QUERY
+        assert "WHEN 'tie'  THEN 1" in NHL_REGULATION_TRAINING_QUERY
+        assert "WHEN 'away' THEN 2" in NHL_REGULATION_TRAINING_QUERY
+
+
+class TestPrepareNhlRegulationFrame:
+    def test_empty_in_empty_out(self):
+        assert prepare_nhl_regulation_frame(pd.DataFrame()).empty
+
+    def test_flattens_features_json(self):
+        raw = pd.DataFrame(
+            {
+                "match_id": ["m1"],
+                "match_date": ["2025-01-15T00:00:00Z"],
+                "nhl_regulation": [1],  # tie
+                "features": [json.dumps({"odds_home_ml": 1.85})],
+            }
+        )
+        out = prepare_nhl_regulation_frame(raw)
+        assert "feature__odds_home_ml" in out.columns
+
+    def test_parses_match_date(self):
+        raw = pd.DataFrame(
+            {
+                "match_id": ["m1"],
+                "match_date": ["2025-01-15T00:00:00Z"],
+                "nhl_regulation": [0],
+            }
+        )
+        out = prepare_nhl_regulation_frame(raw)
+        assert pd.api.types.is_datetime64_any_dtype(out["match_date"])
+
+    def test_does_not_derive_target_from_scores(self):
+        # Unlike moneyline, the regulation target cannot be inferred
+        # from home_score/away_score (those include OT/SO). The CSV
+        # path requires the target column to be present already.
+        raw = pd.DataFrame(
+            {
+                "match_id": ["m1"],
+                "match_date": ["2025-01-15"],
+                "home_score": [4],
+                "away_score": [3],
+            }
+        )
+        out = prepare_nhl_regulation_frame(raw)
+        assert NHL_REGULATION_TARGET not in out.columns
+
+
+class TestGetNhlRegulationFeatureColumns:
+    def test_excludes_target_and_identifiers(self):
+        frame = pd.DataFrame(
+            {
+                "match_id": ["m1"],
+                "match_date": pd.to_datetime(["2025-01-15"]),
+                "home_team_id": ["t1"],
+                "away_team_id": ["t2"],
+                "home_score": [3],
+                "away_score": [2],
+                "nhl_regulation": [1],
+                "feature__odds_home_ml": [1.85],
+                "feature__home_roll_save_pct": [0.91],
+            }
+        )
+        cols = get_nhl_regulation_feature_columns(frame)
+        assert "nhl_regulation" not in cols
+        assert "home_score" not in cols
+        assert set(cols) == {"feature__odds_home_ml", "feature__home_roll_save_pct"}
+
+
+class TestNhlRegulationConfigs:
+    def test_xgboost_is_3_class_softmax(self):
+        # Same softmax-not-binary reason as moneyline (ensemble indexes
+        # proba[:, y], needs 2D), but with num_class=3 for the
+        # home/tie/away classes.
+        assert XGBOOST_NHL_REGULATION.hyperparameters["objective"] == "multi:softprob"
+        assert XGBOOST_NHL_REGULATION.hyperparameters["num_class"] == 3
+
+    def test_lightgbm_is_3_class_multiclass(self):
+        assert LIGHTGBM_NHL_REGULATION.hyperparameters["objective"] == "multiclass"
+        assert LIGHTGBM_NHL_REGULATION.hyperparameters["num_class"] == 3
+
+    def test_neural_network_uses_softmax(self):
+        assert NEURAL_NETWORK_NHL_REGULATION.hyperparameters["output_activation"] == "softmax"
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            XGBOOST_NHL_REGULATION,
+            LIGHTGBM_NHL_REGULATION,
+            NEURAL_NETWORK_NHL_REGULATION,
+            ENSEMBLE_NHL_REGULATION,
+        ],
+    )
+    def test_all_configs_target_nhl_regulation(self, config):
+        assert config.prediction_task == PredictionTask.NHL_REGULATION
+        assert config.target_column == NHL_REGULATION_TARGET
+
+    def test_configs_dict_complete(self):
+        assert set(NHL_REGULATION_CONFIGS.keys()) == {
+            "xgboost_nhl_reg",
+            "lightgbm_nhl_reg",
+            "neural_network_nhl_reg",
+            "ensemble_nhl_reg",
+        }
+
+
+class TestNhlRegulationBundle:
+    def test_uses_regulation_loader_and_target(self):
+        assert NHL_REGULATION_BUNDLE.target_column == NHL_REGULATION_TARGET
+        assert NHL_REGULATION_BUNDLE.load_frame.__name__ == "load_nhl_regulation_frame"
+        assert NHL_REGULATION_BUNDLE.feature_columns.__name__ == "get_nhl_regulation_feature_columns"
+
+    def test_excludes_poisson_dixon_coles(self):
+        # Same reasoning as moneyline — Poisson-family models assume
+        # soccer scoring. Hockey-Poisson port is Phase 3d.
+        types = {m.config.model_type for m in NHL_REGULATION_BUNDLE.base_models}
+        assert ModelType.POISSON not in types
+        assert ModelType.DIXON_COLES not in types
+
+    def test_three_base_models(self):
+        names = [m.name for m in NHL_REGULATION_BUNDLE.base_models]
+        assert names == ["xgboost_nhl_reg", "lightgbm_nhl_reg", "neural_network_nhl_reg"]
+
+    def test_ensemble_name_and_config_match(self):
+        assert NHL_REGULATION_BUNDLE.ensemble_name == "ensemble_nhl_reg"
+        assert NHL_REGULATION_BUNDLE.ensemble_config is ENSEMBLE_NHL_REGULATION

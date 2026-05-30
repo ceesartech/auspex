@@ -170,14 +170,22 @@ class TestSoccerMarketMapping:
         mt, sel, keep = fetch_live_odds.map_outcome("soccer", "totals", "Over", "A", "B", 2.5)
         assert (mt, sel, keep) == ("over_under", "over", True)
 
-    def test_totals_skips_other_lines(self):
-        # Soccer features are tied to the 2.5 line — drop everything else.
-        mt, _, _ = fetch_live_odds.map_outcome("soccer", "totals", "Over", "A", "B", 3.5)
-        assert mt is None
+    def test_totals_keeps_other_lines(self):
+        # Soccer now stores ALL totals lines (the derivation layer
+        # offers 0.5...5.5) so any over/under outcome with a valid
+        # point is kept. (Prior behavior pinned to 2.5 only; expanded
+        # for fuller market coverage.)
+        mt, sel, keep = fetch_live_odds.map_outcome("soccer", "totals", "Over", "A", "B", 3.5)
+        assert (mt, sel, keep) == ("over_under", "over", True)
 
-    def test_spreads_not_supported(self):
-        mt, _, _ = fetch_live_odds.map_outcome("soccer", "spreads", "Liverpool", "Liverpool", "Arsenal", -1.0)
-        assert mt is None
+    def test_spreads_now_asian_handicap(self):
+        # Soccer spreads (goal handicap) are mapped to asian_handicap
+        # with the team's signed line. This was unsupported before
+        # the soccer market expansion.
+        mt, sel, keep = fetch_live_odds.map_outcome("soccer", "spreads", "Liverpool", "Liverpool", "Arsenal", -1.0)
+        assert mt == "asian_handicap"
+        assert sel == "home"
+        assert keep is True
 
 
 class TestNhlMarketMapping:

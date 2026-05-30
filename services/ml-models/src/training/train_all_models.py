@@ -20,13 +20,17 @@ from predictors.model_config import (
     DIXON_COLES_CONFIG,
     ENSEMBLE_CONFIG,
     ENSEMBLE_NHL_MONEYLINE,
+    ENSEMBLE_NHL_REGULATION,
     LIGHTGBM_MATCH_OUTCOME,
     LIGHTGBM_NHL_MONEYLINE,
+    LIGHTGBM_NHL_REGULATION,
     NEURAL_NETWORK_CONFIG,
     NEURAL_NETWORK_NHL_MONEYLINE,
+    NEURAL_NETWORK_NHL_REGULATION,
     POISSON_CONFIG,
     XGBOOST_MATCH_OUTCOME,
     XGBOOST_NHL_MONEYLINE,
+    XGBOOST_NHL_REGULATION,
     ModelConfig,
 )
 from predictors.model_registry import ModelRegistry
@@ -36,10 +40,13 @@ from predictors.xgboost_model import XGBoostMatchPredictor
 from training.calibration import ProbabilityCalibrator
 from utils.training_data import (
     NHL_MONEYLINE_TARGET,
+    NHL_REGULATION_TARGET,
     TARGET_COLUMN,
     get_feature_columns,
     get_nhl_feature_columns,
+    get_nhl_regulation_feature_columns,
     load_nhl_moneyline_frame,
+    load_nhl_regulation_frame,
     load_training_frame,
     validate_training_frame,
 )
@@ -113,9 +120,25 @@ NHL_MONEYLINE_BUNDLE = SportBundle(
 )
 
 
+NHL_REGULATION_BUNDLE = SportBundle(
+    sport="nhl_regulation",
+    target_column=NHL_REGULATION_TARGET,
+    load_frame=load_nhl_regulation_frame,
+    feature_columns=get_nhl_regulation_feature_columns,
+    base_models=[
+        ModelSpec("xgboost_nhl_reg", XGBoostMatchPredictor, XGBOOST_NHL_REGULATION),
+        ModelSpec("lightgbm_nhl_reg", LightGBMMatchPredictor, LIGHTGBM_NHL_REGULATION),
+        ModelSpec("neural_network_nhl_reg", NeuralNetworkMatchPredictor, NEURAL_NETWORK_NHL_REGULATION),
+    ],
+    ensemble_config=ENSEMBLE_NHL_REGULATION,
+    ensemble_name="ensemble_nhl_reg",
+)
+
+
 SPORT_BUNDLES: Dict[str, SportBundle] = {
     "soccer": SOCCER_BUNDLE,
     "nhl_moneyline": NHL_MONEYLINE_BUNDLE,
+    "nhl_regulation": NHL_REGULATION_BUNDLE,
 }
 
 

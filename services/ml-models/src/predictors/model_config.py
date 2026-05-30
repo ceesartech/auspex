@@ -359,3 +359,129 @@ NHL_MONEYLINE_CONFIGS = {
     "neural_network_nhl_ml": NEURAL_NETWORK_NHL_MONEYLINE,
     "ensemble_nhl_ml": ENSEMBLE_NHL_MONEYLINE,
 }
+
+
+# ── NHL REGULATION 3-WAY (60-minute outcome) ─────────────────────────
+#
+# Three classes: 0=home reg win, 1=regulation tie (game went to OT/SO),
+# 2=away reg win. Target column derived from matches.metadata->>'regulation_winner'
+# (string 'home' | 'tie' | 'away'), mapped through a CASE in the query so the
+# frame already has the integer class label. NHL regulation distribution from
+# recent seasons:
+#   * home reg win  ~42%
+#   * tie (OT/SO)   ~22%
+#   * away reg win  ~36%
+# Class imbalance is mild — softmax handles it without explicit reweighting.
+#
+# Hyperparameters mirror the moneyline configs except num_class=3 and (for NN)
+# the slightly wider hidden layers — 3-class softmax can usually exploit a
+# bit more capacity than 2-class.
+
+XGBOOST_NHL_REGULATION = ModelConfig(
+    name="xgboost_nhl_regulation",
+    model_type=ModelType.XGBOOST,
+    prediction_task=PredictionTask.NHL_REGULATION,
+    version="1.0.0",
+    hyperparameters={
+        "objective": "multi:softprob",
+        "num_class": 3,
+        "max_depth": 6,
+        "learning_rate": 0.05,
+        "n_estimators": 400,
+        "subsample": 0.85,
+        "colsample_bytree": 0.85,
+        "min_child_weight": 5,
+        "gamma": 0.1,
+        "reg_alpha": 0.01,
+        "reg_lambda": 1.0,
+        "tree_method": "hist",
+        "random_state": 42,
+    },
+    features=[],
+    target_column="nhl_regulation",
+    loss_function="multi:softprob",
+    metrics=["accuracy", "log_loss", "brier_score"],
+    training_config={
+        "early_stopping_rounds": 50,
+        "eval_metric": "mlogloss",
+        "verbose": 100,
+    },
+)
+
+LIGHTGBM_NHL_REGULATION = ModelConfig(
+    name="lightgbm_nhl_regulation",
+    model_type=ModelType.LIGHTGBM,
+    prediction_task=PredictionTask.NHL_REGULATION,
+    version="1.0.0",
+    hyperparameters={
+        "objective": "multiclass",
+        "num_class": 3,
+        "boosting_type": "gbdt",
+        "num_leaves": 48,
+        "learning_rate": 0.05,
+        "n_estimators": 400,
+        "subsample": 0.85,
+        "colsample_bytree": 0.85,
+        "min_child_samples": 25,
+        "reg_alpha": 0.01,
+        "reg_lambda": 1.0,
+        "random_state": 42,
+    },
+    features=[],
+    target_column="nhl_regulation",
+    loss_function="multiclass",
+    metrics=["accuracy", "log_loss", "brier_score"],
+    training_config={"early_stopping_rounds": 50, "verbose": 100},
+)
+
+NEURAL_NETWORK_NHL_REGULATION = ModelConfig(
+    name="neural_network_nhl_regulation",
+    model_type=ModelType.NEURAL_NETWORK,
+    prediction_task=PredictionTask.NHL_REGULATION,
+    version="1.0.0",
+    hyperparameters={
+        "hidden_layers": [192, 96, 48],  # slightly wider than moneyline — 3-class room
+        "dropout_rate": 0.3,
+        "learning_rate": 0.001,
+        "batch_size": 256,
+        "epochs": 100,
+        "optimizer": "adam",
+        "activation": "relu",
+        "output_activation": "softmax",
+        "batch_norm": True,
+    },
+    features=[],
+    target_column="nhl_regulation",
+    loss_function="categorical_crossentropy",
+    metrics=["accuracy", "log_loss"],
+    training_config={
+        "early_stopping_patience": 15,
+        "reduce_lr_patience": 5,
+        "verbose": 1,
+    },
+)
+
+ENSEMBLE_NHL_REGULATION = ModelConfig(
+    name="ensemble_nhl_regulation",
+    model_type=ModelType.ENSEMBLE,
+    prediction_task=PredictionTask.NHL_REGULATION,
+    version="1.0.0",
+    hyperparameters={
+        "combination_method": "weighted_average",
+        "optimize_weights": True,
+        "weight_optimization_metric": "log_loss",
+        "min_weight": 0.05,
+    },
+    features=[],
+    target_column="nhl_regulation",
+    loss_function="ensemble",
+    metrics=["accuracy", "log_loss", "brier_score", "roi"],
+    training_config={},
+)
+
+NHL_REGULATION_CONFIGS = {
+    "xgboost_nhl_reg": XGBOOST_NHL_REGULATION,
+    "lightgbm_nhl_reg": LIGHTGBM_NHL_REGULATION,
+    "neural_network_nhl_reg": NEURAL_NETWORK_NHL_REGULATION,
+    "ensemble_nhl_reg": ENSEMBLE_NHL_REGULATION,
+}
