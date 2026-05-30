@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pytest
 
-
 SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 
 
@@ -95,31 +94,76 @@ class TestWithDefaults:
 # and the downstream model will see NaN.
 EMITTED_KEYS = {
     # Moneyline
-    "odds_home_ml", "odds_away_ml",
-    "implied_prob_home_ml", "implied_prob_away_ml", "ml_bookie_margin",
+    "odds_home_ml",
+    "odds_away_ml",
+    "implied_prob_home_ml",
+    "implied_prob_away_ml",
+    "ml_bookie_margin",
     # Puck line
-    "odds_home_pl15", "odds_away_pl15",
-    "implied_prob_home_cover_pl15", "implied_prob_away_cover_pl15",
+    "odds_home_pl15",
+    "odds_away_pl15",
+    "implied_prob_home_cover_pl15",
+    "implied_prob_away_cover_pl15",
     # Totals
-    "odds_over55", "odds_under55", "implied_prob_over55",
+    "odds_over55",
+    "odds_under55",
+    "implied_prob_over55",
     # Rolling form (home + away × 8 stats)
-    "home_roll_goals_for", "home_roll_goals_against",
-    "home_roll_shots_for", "home_roll_shots_against",
-    "home_roll_pp_pct", "home_roll_pk_pct",
-    "home_roll_save_pct", "home_roll_standings_pts",
-    "away_roll_goals_for", "away_roll_goals_against",
-    "away_roll_shots_for", "away_roll_shots_against",
-    "away_roll_pp_pct", "away_roll_pk_pct",
-    "away_roll_save_pct", "away_roll_standings_pts",
+    "home_roll_goals_for",
+    "home_roll_goals_against",
+    "home_roll_shots_for",
+    "home_roll_shots_against",
+    "home_roll_pp_pct",
+    "home_roll_pk_pct",
+    "home_roll_save_pct",
+    "home_roll_standings_pts",
+    "away_roll_goals_for",
+    "away_roll_goals_against",
+    "away_roll_shots_for",
+    "away_roll_shots_against",
+    "away_roll_pp_pct",
+    "away_roll_pk_pct",
+    "away_roll_save_pct",
+    "away_roll_standings_pts",
     # Schedule context
-    "home_days_rest", "home_back_to_back", "home_games_in_last_7",
-    "away_days_rest", "away_back_to_back", "away_games_in_last_7",
+    "home_days_rest",
+    "home_back_to_back",
+    "home_games_in_last_7",
+    "away_days_rest",
+    "away_back_to_back",
+    "away_games_in_last_7",
     # Diffs
-    "form_diff_goals_for", "form_diff_goals_against",
-    "form_diff_shots_for", "form_diff_shots_against",
-    "form_diff_pp_pct", "form_diff_pk_pct",
-    "form_diff_save_pct", "form_diff_standings_pts",
+    "form_diff_goals_for",
+    "form_diff_goals_against",
+    "form_diff_shots_for",
+    "form_diff_shots_against",
+    "form_diff_pp_pct",
+    "form_diff_pk_pct",
+    "form_diff_save_pct",
+    "form_diff_standings_pts",
     "rest_diff",
+    # ── v2: starting-goalie rolling stats (per team) ──────────────
+    "home_goalie_roll_save_pct",
+    "home_goalie_roll_gaa",
+    "home_goalie_days_rest",
+    "home_goalie_back_to_back",
+    "away_goalie_roll_save_pct",
+    "away_goalie_roll_gaa",
+    "away_goalie_days_rest",
+    "away_goalie_back_to_back",
+    "goalie_save_pct_diff",
+    "goalie_gaa_diff",
+    # ── v2: pace stats (per-60 normalized) ────────────────────────
+    "home_shots_for_per_60",
+    "home_shots_against_per_60",
+    "home_goals_for_per_60",
+    "home_goals_against_per_60",
+    "away_shots_for_per_60",
+    "away_shots_against_per_60",
+    "away_goals_for_per_60",
+    "away_goals_against_per_60",
+    "pace_shots_diff",
+    "pace_goals_diff",
 }
 
 
@@ -135,6 +179,4 @@ class TestNeutralDefaultsCoverage:
         # Catches the inverse mistake: a default for a feature we no
         # longer emit. Not fatal (just dead config), but worth flagging.
         orphans = set(cfn.NEUTRAL_DEFAULTS.keys()) - EMITTED_KEYS
-        assert not orphans, (
-            f"NEUTRAL_DEFAULTS keys with no matching emitted feature: {sorted(orphans)}"
-        )
+        assert not orphans, f"NEUTRAL_DEFAULTS keys with no matching emitted feature: {sorted(orphans)}"

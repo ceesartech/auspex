@@ -57,10 +57,38 @@ NHL_API = "https://api-web.nhle.com/v1"
 # Inactive (or not-yet-active) teams in a given season's schedule call
 # return an empty `games` array, which we treat as a no-op.
 NHL_TEAM_CODES = [
-    "ANA", "ARI", "BOS", "BUF", "CAR", "CBJ", "CGY", "CHI",
-    "COL", "DAL", "DET", "EDM", "FLA", "LAK", "MIN", "MTL",
-    "NJD", "NSH", "NYI", "NYR", "OTT", "PHI", "PIT", "SEA",
-    "SJS", "STL", "TBL", "TOR", "UTA", "VAN", "VGK", "WPG",
+    "ANA",
+    "ARI",
+    "BOS",
+    "BUF",
+    "CAR",
+    "CBJ",
+    "CGY",
+    "CHI",
+    "COL",
+    "DAL",
+    "DET",
+    "EDM",
+    "FLA",
+    "LAK",
+    "MIN",
+    "MTL",
+    "NJD",
+    "NSH",
+    "NYI",
+    "NYR",
+    "OTT",
+    "PHI",
+    "PIT",
+    "SEA",
+    "SJS",
+    "STL",
+    "TBL",
+    "TOR",
+    "UTA",
+    "VAN",
+    "VGK",
+    "WPG",
     "WSH",
 ]
 
@@ -106,13 +134,7 @@ class TeamGameStats:
 def season_id(season_str: str) -> str:
     """'2024-2025' -> '20242025' (the NHL API's season-id format)."""
     parts = season_str.split("-")
-    if (
-        len(parts) != 2
-        or len(parts[0]) != 4
-        or len(parts[1]) != 4
-        or not parts[0].isdigit()
-        or not parts[1].isdigit()
-    ):
+    if len(parts) != 2 or len(parts[0]) != 4 or len(parts[1]) != 4 or not parts[0].isdigit() or not parts[1].isdigit():
         raise ValueError(f"Bad --seasons entry: {season_str!r} (expected YYYY-YYYY)")
     return parts[0] + parts[1]
 
@@ -201,6 +223,72 @@ def parse_team_game_stats(rr_payload: dict, side: str) -> TeamGameStats:
     )
 
 
+def _parse_starting_goalie(team_block: dict) -> dict | None:
+    """From boxscore.playerByGameStats.{home,away}Team, find the goalie
+    marked starter=True and return a canonical {playerId, name} dict.
+    Returns None if no starter is flagged or the team has no goalies
+    (very rare — e.g., truly bizarre data error).
+    """
+    goalies = team_block.get("goalies") or []
+    for g in goalies:
+        if not g.get("starter"):
+            continue
+        pid = g.get("playerId")
+        if pid is None:
+            continue
+        name_field = g.get("name") or {}
+        name = name_field.get("default") if isinstance(name_field, dict) else str(name_field)
+        return {"nhl_player_id": int(pid), "name": name or f"NHL Player {pid}"}
+    return None
+
+
+def extract_starting_goalies(boxscore_payload: dict) -> tuple[dict | None, dict | None]:
+    """Pull (home_starter, away_starter) from a /boxscore response.
+    Both elements may be None if the API omits the flag for that side."""
+    pbg = boxscore_payload.get("playerByGameStats") or {}
+    home = _parse_starting_goalie(pbg.get("homeTeam") or {})
+    away = _parse_starting_goalie(pbg.get("awayTeam") or {})
+    return home, away
+
+
+def upsert_goalie_player(cur, goalie: dict, team_id: str | None) -> str | None:
+    """Insert-or-update a players row for an NHL goalie keyed on the
+    stable NHL player id (external_ids->>'nhl_player_id'). Returns the
+    players.id. The unique partial index added in migration 008 makes
+    the ON CONFLICT clause work.
+    """
+    name = goalie["name"]
+    norm = " ".join(name.strip().lower().split())
+    cur.execute(
+        """
+        INSERT INTO players (name, normalized_name, team_id, position, external_ids)
+        VALUES (%s, %s, %s, 'G', %s)
+        ON CONFLICT ((external_ids ->> 'nhl_player_id'))
+            WHERE external_ids ? 'nhl_player_id'
+        DO UPDATE
+            SET team_id = COALESCE(EXCLUDED.team_id, players.team_id),
+                name = EXCLUDED.name,
+                normalized_name = EXCLUDED.normalized_name,
+                updated_at = NOW()
+        RETURNING id
+        """,
+        (name, norm, team_id, Json({"nhl_player_id": goalie["nhl_player_id"]})),
+    )
+    row = cur.fetchone()
+    return row["id"] if row else None
+
+
+def fetch_boxscore_goalies(game_id: int) -> tuple[dict | None, dict | None] | None:
+    """One /boxscore call to extract (home, away) starting goalies.
+    Returns None on graceful skip (404/timeout); caller treats this as
+    'no goalie data' and inserts NULL for that game.
+    """
+    payload = get_json(f"{NHL_API}/gamecenter/{game_id}/boxscore")
+    if payload is None:
+        return None
+    return extract_starting_goalies(payload)
+
+
 def regulation_outcome(home_periods: dict[str, int], away_periods: dict[str, int]) -> tuple[int, int, str]:
     """Sum periods 1-3 only (exclude OT/SO) to get the regulation score,
     then label the regulation winner. Used downstream for both the
@@ -258,8 +346,17 @@ def ensure_nhl_team(cur, team_payload: dict, league_id: str) -> str | None:
     return row["id"] if row else None
 
 
-def upsert_match(cur, game: dict, league_id: str, home_id: str, away_id: str,
-                 reg_home: int, reg_away: int, reg_winner: str, season: str) -> str | None:
+def upsert_match(
+    cur,
+    game: dict,
+    league_id: str,
+    home_id: str,
+    away_id: str,
+    reg_home: int,
+    reg_away: int,
+    reg_winner: str,
+    season: str,
+) -> str | None:
     """Upsert one game's row in `matches`. Returns the match id.
 
     Final score = NHL `awayTeam.score` / `homeTeam.score` (includes OT
@@ -304,8 +401,14 @@ def upsert_match(cur, game: dict, league_id: str, home_id: str, away_id: str,
         RETURNING id
         """,
         (
-            league_id, home_id, away_id, match_dt,
-            home_score, away_score, season, venue,
+            league_id,
+            home_id,
+            away_id,
+            match_dt,
+            home_score,
+            away_score,
+            season,
+            venue,
             Json({"nhl": str(game.get("id"))}),
             Json(metadata),
         ),
@@ -314,8 +417,7 @@ def upsert_match(cur, game: dict, league_id: str, home_id: str, away_id: str,
     return row["id"] if row else None
 
 
-def upsert_team_stats(cur, match_id: str, team_id: str, stats: TeamGameStats,
-                      opp_stats: TeamGameStats) -> None:
+def upsert_team_stats(cur, match_id: str, team_id: str, stats: TeamGameStats, opp_stats: TeamGameStats) -> None:
     """Persist one team's NHL stats. Goalie-side numbers (saves, save_pct,
     goals_against) are derived from the opponent's shots and goals — the
     right-rail feed doesn't expose them as team-level stats directly."""
@@ -324,11 +426,7 @@ def upsert_team_stats(cur, match_id: str, team_id: str, stats: TeamGameStats,
     shots_faced = opp_stats.shots_on_goal
     saves = max(shots_faced - goals_against, 0)
     save_pct = (saves / shots_faced) if shots_faced > 0 else None
-    pk_pct = (
-        1.0 - (opp_stats.power_play_goals / opp_stats.power_play_opps)
-        if opp_stats.power_play_opps > 0
-        else None
-    )
+    pk_pct = 1.0 - (opp_stats.power_play_goals / opp_stats.power_play_opps) if opp_stats.power_play_opps > 0 else None
     cur.execute(
         """
         INSERT INTO nhl_match_stats (
@@ -374,14 +472,27 @@ def upsert_team_stats(cur, match_id: str, team_id: str, stats: TeamGameStats,
             period_scores = EXCLUDED.period_scores
         """,
         (
-            match_id, team_id,
-            stats.shots_on_goal, goals,
-            saves, save_pct, goals_against,
-            stats.power_play_goals, stats.power_play_opps, stats.power_play_pct,
-            opp_stats.power_play_goals, opp_stats.power_play_opps, pk_pct,
-            stats.hits, stats.blocked_shots,
-            stats.faceoffs_won, stats.faceoffs_taken, stats.faceoff_win_pct,
-            stats.giveaways, stats.takeaways, stats.pim,
+            match_id,
+            team_id,
+            stats.shots_on_goal,
+            goals,
+            saves,
+            save_pct,
+            goals_against,
+            stats.power_play_goals,
+            stats.power_play_opps,
+            stats.power_play_pct,
+            opp_stats.power_play_goals,
+            opp_stats.power_play_opps,
+            pk_pct,
+            stats.hits,
+            stats.blocked_shots,
+            stats.faceoffs_won,
+            stats.faceoffs_taken,
+            stats.faceoff_win_pct,
+            stats.giveaways,
+            stats.takeaways,
+            stats.pim,
             Json(stats.period_scores),
         ),
     )
@@ -450,7 +561,9 @@ def load_season(database_url: str, season_str: str, refetch: bool) -> dict[str, 
             total = len(games)
             logger.info(
                 "=== season %s: %d games to consider (%d already loaded) ===",
-                season_str, total, len(already),
+                season_str,
+                total,
+                len(already),
             )
 
             for processed, (gid, game) in enumerate(games.items(), start=1):
@@ -473,8 +586,15 @@ def load_season(database_url: str, season_str: str, refetch: bool) -> dict[str, 
                                 counts["games_failed"] += 1
                             else:
                                 match_id = upsert_match(
-                                    cur, game, league_id, home_team_id, away_team_id,
-                                    reg_home, reg_away, reg_winner, season_str,
+                                    cur,
+                                    game,
+                                    league_id,
+                                    home_team_id,
+                                    away_team_id,
+                                    reg_home,
+                                    reg_away,
+                                    reg_winner,
+                                    season_str,
                                 )
                                 if not match_id:
                                     counts["games_failed"] += 1
@@ -496,8 +616,12 @@ def load_season(database_url: str, season_str: str, refetch: bool) -> dict[str, 
                 if processed % GAME_LOG_INTERVAL == 0 or processed == total:
                     logger.info(
                         "season %s: processed %d/%d (loaded=%d skipped=%d failed=%d)",
-                        season_str, processed, total,
-                        counts["games_loaded"], counts["games_skipped"], counts["games_failed"],
+                        season_str,
+                        processed,
+                        total,
+                        counts["games_loaded"],
+                        counts["games_skipped"],
+                        counts["games_failed"],
                     )
 
     return counts

@@ -62,7 +62,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(me
 logger = logging.getLogger("compute_features_nhl")
 
 FEATURE_SET = "nhl_baseline"
-FEATURE_VERSION = "v1"
+# v2 adds starting-goalie rolling stats (save%, GAA, days-rest, B2B
+# flag) plus team pace stats (shots/goals per 60 minutes). Phase 3c
+# training showed the v1 puck-line + total models couldn't beat naive
+# baselines — odds correlate with WINNER but tell you almost nothing
+# about MARGIN or TOTAL GOALS. Goalie identity + pace are the two
+# biggest missing signals.
+#
+# Inference-time gap: for UPCOMING games we don't yet know who's
+# starting in goal, so the goalie features fall to NEUTRAL_DEFAULTS
+# at predict time. The benefit is currently training-only until we
+# add projected-goalie ingestion (DailyFaceoff scrape or NHL roster
+# API). Pace features work at both train and inference time because
+# they're rolled from each team's prior games.
+FEATURE_VERSION = "v2"
 # Rolling window — NHL teams play ~3.5 games/week so 10 games is ~3 weeks
 # of recent form, the standard "last 10" cadence NHL coverage uses.
 WINDOW = 10
@@ -73,6 +86,12 @@ CACHE_TTL_SECONDS = 3600
 # some pairs to ~26h — 1.5 days covers both without bleeding into
 # 2-days-rest games.
 BACK_TO_BACK_DAYS = 1.5
+# Approximate game length in minutes used to normalize per-60 pace
+# stats. The right-rail boxscore stores period_scores but not exact
+# OT minutes; we use 60/65/65 as a reasonable approximation (real OT
+# adds 0-5 min, SO adds ~0-2 min). Error is <2% on per-60 rates which
+# is well within the noise of a 10-game rolling window.
+GAME_LENGTH_MIN = {"REG": 60.0, "OT": 65.0, "SO": 65.0}
 
 # NHL-tuned neutral defaults, rough league averages 2018-2024:
 #   * Goals/game per team ≈ 3.05
@@ -134,6 +153,35 @@ NEUTRAL_DEFAULTS: dict[str, float] = {
     "form_diff_save_pct": 0.0,
     "form_diff_standings_pts": 0.0,
     "rest_diff": 0.0,
+    # ── Starting goalie rolling stats (v2) ────────────────────────
+    # Save% league average ~0.905 (same as team-level). GAA ~2.75/60
+    # for a league-average starter. Days-rest 3 is the modal start-
+    # to-start gap for an NHL starter who plays ~60-65% of games. B2B
+    # flag defaults to 0 (most starts aren't on no-rest).
+    "home_goalie_roll_save_pct": 0.905,
+    "away_goalie_roll_save_pct": 0.905,
+    "home_goalie_roll_gaa": 2.75,
+    "away_goalie_roll_gaa": 2.75,
+    "home_goalie_days_rest": 3.0,
+    "away_goalie_days_rest": 3.0,
+    "home_goalie_back_to_back": 0.0,
+    "away_goalie_back_to_back": 0.0,
+    "goalie_save_pct_diff": 0.0,
+    "goalie_gaa_diff": 0.0,
+    # ── Pace stats (v2) ────────────────────────────────────────────
+    # Per-60 normalization removes the OT-game inflation that biased
+    # raw rolling averages. League averages: 30 shots/60 for, 30
+    # against; 3.05 goals/60 each way.
+    "home_shots_for_per_60": 30.0,
+    "home_shots_against_per_60": 30.0,
+    "home_goals_for_per_60": 3.05,
+    "home_goals_against_per_60": 3.05,
+    "away_shots_for_per_60": 30.0,
+    "away_shots_against_per_60": 30.0,
+    "away_goals_for_per_60": 3.05,
+    "away_goals_against_per_60": 3.05,
+    "pace_shots_diff": 0.0,
+    "pace_goals_diff": 0.0,
 }
 
 
@@ -385,6 +433,156 @@ def _team_schedule_context(cur, team_id: str, before_date, side: str) -> dict:
     }
 
 
+def _rolling_pace_stats(cur, team_id: str, before_date, side: str) -> dict:
+    """Per-60-minute rate stats over the team's last WINDOW finished
+    games. Normalizes for OT/SO game-length inflation so totals models
+    see clean rate signals instead of OT-inflated raw averages."""
+    cur.execute(
+        f"""
+        WITH team_games AS (
+            SELECT
+                CASE WHEN m.home_team_id = %(tid)s THEN m.home_score
+                     ELSE m.away_score END AS goals_for,
+                CASE WHEN m.home_team_id = %(tid)s THEN m.away_score
+                     ELSE m.home_score END AS goals_against,
+                s.shots_on_goal AS shots_for,
+                opp.shots_on_goal AS shots_against,
+                CASE COALESCE(m.metadata->>'period_type_final', 'REG')
+                    WHEN 'REG' THEN {GAME_LENGTH_MIN['REG']}
+                    WHEN 'OT'  THEN {GAME_LENGTH_MIN['OT']}
+                    WHEN 'SO'  THEN {GAME_LENGTH_MIN['SO']}
+                    ELSE {GAME_LENGTH_MIN['REG']}
+                END AS game_minutes
+            FROM matches m
+            JOIN nhl_match_stats s
+              ON s.match_id = m.id AND s.team_id = %(tid)s
+            JOIN nhl_match_stats opp
+              ON opp.match_id = m.id AND opp.team_id <> %(tid)s
+            WHERE (m.home_team_id = %(tid)s OR m.away_team_id = %(tid)s)
+              AND m.status = 'finished'
+              AND m.match_date < %(before)s
+              AND m.home_score IS NOT NULL
+              AND m.away_score IS NOT NULL
+            ORDER BY m.match_date DESC
+            LIMIT %(n)s
+        )
+        SELECT
+            CASE WHEN SUM(game_minutes) > 0
+                 THEN 60.0 * SUM(shots_for)::float / SUM(game_minutes)
+                 ELSE NULL
+            END AS shots_for_per_60,
+            CASE WHEN SUM(game_minutes) > 0
+                 THEN 60.0 * SUM(shots_against)::float / SUM(game_minutes)
+                 ELSE NULL
+            END AS shots_against_per_60,
+            CASE WHEN SUM(game_minutes) > 0
+                 THEN 60.0 * SUM(goals_for)::float / SUM(game_minutes)
+                 ELSE NULL
+            END AS goals_for_per_60,
+            CASE WHEN SUM(game_minutes) > 0
+                 THEN 60.0 * SUM(goals_against)::float / SUM(game_minutes)
+                 ELSE NULL
+            END AS goals_against_per_60
+        FROM team_games
+        """,
+        {"tid": team_id, "before": before_date, "n": WINDOW},
+    )
+    row = cur.fetchone() or {}
+    return {
+        f"{side}_shots_for_per_60": row.get("shots_for_per_60"),
+        f"{side}_shots_against_per_60": row.get("shots_against_per_60"),
+        f"{side}_goals_for_per_60": row.get("goals_for_per_60"),
+        f"{side}_goals_against_per_60": row.get("goals_against_per_60"),
+    }
+
+
+def _find_starting_goalie(cur, team_id: str, before_date) -> str | None:
+    """Look up the team's starting goalie for the upcoming match. For
+    HISTORICAL games (where this feature compute runs during the
+    --all-finished sweep) the goalie is already set on the matching
+    nhl_match_stats row, so we read it from there. For UPCOMING games
+    there's no such row yet — returns None and the caller falls back
+    to NEUTRAL_DEFAULTS for all goalie features. Closing that gap
+    needs a projected-goalie ingestion path (e.g., DailyFaceoff scrape)."""
+    cur.execute(
+        """
+        SELECT s.starting_goalie_id::text AS gid
+        FROM nhl_match_stats s
+        JOIN matches m ON m.id = s.match_id
+        WHERE s.team_id = %s
+          AND m.match_date >= %s::timestamptz - INTERVAL '6 hours'
+          AND m.match_date <= %s::timestamptz + INTERVAL '6 hours'
+        LIMIT 1
+        """,
+        (team_id, before_date, before_date),
+    )
+    row = cur.fetchone()
+    return row["gid"] if row and row.get("gid") else None
+
+
+def _goalie_rolling_form(cur, goalie_id: str | None, before_date, side: str) -> dict:
+    """Per-goalie rolling stats over their last WINDOW starts: save%,
+    GAA (per 60), days since last start, back-to-back flag. Returns
+    Nones (filled with NEUTRAL_DEFAULTS downstream) when goalie_id is
+    None — i.e., we don't know who'll start for the upcoming game."""
+    if goalie_id is None:
+        return {
+            f"{side}_goalie_roll_save_pct": None,
+            f"{side}_goalie_roll_gaa": None,
+            f"{side}_goalie_days_rest": None,
+            f"{side}_goalie_back_to_back": None,
+        }
+
+    cur.execute(
+        f"""
+        WITH goalie_starts AS (
+            SELECT
+                m.match_date,
+                s.saves,
+                opp.shots_on_goal AS shots_faced,
+                s.goals_against,
+                CASE COALESCE(m.metadata->>'period_type_final', 'REG')
+                    WHEN 'REG' THEN {GAME_LENGTH_MIN['REG']}
+                    WHEN 'OT'  THEN {GAME_LENGTH_MIN['OT']}
+                    WHEN 'SO'  THEN {GAME_LENGTH_MIN['SO']}
+                    ELSE {GAME_LENGTH_MIN['REG']}
+                END AS game_minutes
+            FROM nhl_match_stats s
+            JOIN matches m ON m.id = s.match_id
+            JOIN nhl_match_stats opp
+              ON opp.match_id = s.match_id AND opp.team_id <> s.team_id
+            WHERE s.starting_goalie_id = %(gid)s
+              AND m.status = 'finished'
+              AND m.match_date < %(before)s
+            ORDER BY m.match_date DESC
+            LIMIT %(n)s
+        )
+        SELECT
+            CASE WHEN SUM(shots_faced) > 0
+                 THEN SUM(saves)::float / SUM(shots_faced)
+                 ELSE NULL
+            END AS save_pct,
+            CASE WHEN SUM(game_minutes) > 0
+                 THEN 60.0 * SUM(goals_against)::float / SUM(game_minutes)
+                 ELSE NULL
+            END AS gaa,
+            EXTRACT(EPOCH FROM (%(before)s - MAX(match_date))) / 86400.0 AS days_rest
+        FROM goalie_starts
+        """,
+        {"gid": goalie_id, "before": before_date, "n": WINDOW},
+    )
+    row = cur.fetchone() or {}
+    days_rest = row.get("days_rest")
+    return {
+        f"{side}_goalie_roll_save_pct": row.get("save_pct"),
+        f"{side}_goalie_roll_gaa": row.get("gaa"),
+        f"{side}_goalie_days_rest": float(days_rest) if days_rest is not None else None,
+        f"{side}_goalie_back_to_back": (
+            1.0 if days_rest is not None and float(days_rest) <= BACK_TO_BACK_DAYS else 0.0
+        ),
+    }
+
+
 # ── Per-match feature assembly ───────────────────────────────────────
 
 
@@ -438,6 +636,23 @@ def compute_match_features(cur, match_id: str):
     features.update(_team_schedule_context(cur, m["h"], m["d"], "home"))
     features.update(_team_schedule_context(cur, m["a"], m["d"], "away"))
 
+    # Per-60 pace stats per team (controls for OT/SO game-length inflation)
+    home_pace = _rolling_pace_stats(cur, m["h"], m["d"], "home")
+    away_pace = _rolling_pace_stats(cur, m["a"], m["d"], "away")
+    features.update(home_pace)
+    features.update(away_pace)
+
+    # Starting goalie rolling stats. For historical games (current_match
+    # is finished), the goalie row exists; for upcoming games it's
+    # absent and goalie features default. Document a v2-of-v2 path:
+    # add projected-goalie ingestion so prediction-time benefits too.
+    home_goalie_id = _find_starting_goalie(cur, m["h"], m["d"])
+    away_goalie_id = _find_starting_goalie(cur, m["a"], m["d"])
+    home_goalie = _goalie_rolling_form(cur, home_goalie_id, m["d"], "home")
+    away_goalie = _goalie_rolling_form(cur, away_goalie_id, m["d"], "away")
+    features.update(home_goalie)
+    features.update(away_goalie)
+
     # Derived diffs — pull from the raw rolling values BEFORE neutral
     # defaults are applied so a missing-on-both-sides stat doesn't get
     # a misleading zero diff. _safe_diff returns None on either-side
@@ -468,6 +683,22 @@ def compute_match_features(cur, match_id: str):
         home_form.get("home_roll_standings_pts"), away_form.get("away_roll_standings_pts")
     )
     features["rest_diff"] = _safe_diff(features.get("home_days_rest"), features.get("away_days_rest"))
+
+    # Goalie diffs (home minus away). Defaults fire when goalie unknown.
+    features["goalie_save_pct_diff"] = _safe_diff(
+        home_goalie.get("home_goalie_roll_save_pct"), away_goalie.get("away_goalie_roll_save_pct")
+    )
+    features["goalie_gaa_diff"] = _safe_diff(
+        home_goalie.get("home_goalie_roll_gaa"), away_goalie.get("away_goalie_roll_gaa")
+    )
+
+    # Pace diffs — shots/60 and goals/60 (home minus away).
+    features["pace_shots_diff"] = _safe_diff(
+        home_pace.get("home_shots_for_per_60"), away_pace.get("away_shots_for_per_60")
+    )
+    features["pace_goals_diff"] = _safe_diff(
+        home_pace.get("home_goals_for_per_60"), away_pace.get("away_goals_for_per_60")
+    )
 
     return features
 
