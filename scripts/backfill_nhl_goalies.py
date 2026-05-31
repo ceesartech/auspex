@@ -74,13 +74,17 @@ def list_games_needing_goalies(conn, season: str | None, refetch: bool) -> list[
         params: list = []
         if season:
             params.append(season)
+        # Postgres requires SELECT DISTINCT columns to include any
+        # ORDER BY expression. m.match_date is selected solely for that
+        # purpose; the Python loop ignores it.
         cur.execute(
             f"""
             SELECT DISTINCT
                 m.id::text AS match_id,
                 (m.external_ids->>'nhl')::bigint AS nhl_game_id,
                 m.home_team_id::text AS home_team_id,
-                m.away_team_id::text AS away_team_id
+                m.away_team_id::text AS away_team_id,
+                m.match_date
             FROM matches m
             JOIN leagues l ON l.id = m.league_id
             JOIN nhl_match_stats s ON s.match_id = m.id
