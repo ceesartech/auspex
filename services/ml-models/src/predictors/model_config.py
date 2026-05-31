@@ -757,6 +757,4 @@ HOCKEY_POISSON_NHL_REGULATION = _hockey_poisson_config(
 HOCKEY_POISSON_NHL_PUCK_LINE = _hockey_poisson_config(
     "hockey_poisson_nhl_pl", PredictionTask.NHL_PUCK_LINE, "nhl_puck_line"
 )
-HOCKEY_POISSON_NHL_TOTAL = _hockey_poisson_config(
-    "hockey_poisson_nhl_tot", PredictionTask.NHL_TOTAL, "nhl_total"
-)
+HOCKEY_POISSON_NHL_TOTAL = _hockey_poisson_config("hockey_poisson_nhl_tot", PredictionTask.NHL_TOTAL, "nhl_total")
