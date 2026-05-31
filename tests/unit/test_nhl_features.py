@@ -164,6 +164,33 @@ EMITTED_KEYS = {
     "away_goals_against_per_60",
     "pace_shots_diff",
     "pace_goals_diff",
+    # ── v3: 5v5 even-strength stats (per team rolling) ────────────
+    "home_roll_corsi_for_5v5",
+    "home_roll_corsi_against_5v5",
+    "home_roll_fenwick_for_5v5",
+    "home_roll_fenwick_against_5v5",
+    "home_roll_sog_for_5v5",
+    "home_roll_sog_against_5v5",
+    "home_roll_goals_for_5v5",
+    "home_roll_goals_against_5v5",
+    "home_roll_xg_for_5v5",
+    "home_roll_xg_against_5v5",
+    "home_roll_cf_pct_5v5",
+    "away_roll_corsi_for_5v5",
+    "away_roll_corsi_against_5v5",
+    "away_roll_fenwick_for_5v5",
+    "away_roll_fenwick_against_5v5",
+    "away_roll_sog_for_5v5",
+    "away_roll_sog_against_5v5",
+    "away_roll_goals_for_5v5",
+    "away_roll_goals_against_5v5",
+    "away_roll_xg_for_5v5",
+    "away_roll_xg_against_5v5",
+    "away_roll_cf_pct_5v5",
+    # ── v3: 5v5 differentials (home minus away) ───────────────────
+    "cf_pct_diff_5v5",
+    "xg_diff_5v5",
+    "corsi_diff_5v5",
 }
 
 

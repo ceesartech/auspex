@@ -62,20 +62,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(me
 logger = logging.getLogger("compute_features_nhl")
 
 FEATURE_SET = "nhl_baseline"
-# v2 adds starting-goalie rolling stats (save%, GAA, days-rest, B2B
-# flag) plus team pace stats (shots/goals per 60 minutes). Phase 3c
-# training showed the v1 puck-line + total models couldn't beat naive
-# baselines — odds correlate with WINNER but tell you almost nothing
-# about MARGIN or TOTAL GOALS. Goalie identity + pace are the two
-# biggest missing signals.
+# v2 added starting-goalie rolling stats and team pace per-60. v3 adds
+# 5v5 even-strength advanced stats (Corsi/Fenwick/SOG/Goals/xG) from
+# the play-by-play feed — the canonical NHL underlying-quality signal
+# that goalbox-aggregate-shot data couldn't expose. Phase 3d found
+# puck-line and total still couldn't beat naive marginal baselines on
+# v2; 5v5 differential is the analytics community's standard answer.
 #
-# Inference-time gap: for UPCOMING games we don't yet know who's
-# starting in goal, so the goalie features fall to NEUTRAL_DEFAULTS
-# at predict time. The benefit is currently training-only until we
-# add projected-goalie ingestion (DailyFaceoff scrape or NHL roster
-# API). Pace features work at both train and inference time because
-# they're rolled from each team's prior games.
-FEATURE_VERSION = "v2"
+# Inference-time gap (unchanged from v2): goalie features still fall
+# to NEUTRAL_DEFAULTS at predict time for upcoming games until we add
+# projected-goalie ingestion. 5v5 features DO work at predict time
+# because they're rolled from each team's prior games — same shape
+# as pace.
+FEATURE_VERSION = "v3"
 # Rolling window — NHL teams play ~3.5 games/week so 10 games is ~3 weeks
 # of recent form, the standard "last 10" cadence NHL coverage uses.
 WINDOW = 10
@@ -182,6 +181,39 @@ NEUTRAL_DEFAULTS: dict[str, float] = {
     "away_goals_against_per_60": 3.05,
     "pace_shots_diff": 0.0,
     "pace_goals_diff": 0.0,
+    # ── v3: 5v5 even-strength advanced stats (per team, rolling) ───
+    # League averages: ~48 Corsi-for / 48 Corsi-against per game at 5v5
+    # (full 60-min game would have ~96 attempts per team in even strength).
+    # Fenwick ~36 each way (unblocked); SOG ~22-24; goals ~1.7 at 5v5;
+    # xG ~1.7 (from the approximation model, matches goals on average).
+    "home_roll_corsi_for_5v5": 48.0,
+    "home_roll_corsi_against_5v5": 48.0,
+    "home_roll_fenwick_for_5v5": 36.0,
+    "home_roll_fenwick_against_5v5": 36.0,
+    "home_roll_sog_for_5v5": 22.0,
+    "home_roll_sog_against_5v5": 22.0,
+    "home_roll_goals_for_5v5": 1.7,
+    "home_roll_goals_against_5v5": 1.7,
+    "home_roll_xg_for_5v5": 1.7,
+    "home_roll_xg_against_5v5": 1.7,
+    "away_roll_corsi_for_5v5": 48.0,
+    "away_roll_corsi_against_5v5": 48.0,
+    "away_roll_fenwick_for_5v5": 36.0,
+    "away_roll_fenwick_against_5v5": 36.0,
+    "away_roll_sog_for_5v5": 22.0,
+    "away_roll_sog_against_5v5": 22.0,
+    "away_roll_goals_for_5v5": 1.7,
+    "away_roll_goals_against_5v5": 1.7,
+    "away_roll_xg_for_5v5": 1.7,
+    "away_roll_xg_against_5v5": 1.7,
+    # ── v3: 5v5 differential ratios (home - away) and Corsi-for% ─────
+    # Corsi-for% (CF%) is the canonical NHL underlying-quality metric.
+    # 0.50 is league-average; >0.55 is elite, <0.45 is bad.
+    "home_roll_cf_pct_5v5": 0.50,
+    "away_roll_cf_pct_5v5": 0.50,
+    "cf_pct_diff_5v5": 0.0,
+    "xg_diff_5v5": 0.0,
+    "corsi_diff_5v5": 0.0,
 }
 
 
@@ -496,6 +528,82 @@ def _rolling_pace_stats(cur, team_id: str, before_date, side: str) -> dict:
     }
 
 
+def _rolling_5v5_stats(cur, team_id: str, before_date, side: str) -> dict:
+    """Mean per-game 5v5 stats over the team's last WINDOW finished games,
+    plus the team's rolling Corsi-for% (a vs-opponent ratio that the
+    analytics community treats as the canonical underlying-quality metric).
+
+    Reads from nhl_match_advanced_stats which is populated by
+    backfill_nhl_5v5_stats.py from the play-by-play feed. Games without
+    a row (e.g., games loaded before the 5v5 backfill ran) are skipped
+    by the inner JOIN — for short rolling windows that include such
+    games, the per-team averages collapse toward the neutral defaults.
+
+    `side` ∈ {'home', 'away'} prefixes the output keys."""
+    cur.execute(
+        """
+        WITH team_games AS (
+            SELECT
+                s.shot_attempts_5v5      AS corsi_for,
+                opp.shot_attempts_5v5    AS corsi_against,
+                s.unblocked_shots_5v5    AS fenwick_for,
+                opp.unblocked_shots_5v5  AS fenwick_against,
+                s.shots_on_goal_5v5      AS sog_for,
+                opp.shots_on_goal_5v5    AS sog_against,
+                s.goals_5v5              AS goals_for,
+                opp.goals_5v5            AS goals_against,
+                s.xg_5v5                 AS xg_for,
+                opp.xg_5v5               AS xg_against
+            FROM matches m
+            JOIN nhl_match_advanced_stats s
+              ON s.match_id = m.id AND s.team_id = %(tid)s
+            JOIN nhl_match_advanced_stats opp
+              ON opp.match_id = m.id AND opp.team_id <> %(tid)s
+            WHERE (m.home_team_id = %(tid)s OR m.away_team_id = %(tid)s)
+              AND m.status = 'finished'
+              AND m.match_date < %(before)s
+            ORDER BY m.match_date DESC
+            LIMIT %(n)s
+        )
+        SELECT
+            AVG(corsi_for)::float        AS corsi_for,
+            AVG(corsi_against)::float    AS corsi_against,
+            AVG(fenwick_for)::float      AS fenwick_for,
+            AVG(fenwick_against)::float  AS fenwick_against,
+            AVG(sog_for)::float          AS sog_for,
+            AVG(sog_against)::float      AS sog_against,
+            AVG(goals_for)::float        AS goals_for,
+            AVG(goals_against)::float    AS goals_against,
+            AVG(xg_for)::float           AS xg_for,
+            AVG(xg_against)::float       AS xg_against,
+            -- CF% = total Corsi-for / (total CF + total CA), aggregated
+            -- across games (not avg of per-game ratios) so a 1-shot game
+            -- doesn't dominate the window.
+            CASE WHEN (SUM(corsi_for) + SUM(corsi_against)) > 0
+                 THEN SUM(corsi_for)::float / (SUM(corsi_for) + SUM(corsi_against))
+                 ELSE NULL
+            END                          AS cf_pct,
+            COUNT(*)::int                AS n
+        FROM team_games
+        """,
+        {"tid": team_id, "before": before_date, "n": WINDOW},
+    )
+    row = cur.fetchone() or {}
+    return {
+        f"{side}_roll_corsi_for_5v5": row.get("corsi_for"),
+        f"{side}_roll_corsi_against_5v5": row.get("corsi_against"),
+        f"{side}_roll_fenwick_for_5v5": row.get("fenwick_for"),
+        f"{side}_roll_fenwick_against_5v5": row.get("fenwick_against"),
+        f"{side}_roll_sog_for_5v5": row.get("sog_for"),
+        f"{side}_roll_sog_against_5v5": row.get("sog_against"),
+        f"{side}_roll_goals_for_5v5": row.get("goals_for"),
+        f"{side}_roll_goals_against_5v5": row.get("goals_against"),
+        f"{side}_roll_xg_for_5v5": row.get("xg_for"),
+        f"{side}_roll_xg_against_5v5": row.get("xg_against"),
+        f"{side}_roll_cf_pct_5v5": row.get("cf_pct"),
+    }
+
+
 def _find_starting_goalie(cur, team_id: str, before_date) -> str | None:
     """Look up the team's starting goalie for the upcoming match. For
     HISTORICAL games (where this feature compute runs during the
@@ -653,6 +761,14 @@ def compute_match_features(cur, match_id: str):
     features.update(home_goalie)
     features.update(away_goalie)
 
+    # v3: 5v5 even-strength advanced stats per team (Corsi/Fenwick/SOG/
+    # goals/xG + Corsi-for%). Works for upcoming games too because the
+    # stats are rolled from each team's prior games, not the current one.
+    home_5v5 = _rolling_5v5_stats(cur, m["h"], m["d"], "home")
+    away_5v5 = _rolling_5v5_stats(cur, m["a"], m["d"], "away")
+    features.update(home_5v5)
+    features.update(away_5v5)
+
     # Derived diffs — pull from the raw rolling values BEFORE neutral
     # defaults are applied so a missing-on-both-sides stat doesn't get
     # a misleading zero diff. _safe_diff returns None on either-side
@@ -698,6 +814,16 @@ def compute_match_features(cur, match_id: str):
     )
     features["pace_goals_diff"] = _safe_diff(
         home_pace.get("home_goals_for_per_60"), away_pace.get("away_goals_for_per_60")
+    )
+
+    # v3: 5v5 differentials (home minus away). CF%-diff is the most
+    # predictive single number — it captures both "we shoot more" and
+    # "we allow fewer" in one metric. xG-diff is the v1 xG-approximation
+    # version of the same idea.
+    features["cf_pct_diff_5v5"] = _safe_diff(home_5v5.get("home_roll_cf_pct_5v5"), away_5v5.get("away_roll_cf_pct_5v5"))
+    features["xg_diff_5v5"] = _safe_diff(home_5v5.get("home_roll_xg_for_5v5"), away_5v5.get("away_roll_xg_for_5v5"))
+    features["corsi_diff_5v5"] = _safe_diff(
+        home_5v5.get("home_roll_corsi_for_5v5"), away_5v5.get("away_roll_corsi_for_5v5")
     )
 
     return features
