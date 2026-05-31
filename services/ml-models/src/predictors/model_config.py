@@ -712,3 +712,51 @@ NHL_TOTAL_CONFIGS = {
     "neural_network_nhl_tot": NEURAL_NETWORK_NHL_TOTAL,
     "ensemble_nhl_tot": ENSEMBLE_NHL_TOTAL,
 }
+
+
+# ── Hockey-Poisson configs (Phase 3d) ────────────────────────────────
+#
+# One HockeyPoissonPredictor fits per task; each emits a task-specific
+# probability array derived from the same joint goal distribution.
+# Hyperparameters are shared across all four task variants because the
+# underlying MLE is the same — only the predict_proba derivation differs.
+#
+# Hockey home_advantage 0.15 (NHL home win rate ~55%) vs soccer's 0.25
+# (soccer home win rate ~45-50%). max_goals=10 covers NHL's long tail.
+
+_HOCKEY_POISSON_HYPERPARAMS = {
+    "max_goals": 10,
+    "home_advantage": 0.15,
+    "regularization": 0.001,
+    "max_iterations": 1000,
+    "convergence_threshold": 1e-6,
+}
+
+
+def _hockey_poisson_config(name: str, task: PredictionTask, target: str) -> ModelConfig:
+    return ModelConfig(
+        name=name,
+        model_type=ModelType.POISSON,
+        prediction_task=task,
+        version="1.0.0",
+        hyperparameters=dict(_HOCKEY_POISSON_HYPERPARAMS),
+        features=[],
+        target_column=target,
+        loss_function="poisson_nll",
+        metrics=["accuracy", "log_loss", "brier_score"],
+        training_config={},
+    )
+
+
+HOCKEY_POISSON_NHL_MONEYLINE = _hockey_poisson_config(
+    "hockey_poisson_nhl_ml", PredictionTask.NHL_MONEYLINE, "nhl_moneyline"
+)
+HOCKEY_POISSON_NHL_REGULATION = _hockey_poisson_config(
+    "hockey_poisson_nhl_reg", PredictionTask.NHL_REGULATION, "nhl_regulation"
+)
+HOCKEY_POISSON_NHL_PUCK_LINE = _hockey_poisson_config(
+    "hockey_poisson_nhl_pl", PredictionTask.NHL_PUCK_LINE, "nhl_puck_line"
+)
+HOCKEY_POISSON_NHL_TOTAL = _hockey_poisson_config(
+    "hockey_poisson_nhl_tot", PredictionTask.NHL_TOTAL, "nhl_total"
+)

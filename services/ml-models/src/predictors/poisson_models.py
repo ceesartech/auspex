@@ -10,7 +10,7 @@ from scipy.optimize import minimize
 from scipy.special import gammaln  # log(k!) = gammaln(k + 1)
 
 from .base_model import BaseModel
-from .model_config import ModelConfig
+from .model_config import ModelConfig, PredictionTask
 
 logger = logging.getLogger(__name__)
 
@@ -342,6 +342,162 @@ class PoissonMatchPredictor(BaseModel):
         self.max_goals = data["max_goals"]
         self.is_fitted = True
         logger.info(f"Poisson model loaded from {path}")
+
+
+class HockeyPoissonPredictor(PoissonMatchPredictor):
+    """NHL-tuned Poisson model that emits the joint goal distribution
+    once and derives task-specific probabilities (moneyline, regulation
+    3-way, puck-line, total) from it.
+
+    The classification models in Phase 3a-3c learned moneyline well but
+    plateaued for puck-line and total — those tasks ask about MARGIN
+    and TOTAL GOALS, which are naturally framed as functions of the
+    joint goal distribution rather than direct classifications. By
+    fitting one Poisson and integrating it differently per task, we get
+    a more principled signal for the harder markets and a useful 4th
+    base model for the moneyline ensemble.
+
+    Inherits the vectorized MLE and team-attack/defense state from
+    PoissonMatchPredictor. The only overrides are:
+      * Hockey-tuned defaults (lower home_advantage, higher max_goals).
+      * predict_proba branches on config.prediction_task and derives
+        the appropriate (N, num_classes) array from the joint matrices.
+      * train() reads the target from config.target_column so NHL
+        target columns (nhl_moneyline, nhl_regulation, ...) work in
+        place of soccer's match_outcome.
+
+    Output shape per task:
+      * NHL_MONEYLINE   (N, 2)  [P(home win incl OT/SO), P(away win)]
+      * NHL_REGULATION  (N, 3)  [P(home reg), P(reg tie), P(away reg)]
+      * NHL_PUCK_LINE   (N, 2)  [P(home covers -1.5), P(does not)]
+      * NHL_TOTAL       (N, 2)  [P(over 5.5), P(under 5.5)]
+
+    Approximation: OT/SO goals aren't separately modeled. For moneyline
+    we split the regulation-tie mass 50/50 between home and away (OT/SO
+    is approximately a coin flip at the league level). For totals,
+    we predict regulation totals; the ~22% of games that go to OT/SO
+    add +1 to the eventual total in NHL but we don't apply a correction
+    here — the calibration step downstream absorbs the small bias.
+    """
+
+    def __init__(self, config: ModelConfig):
+        super().__init__(config)
+        # NHL home advantage is smaller than soccer's. League home win
+        # rate is ~55% — translating that to a log-Poisson home bump:
+        # roughly 0.10-0.15 added to home_lambda. Soccer's 0.25 is too
+        # aggressive for hockey.
+        self.home_advantage = config.hyperparameters.get("home_advantage", 0.15)
+        # NHL scores cluster 0-6 per team; max_goals=10 covers the long
+        # tail (10+ goal games are <0.1%). Soccer's 6 would underweight
+        # blowouts.
+        self.max_goals = config.hyperparameters.get("max_goals", 10)
+
+    def train(
+        self,
+        train_df: pd.DataFrame,
+        val_df: Optional[pd.DataFrame] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        # Call parent training but skip its match_outcome-hardcoded
+        # validation block (val_df=None), then run our own validation
+        # against the task-specific target column.
+        result = super().train(train_df, val_df=None, **kwargs)
+
+        if val_df is not None:
+            target = self.config.target_column
+            if target in val_df.columns:
+                try:
+                    y_val = val_df[target].values
+                    result["validation_metrics"] = self.evaluate(val_df, y_val)
+                except Exception as e:
+                    logger.warning("HockeyPoisson evaluate(%s) failed: %s", target, e)
+
+        return result
+
+    def _joint_matrices(self, X: pd.DataFrame) -> np.ndarray:
+        """Compute the (N, mg, mg) joint goal distribution for the
+        rows in X. Shared by every task-specific predict_proba branch."""
+        if not self.is_fitted:
+            raise ValueError("Model not fitted")
+        home = X["home_team"].to_numpy() if "home_team" in X.columns else np.array([""] * len(X))
+        away = X["away_team"].to_numpy() if "away_team" in X.columns else np.array([""] * len(X))
+        h_lam, a_lam = self._lambdas_for(home, away)
+        return self._score_tensor(h_lam, a_lam)  # (N, mg, mg)
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        task = self.config.prediction_task
+        matrices = self._joint_matrices(X)
+        mg = self.max_goals + 1
+        i_idx, j_idx = np.indices((mg, mg))
+
+        if task == PredictionTask.NHL_REGULATION:
+            # 3-class: [home reg win, regulation tie, away reg win]
+            home_mask = i_idx > j_idx
+            tie_mask = i_idx == j_idx
+            away_mask = i_idx < j_idx
+            p_home = matrices[:, home_mask].sum(axis=1)
+            p_tie = matrices[:, tie_mask].sum(axis=1)
+            p_away = matrices[:, away_mask].sum(axis=1)
+            total = p_home + p_tie + p_away
+            out = np.empty((len(X), 3))
+            nonzero = total > 0
+            out[nonzero, 0] = p_home[nonzero] / total[nonzero]
+            out[nonzero, 1] = p_tie[nonzero] / total[nonzero]
+            out[nonzero, 2] = p_away[nonzero] / total[nonzero]
+            out[~nonzero] = [0.42, 0.22, 0.36]  # league marginal prior
+            return out
+
+        if task == PredictionTask.NHL_MONEYLINE:
+            # 2-class: [home win incl OT/SO, away win incl OT/SO].
+            # Regulation ties split ~50/50 in OT/SO at the league level.
+            home_mask = i_idx > j_idx
+            tie_mask = i_idx == j_idx
+            away_mask = i_idx < j_idx
+            p_home_reg = matrices[:, home_mask].sum(axis=1)
+            p_tie = matrices[:, tie_mask].sum(axis=1)
+            p_away_reg = matrices[:, away_mask].sum(axis=1)
+            p_home_ml = p_home_reg + 0.5 * p_tie
+            p_away_ml = p_away_reg + 0.5 * p_tie
+            total = p_home_ml + p_away_ml
+            out = np.empty((len(X), 2))
+            nonzero = total > 0
+            out[nonzero, 0] = p_home_ml[nonzero] / total[nonzero]
+            out[nonzero, 1] = p_away_ml[nonzero] / total[nonzero]
+            out[~nonzero] = [0.55, 0.45]
+            return out
+
+        if task == PredictionTask.NHL_PUCK_LINE:
+            # 2-class: [home covers -1.5 (margin >= 2), does not].
+            # Note: OT/SO games end at margin=1, which doesn't cover —
+            # so using regulation-goal masses is approximately right
+            # (some OT games would have ended margin>=2 in regulation
+            # if not for the goalie pull etc., but the effect is small).
+            cover_mask = (i_idx - j_idx) >= 2
+            p_cover = matrices[:, cover_mask].sum(axis=1)
+            grid_total = matrices.sum(axis=(1, 2))
+            out = np.empty((len(X), 2))
+            nonzero = grid_total > 0
+            out[nonzero, 0] = p_cover[nonzero] / grid_total[nonzero]
+            out[nonzero, 1] = 1.0 - out[nonzero, 0]
+            out[~nonzero] = [0.28, 0.72]
+            return out
+
+        if task == PredictionTask.NHL_TOTAL:
+            # 2-class: [over 5.5 (total >= 6), under 5.5]. Per NHL
+            # convention the SO winner gets +1 toward the total, but
+            # we predict regulation totals here and let downstream
+            # calibration absorb the small bias.
+            over_mask = (i_idx + j_idx) >= 6
+            p_over = matrices[:, over_mask].sum(axis=1)
+            grid_total = matrices.sum(axis=(1, 2))
+            out = np.empty((len(X), 2))
+            nonzero = grid_total > 0
+            out[nonzero, 0] = p_over[nonzero] / grid_total[nonzero]
+            out[nonzero, 1] = 1.0 - out[nonzero, 0]
+            out[~nonzero] = [0.55, 0.45]
+            return out
+
+        raise ValueError(f"HockeyPoissonPredictor doesn't support prediction_task={task}")
 
 
 class DixonColesPredictor(PoissonMatchPredictor):

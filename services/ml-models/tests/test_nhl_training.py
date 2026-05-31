@@ -268,21 +268,28 @@ class TestSportBundles:
         assert NHL_MONEYLINE_BUNDLE.load_frame.__name__ == "load_nhl_moneyline_frame"
         assert NHL_MONEYLINE_BUNDLE.feature_columns.__name__ == "get_nhl_feature_columns"
 
-    def test_nhl_bundle_excludes_poisson_and_dixon_coles(self):
-        # Both Poisson-family models assume soccer scoring rules; NHL
-        # ensemble drops them entirely in v1. Hockey-Poisson port is
-        # Phase 3d work.
+    def test_nhl_bundle_includes_hockey_poisson_not_dixon_coles(self):
+        # Phase 3d added hockey-Poisson (NHL-tuned variant) to the NHL
+        # ensembles. Soccer's Dixon-Coles is still excluded — it bakes
+        # in soccer-specific tau corrections for low-scoring games that
+        # don't apply to NHL.
         names = {m.name for m in NHL_MONEYLINE_BUNDLE.base_models}
-        assert "poisson" not in names
+        assert "hockey_poisson_nhl_ml" in names
         assert "dixon_coles" not in names
-        # And by model type — same check, different angle:
+        # Soccer's PoissonMatchPredictor (the base class) shouldn't be
+        # in the NHL bundle either — only the hockey-tuned subclass.
         types = {m.config.model_type for m in NHL_MONEYLINE_BUNDLE.base_models}
-        assert ModelType.POISSON not in types
+        assert ModelType.POISSON in types  # via hockey-Poisson
         assert ModelType.DIXON_COLES not in types
 
-    def test_nhl_bundle_includes_three_base_models(self):
+    def test_nhl_bundle_includes_four_base_models(self):
         names = [m.name for m in NHL_MONEYLINE_BUNDLE.base_models]
-        assert names == ["xgboost_nhl_ml", "lightgbm_nhl_ml", "neural_network_nhl_ml"]
+        assert names == [
+            "xgboost_nhl_ml",
+            "lightgbm_nhl_ml",
+            "neural_network_nhl_ml",
+            "hockey_poisson_nhl_ml",
+        ]
 
     def test_nhl_ensemble_name_and_config_match(self):
         assert NHL_MONEYLINE_BUNDLE.ensemble_name == "ensemble_nhl_ml"
@@ -442,16 +449,22 @@ class TestNhlRegulationBundle:
         assert NHL_REGULATION_BUNDLE.load_frame.__name__ == "load_nhl_regulation_frame"
         assert NHL_REGULATION_BUNDLE.feature_columns.__name__ == "get_nhl_regulation_feature_columns"
 
-    def test_excludes_poisson_dixon_coles(self):
-        # Same reasoning as moneyline — Poisson-family models assume
-        # soccer scoring. Hockey-Poisson port is Phase 3d.
+    def test_includes_hockey_poisson_not_dixon_coles(self):
+        # Phase 3d: hockey-Poisson derives P(home reg / tie / away reg)
+        # by integrating the joint goal distribution. Dixon-Coles still
+        # excluded.
         types = {m.config.model_type for m in NHL_REGULATION_BUNDLE.base_models}
-        assert ModelType.POISSON not in types
+        assert ModelType.POISSON in types
         assert ModelType.DIXON_COLES not in types
 
-    def test_three_base_models(self):
+    def test_four_base_models(self):
         names = [m.name for m in NHL_REGULATION_BUNDLE.base_models]
-        assert names == ["xgboost_nhl_reg", "lightgbm_nhl_reg", "neural_network_nhl_reg"]
+        assert names == [
+            "xgboost_nhl_reg",
+            "lightgbm_nhl_reg",
+            "neural_network_nhl_reg",
+            "hockey_poisson_nhl_reg",
+        ]
 
     def test_ensemble_name_and_config_match(self):
         assert NHL_REGULATION_BUNDLE.ensemble_name == "ensemble_nhl_reg"
@@ -537,12 +550,17 @@ class TestNhlPuckLineBundle:
         assert NHL_PUCK_LINE_BUNDLE.load_frame.__name__ == "load_nhl_puck_line_frame"
         assert NHL_PUCK_LINE_BUNDLE.feature_columns.__name__ == "get_nhl_puck_line_feature_columns"
 
-    def test_three_base_models_no_poisson(self):
+    def test_four_base_models_with_hockey_poisson(self):
         types = {m.config.model_type for m in NHL_PUCK_LINE_BUNDLE.base_models}
-        assert ModelType.POISSON not in types
+        assert ModelType.POISSON in types  # hockey-Poisson, the principled answer for puck-line
         assert ModelType.DIXON_COLES not in types
         names = [m.name for m in NHL_PUCK_LINE_BUNDLE.base_models]
-        assert names == ["xgboost_nhl_pl", "lightgbm_nhl_pl", "neural_network_nhl_pl"]
+        assert names == [
+            "xgboost_nhl_pl",
+            "lightgbm_nhl_pl",
+            "neural_network_nhl_pl",
+            "hockey_poisson_nhl_pl",
+        ]
 
     def test_ensemble_name_and_config(self):
         assert NHL_PUCK_LINE_BUNDLE.ensemble_name == "ensemble_nhl_pl"
@@ -620,12 +638,17 @@ class TestNhlTotalBundle:
         assert NHL_TOTAL_BUNDLE.load_frame.__name__ == "load_nhl_total_frame"
         assert NHL_TOTAL_BUNDLE.feature_columns.__name__ == "get_nhl_total_feature_columns"
 
-    def test_three_base_models_no_poisson(self):
+    def test_four_base_models_with_hockey_poisson(self):
         types = {m.config.model_type for m in NHL_TOTAL_BUNDLE.base_models}
-        assert ModelType.POISSON not in types
+        assert ModelType.POISSON in types  # hockey-Poisson directly integrates P(total >= 6)
         assert ModelType.DIXON_COLES not in types
         names = [m.name for m in NHL_TOTAL_BUNDLE.base_models]
-        assert names == ["xgboost_nhl_tot", "lightgbm_nhl_tot", "neural_network_nhl_tot"]
+        assert names == [
+            "xgboost_nhl_tot",
+            "lightgbm_nhl_tot",
+            "neural_network_nhl_tot",
+            "hockey_poisson_nhl_tot",
+        ]
 
     def test_ensemble_name_and_config(self):
         assert NHL_TOTAL_BUNDLE.ensemble_name == "ensemble_nhl_tot"

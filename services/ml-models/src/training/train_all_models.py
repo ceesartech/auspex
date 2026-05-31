@@ -23,6 +23,10 @@ from predictors.model_config import (
     ENSEMBLE_NHL_PUCK_LINE,
     ENSEMBLE_NHL_REGULATION,
     ENSEMBLE_NHL_TOTAL,
+    HOCKEY_POISSON_NHL_MONEYLINE,
+    HOCKEY_POISSON_NHL_PUCK_LINE,
+    HOCKEY_POISSON_NHL_REGULATION,
+    HOCKEY_POISSON_NHL_TOTAL,
     LIGHTGBM_MATCH_OUTCOME,
     LIGHTGBM_NHL_MONEYLINE,
     LIGHTGBM_NHL_PUCK_LINE,
@@ -43,7 +47,7 @@ from predictors.model_config import (
 )
 from predictors.model_registry import ModelRegistry
 from predictors.neural_network import NeuralNetworkMatchPredictor
-from predictors.poisson_models import DixonColesPredictor, PoissonMatchPredictor
+from predictors.poisson_models import DixonColesPredictor, HockeyPoissonPredictor, PoissonMatchPredictor
 from predictors.xgboost_model import XGBoostMatchPredictor
 from training.calibration import ProbabilityCalibrator
 from utils.training_data import (
@@ -125,9 +129,15 @@ NHL_MONEYLINE_BUNDLE = SportBundle(
         ModelSpec("xgboost_nhl_ml", XGBoostMatchPredictor, XGBOOST_NHL_MONEYLINE),
         ModelSpec("lightgbm_nhl_ml", LightGBMMatchPredictor, LIGHTGBM_NHL_MONEYLINE),
         ModelSpec("neural_network_nhl_ml", NeuralNetworkMatchPredictor, NEURAL_NETWORK_NHL_MONEYLINE),
-        # Poisson / Dixon-Coles intentionally absent — both assume soccer
-        # scoring rules. The hockey-Poisson ports to feed NHL totals is
-        # Phase 3d work.
+        # Hockey-Poisson (Phase 3d): joint goal distribution → P(home win
+        # incl OT/SO). Needs home_team/away_team columns (not feature cols)
+        # for its team-attack/defense MLE fit.
+        ModelSpec(
+            "hockey_poisson_nhl_ml",
+            HockeyPoissonPredictor,
+            HOCKEY_POISSON_NHL_MONEYLINE,
+            needs_team_columns=True,
+        ),
     ],
     ensemble_config=ENSEMBLE_NHL_MONEYLINE,
     ensemble_name="ensemble_nhl_ml",
@@ -143,6 +153,12 @@ NHL_REGULATION_BUNDLE = SportBundle(
         ModelSpec("xgboost_nhl_reg", XGBoostMatchPredictor, XGBOOST_NHL_REGULATION),
         ModelSpec("lightgbm_nhl_reg", LightGBMMatchPredictor, LIGHTGBM_NHL_REGULATION),
         ModelSpec("neural_network_nhl_reg", NeuralNetworkMatchPredictor, NEURAL_NETWORK_NHL_REGULATION),
+        ModelSpec(
+            "hockey_poisson_nhl_reg",
+            HockeyPoissonPredictor,
+            HOCKEY_POISSON_NHL_REGULATION,
+            needs_team_columns=True,
+        ),
     ],
     ensemble_config=ENSEMBLE_NHL_REGULATION,
     ensemble_name="ensemble_nhl_reg",
@@ -158,6 +174,15 @@ NHL_PUCK_LINE_BUNDLE = SportBundle(
         ModelSpec("xgboost_nhl_pl", XGBoostMatchPredictor, XGBOOST_NHL_PUCK_LINE),
         ModelSpec("lightgbm_nhl_pl", LightGBMMatchPredictor, LIGHTGBM_NHL_PUCK_LINE),
         ModelSpec("neural_network_nhl_pl", NeuralNetworkMatchPredictor, NEURAL_NETWORK_NHL_PUCK_LINE),
+        # Hockey-Poisson is the principled answer for puck-line: derive
+        # P(home covers -1.5) from the joint goal matrix rather than ask
+        # a classifier to learn margin from coarse features.
+        ModelSpec(
+            "hockey_poisson_nhl_pl",
+            HockeyPoissonPredictor,
+            HOCKEY_POISSON_NHL_PUCK_LINE,
+            needs_team_columns=True,
+        ),
     ],
     ensemble_config=ENSEMBLE_NHL_PUCK_LINE,
     ensemble_name="ensemble_nhl_pl",
@@ -173,6 +198,14 @@ NHL_TOTAL_BUNDLE = SportBundle(
         ModelSpec("xgboost_nhl_tot", XGBoostMatchPredictor, XGBOOST_NHL_TOTAL),
         ModelSpec("lightgbm_nhl_tot", LightGBMMatchPredictor, LIGHTGBM_NHL_TOTAL),
         ModelSpec("neural_network_nhl_tot", NeuralNetworkMatchPredictor, NEURAL_NETWORK_NHL_TOTAL),
+        # Hockey-Poisson directly integrates P(total >= 6) from the joint
+        # goal distribution — the natural framing for over/under markets.
+        ModelSpec(
+            "hockey_poisson_nhl_tot",
+            HockeyPoissonPredictor,
+            HOCKEY_POISSON_NHL_TOTAL,
+            needs_team_columns=True,
+        ),
     ],
     ensemble_config=ENSEMBLE_NHL_TOTAL,
     ensemble_name="ensemble_nhl_tot",
