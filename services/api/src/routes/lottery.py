@@ -1,13 +1,19 @@
-"""Lottery endpoints - draws, analysis, recommendations"""
+"""Lottery endpoints - draws, analysis, combination recommendations.
+
+Analysis + generation logic lives in services/lottery_analysis.py (pure engine)
+behind services/lottery_service.py. IMPORTANT: lottery draws are random; these
+endpoints never forecast a draw — see the engine's DISCLAIMER, surfaced on the
+recommendations response.
+"""
 
 import logging
-from collections import Counter
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from auth.dependencies import require_auth
 from database import get_db
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from models.responses import LotteryAnalysisResponse, LotteryDrawResponse
+from models.responses import LotteryAnalysisResponse, LotteryDrawResponse, LotteryRecommendationsResponse
+from services.lottery_service import LotteryService
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -58,199 +64,41 @@ async def get_lottery_analysis(
     db: Session = Depends(get_db),
     user: dict = Depends(require_auth),
 ) -> LotteryAnalysisResponse:
-    """Get lottery number frequency analysis"""
+    """Hot / cold / overdue numbers plus the historical combination profile."""
 
-    query = text(
-        """
-        SELECT numbers, bonus_number, draw_date
-        FROM lottery_draws
-        WHERE game = :game
-        ORDER BY draw_date DESC
-        LIMIT :num_draws
-    """
-    )
-
-    results = db.execute(query, {"game": game, "num_draws": num_draws}).fetchall()
-
-    if not results:
+    result = LotteryService(db).analyze(game, num_draws=num_draws)
+    if result is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No draw data found for {game}",
         )
-
-    # Frequency analysis
-    number_counts: Counter[int] = Counter()
-    bonus_counts: Counter[int] = Counter()
-
-    for row in results:
-        for num in row.numbers:
-            number_counts[num] += 1
-        bonus_counts[row.bonus_number] += 1
-
-    total_draws = len(results)
-
-    # Determine number range based on game
-    if game == "powerball":
-        main_range = range(1, 70)
-    else:  # mega_millions
-        main_range = range(1, 71)
-
-    # Hot numbers (most frequent)
-    hot = sorted(number_counts.items(), key=lambda x: x[1], reverse=True)[:10]
-    hot_numbers = [
-        {
-            "number": num,
-            "frequency": count,
-            "percentage": round(count / total_draws * 100, 2),
-        }
-        for num, count in hot
-    ]
-
-    # Cold numbers (least frequent)
-    cold = sorted(number_counts.items(), key=lambda x: x[1])[:10]
-    cold_numbers = [
-        {
-            "number": num,
-            "frequency": count,
-            "percentage": round(count / total_draws * 100, 2),
-        }
-        for num, count in cold
-    ]
-
-    # Overdue numbers (not drawn recently)
-    last_seen = {}
-    for i, row in enumerate(results):
-        for num in row.numbers:
-            if num not in last_seen:
-                last_seen[num] = i  # draws ago
-
-    all_numbers = set(main_range)
-    never_drawn = all_numbers - set(number_counts.keys())
-
-    overdue = []
-    for num in never_drawn:
-        overdue.append({"number": num, "draws_since_last": total_draws, "frequency": 0})
-
-    for num, last in sorted(last_seen.items(), key=lambda x: x[1], reverse=True)[:10]:
-        if num not in [o["number"] for o in overdue]:
-            overdue.append(
-                {
-                    "number": num,
-                    "draws_since_last": last,
-                    "frequency": number_counts.get(num, 0),
-                }
-            )
-
-    overdue = sorted(overdue, key=lambda x: x["draws_since_last"], reverse=True)[:10]
-
-    # Full frequency distribution
-    frequency_distribution = {str(num): count for num, count in sorted(number_counts.items())}
-
-    return LotteryAnalysisResponse(
-        game=game,
-        total_draws_analyzed=total_draws,
-        hot_numbers=hot_numbers,
-        cold_numbers=cold_numbers,
-        overdue_numbers=overdue,
-        frequency_distribution=frequency_distribution,
-    )
+    return LotteryAnalysisResponse(**result)
 
 
-@router.post("/recommendations")
+@router.post("/recommendations", response_model=LotteryRecommendationsResponse)
 async def get_lottery_recommendations(
     game: str = Query(..., pattern="^(powerball|mega_millions)$"),
-    strategy: str = Query("balanced", pattern="^(hot|cold|balanced|random)$"),
+    strategy: str = Query("blend", pattern="^(blend|statistical|ev|hot|due|random)$"),
     num_sets: int = Query(5, ge=1, le=20),
+    persist: bool = Query(False, description="Store the generated lines for backtesting."),
+    seed: Optional[int] = Query(None, description="Seed for reproducible generation."),
     db: Session = Depends(get_db),
     user: dict = Depends(require_auth),
-) -> Dict[str, Any]:
-    """Generate lottery number recommendations based on analysis"""
+) -> LotteryRecommendationsResponse:
+    """Generate `num_sets` scored combinations for a strategy.
 
-    import random
-
-    # Get frequency data
-    query = text(
-        """
-        SELECT numbers, bonus_number
-        FROM lottery_draws
-        WHERE game = :game
-        ORDER BY draw_date DESC
-        LIMIT 200
+    Strategies: blend (default — all dimensions), statistical (match the
+    historical winning profile), ev (avoid commonly-picked numbers to maximize
+    expected payout), hot (frequent numbers), due (overdue numbers), random.
+    `score` ranks lines internally; it is NOT a probability of winning.
     """
+
+    result = LotteryService(db).recommend(
+        game,
+        strategy=strategy,
+        num_sets=num_sets,
+        persist=persist,
+        user_id=user.get("user_id"),
+        seed=seed,
     )
-
-    results = db.execute(query, {"game": game}).fetchall()
-
-    number_counts: Counter[int] = Counter()
-    bonus_counts: Counter[int] = Counter()
-
-    for row in results:
-        for num in row.numbers:
-            number_counts[num] += 1
-        bonus_counts[row.bonus_number] += 1
-
-    # Number ranges
-    if game == "powerball":
-        main_max = 69
-        bonus_max = 26
-        pick_count = 5
-    else:
-        main_max = 70
-        bonus_max = 25
-        pick_count = 5
-
-    all_main = list(range(1, main_max + 1))
-    list(range(1, bonus_max + 1))
-
-    recommendations = []
-
-    for _ in range(num_sets):
-        if strategy == "hot":
-            # Pick from most frequent numbers
-            hot = sorted(number_counts.items(), key=lambda x: x[1], reverse=True)
-            pool = [n for n, _ in hot[:20]]
-            numbers = sorted(random.sample(pool, min(pick_count, len(pool))))
-            bonus_hot = sorted(bonus_counts.items(), key=lambda x: x[1], reverse=True)
-            bonus = bonus_hot[0][0] if bonus_hot else random.randint(1, bonus_max)
-
-        elif strategy == "cold":
-            # Pick from least frequent numbers
-            cold = sorted(number_counts.items(), key=lambda x: x[1])
-            pool = [n for n, _ in cold[:20]]
-            missing = [n for n in all_main if n not in number_counts]
-            pool.extend(missing[:5])
-            numbers = sorted(random.sample(pool, min(pick_count, len(pool))))
-            bonus_cold = sorted(bonus_counts.items(), key=lambda x: x[1])
-            bonus = bonus_cold[0][0] if bonus_cold else random.randint(1, bonus_max)
-
-        elif strategy == "balanced":
-            # Mix of hot and cold
-            hot = sorted(number_counts.items(), key=lambda x: x[1], reverse=True)
-            cold = sorted(number_counts.items(), key=lambda x: x[1])
-            hot_pool = [n for n, _ in hot[:15]]
-            cold_pool = [n for n, _ in cold[:15]]
-            hot_picks = random.sample(hot_pool, min(3, len(hot_pool)))
-            remaining = [n for n in cold_pool if n not in hot_picks]
-            cold_picks = random.sample(remaining, min(2, len(remaining)))
-            numbers = sorted(hot_picks + cold_picks)
-            bonus = random.randint(1, bonus_max)
-
-        else:  # random
-            numbers = sorted(random.sample(all_main, pick_count))
-            bonus = random.randint(1, bonus_max)
-
-        recommendations.append(
-            {
-                "numbers": numbers,
-                "bonus_number": bonus,
-                "strategy": strategy,
-            }
-        )
-
-    return {
-        "game": game,
-        "strategy": strategy,
-        "total_draws_analyzed": len(results),
-        "recommendations": recommendations,
-        "disclaimer": "Lottery numbers are random. Past frequency does not predict future draws. Play responsibly.",
-    }
+    return LotteryRecommendationsResponse(**result)

@@ -82,4 +82,23 @@ export interface LotteryAnalysis {
   cold_numbers: { number: number; frequency: number; percentage: number }[];
   overdue_numbers: { number: number; draws_since_last: number; frequency: number }[];
   frequency_distribution: Record<string, number>;
+  profile?: Record<string, unknown>;
+}
+
+export interface LotteryCombination {
+  numbers: number[];
+  bonus_number: number;
+  score: number;
+  strategy: string;
+  rationale: string;
+  features: Record<string, number>;
+}
+
+export interface LotteryRecommendations {
+  game: string;
+  strategy: string;
+  total_draws_analyzed: number;
+  generated_at: string;
+  combinations: LotteryCombination[];
+  disclaimer: string;
 }

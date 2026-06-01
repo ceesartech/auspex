@@ -109,6 +109,9 @@ db-migrate:
 	docker-compose exec postgres psql -U betting_user -d betting_system -f /docker-entrypoint-initdb.d/005_predictions_unique_constraint.sql
 	docker-compose exec postgres psql -U betting_user -d betting_system -f /docker-entrypoint-initdb.d/006_nhl_match_stats.sql
 	docker-compose exec postgres psql -U betting_user -d betting_system -f /docker-entrypoint-initdb.d/007_market_types_expansion.sql
+	docker-compose exec postgres psql -U betting_user -d betting_system -f /docker-entrypoint-initdb.d/008_nhl_goalie_features.sql
+	docker-compose exec postgres psql -U betting_user -d betting_system -f /docker-entrypoint-initdb.d/009_nhl_5v5_advanced_stats.sql
+	docker-compose exec postgres psql -U betting_user -d betting_system -f /docker-entrypoint-initdb.d/010_lottery_predictions.sql
 
 db-reset:
 	@echo "WARNING: This will delete all data. Press Ctrl+C to cancel."

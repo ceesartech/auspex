@@ -1,9 +1,11 @@
 'use client';
 
 import { useState } from 'react';
-import { useLotteryDraws, useLotteryAnalysis } from '@/lib/hooks/use-recommendations';
+import { useLotteryDraws, useLotteryAnalysis, useLotteryRecommendations } from '@/lib/hooks/use-recommendations';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Select } from '@/components/ui/select';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { LoadingPage } from '@/components/shared/loading';
@@ -12,8 +14,20 @@ import { EmptyState } from '@/components/shared/empty-state';
 import { formatCurrency, formatDate } from '@/lib/utils/format';
 import { Ticket } from 'lucide-react';
 
+const strategyOptions = [
+  { value: 'blend', label: 'Balanced blend' },
+  { value: 'ev', label: 'EV / unpopular' },
+  { value: 'statistical', label: 'Statistical profile' },
+  { value: 'hot', label: 'Hot numbers' },
+  { value: 'due', label: 'Overdue numbers' },
+  { value: 'random', label: 'Quick pick' },
+];
+
 export default function LotteryPage() {
   const [game, setGame] = useState('powerball');
+  const [strategy, setStrategy] = useState('blend');
+  const [numSets, setNumSets] = useState(5);
+  const generate = useLotteryRecommendations();
   const { data: draws, isLoading, error, refetch } = useLotteryDraws(game, 20);
   const { data: analysis } = useLotteryAnalysis(game);
 
@@ -84,6 +98,65 @@ export default function LotteryPage() {
           </Card>
         </div>
       )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Generate Combinations</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-end gap-3">
+            <Select
+              options={strategyOptions}
+              value={strategy}
+              onChange={(e) => setStrategy(e.target.value)}
+              className="w-[200px]"
+            />
+            <Input
+              type="number"
+              min="1"
+              max="20"
+              value={numSets}
+              onChange={(e) => setNumSets(Math.min(20, Math.max(1, Number(e.target.value) || 1)))}
+              className="w-[100px]"
+            />
+            <Button
+              onClick={() => generate.mutate({ game, strategy, numSets })}
+              disabled={generate.isPending}
+            >
+              {generate.isPending ? 'Generating…' : `Generate ${numSets}`}
+            </Button>
+          </div>
+
+          {generate.isError && (
+            <p className="text-sm text-destructive">Failed to generate combinations.</p>
+          )}
+
+          {generate.data && (
+            <div className="space-y-3">
+              <div className="rounded-md border border-amber-300/50 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-200">
+                {generate.data.disclaimer}
+              </div>
+              {generate.data.combinations.map((combo, i) => (
+                <div key={i} className="flex flex-wrap items-center gap-2 rounded-lg border p-3">
+                  {combo.numbers.map((n) => (
+                    <span
+                      key={n}
+                      className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground"
+                    >
+                      {n}
+                    </span>
+                  ))}
+                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-destructive text-xs font-bold text-destructive-foreground">
+                    {combo.bonus_number}
+                  </span>
+                  <Badge variant="secondary">score {combo.score.toFixed(2)}</Badge>
+                  <span className="text-xs text-muted-foreground">{combo.rationale}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

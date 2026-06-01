@@ -122,6 +122,36 @@ class LotteryAnalysisResponse(BaseModel):
     cold_numbers: List[Dict[str, Any]]
     overdue_numbers: List[Dict[str, Any]]
     frequency_distribution: Dict[str, int]
+    # Historical combination profile (sum/odd-even/low-high/spread stats + top
+    # co-occurring pairs). Optional so older clients keep working.
+    profile: Optional[Dict[str, Any]] = None
+
+
+class LotteryCombination(BaseModel):
+    """One generated lottery line with its feature breakdown."""
+
+    numbers: List[int]
+    bonus_number: int
+    score: float
+    strategy: str
+    rationale: str
+    features: Dict[str, float]
+
+
+class LotteryRecommendationsResponse(BaseModel):
+    """A set of generated lottery combinations.
+
+    NOTE: `score` ranks lines by statistical-profile fit and expected value
+    (jackpot-share avoidance); it is NOT a probability of winning. Lottery draws
+    are random — see `disclaimer`.
+    """
+
+    game: str
+    strategy: str
+    total_draws_analyzed: int
+    generated_at: datetime
+    combinations: List[LotteryCombination]
+    disclaimer: str
 
 
 class DashboardResponse(BaseModel):

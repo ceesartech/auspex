@@ -10,6 +10,42 @@ from .base_scraper import BaseScraper
 logger = logging.getLogger(__name__)
 
 
+def _parse_jackpot_dollars(jackpot_str: str) -> float:
+    """Parse a jackpot string (e.g. '$50 Million', '$1.2 Billion') to dollars,
+    matching lottery_draws.jackpot_amount which is DECIMAL dollars."""
+    match = re.search(r"\$?([\d.]+)\s*(million|billion)?", jackpot_str, re.I)
+    if not match:
+        return 0.0
+    amount = float(match.group(1))
+    unit = match.group(2).lower() if match.group(2) else ""
+    if "million" in unit:
+        return amount * 1_000_000
+    if "billion" in unit:
+        return amount * 1_000_000_000
+    return amount
+
+
+def _save_lottery_draw(db, draw_data: Dict) -> None:
+    """Insert a draw into lottery_draws using the actual schema columns
+    (game, draw_date, numbers, bonus_number, jackpot_amount). Idempotent on
+    (game, draw_date)."""
+    query = """
+        INSERT INTO lottery_draws (game, draw_date, numbers, bonus_number, jackpot_amount)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (game, draw_date) DO NOTHING
+    """
+    db.execute_query(
+        query,
+        (
+            draw_data["game"],
+            draw_data["draw_date"],
+            draw_data["numbers"],
+            draw_data["bonus_number"],
+            draw_data.get("jackpot_amount"),
+        ),
+    )
+
+
 class PowerballScraper(BaseScraper):
     """Scrape Powerball lottery draws"""
 
@@ -29,7 +65,7 @@ class PowerballScraper(BaseScraper):
             try:
                 draw_data = self._parse_powerball_draw(item)
                 if draw_data:
-                    self._save_lottery_draw(draw_data)
+                    _save_lottery_draw(self.db, draw_data)
                     draws_scraped += 1
             except Exception as e:
                 logger.error(f"Error parsing Powerball draw: {e}")
@@ -54,55 +90,15 @@ class PowerballScraper(BaseScraper):
 
         # Extract jackpot
         jackpot_str = item.find("div", class_="jackpot-amount").text.strip()
-        jackpot = self._parse_jackpot(jackpot_str)
+        jackpot = _parse_jackpot_dollars(jackpot_str)
 
         return {
-            "lottery_type": "powerball",
+            "game": "powerball",
             "draw_date": draw_date,
             "numbers": numbers,
-            "powerball": powerball,
-            "jackpot": jackpot,
+            "bonus_number": powerball,
+            "jackpot_amount": jackpot,
         }
-
-    def _parse_jackpot(self, jackpot_str: str) -> int:
-        """Parse jackpot string to cents"""
-        # "$50 Million" -> 5000000000 cents
-        match = re.search(r"\$?([\d.]+)\s*(million|billion)?", jackpot_str, re.I)
-
-        if not match:
-            return 0
-
-        amount = float(match.group(1))
-        unit = match.group(2).lower() if match.group(2) else ""
-
-        if "million" in unit:
-            return int(amount * 1_000_000 * 100)
-        elif "billion" in unit:
-            return int(amount * 1_000_000_000 * 100)
-        else:
-            return int(amount * 100)
-
-    def _save_lottery_draw(self, draw_data: Dict):
-        """Save lottery draw to database"""
-
-        query = """
-            INSERT INTO lottery_draws
-            (lottery_type, draw_date, numbers, powerball, megaball, jackpot)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (lottery_type, draw_date) DO NOTHING
-        """
-
-        self.db.execute_query(
-            query,
-            (
-                draw_data["lottery_type"],
-                draw_data["draw_date"],
-                draw_data["numbers"],
-                draw_data.get("powerball"),
-                draw_data.get("megaball"),
-                draw_data["jackpot"],
-            ),
-        )
 
 
 class MegaMillionsScraper(BaseScraper):
@@ -123,7 +119,7 @@ class MegaMillionsScraper(BaseScraper):
             try:
                 draw_data = self._parse_mega_millions_draw(item)
                 if draw_data:
-                    self._save_lottery_draw(draw_data)
+                    _save_lottery_draw(self.db, draw_data)
                     draws_scraped += 1
             except Exception as e:
                 logger.error(f"Error parsing Mega Millions draw: {e}")
@@ -148,51 +144,12 @@ class MegaMillionsScraper(BaseScraper):
 
         # Extract jackpot
         jackpot_elem = item.find("div", class_="jackpot-amount")
-        jackpot = self._parse_jackpot(jackpot_elem.text.strip()) if jackpot_elem else 0
+        jackpot = _parse_jackpot_dollars(jackpot_elem.text.strip()) if jackpot_elem else 0.0
 
         return {
-            "lottery_type": "mega_millions",
+            "game": "mega_millions",
             "draw_date": draw_date,
             "numbers": numbers,
-            "megaball": megaball,
-            "jackpot": jackpot,
+            "bonus_number": megaball,
+            "jackpot_amount": jackpot,
         }
-
-    def _parse_jackpot(self, jackpot_str: str) -> int:
-        """Parse jackpot string to cents"""
-        match = re.search(r"\$?([\d.]+)\s*(million|billion)?", jackpot_str, re.I)
-
-        if not match:
-            return 0
-
-        amount = float(match.group(1))
-        unit = match.group(2).lower() if match.group(2) else ""
-
-        if "million" in unit:
-            return int(amount * 1_000_000 * 100)
-        elif "billion" in unit:
-            return int(amount * 1_000_000_000 * 100)
-        else:
-            return int(amount * 100)
-
-    def _save_lottery_draw(self, draw_data: Dict):
-        """Save lottery draw to database"""
-
-        query = """
-            INSERT INTO lottery_draws
-            (lottery_type, draw_date, numbers, powerball, megaball, jackpot)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (lottery_type, draw_date) DO NOTHING
-        """
-
-        self.db.execute_query(
-            query,
-            (
-                draw_data["lottery_type"],
-                draw_data["draw_date"],
-                draw_data["numbers"],
-                draw_data.get("powerball"),
-                draw_data.get("megaball"),
-                draw_data["jackpot"],
-            ),
-        )
