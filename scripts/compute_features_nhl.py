@@ -576,9 +576,14 @@ def _rolling_5v5_stats(cur, team_id: str, before_date, side: str) -> dict:
             AVG(goals_against)::float    AS goals_against,
             AVG(xg_for)::float           AS xg_for,
             AVG(xg_against)::float       AS xg_against,
-            -- CF% = total Corsi-for / (total CF + total CA), aggregated
-            -- across games (not avg of per-game ratios) so a 1-shot game
-            -- doesn't dominate the window.
+            -- Corsi-for ratio = total Corsi-for / (total CF + total CA),
+            -- aggregated across games (not avg of per-game ratios) so a
+            -- 1-shot game does not dominate the window. The percent
+            -- character is intentionally avoided throughout this SQL
+            -- comment block; psycopg2 scans the entire query string
+            -- for parameter markers and treats a bare percent sign as
+            -- a malformed format token, raising the "argument formats
+            -- can't be mixed" error even inside comments.
             CASE WHEN (SUM(corsi_for) + SUM(corsi_against)) > 0
                  THEN SUM(corsi_for)::float / (SUM(corsi_for) + SUM(corsi_against))
                  ELSE NULL
