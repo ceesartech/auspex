@@ -75,10 +75,13 @@ with DAG(
 
     fetch_upcoming >> compute_features >> precompute_predictions >> generate_recommendations
 
-    # ── NHL branch (Phase 2: ingestion + features only) ───────────
-    # Prediction task lands when the NHL ensemble ships in Phase 3.
-    # Until then this branch just keeps matches + features fresh so
-    # the model has a target to train against the moment it's ready.
+    # ── NHL branch (Phase 4a: full ingest → features → predictions) ─
+    # Predict task runs all 4 NHL ensembles (moneyline, regulation,
+    # puck-line, total) per match via the Phase 4a TASKS registry and
+    # writes one prediction row per task. Telegram alerts stay
+    # soccer-only until Phase 4d ships a sport-aware notification
+    # template; recommendations also stay soccer-only until the
+    # NHL-aware generate_recommendations equivalent lands.
     fetch_upcoming_nhl = BashOperator(
         task_id="fetch_upcoming_nhl",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport nhl --days 14",
@@ -89,4 +92,9 @@ with DAG(
         bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_nhl.py --days 14",
     )
 
-    fetch_upcoming_nhl >> compute_features_nhl
+    precompute_predictions_nhl = BashOperator(
+        task_id="precompute_predictions_nhl",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/precompute_predictions_nhl.py --days 14",
+    )
+
+    fetch_upcoming_nhl >> compute_features_nhl >> precompute_predictions_nhl
