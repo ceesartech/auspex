@@ -33,6 +33,12 @@ class PredictionResponse(BaseModel):
     timestamp: datetime
     explanation: Optional[Dict[str, Any]] = None
     alternate_models: Optional[List[Dict[str, Any]]] = None
+    # Which market this prediction is for — populated by the
+    # per-match endpoint so the frontend can render NHL's 4 markets in
+    # parallel without re-deriving market from prediction_type strings.
+    # Optional + None default to stay backwards-compatible with cached
+    # responses that pre-date this field.
+    market: Optional[str] = None
 
 
 class RecommendationResponse(BaseModel):

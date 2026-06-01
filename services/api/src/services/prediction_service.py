@@ -524,9 +524,34 @@ class PredictionService:
         self,
         sport: Optional[str] = None,
         league: Optional[str] = None,
+        market: Optional[str] = None,
         limit: int = 20,
     ) -> List[PredictionResponse]:
-        """Get predictions for upcoming matches"""
+        """Get predictions for upcoming matches.
+
+        With NHL's 4 markets per match, calling this without any filter
+        for NHL would return 4× as many rows as matches and rapidly hit
+        the limit. To keep the list "one row per match" by default, NHL
+        without an explicit market filter defaults to moneyline (the
+        headline). Soccer's only market is match_result so the default
+        is harmless there. Set `market` explicitly to override (e.g.
+        market='puck_line' for NHL puck-line predictions only).
+        """
+
+        # Map the friendly market name through the TASKS registry to the
+        # DB prediction_type value. Unknown markets pass through to the
+        # SQL filter unchanged so callers can target prediction_type
+        # values that don't have a TaskSpec yet (forward-compat).
+        prediction_type: Optional[str] = None
+        if market is not None:
+            matched_task = next(
+                (t for t in TASKS.values() if t.sport == (sport or t.sport) and t.market == market),
+                None,
+            )
+            prediction_type = matched_task.prediction_type if matched_task else market
+        elif sport == "nhl":
+            # Default the NHL list to moneyline so one row per match.
+            prediction_type = TASKS["nhl:moneyline"].prediction_type
 
         query = text(
             """
@@ -544,13 +569,22 @@ class PredictionService:
             WHERE m.status = 'scheduled' AND m.match_date > NOW()
             AND (:sport IS NULL OR l.sport = :sport)
             AND (:league IS NULL OR l.name = :league)
+            AND (:prediction_type IS NULL OR p.prediction_type = :prediction_type)
             ORDER BY m.match_date ASC
             LIMIT :limit
         """
         )
 
         db = self._require_db()
-        results = db.execute(query, {"sport": sport, "league": league, "limit": limit}).fetchall()
+        results = db.execute(
+            query,
+            {
+                "sport": sport,
+                "league": league,
+                "prediction_type": prediction_type,
+                "limit": limit,
+            },
+        ).fetchall()
 
         predictions = []
         for row in results:
@@ -569,6 +603,84 @@ class PredictionService:
                     confidence=float(row.confidence),
                     model_version=row.model_version,
                     timestamp=datetime.utcnow(),
+                )
+            )
+
+        return predictions
+
+    def get_match_predictions(self, match_id: str) -> List[PredictionResponse]:
+        """Return every stored prediction for a single match — one row
+        per (model, prediction_type). Soccer matches have a single
+        match_result row; NHL matches return up to four (moneyline,
+        regulation, puck_line, total). Ordered by prediction_type so
+        the frontend can rely on a stable display order.
+
+        Raises ValueError if the match itself doesn't exist. An empty
+        list (vs. ValueError) means the match exists but predictions
+        haven't been precomputed yet — that's the "freshly fetched but
+        not yet scored" window and the caller can render a pending UI.
+        """
+
+        # Verify the match exists before returning an empty list — lets
+        # the caller distinguish "no predictions yet" from "bad ID".
+        db = self._require_db()
+        exists = db.execute(
+            text("SELECT 1 FROM matches WHERE id = :match_id"),
+            {"match_id": match_id},
+        ).fetchone()
+        if not exists:
+            raise ValueError(f"Match {match_id} not found")
+
+        query = text(
+            """
+            SELECT p.id, p.match_id, p.predicted_outcome, p.confidence,
+                   p.probabilities, p.model_name, p.model_version,
+                   p.prediction_type,
+                   m.match_date, m.venue,
+                   l.name as league_name,
+                   ht.name as home_team, at.name as away_team
+            FROM predictions p
+            JOIN matches m ON p.match_id = m.id
+            JOIN leagues l ON m.league_id = l.id
+            JOIN teams ht ON m.home_team_id = ht.id
+            JOIN teams at ON m.away_team_id = at.id
+            WHERE p.match_id = :match_id
+            ORDER BY p.prediction_type ASC
+        """
+        )
+
+        results = db.execute(query, {"match_id": match_id}).fetchall()
+
+        # Map (ensemble_name, prediction_type) → friendly market name.
+        # Keying on ensemble_name alone would work today but tomorrow
+        # two ensembles could share a name across sports; keying on
+        # prediction_type alone is ambiguous (soccer match_result vs
+        # NHL regulation both serialize as 'match_result'). The pair
+        # is unique per TaskSpec.
+        ensemble_to_market = {(t.ensemble_name, t.prediction_type): t.market for t in TASKS.values()}
+
+        predictions = []
+        for row in results:
+            market_label = ensemble_to_market.get(
+                (row.model_name, row.prediction_type),
+                row.prediction_type,
+            )
+            predictions.append(
+                PredictionResponse(
+                    match_info=MatchInfo(
+                        match_id=str(row.match_id),
+                        league_name=row.league_name,
+                        home_team=row.home_team,
+                        away_team=row.away_team,
+                        match_date=row.match_date,
+                        venue=row.venue,
+                    ),
+                    predicted_outcome=row.predicted_outcome,
+                    probabilities=dict(row.probabilities or {}),
+                    confidence=float(row.confidence),
+                    model_version=row.model_version,
+                    timestamp=datetime.utcnow(),
+                    market=market_label,
                 )
             )
 

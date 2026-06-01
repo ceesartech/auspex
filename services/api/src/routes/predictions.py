@@ -101,17 +101,60 @@ async def get_bulk_predictions(
 
 @router.get("/upcoming", response_model=List[PredictionResponse])
 async def get_upcoming_predictions(
-    sport: Optional[str] = Query(None),
-    league: Optional[str] = Query(None),
+    sport: Optional[str] = Query(None, description="Filter by sport ('soccer' or 'nhl')."),
+    league: Optional[str] = Query(None, description="Filter by league name (exact match)."),
+    market: Optional[str] = Query(
+        None,
+        description=(
+            "Filter by market — e.g. 'moneyline', 'regulation', 'puck_line', "
+            "'total' for NHL, 'match_result' for soccer. Omit to get the "
+            "default headline market per sport (soccer→match_result, "
+            "nhl→moneyline)."
+        ),
+    ),
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
     user: dict = Depends(require_auth),
 ):
-    """Get predictions for upcoming matches"""
+    """Get predictions for upcoming matches.
+
+    With market omitted, returns one prediction per match (the headline
+    market for each sport). With market set, returns predictions for
+    that market only — useful for sport-specific dashboards.
+    """
 
     prediction_service = PredictionService(db)
 
-    predictions = prediction_service.get_upcoming_predictions(sport=sport, league=league, limit=limit)
+    predictions = prediction_service.get_upcoming_predictions(
+        sport=sport,
+        league=league,
+        market=market,
+        limit=limit,
+    )
+
+    return predictions
+
+
+@router.get("/match/{match_id}", response_model=List[PredictionResponse])
+async def get_match_predictions(
+    match_id: str,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_auth),
+):
+    """Return every market's prediction for a single match.
+
+    Soccer matches have one row (match_result); NHL matches have up to
+    four (moneyline, regulation, puck_line, total). The frontend uses
+    this to render a multi-market card per game without having to make
+    one /upcoming call per market.
+    """
+
+    prediction_service = PredictionService(db)
+
+    try:
+        predictions = prediction_service.get_match_predictions(match_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
     return predictions
 

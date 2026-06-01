@@ -121,6 +121,120 @@ class TestPredictionService:
         assert predictions[0].predicted_outcome == "home"
         assert predictions[0].match_info.home_team == "Arsenal"
 
+    def test_get_upcoming_predictions_nhl_default_market_is_moneyline(self, mock_db, mock_row, mock_settings):
+        """NHL without an explicit market should default to moneyline so
+        one row per match — without this filter, 4 markets × N matches
+        would saturate the limit."""
+        from services.prediction_service import PredictionService
+
+        mock_db.execute.return_value.fetchall.return_value = []
+        service = PredictionService(mock_db)
+
+        service.get_upcoming_predictions(sport="nhl", limit=10)
+
+        # Last call's params is the SQL execute — assert it pinned
+        # prediction_type to 'moneyline' even though caller didn't pass it.
+        call_args = mock_db.execute.call_args
+        assert call_args is not None
+        assert call_args[0][1]["prediction_type"] == "moneyline"
+
+    def test_get_upcoming_predictions_explicit_market_overrides_default(self, mock_db, mock_row, mock_settings):
+        """Explicit market='puck_line' should map to prediction_type='spread'
+        via the TASKS registry."""
+        from services.prediction_service import PredictionService
+
+        mock_db.execute.return_value.fetchall.return_value = []
+        service = PredictionService(mock_db)
+
+        service.get_upcoming_predictions(sport="nhl", market="puck_line", limit=10)
+
+        call_args = mock_db.execute.call_args
+        assert call_args is not None
+        assert call_args[0][1]["prediction_type"] == "spread"
+
+    def test_get_upcoming_predictions_soccer_no_market_filter(self, mock_db, mock_row, mock_settings):
+        """Soccer is single-market so we don't auto-filter — the SQL
+        gets prediction_type=None and the AND clause short-circuits."""
+        from services.prediction_service import PredictionService
+
+        mock_db.execute.return_value.fetchall.return_value = []
+        service = PredictionService(mock_db)
+
+        service.get_upcoming_predictions(sport="soccer", limit=10)
+
+        call_args = mock_db.execute.call_args
+        assert call_args is not None
+        assert call_args[0][1]["prediction_type"] is None
+
+    def test_get_match_predictions_returns_all_markets(self, mock_db, mock_row, mock_settings):
+        """NHL match returns all 4 markets ordered by prediction_type."""
+        from services.prediction_service import PredictionService
+
+        match_uuid = uuid.uuid4()
+
+        existence_row = mock_row(exists=True)
+        prediction_rows = [
+            mock_row(
+                id=uuid.uuid4(),
+                match_id=match_uuid,
+                predicted_outcome="home",
+                confidence=0.58,
+                probabilities={"home": 0.58, "away": 0.42},
+                model_name="ensemble_nhl_ml",
+                model_version="v1.0",
+                prediction_type="moneyline",
+                match_date=datetime(2025, 3, 15, 19, 0),
+                venue="Bell Centre",
+                league_name="NHL",
+                home_team="Canadiens",
+                away_team="Rangers",
+            ),
+            mock_row(
+                id=uuid.uuid4(),
+                match_id=match_uuid,
+                predicted_outcome="over",
+                confidence=0.54,
+                probabilities={"over": 0.54, "under": 0.46},
+                model_name="ensemble_nhl_tot",
+                model_version="v1.0",
+                prediction_type="total",
+                match_date=datetime(2025, 3, 15, 19, 0),
+                venue="Bell Centre",
+                league_name="NHL",
+                home_team="Canadiens",
+                away_team="Rangers",
+            ),
+        ]
+
+        call_count = [0]
+
+        def side_effect(query, params=None):
+            call_count[0] += 1
+            result = MagicMock()
+            if call_count[0] == 1:  # existence check
+                result.fetchone.return_value = existence_row
+            else:  # prediction rows
+                result.fetchall.return_value = prediction_rows
+            return result
+
+        mock_db.execute.side_effect = side_effect
+
+        service = PredictionService(mock_db)
+        predictions = service.get_match_predictions(str(match_uuid))
+
+        assert len(predictions) == 2
+        assert predictions[0].market == "moneyline"
+        assert predictions[1].market == "total"
+
+    def test_get_match_predictions_match_not_found(self, mock_db, mock_settings):
+        from services.prediction_service import PredictionService
+
+        mock_db.execute.return_value.fetchone.return_value = None
+        service = PredictionService(mock_db)
+
+        with pytest.raises(ValueError, match="not found"):
+            service.get_match_predictions(str(uuid.uuid4()))
+
     def test_get_live_predictions_empty(self, mock_db, mock_settings):
         from services.prediction_service import PredictionService
 
