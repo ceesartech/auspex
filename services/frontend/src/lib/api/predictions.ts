@@ -20,6 +20,7 @@ export const predictionsApi = {
   async getUpcomingPredictions(params?: {
     sport?: string;
     league?: string;
+    market?: string;
     limit?: number;
   }): Promise<Prediction[]> {
     const { data } = await apiClient.get('/api/v1/predictions/upcoming', { params });
@@ -28,6 +29,13 @@ export const predictionsApi = {
 
   async getLivePredictions(): Promise<Prediction[]> {
     const { data } = await apiClient.get('/api/v1/predictions/live');
+    return data;
+  },
+
+  async getMatchPredictions(matchId: string): Promise<Prediction[]> {
+    // Returns every market's prediction for one match. NHL matches yield up
+    // to 4 rows (moneyline, regulation, puck_line, total); soccer yields 1.
+    const { data } = await apiClient.get(`/api/v1/predictions/match/${matchId}`);
     return data;
   },
 

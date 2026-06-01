@@ -102,6 +102,7 @@ class TestPredictionService:
                 probabilities={"home": 0.55, "draw": 0.25, "away": 0.20},
                 model_name="ensemble",
                 model_version="v1.0",
+                prediction_type="match_result",
                 features_used={},
                 feature_importance={},
                 match_date=datetime(2025, 3, 15, 15, 0),
@@ -120,6 +121,9 @@ class TestPredictionService:
         assert len(predictions) == 1
         assert predictions[0].predicted_outcome == "home"
         assert predictions[0].match_info.home_team == "Arsenal"
+        # Soccer match_result row should be labeled 'match_result' via
+        # the (ensemble_name, prediction_type) → market mapping.
+        assert predictions[0].market == "match_result"
 
     def test_get_upcoming_predictions_nhl_default_market_is_moneyline(self, mock_db, mock_row, mock_settings):
         """NHL without an explicit market should default to moneyline so

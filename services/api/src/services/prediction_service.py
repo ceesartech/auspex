@@ -557,6 +557,7 @@ class PredictionService:
             """
             SELECT p.id, p.match_id, p.predicted_outcome, p.confidence,
                    p.probabilities, p.model_name, p.model_version,
+                   p.prediction_type,
                    p.features_used, p.feature_importance,
                    m.match_date, m.venue,
                    l.name as league_name,
@@ -586,8 +587,17 @@ class PredictionService:
             },
         ).fetchall()
 
+        # Same (ensemble_name, prediction_type) → market mapping used by
+        # get_match_predictions; keeps both endpoints labeling rows
+        # consistently for the frontend.
+        ensemble_to_market = {(t.ensemble_name, t.prediction_type): t.market for t in TASKS.values()}
+
         predictions = []
         for row in results:
+            market_label = ensemble_to_market.get(
+                (row.model_name, row.prediction_type),
+                row.prediction_type,
+            )
             predictions.append(
                 PredictionResponse(
                     match_info=MatchInfo(
@@ -603,6 +613,7 @@ class PredictionService:
                     confidence=float(row.confidence),
                     model_version=row.model_version,
                     timestamp=datetime.utcnow(),
+                    market=market_label,
                 )
             )
 

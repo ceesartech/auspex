@@ -12,21 +12,40 @@ interface PredictionCardProps {
   compact?: boolean;
 }
 
+// Human-readable label for the API's `market` value. The API uses
+// snake_case (puck_line, match_result) — translate to display strings
+// here so the card stays presentational.
+const MARKET_LABELS: Record<string, string> = {
+  moneyline: 'Moneyline',
+  regulation: 'Regulation',
+  puck_line: 'Puck Line',
+  total: 'Total O/U',
+  match_result: '1X2',
+};
+
 export function PredictionCard({ prediction, compact = false }: PredictionCardProps) {
-  const { match_info, predicted_outcome, probabilities, confidence, timestamp } = prediction;
+  const { match_info, predicted_outcome, probabilities, confidence, timestamp, market } = prediction;
   const outcomeColor = getOutcomeColor(predicted_outcome);
   const confidenceLevel = formatConfidenceLevel(confidence);
 
   const confidenceVariant = confidence >= 0.7 ? 'success' : confidence >= 0.5 ? 'warning' : 'secondary';
+  const marketLabel = market ? (MARKET_LABELS[market] ?? market) : null;
 
   return (
     <Link href={`/predictions/${match_info.match_id}`}>
       <Card className="transition-all hover:shadow-md hover:border-primary/50">
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
-            <Badge variant="outline" className="text-xs">
-              {match_info.league_name}
-            </Badge>
+            <div className="flex items-center gap-2">
+              <Badge variant="outline" className="text-xs">
+                {match_info.league_name}
+              </Badge>
+              {marketLabel && (
+                <Badge variant="secondary" className="text-xs">
+                  {marketLabel}
+                </Badge>
+              )}
+            </div>
             <Badge variant={confidenceVariant} className="text-xs">
               {confidenceLevel}
             </Badge>

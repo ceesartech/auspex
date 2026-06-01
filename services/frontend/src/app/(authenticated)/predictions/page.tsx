@@ -11,9 +11,10 @@ import { Badge } from '@/components/ui/badge';
 import { TrendingUp } from 'lucide-react';
 
 export default function PredictionsPage() {
-  const { selectedSport } = usePredictionsStore();
+  const { selectedSport, selectedMarket } = usePredictionsStore();
   const { data: upcoming, isLoading, error, refetch } = useUpcomingPredictions({
     sport: selectedSport || undefined,
+    market: selectedMarket || undefined,
     limit: 50,
   });
   const { data: live } = useLivePredictions();

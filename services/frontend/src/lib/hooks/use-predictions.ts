@@ -7,12 +7,24 @@ import { Prediction } from '@/lib/types/prediction';
 export function useUpcomingPredictions(params?: {
   sport?: string;
   league?: string;
+  market?: string;
   limit?: number;
 }) {
   return useQuery({
     queryKey: ['predictions', 'upcoming', params],
     queryFn: () => predictionsApi.getUpcomingPredictions(params),
     refetchInterval: 60000,
+  });
+}
+
+export function useMatchPredictions(matchId: string) {
+  // All markets for a single match. Useful on the detail screen so the
+  // NHL multi-market card can render moneyline/regulation/puck_line/total
+  // side-by-side without making one /upcoming call per market.
+  return useQuery({
+    queryKey: ['predictions', 'match', matchId],
+    queryFn: () => predictionsApi.getMatchPredictions(matchId),
+    enabled: !!matchId,
   });
 }
 
