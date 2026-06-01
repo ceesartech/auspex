@@ -43,10 +43,13 @@ class TestPredictionService:
 
         match_id = str(uuid.uuid4())
 
-        # Mock match data query
+        # Mock match data query. Phase 4a adds leagues.sport to the
+        # SELECT so predict_match can route NHL matches to the right
+        # task ensemble; soccer rows default to sport="soccer".
         match_result = mock_row(
             id=uuid.UUID(match_id),
             league_name="Premier League",
+            sport="soccer",
             home_team="Arsenal",
             away_team="Chelsea",
             match_date=datetime(2025, 3, 15, 15, 0),
