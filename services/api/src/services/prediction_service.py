@@ -134,7 +134,23 @@ def _predict_one(model, features: Dict[str, Any], labels: List[str]) -> Dict[str
     """
     import pandas as pd
 
-    X = pd.DataFrame([features])
+    # Mirror every key into its feature__-prefixed form. The training
+    # queries SELECT raw columns (odds_home_ml, etc.) alongside the
+    # features_cache JSONB which gets flattened to feature__* names via
+    # utils.training_data._flatten_features. So each trained model's
+    # feature_names list contains BOTH versions. The features dict we
+    # get here comes only from the JSONB blob (unprefixed). Mirroring
+    # both forms lets the model's X[self.feature_names] lookup find
+    # every column it expects. Existing feature__X entries are left
+    # alone.
+    X_dict: Dict[str, Any] = {}
+    for k, v in features.items():
+        X_dict[k] = v
+        prefixed = k if k.startswith("feature__") else f"feature__{k}"
+        if prefixed not in X_dict:
+            X_dict[prefixed] = v
+    X = pd.DataFrame([X_dict])
+
     proba = model.predict_proba(X)[0]
     if len(proba) != len(labels):
         raise ValueError(
