@@ -2,7 +2,12 @@
 
 import pandas as pd
 import pytest
-from utils.training_data import get_feature_columns, prepare_training_frame, validate_training_frame
+from utils.training_data import (
+    DEFAULT_TRAINING_QUERY,
+    get_feature_columns,
+    prepare_training_frame,
+    validate_training_frame,
+)
 
 
 def test_prepare_training_frame_flattens_features_and_derives_target():
@@ -67,3 +72,17 @@ def test_validate_training_frame_rejects_missing_features():
 
     with pytest.raises(ValueError, match="numeric features"):
         validate_training_frame(frame, min_samples=4, min_feature_count=1)
+
+
+def test_default_training_query_is_sport_scoped_to_soccer():
+    """Lock the soccer pinning. Without it, NHL matches leak in with
+    NULL 1x2 odds + nhl_baseline-only feature columns, which tipped
+    validate_training_frame's missing-feature gate over 50% after the
+    NHL ingest landed."""
+    # leagues join + sport filter are load-bearing
+    assert "JOIN leagues l" in DEFAULT_TRAINING_QUERY
+    assert "l.sport = 'soccer'" in DEFAULT_TRAINING_QUERY
+    # features_cache LATERAL must pin the soccer feature set so NHL
+    # rows in features_cache (feature_set='nhl_baseline') can't be
+    # picked up by the "most recent" ORDER BY.
+    assert "feature_set = 'baseline'" in DEFAULT_TRAINING_QUERY

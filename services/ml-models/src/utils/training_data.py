@@ -7,11 +7,19 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-# Pulls finished matches with closing odds joined in, plus the most recent
-# features_cache row (when available). The odds-derived columns let us train
-# a working baseline model even before features_cache has been populated for
-# every historical match. Once compute_features.py has been run over the
-# corpus, the `features` JSON adds the richer 250+ feature set.
+# Pulls finished SOCCER matches with closing odds joined in, plus the most
+# recent features_cache row from the 'baseline' (soccer) feature set. The
+# odds-derived columns let us train a working baseline model even before
+# features_cache has been populated for every historical match. Once
+# compute_features.py has been run over the corpus, the `features` JSON adds
+# the richer 250+ feature set.
+#
+# The l.sport='soccer' filter + feature_set='baseline' pin matter: without
+# them, finished NHL matches (which have NULL 1x2 odds and carry
+# 'nhl_baseline' feature_set rows that flatten to NHL-only feature__* columns)
+# would land in this frame as ~all-NaN rows. The naive missing-feature gate
+# in validate_training_frame averages NaNs across every feature column, so
+# even a few thousand NHL rows tipped the gate past 50% after Phase 3.
 DEFAULT_TRAINING_QUERY = """
     SELECT
         m.id::text AS match_id,
@@ -46,16 +54,18 @@ DEFAULT_TRAINING_QUERY = """
               AND o.selection = 'under' AND o.line = 2.5 AND NOT o.is_live) AS odds_under25,
         fc.features
     FROM matches m
+    JOIN leagues l ON l.id = m.league_id
     JOIN teams ht ON m.home_team_id = ht.id
     JOIN teams at ON m.away_team_id = at.id
     LEFT JOIN LATERAL (
         SELECT features
         FROM features_cache
-        WHERE match_id = m.id
+        WHERE match_id = m.id AND feature_set = 'baseline'
         ORDER BY computed_at DESC
         LIMIT 1
     ) fc ON true
-    WHERE m.status = 'finished'
+    WHERE l.sport = 'soccer'
+      AND m.status = 'finished'
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
     ORDER BY m.match_date ASC
