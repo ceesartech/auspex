@@ -12,16 +12,18 @@ Soccer's market_result + Dixon-Coles market derivation is not used
 here — NHL tasks are direct classifications and don't share that
 pipeline.
 
-Telegram notifications are intentionally NOT triggered from this
-script in v1. The soccer template hardcodes the ⚽ emoji and 3-class
-result format; a sport-aware notification template lands in Phase 4d
-along with per-sport / per-market confidence thresholds (puck-line
-and total need stricter thresholds than moneyline because they sit
-closer to the noise floor).
+Telegram notifications (Phase 4d) fire one alert per (match, market)
+when the prediction's confidence clears that market's threshold. The
+thresholds are per-market because the markets sit at different
+points in the noise floor: puck-line and total only marginally beat
+naive baselines so they need a stricter bar than moneyline. The
+template uses 🏒 and prints the friendly market label so a single
+chat can receive both soccer and NHL alerts without confusion.
 
 Usage:
     python /app/scripts/precompute_predictions_nhl.py                 # next 7 days
     python /app/scripts/precompute_predictions_nhl.py --days 14
+    python /app/scripts/precompute_predictions_nhl.py --no-notify     # skip Telegram
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ import os
 import sys
 
 import psycopg2
+import requests
 from psycopg2.extras import RealDictCursor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
@@ -42,6 +45,84 @@ logger = logging.getLogger("precompute_predictions_nhl")
 # and the lookup automatically prefers the newer rows.
 FEATURE_SET = "nhl_baseline"
 FEATURE_VERSION = "v3"
+
+# Per-market confidence thresholds (Phase 4d). Moneyline gets the lowest
+# bar because favorites routinely clear 0.60 and the model is
+# well-calibrated there. Regulation is 3-class so the achievable max
+# probability is lower (~0.55 is "strong"). Puck-line and total sit
+# close to a naive marginal baseline — only the model's most confident
+# picks are worth surfacing, so we set 0.70.
+MARKET_NOTIFY_THRESHOLDS: dict[str, float] = {
+    "moneyline": 0.60,
+    "regulation": 0.55,
+    "puck_line": 0.70,
+    "total": 0.70,
+}
+
+# Friendly market label for the Telegram message. Mirrors the
+# MARKET_LABELS map in services/frontend/src/components/predictions/
+# prediction-card.tsx — keep both in sync if a new market lands.
+MARKET_DISPLAY_LABELS: dict[str, str] = {
+    "moneyline": "Moneyline",
+    "regulation": "Regulation (60 min)",
+    "puck_line": "Puck Line",
+    "total": "Total Goals O/U 5.5",
+}
+
+
+def send_telegram_nhl(
+    *,
+    league_name: str,
+    home_team: str,
+    away_team: str,
+    match_date,
+    market: str,
+    predicted_outcome: str,
+    confidence: float,
+    probabilities: dict,
+    threshold: float,
+) -> bool:
+    """Sport-aware Telegram dispatch for NHL predictions.
+
+    Parallel to the soccer send_telegram in scripts/precompute_predictions.py
+    but uses the 🏒 emoji and a 2-class-friendly probability line. Returns
+    True iff a message was actually sent (config present + threshold met +
+    network success).
+
+    The gate ordering is intentional: confidence check first so we can
+    early-exit without paying the env-lookup cost on every prediction,
+    then the env-flag check, then the credential check.
+    """
+    if confidence < threshold:
+        return False
+    if os.environ.get("ENABLE_TELEGRAM_NOTIFICATIONS", "false").lower() != "true":
+        return False
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        logger.warning("Telegram not configured — skipping NHL notification")
+        return False
+
+    market_label = MARKET_DISPLAY_LABELS.get(market, market)
+    text = (
+        f"🏒 <b>{league_name}</b> · {market_label}\n"
+        f"{home_team} vs {away_team}\n"
+        f"\U0001f551 {match_date.strftime('%Y-%m-%d %H:%M %Z')}\n\n"
+        f"Predicted: <b>{predicted_outcome}</b>\n"
+        f"Confidence: <b>{confidence:.1%}</b>\n"
+        f"Probabilities: " + ", ".join(f"{k} {v:.1%}" for k, v in (probabilities or {}).items())
+    )
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        return True
+    except requests.RequestException as e:
+        logger.warning("Telegram send failed: %s", e)
+        return False
 
 
 def list_upcoming_nhl(database_url: str, days: int) -> list[dict]:
@@ -135,10 +216,16 @@ def store_prediction(
     )
 
 
-def run(database_url: str, days: int) -> dict:
+def run(database_url: str, days: int, notify: bool = True) -> dict:
     """Walk upcoming NHL matches and write predictions for every
     registered NHL task. Returns a count summary suitable for log /
-    DAG return."""
+    DAG return.
+
+    With notify=True (default), high-confidence predictions also
+    trigger a Telegram alert per market. The per-market thresholds
+    in MARKET_NOTIFY_THRESHOLDS keep low-signal markets (puck-line,
+    total) from spamming the channel.
+    """
     # Late imports so module load doesn't pull in numpy / sqlalchemy /
     # the predictor package unless the script is actually being run.
     from services.cache_service import CacheService  # type: ignore
@@ -174,6 +261,7 @@ def run(database_url: str, days: int) -> dict:
 
     predicted = 0
     skipped = 0
+    notified = 0
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for m in upcoming:
@@ -257,8 +345,10 @@ def run(database_url: str, days: int) -> dict:
 
                     # Cache the moneyline as the headline so the /api/v1/predictions/
                     # endpoint can serve it without re-running the ensemble.
-                    # Other markets stay DB-only until Phase 4b adds the
-                    # per-market route.
+                    # Other markets are now exposed via Phase 4b's
+                    # /predictions/match/{match_id} endpoint; this cache stays
+                    # moneyline-only because it backs the legacy single-
+                    # prediction code path.
                     if task.market == "moneyline" and not headline_cached:
                         cache.set_prediction(
                             m["match_id"],
@@ -271,21 +361,52 @@ def run(database_url: str, days: int) -> dict:
                             model_version=version_str,
                         )
                         headline_cached = True
+
+                    # Telegram alert (Phase 4d). One message per (match,
+                    # market) when confidence clears the per-market gate.
+                    # Unknown markets fall back to 0.70 — strict enough
+                    # to avoid noise if a new market lands before we
+                    # update MARKET_NOTIFY_THRESHOLDS.
+                    if notify:
+                        threshold = MARKET_NOTIFY_THRESHOLDS.get(task.market, 0.70)
+                        if send_telegram_nhl(
+                            league_name=m["league_name"],
+                            home_team=m["home_team"],
+                            away_team=m["away_team"],
+                            match_date=m["match_date"],
+                            market=task.market,
+                            predicted_outcome=predicted_outcome,
+                            confidence=confidence,
+                            probabilities=probabilities,
+                            threshold=threshold,
+                        ):
+                            notified += 1
             conn.commit()
 
     logger.info(
-        "Wrote %d NHL prediction rows across %d matches (%d skipped)",
+        "Wrote %d NHL prediction rows across %d matches (%d skipped, %d notified)",
         predicted,
         len(upcoming),
         skipped,
+        notified,
     )
-    return {"predicted": predicted, "match_count": len(upcoming), "skipped": skipped}
+    return {
+        "predicted": predicted,
+        "match_count": len(upcoming),
+        "skipped": skipped,
+        "notified": notified,
+    }
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--days", type=int, default=7, help="How many days forward to score (default 7).")
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
+    p.add_argument(
+        "--no-notify",
+        action="store_true",
+        help="Skip Telegram dispatch for high-confidence predictions.",
+    )
     return p.parse_args(argv)
 
 
@@ -301,7 +422,7 @@ def main(argv: list[str] | None = None) -> int:
     for p in ("/app/services/api/src", "/app/services/ml-models/src"):
         if p not in sys.path:
             sys.path.insert(0, p)
-    counts = run(args.database_url, args.days)
+    counts = run(args.database_url, args.days, notify=not args.no_notify)
     logger.info("Done. %s", counts)
     return 0
 
