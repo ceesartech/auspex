@@ -5,8 +5,10 @@ populated, run the ensemble model, store the prediction in:
   - the `predictions` table (history + auditability)
   - the `prediction:<match_id>:...` Redis key (low-latency serve)
 
-Optionally fire a Telegram message for any prediction whose confidence
-exceeds --notify-threshold (default 0.65).
+Picks that clear --notify-threshold are bundled into a single Telegram
+digest message at the end of the run. Previously this fired one
+message per pick — for a 7-day window that meant a flurry of alerts
+the user had to scroll through individually.
 
 Usage (inside the api container):
     python /app/scripts/precompute_predictions.py
@@ -23,14 +25,17 @@ import os
 import sys
 
 import psycopg2
-import requests
 from psycopg2.extras import RealDictCursor
+
+# Make the api src + shared scripts package importable so we reuse
+# PredictionService + the digest helper.
+sys.path.insert(0, "/app/services/api/src")
+sys.path.insert(0, os.path.dirname(__file__))
+
+from telegram_notify import Alert, send_telegram_digest  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("precompute_predictions")
-
-# Make the api src importable so we reuse PredictionService + caching.
-sys.path.insert(0, "/app/services/api/src")
 
 
 def list_upcoming(database_url: str, days: int) -> list[dict]:
@@ -61,41 +66,22 @@ def list_upcoming(database_url: str, days: int) -> list[dict]:
             return list(cur.fetchall())
 
 
-def send_telegram(prediction: dict, match: dict, threshold: float) -> bool:
-    """Send a Telegram message if confidence exceeds threshold.
-
-    Reads bot token + chat id from env. Returns True on send, False
-    otherwise (missing config / network error / below threshold).
-    """
-    if prediction.get("confidence", 0.0) < threshold:
-        return False
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if os.environ.get("ENABLE_TELEGRAM_NOTIFICATIONS", "false").lower() != "true":
-        return False
-    if not token or not chat_id:
-        logger.warning("Telegram not configured — skipping notification")
-        return False
-
-    text = (
-        f"⚽ <b>{match['league']}</b>\n"
-        f"{match['home_team']} vs {match['away_team']}\n"
-        f"\U0001F551 {match['match_date'].strftime('%Y-%m-%d %H:%M %Z')}\n\n"
-        f"Predicted: <b>{prediction['predicted_label']}</b>\n"
-        f"Confidence: <b>{prediction['confidence']:.1%}</b>\n"
-        f"Probabilities: " + ", ".join(f"{k} {v:.1%}" for k, v in (prediction.get("probabilities") or {}).items())
+def soccer_alert(prediction: dict, match: dict) -> Alert:
+    """Translate a soccer prediction dict into the shared Alert shape.
+    The market label is hardcoded to '1X2' because precompute_predictions
+    produces match_result picks only; market-derivation rows are written
+    DB-only and don't get bundled into the digest."""
+    return Alert(
+        sport="soccer",
+        league_name=match["league"],
+        home_team=match["home_team"],
+        away_team=match["away_team"],
+        match_date=match["match_date"],
+        market_label="1X2",
+        predicted_outcome=prediction["predicted_label"],
+        confidence=float(prediction.get("confidence", 0.0)),
+        probabilities={k: float(v) for k, v in (prediction.get("probabilities") or {}).items()},
     )
-    try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
-            timeout=10,
-        )
-        r.raise_for_status()
-        return True
-    except requests.RequestException as e:
-        logger.warning("Telegram send failed: %s", e)
-        return False
 
 
 def store_prediction(cur, match_id: str, prediction: dict, model_version: str) -> None:
@@ -259,11 +245,11 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
     upcoming = list_upcoming(database_url, days)
     if not upcoming:
         logger.info("No upcoming matches with features in the next %d days", days)
-        return {"predicted": 0, "market_rows": 0, "notified": 0}
+        return {"predicted": 0, "market_rows": 0, "alerts": 0, "telegram_messages": 0}
 
     predicted = 0
     market_rows = 0
-    notified = 0
+    alerts: list[Alert] = []
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for m in upcoming:
@@ -288,7 +274,12 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                 ensemble = models.get("ensemble")
                 if not ensemble:
                     logger.error("No ensemble model loaded; aborting")
-                    return {"predicted": predicted, "market_rows": market_rows, "notified": notified}
+                    return {
+                        "predicted": predicted,
+                        "market_rows": market_rows,
+                        "alerts": len(alerts),
+                        "telegram_messages": 0,
+                    }
 
                 try:
                     import numpy as np
@@ -354,17 +345,33 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                     except Exception as e:
                         logger.warning("Market derivation failed for %s: %s", m["match_id"], e)
 
-                if notify and send_telegram(pred, m, notify_threshold):
-                    notified += 1
+                # Accumulate for the end-of-run digest instead of
+                # firing one message per pick.
+                if notify and pred["confidence"] >= notify_threshold:
+                    alerts.append(soccer_alert(pred, m))
 
             conn.commit()
+
+    # One bundled Telegram message instead of N per-pick alerts. The
+    # digest helper handles the disabled / unconfigured / network-fail
+    # gates and chunks if the digest exceeds Telegram's 4096-char limit.
+    messages_sent = send_telegram_digest(
+        alerts,
+        header=f"Auspex soccer picks · {len(alerts)} high-confidence",
+    )
     logger.info(
-        "Stored %d match-result predictions (+%d market rows), sent %d Telegram alerts",
+        "Stored %d match-result predictions (+%d market rows), %d picks digested into %d Telegram message(s)",
         predicted,
         market_rows,
-        notified,
+        len(alerts),
+        messages_sent,
     )
-    return {"predicted": predicted, "market_rows": market_rows, "notified": notified}
+    return {
+        "predicted": predicted,
+        "market_rows": market_rows,
+        "alerts": len(alerts),
+        "telegram_messages": messages_sent,
+    }
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

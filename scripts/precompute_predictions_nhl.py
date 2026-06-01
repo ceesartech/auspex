@@ -12,13 +12,12 @@ Soccer's market_result + Dixon-Coles market derivation is not used
 here — NHL tasks are direct classifications and don't share that
 pipeline.
 
-Telegram notifications (Phase 4d) fire one alert per (match, market)
-when the prediction's confidence clears that market's threshold. The
-thresholds are per-market because the markets sit at different
-points in the noise floor: puck-line and total only marginally beat
-naive baselines so they need a stricter bar than moneyline. The
-template uses 🏒 and prints the friendly market label so a single
-chat can receive both soccer and NHL alerts without confusion.
+Telegram notifications (Phase 4d) bundle every (match, market) pick
+that clears its per-market threshold into a single digest message at
+the end of the run. The thresholds are per-market because the
+markets sit at different points in the noise floor: puck-line and
+total only marginally beat naive baselines so they need a stricter
+bar than moneyline.
 
 Usage:
     python /app/scripts/precompute_predictions_nhl.py                 # next 7 days
@@ -34,8 +33,12 @@ import os
 import sys
 
 import psycopg2
-import requests
 from psycopg2.extras import RealDictCursor
+
+# Add the scripts dir so the shared telegram_notify helper imports.
+sys.path.insert(0, os.path.dirname(__file__))
+
+from telegram_notify import Alert, send_telegram_digest  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("precompute_predictions_nhl")
@@ -70,7 +73,7 @@ MARKET_DISPLAY_LABELS: dict[str, str] = {
 }
 
 
-def send_telegram_nhl(
+def nhl_alert(
     *,
     league_name: str,
     home_team: str,
@@ -80,49 +83,22 @@ def send_telegram_nhl(
     predicted_outcome: str,
     confidence: float,
     probabilities: dict,
-    threshold: float,
-) -> bool:
-    """Sport-aware Telegram dispatch for NHL predictions.
-
-    Parallel to the soccer send_telegram in scripts/precompute_predictions.py
-    but uses the 🏒 emoji and a 2-class-friendly probability line. Returns
-    True iff a message was actually sent (config present + threshold met +
-    network success).
-
-    The gate ordering is intentional: confidence check first so we can
-    early-exit without paying the env-lookup cost on every prediction,
-    then the env-flag check, then the credential check.
-    """
-    if confidence < threshold:
-        return False
-    if os.environ.get("ENABLE_TELEGRAM_NOTIFICATIONS", "false").lower() != "true":
-        return False
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        logger.warning("Telegram not configured — skipping NHL notification")
-        return False
-
-    market_label = MARKET_DISPLAY_LABELS.get(market, market)
-    text = (
-        f"🏒 <b>{league_name}</b> · {market_label}\n"
-        f"{home_team} vs {away_team}\n"
-        f"\U0001f551 {match_date.strftime('%Y-%m-%d %H:%M %Z')}\n\n"
-        f"Predicted: <b>{predicted_outcome}</b>\n"
-        f"Confidence: <b>{confidence:.1%}</b>\n"
-        f"Probabilities: " + ", ".join(f"{k} {v:.1%}" for k, v in (probabilities or {}).items())
+) -> Alert:
+    """Translate one NHL task prediction into the shared Alert shape.
+    Looks up the friendly market label here so the digest never carries
+    raw snake_case 'puck_line' / 'total' strings into the user-facing
+    message."""
+    return Alert(
+        sport="nhl",
+        league_name=league_name,
+        home_team=home_team,
+        away_team=away_team,
+        match_date=match_date,
+        market_label=MARKET_DISPLAY_LABELS.get(market, market),
+        predicted_outcome=predicted_outcome,
+        confidence=float(confidence),
+        probabilities={k: float(v) for k, v in (probabilities or {}).items()},
     )
-    try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
-            timeout=10,
-        )
-        r.raise_for_status()
-        return True
-    except requests.RequestException as e:
-        logger.warning("Telegram send failed: %s", e)
-        return False
 
 
 def list_upcoming_nhl(database_url: str, days: int) -> list[dict]:
@@ -261,7 +237,7 @@ def run(database_url: str, days: int, notify: bool = True) -> dict:
 
     predicted = 0
     skipped = 0
-    notified = 0
+    alerts: list[Alert] = []
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for m in upcoming:
@@ -362,39 +338,48 @@ def run(database_url: str, days: int, notify: bool = True) -> dict:
                         )
                         headline_cached = True
 
-                    # Telegram alert (Phase 4d). One message per (match,
-                    # market) when confidence clears the per-market gate.
-                    # Unknown markets fall back to 0.70 — strict enough
-                    # to avoid noise if a new market lands before we
-                    # update MARKET_NOTIFY_THRESHOLDS.
+                    # Accumulate for the end-of-run digest. Per-market
+                    # thresholds gate which picks are surfaced; unknown
+                    # markets fall back to 0.70 (strict, in case a new
+                    # market lands before we update the threshold map).
                     if notify:
                         threshold = MARKET_NOTIFY_THRESHOLDS.get(task.market, 0.70)
-                        if send_telegram_nhl(
-                            league_name=m["league_name"],
-                            home_team=m["home_team"],
-                            away_team=m["away_team"],
-                            match_date=m["match_date"],
-                            market=task.market,
-                            predicted_outcome=predicted_outcome,
-                            confidence=confidence,
-                            probabilities=probabilities,
-                            threshold=threshold,
-                        ):
-                            notified += 1
+                        if confidence >= threshold:
+                            alerts.append(
+                                nhl_alert(
+                                    league_name=m["league_name"],
+                                    home_team=m["home_team"],
+                                    away_team=m["away_team"],
+                                    match_date=m["match_date"],
+                                    market=task.market,
+                                    predicted_outcome=predicted_outcome,
+                                    confidence=confidence,
+                                    probabilities=probabilities,
+                                )
+                            )
             conn.commit()
 
+    # One bundled NHL digest covering every market that cleared its
+    # per-market threshold. send_telegram_digest handles env gating +
+    # 4096-char chunking; we just log the outcome.
+    messages_sent = send_telegram_digest(
+        alerts,
+        header=f"Auspex NHL picks · {len(alerts)} high-confidence",
+    )
     logger.info(
-        "Wrote %d NHL prediction rows across %d matches (%d skipped, %d notified)",
+        "Wrote %d NHL prediction rows across %d matches (%d skipped); " "%d picks digested into %d Telegram message(s)",
         predicted,
         len(upcoming),
         skipped,
-        notified,
+        len(alerts),
+        messages_sent,
     )
     return {
         "predicted": predicted,
         "match_count": len(upcoming),
         "skipped": skipped,
-        "notified": notified,
+        "alerts": len(alerts),
+        "telegram_messages": messages_sent,
     }
 
 
