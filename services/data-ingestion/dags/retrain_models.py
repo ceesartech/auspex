@@ -41,11 +41,23 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.utils.trigger_rule import TriggerRule
 
-# Sports trained on every run. Matches the SPORT_BUNDLES keys in
-# services/ml-models/src/training/train_all_models.py — add a new
-# bundle there, add it here, and the DAG starts training it on the
-# next Sunday run.
-SPORTS = ["soccer", "nhl_moneyline", "nhl_regulation", "nhl_puck_line", "nhl_total"]
+# Logical sport → ordered list of SPORT_BUNDLES keys to train.
+#
+# We use ONE DAG task per logical sport (not per bundle) so the graph
+# doesn't blow up to 4N tasks once we have NBA / NFL / etc. Each
+# task's bash command iterates its bundle list sequentially inside
+# the api container. Adding a new sport = adding one entry here and
+# one >> wire below; no code change needed in train_all_models.py.
+#
+# Soccer's "match_result" ensemble + Dixon-Coles internally derive
+# ~15 markets at predict time (see scripts/precompute_predictions.py),
+# so soccer doesn't need a per-market bundle list. NHL's four markets
+# (moneyline, regulation, puck_line, total) are direct classifiers
+# with different label sets, so each gets its own bundle.
+SPORT_BUNDLE_GROUPS: dict[str, list[str]] = {
+    "soccer": ["soccer"],
+    "nhl": ["nhl_moneyline", "nhl_regulation", "nhl_puck_line", "nhl_total"],
+}
 
 default_args = {
     "owner": "auspex",
@@ -82,31 +94,54 @@ with DAG(
         ),
     )
 
-    # One BashOperator per SportBundle. Sequential (not parallel)
-    # because each training run is CPU-heavy — Poisson + Dixon-Coles
-    # do per-team MLE fits that can take 20-30 minutes on a full
-    # corpus, and running five in parallel would saturate the api
-    # container. Sequential keeps the resource profile predictable;
-    # total wall-clock is still under the 90-minute per-task SLA
-    # because NHL bundles are smaller than soccer.
-    train_tasks = {}
-    for sport in SPORTS:
+    # One BashOperator per LOGICAL SPORT. Each task internally loops
+    # over that sport's bundle list, training each bundle
+    # sequentially in a single container invocation. This collapses
+    # what would otherwise be N_sports × N_markets tasks into N_sports
+    # tasks — the graph stays readable as we add NBA / NFL / etc.
+    #
+    # `set +e` inside the loop so one bundle's failure doesn't abort
+    # the rest of that sport's training. Failures are captured in
+    # `failed_bundles` and printed at the end; the task still exits 0
+    # if at least one bundle wrote artifacts to staging (the swap
+    # step's per-item merge handles partial output safely).
+    train_tasks: dict[str, BashOperator] = {}
+    for sport, bundles in SPORT_BUNDLE_GROUPS.items():
+        bundle_list_bash = " ".join(bundles)
         train_tasks[sport] = BashOperator(
             task_id=f"train_{sport}",
             execution_timeout=timedelta(minutes=90),
-            # Don't let a single sport's data hiccup block the others —
-            # all five tasks should attempt, and swap_production will
-            # merge whatever made it into staging.
+            # Don't let one sport's data hiccup block the others —
+            # all sport tasks attempt; swap merges whatever landed.
             trigger_rule=TriggerRule.ALL_DONE,
             bash_command=(
                 f"{DOCKER_EXEC} bash -c '"
-                "cd /app/services/ml-models && "
-                "PYTHONPATH=src python -m training.train_all_models "
-                f"--sport {sport} "
+                "cd /app/services/ml-models; "
+                'failed_bundles=""; '
+                f"for bundle in {bundle_list_bash}; do "
+                'echo "=== training bundle $bundle ==="; '
+                "if ! PYTHONPATH=src python -m training.train_all_models "
+                "--sport $bundle "
                 "--model-type all "
                 '--database-url "$DATABASE_URL" '
                 "--output-dir /app/models/staging "
-                "--export-onnx"
+                "--export-onnx; then "
+                'echo "!!! bundle $bundle FAILED"; '
+                'failed_bundles="$failed_bundles $bundle"; '
+                "fi; "
+                "done; "
+                'if [ -n "$failed_bundles" ]; then '
+                'echo "Failed bundles:$failed_bundles"; '
+                "fi; "
+                # Exit 0 if ANY bundle succeeded (staging has its
+                # artifacts), non-zero only if every single bundle
+                # failed — that surfaces a real problem worth paging.
+                'if [ -d /app/models/staging ] && [ -n "$(ls -A /app/models/staging 2>/dev/null)" ]; then '
+                "exit 0; "
+                "else "
+                'echo "No artifacts in staging — every bundle failed."; '
+                "exit 1; "
+                "fi"
                 "'"
             ),
         )
@@ -134,7 +169,17 @@ with DAG(
         bash_command=(
             f"{DOCKER_EXEC} bash -c '"
             "set -euo pipefail; "
-            "STAMP=$(date -u +%%Y%%m%%d-%%H%%M%%S); "
+            # Self-heal: earlier DAG versions had `%%Y%%m%%d-%%H%%M%%S`
+            # in the date format. The double-percent was meant as
+            # Airflow templating escape but our BashOperator is
+            # Jinja2-templated and doesn't need it — bash passed
+            # `%%Y...` to `date`, which printed `%Y%m%d-%H%M%S`
+            # literally. Every "successful" old run then created or
+            # nested into a dir named that literal string. Remove
+            # any such dir before we proceed so the new run is clean.
+            "rm -rf /app/models/production-prev-%Y%m%d-%H%M%S; "
+            # Now the correct timestamp — no Airflow %% escape needed.
+            "STAMP=$(date -u +%Y%m%d-%H%M%S); "
             "if [ ! -d /app/models/staging ]; then "
             'echo "No staging dir — every train_<sport> task failed. Leaving production untouched."; '
             "exit 0; "
@@ -175,23 +220,20 @@ with DAG(
         ),
     )
 
-    # Validate gates SOCCER training only — NHL bundles handle their
-    # own data validation inside load_frame, and a soccer corpus issue
-    # shouldn't block NHL retraining.
+    # Validate gates SOCCER training only — non-soccer sports do their
+    # own data validation inside each bundle's load_frame, and a
+    # soccer corpus issue shouldn't block other sports.
     validate_data >> train_tasks["soccer"]
 
-    # Chain each sport's training task to the previous one's completion
-    # (not success — trigger_rule on each is ALL_DONE, so a soccer
-    # training failure still lets the NHL bundles run). Sequential
-    # because each training run is CPU-heavy; running them in parallel
-    # would saturate the api container.
-    prev = train_tasks["soccer"]
-    for sport in SPORTS[1:]:
+    # Chain sport tasks sequentially. Each sport's training runs all
+    # its bundles internally (see the bash loop in each task), so the
+    # DAG only has one task per logical sport — adding NBA later =
+    # one entry in SPORT_BUNDLE_GROUPS + one extra link in this chain.
+    sport_order = list(SPORT_BUNDLE_GROUPS.keys())
+    prev = train_tasks[sport_order[0]]
+    for sport in sport_order[1:]:
         prev >> train_tasks[sport]
         prev = train_tasks[sport]
 
-    # The last sport feeds swap_production, which then chains through
-    # reload + cleanup. (swap_production's own trigger_rule=ALL_DONE
-    # makes it run even if some sports failed — see comment on the
-    # swap_production BashOperator.)
+    # The last sport feeds swap_production, then reload + cleanup.
     prev >> swap_production >> reload_api >> cleanup_old_backups
