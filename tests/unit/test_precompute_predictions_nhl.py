@@ -27,14 +27,17 @@ ppn = _load("precompute_predictions_nhl", "precompute_predictions_nhl.py")
 
 
 class TestMarketThresholds:
-    def test_moneyline_threshold_is_loosest(self):
-        # Lock the ordering: moneyline should always be the easiest
-        # gate, puck-line and total the strictest. If someone flips
-        # them, low-signal markets would spam the digest.
+    def test_thresholds_are_inside_realistic_band(self):
+        # Each threshold should sit above the coin-flip floor (0.50 for
+        # 2-class, 0.33 for 3-class) but below the "model is broken"
+        # ceiling (0.85+). The previous puck_line/total of 0.70 was
+        # high enough to produce zero NHL alerts during playoff
+        # wind-down — locked here so we don't drift back up.
         t = ppn.MARKET_NOTIFY_THRESHOLDS
-        assert t["moneyline"] < t["puck_line"]
-        assert t["moneyline"] < t["total"]
-        assert t["regulation"] < t["puck_line"]
+        assert 0.55 <= t["moneyline"] <= 0.75
+        assert 0.45 <= t["regulation"] <= 0.65
+        assert 0.55 <= t["puck_line"] <= 0.65
+        assert 0.55 <= t["total"] <= 0.65
 
     def test_all_nhl_markets_have_a_threshold(self):
         for market in ("moneyline", "regulation", "puck_line", "total"):

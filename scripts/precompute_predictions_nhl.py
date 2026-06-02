@@ -49,17 +49,22 @@ logger = logging.getLogger("precompute_predictions_nhl")
 FEATURE_SET = "nhl_baseline"
 FEATURE_VERSION = "v3"
 
-# Per-market confidence thresholds (Phase 4d). Moneyline gets the lowest
-# bar because favorites routinely clear 0.60 and the model is
-# well-calibrated there. Regulation is 3-class so the achievable max
-# probability is lower (~0.55 is "strong"). Puck-line and total sit
-# close to a naive marginal baseline — only the model's most confident
-# picks are worth surfacing, so we set 0.70.
+# Per-market confidence thresholds. Tuned to surface alerts most days
+# while staying above the "coin-flip" noise floor for each market:
+#   - moneyline: favorites routinely clear 0.60 and the model is
+#     well-calibrated there
+#   - regulation: 3-class so the achievable max is lower; 0.55 is the
+#     practical "strong call" line
+#   - puck-line / total: 2-class but only marginally beat their naive
+#     baselines (log_loss within ~0.03 of the marginal); 0.58 surfaces
+#     the model's most confident picks without going so strict that
+#     entire weeks pass with no alerts. Previously 0.70 — too strict;
+#     with NHL playoffs winding down it produced zero NHL alerts.
 MARKET_NOTIFY_THRESHOLDS: dict[str, float] = {
     "moneyline": 0.60,
     "regulation": 0.55,
-    "puck_line": 0.70,
-    "total": 0.70,
+    "puck_line": 0.58,
+    "total": 0.58,
 }
 
 # Friendly market label for the Telegram message. Mirrors the
@@ -238,6 +243,12 @@ def run(database_url: str, days: int, notify: bool = True) -> dict:
     predicted = 0
     skipped = 0
     alerts: list[Alert] = []
+    # Per-market tally — surfaces in the summary log so when a run
+    # queues 0 alerts we can see WHICH market gates were the blocker
+    # (or whether predictions weren't made at all). Indexed by
+    # task.market.
+    market_predicted: dict[str, int] = {t.market: 0 for t in nhl_tasks}
+    market_max_conf: dict[str, float] = {t.market: 0.0 for t in nhl_tasks}
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for m in upcoming:
@@ -305,6 +316,9 @@ def run(database_url: str, days: int, notify: bool = True) -> dict:
                     probabilities = {task.labels[i]: float(proba[i]) for i in range(len(task.labels))}
                     confidence = float(proba[idx])
                     predicted_outcome = task.labels[idx]
+                    market_predicted[task.market] += 1
+                    if confidence > market_max_conf[task.market]:
+                        market_max_conf[task.market] = confidence
 
                     version_str = get_model_version(task_key)
                     store_prediction(
@@ -364,13 +378,25 @@ def run(database_url: str, days: int, notify: bool = True) -> dict:
     # drains both and sends ONE combined Telegram message — no longer
     # one message per sport.
     queue_depth = enqueue_alerts(alerts) if alerts else 0
+    # Per-market breakdown: how many predictions per market, max
+    # confidence seen, and that market's threshold. Lets us see at a
+    # glance whether a 0-alert run was a "no games" issue, a "no model"
+    # issue, or just "best pick was below threshold".
+    market_breakdown = ", ".join(
+        f"{market}: n={market_predicted[market]}, "
+        f"max={market_max_conf[market]:.2f}, "
+        f"gate={MARKET_NOTIFY_THRESHOLDS.get(market, 0.70):.2f}"
+        for market in market_predicted
+    )
     logger.info(
-        "Wrote %d NHL prediction rows across %d matches (%d skipped); " "queued %d picks (queue depth now %d)",
+        "Wrote %d NHL prediction rows across %d matches (%d skipped); "
+        "queued %d picks (queue depth now %d). Per-market: %s",
         predicted,
         len(upcoming),
         skipped,
         len(alerts),
         queue_depth,
+        market_breakdown,
     )
     return {
         "predicted": predicted,
