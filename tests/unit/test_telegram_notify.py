@@ -72,6 +72,44 @@ class TestRenderDigest:
         out = tn.render_digest([_alert()], header="Custom title")
         assert "Custom title" in out
 
+    def test_value_bet_mode_renders_ev_odds_stake(self):
+        # Setting expected_value flips the formatter to value-bet mode.
+        # The line should show EV %, odds, and the recommended stake —
+        # NOT the raw probability breakdown the prediction mode uses.
+        rec = tn.Alert(
+            sport="nhl",
+            league_name="NHL",
+            home_team="Canadiens",
+            away_team="Rangers",
+            match_date=datetime(2025, 3, 15, 19, 0),
+            market_label="Moneyline",
+            predicted_outcome="home",
+            confidence=0.62,
+            probabilities={"home": 0.62, "away": 0.38},
+            odds_decimal=1.85,
+            expected_value=0.147,
+            recommended_stake=25.0,
+            bookmaker="bet365",
+        )
+        out = tn.render_digest([rec])
+        assert "EV +15%" in out
+        assert "@ 1.85" in out
+        assert "stake $25" in out
+        assert "bet365" in out
+        assert "model 62%" in out
+        assert "💰" in out  # value-bet marker emoji
+        # Should NOT also dump the raw probability list.
+        assert "away 38%" not in out
+
+    def test_prediction_mode_unchanged_when_ev_absent(self):
+        # Backwards compat: alerts without EV still render in the
+        # original prediction format.
+        out = tn.render_digest([_alert(sport="soccer")])
+        assert "EV" not in out
+        assert "💰" not in out
+        # Raw probability breakdown is present in prediction mode.
+        assert "home" in out
+
 
 class TestChunking:
     def test_short_digest_is_single_chunk(self):

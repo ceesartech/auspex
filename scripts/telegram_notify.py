@@ -44,12 +44,18 @@ _SAFE_CHUNK_SIZE = 3900
 
 @dataclass
 class Alert:
-    """One bundled prediction line.
+    """One bundled prediction or value-bet recommendation.
 
     `sport` drives the sport emoji (⚽ / 🏒). `market_label` is the
-    user-facing market name ("Moneyline", "Puck Line", "1X2"), NOT the
-    raw snake_case prediction_type — callers translate before
+    user-facing market name ("Moneyline", "Puck Line", "1X2"), NOT
+    the raw snake_case prediction_type — callers translate before
     constructing the Alert so the digest never leaks internal vocab.
+
+    Set `expected_value` (and ideally also `odds_decimal`,
+    `bookmaker`, `recommended_stake`) to flip the digest formatter
+    into VALUE-BET mode: the line renders odds + EV % + stake instead
+    of the raw probability breakdown. Leave them None for raw
+    prediction alerts (the original mode).
     """
 
     sport: str
@@ -61,6 +67,12 @@ class Alert:
     predicted_outcome: str
     confidence: float
     probabilities: Dict[str, float] = field(default_factory=dict)
+    # Optional value-bet fields. Presence of expected_value flips the
+    # render mode; the others are decorative if EV is set.
+    odds_decimal: Optional[float] = None
+    expected_value: Optional[float] = None
+    recommended_stake: Optional[float] = None
+    bookmaker: Optional[str] = None
 
 
 _SPORT_EMOJI: Dict[str, str] = {
@@ -70,13 +82,25 @@ _SPORT_EMOJI: Dict[str, str] = {
 
 
 def _format_alert_line(alert: Alert) -> str:
-    """One HTML-formatted line per pick. Compact enough that ~30 picks
-    fit under the 4096-char Telegram limit, but readable on a phone."""
+    """One HTML-formatted line per pick. Switches to value-bet format
+    when alert.expected_value is set."""
     emoji = _SPORT_EMOJI.get(alert.sport, "•")
     when = alert.match_date.strftime("%a %m/%d %H:%M")
+    header = f"{emoji} <b>{alert.home_team} vs {alert.away_team}</b> · {alert.league_name}"
+    if alert.expected_value is not None:
+        odds_str = f"@ {alert.odds_decimal:.2f}" if alert.odds_decimal is not None else ""
+        stake_str = f"stake ${alert.recommended_stake:.0f}" if alert.recommended_stake else ""
+        book_str = f"({alert.bookmaker})" if alert.bookmaker else ""
+        meta_parts = [p for p in (stake_str, book_str, f"model {alert.confidence:.0%}") if p]
+        return (
+            f"{header}\n"
+            f"   💰 {alert.market_label}: <b>{alert.predicted_outcome}</b> {odds_str}"
+            f" <b>EV {alert.expected_value:+.0%}</b> · {when}\n"
+            f"   <i>{' · '.join(meta_parts)}</i>"
+        )
     probs = ", ".join(f"{k} {v:.0%}" for k, v in alert.probabilities.items())
     return (
-        f"{emoji} <b>{alert.home_team} vs {alert.away_team}</b> · {alert.league_name}\n"
+        f"{header}\n"
         f"   {alert.market_label}: <b>{alert.predicted_outcome}</b> "
         f"({alert.confidence:.0%}) · {when}\n"
         f"   <i>{probs}</i>"
@@ -185,6 +209,10 @@ def _alert_from_dict(d: dict) -> Alert:
         predicted_outcome=d["predicted_outcome"],
         confidence=float(d["confidence"]),
         probabilities={k: float(v) for k, v in (d.get("probabilities") or {}).items()},
+        odds_decimal=float(d["odds_decimal"]) if d.get("odds_decimal") is not None else None,
+        expected_value=float(d["expected_value"]) if d.get("expected_value") is not None else None,
+        recommended_stake=float(d["recommended_stake"]) if d.get("recommended_stake") is not None else None,
+        bookmaker=d.get("bookmaker"),
     )
 
 

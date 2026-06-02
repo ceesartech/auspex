@@ -98,12 +98,23 @@ with DAG(
         bash_command=f"{DOCKER_EXEC} python /app/scripts/precompute_predictions_nhl.py --days 14",
     )
 
-    fetch_upcoming_nhl >> compute_features_nhl >> precompute_predictions_nhl
+    # Phase 4e: per-market NHL value-bet recommendations. Reads the
+    # NHL predictions just written above, joins them to the latest
+    # bookmaker odds, emits a betting_recommendations row + a digest
+    # alert for every pick that clears the EV + prob thresholds.
+    # Soccer has the same task at line 71.
+    generate_recommendations_nhl = BashOperator(
+        task_id="generate_recommendations_nhl",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/generate_recommendations_nhl.py --days 14",
+    )
+
+    fetch_upcoming_nhl >> compute_features_nhl >> precompute_predictions_nhl >> generate_recommendations_nhl
 
     # ── Combined digest (fan-in) ──────────────────────────────────
     # Drains the shared Redis queue both branches push into and sends
     # ONE Telegram message with every sport's picks. Runs after both
-    # branches' precompute steps.
+    # branches' recommendations steps (so value-bet alerts from both
+    # sports land in the same digest as the raw prediction alerts).
     #
     # trigger_rule=ALL_DONE so the digest runs whether or not a branch
     # failed. NONE_FAILED_MIN_ONE_SUCCESS (what we tried first) skips
@@ -116,4 +127,4 @@ with DAG(
         trigger_rule=TriggerRule.ALL_DONE,
     )
 
-    [precompute_predictions, precompute_predictions_nhl] >> send_pipeline_digest
+    [generate_recommendations, generate_recommendations_nhl] >> send_pipeline_digest
