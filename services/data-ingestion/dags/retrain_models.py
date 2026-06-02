@@ -114,12 +114,16 @@ with DAG(
     # MERGE staging into production (don't wholesale replace). The
     # previous wholesale `mv staging production` clobbered any sport's
     # artifacts that weren't in staging — which was the root cause of
-    # NHL models disappearing after a soccer-only retrain. `cp -aR`
-    # with the `staging/.` trailing slash copies the CONTENTS of
-    # staging into production, overwriting anything with the same
-    # path and leaving everything else alone. Partial retrains stay
-    # safe: a sport that failed to train keeps its previous model in
-    # production.
+    # NHL models disappearing after a soccer-only retrain. Partial
+    # retrains stay safe: a sport that failed to train keeps its
+    # previous model in production.
+    #
+    # Why a per-item rm + cp loop (not a single `cp -aR staging/.`):
+    # production may contain SYMLINKS (e.g. a manual promote of an
+    # earlier training output). `cp` refuses to overwrite a symlink
+    # with a real directory ("cannot overwrite non-directory"), so a
+    # wholesale cp aborts mid-merge. Removing the destination first
+    # handles symlinks, real dirs, and missing dirs uniformly.
     #
     # trigger_rule=ALL_DONE: run even if some train_<sport> tasks
     # failed. Without this, one finicky NHL bundle would skip the
@@ -139,7 +143,14 @@ with DAG(
             "cp -a /app/models/production /app/models/production-prev-${STAMP}; "
             "fi; "
             "mkdir -p /app/models/production; "
-            "cp -aR /app/models/staging/. /app/models/production/; "
+            # Per-item merge: rm-then-cp each top-level entry from
+            # staging. Handles symlink-in-production → real-dir-in-
+            # staging cleanly.
+            "for item in /app/models/staging/*; do "
+            'name=$(basename "$item"); '
+            'rm -rf "/app/models/production/$name"; '
+            'cp -a "$item" "/app/models/production/$name"; '
+            "done; "
             "rm -rf /app/models/staging; "
             'echo "--- production after merge ---"; '
             "ls /app/models/production"
