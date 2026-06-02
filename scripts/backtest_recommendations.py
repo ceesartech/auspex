@@ -205,16 +205,25 @@ def _market_for_prediction(model_name: str, prediction_type: str) -> Optional[tu
 # ── DB queries ───────────────────────────────────────────────────────
 
 
-def list_predictions_in_window(cur, start: str, end: str) -> list[dict]:
+def list_predictions_in_window(cur, start: str, end: str, prediction_version: Optional[str] = None) -> list[dict]:
     """Every prediction row whose match finished within [start, end].
     Includes match scores + metadata for the grading step + the
-    sport/league for routing."""
+    sport/league for routing.
+
+    `prediction_version`: when provided, restricts to predictions with
+    `model_version = <prediction_version>`. Used by the walk-forward
+    workflow to backtest only the wf_<split_date>-versioned rows
+    written by scripts/walk_forward_predictions.py — without this
+    filter, the backtest would mix walk-forward + production
+    predictions and the numbers wouldn't mean anything.
+    """
     cur.execute(
         """
         SELECT
             p.id::text AS prediction_id,
             p.match_id::text AS match_id,
             p.model_name,
+            p.model_version,
             p.prediction_type,
             p.predicted_outcome,
             p.probabilities,
@@ -231,9 +240,10 @@ def list_predictions_in_window(cur, start: str, end: str) -> list[dict]:
           AND m.home_score IS NOT NULL
           AND m.away_score IS NOT NULL
           AND m.match_date BETWEEN %s::date AND %s::date
+          AND (%s IS NULL OR p.model_version = %s)
         ORDER BY m.match_date ASC, p.id ASC
         """,
-        (start, end),
+        (start, end, prediction_version, prediction_version),
     )
     return [dict(r) for r in cur.fetchall()]
 
@@ -301,13 +311,14 @@ def run(
     kelly_fraction_arg: float,
     nba_prob_cap: float,
     bankroll: float,
+    prediction_version: Optional[str] = None,
 ) -> BacktestResult:
     bankroll_d = Decimal(str(bankroll))
     aggregates: dict[tuple[str, str], MarketAggregate] = {}
 
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            preds = list_predictions_in_window(cur, start, end)
+            preds = list_predictions_in_window(cur, start, end, prediction_version=prediction_version)
             logger.info("Loaded %d predictions in [%s .. %s]", len(preds), start, end)
 
             for pred in preds:
@@ -404,6 +415,7 @@ def run(
             "kelly_fraction": kelly_fraction_arg,
             "nba_prob_cap": nba_prob_cap,
             "bankroll": float(bankroll_d),
+            "prediction_version": prediction_version,
         },
         overall=overall,
         by_market=sorted(aggregates.values(), key=lambda a: (a.sport, a.market)),
@@ -459,6 +471,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     )
     p.add_argument("--bankroll", type=float, default=1000.0, help="Starting bankroll for stake sizing.")
     p.add_argument("--output", help="Write structured result to this JSON path.")
+    p.add_argument(
+        "--prediction-version",
+        help="Filter predictions to exact model_version (e.g. 'wf_2024-01-01' to backtest "
+        "only walk-forward predictions written by scripts/walk_forward_predictions.py).",
+    )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
 
@@ -478,6 +495,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         kelly_fraction_arg=args.kelly_fraction,
         nba_prob_cap=args.nba_prob_cap,
         bankroll=args.bankroll,
+        prediction_version=args.prediction_version,
     )
 
     print(render_markdown(result))
