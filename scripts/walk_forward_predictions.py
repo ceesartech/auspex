@@ -279,21 +279,26 @@ def list_test_matches(conn, bundle: str, split_date: str) -> list[dict]:
 
 def load_snapshot_ensemble(bundle: str, snapshot_dir: Path):
     """Reconstitute the ensemble from a walk-forward snapshot. Reuses
-    services.api's _build_ensemble_for_task by overriding the
-    settings.MODEL_PATH at call time."""
-    from services.prediction_service import _build_ensemble_for_task  # type: ignore
+    services.api's _build_ensemble_for_task with the snapshot path
+    as the model_path, so the live registry under
+    /app/models/production isn't touched."""
+    from services.prediction_service import (  # type: ignore
+        TASKS,
+        _build_ensemble_for_task,
+        _klass_registry,
+    )
 
     ensemble_name = BUNDLE_TO_ENSEMBLE[bundle]
-
-    # _build_ensemble_for_task takes (model_path, task). We build a
-    # minimal TaskSpec inline rather than rummaging through TASKS.
-    from services.prediction_service import TASKS  # type: ignore
+    # _klass_registry returns the (class, config) lookup that
+    # _build_ensemble_for_task uses to instantiate each base model
+    # from its on-disk artifact. Build once, reuse for every bundle.
+    klass_for = _klass_registry()
 
     # Find the prod TaskSpec that uses this ensemble_name; we reuse
     # its label/feature config and only swap the model_path.
     for task in TASKS.values():
         if task.ensemble_name == ensemble_name:
-            ensemble, meta = _build_ensemble_for_task(snapshot_dir, task)
+            ensemble, meta = _build_ensemble_for_task(snapshot_dir, task, klass_for)
             if ensemble is None:
                 raise RuntimeError(f"No ensemble found at {snapshot_dir}/{ensemble_name}/. Did training succeed?")
             return ensemble, task, meta
