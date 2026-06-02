@@ -12,7 +12,7 @@ non-overfit way:
 
   1. For each --bundle (one of soccer_match_result, nhl_moneyline,
      nhl_regulation, nhl_puck_line, nhl_total, nba_moneyline,
-     nba_spread, nba_total):
+     nba_spread, nba_total, nfl_moneyline, nfl_spread, nfl_total):
        a. Load the bundle's training frame from the live DB.
        b. Filter to matches with match_date < --split-date.
        c. Persist the filtered frame to CSV.
@@ -103,6 +103,9 @@ ALL_BUNDLES = (
     "nba_moneyline",
     "nba_spread",
     "nba_total",
+    "nfl_moneyline",
+    "nfl_spread",
+    "nfl_total",
 )
 
 # Each bundle's ensemble registry name — needed for prediction-side
@@ -117,6 +120,9 @@ BUNDLE_TO_ENSEMBLE: dict[str, str] = {
     "nba_moneyline": "ensemble_nba_ml",
     "nba_spread": "ensemble_nba_sp",
     "nba_total": "ensemble_nba_tot",
+    "nfl_moneyline": "ensemble_nfl_ml",
+    "nfl_spread": "ensemble_nfl_sp",
+    "nfl_total": "ensemble_nfl_tot",
 }
 
 # Each bundle's prediction_type value (what gets written to
@@ -132,6 +138,9 @@ BUNDLE_TO_PREDICTION_TYPE: dict[str, str] = {
     "nba_moneyline": "moneyline",
     "nba_spread": "spread",
     "nba_total": "total",
+    "nfl_moneyline": "moneyline",
+    "nfl_spread": "spread",
+    "nfl_total": "total",
 }
 
 # Each bundle's feature_set (matches compute_features_*.py).
@@ -144,19 +153,24 @@ BUNDLE_TO_FEATURE_SET: dict[str, str] = {
     "nba_moneyline": "nba_baseline",
     "nba_spread": "nba_baseline",
     "nba_total": "nba_baseline",
+    "nfl_moneyline": "nfl_baseline",
+    "nfl_spread": "nfl_baseline",
+    "nfl_total": "nfl_baseline",
 }
 
 
 def resolve_bundles(arg: str) -> list[str]:
-    """'all' → every bundle. 'soccer' / 'nhl' / 'nba' → all bundles
-    for that sport. Otherwise treated as a single bundle key."""
+    """'all' → every bundle. 'soccer' / 'nhl' / 'nba' / 'nfl' → all
+    bundles for that sport. Otherwise treated as a single bundle key."""
     if arg == "all":
         return list(ALL_BUNDLES)
-    if arg in {"soccer", "nhl", "nba"}:
+    if arg in {"soccer", "nhl", "nba", "nfl"}:
         return [b for b in ALL_BUNDLES if b.startswith(arg + "_") or b == f"{arg}_match_result"]
     if arg in ALL_BUNDLES:
         return [arg]
-    raise ValueError(f"Unknown bundle {arg!r}. Use 'all', a sport ('soccer'/'nhl'/'nba'), " f"or one of {ALL_BUNDLES}")
+    raise ValueError(
+        f"Unknown bundle {arg!r}. Use 'all', a sport ('soccer'/'nhl'/'nba'/'nfl'), or one of {ALL_BUNDLES}"
+    )
 
 
 # ── Training step ────────────────────────────────────────────────────
@@ -245,7 +259,7 @@ def list_test_matches(conn, bundle: str, split_date: str) -> list[dict]:
     """Finished matches with match_date >= split_date for this bundle's
     sport. Each row carries the features_cache JSON needed for
     prediction — INNER JOIN so we skip matches without features."""
-    sport = bundle.split("_")[0]  # soccer / nhl / nba
+    sport = bundle.split("_")[0]  # soccer / nhl / nba / nfl
     feature_set = BUNDLE_TO_FEATURE_SET[bundle]
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
@@ -282,11 +296,7 @@ def load_snapshot_ensemble(bundle: str, snapshot_dir: Path):
     services.api's _build_ensemble_for_task with the snapshot path
     as the model_path, so the live registry under
     /app/models/production isn't touched."""
-    from services.prediction_service import (  # type: ignore
-        TASKS,
-        _build_ensemble_for_task,
-        _klass_registry,
-    )
+    from services.prediction_service import TASKS, _build_ensemble_for_task, _klass_registry  # type: ignore
 
     ensemble_name = BUNDLE_TO_ENSEMBLE[bundle]
     # _klass_registry returns the (class, config) lookup that
@@ -445,7 +455,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--bundle",
         default="all",
-        help="'all' / sport ('soccer'/'nhl'/'nba') / specific bundle key.",
+        help="'all' / sport ('soccer'/'nhl'/'nba'/'nfl') / specific bundle key.",
     )
     p.add_argument(
         "--snapshots-dir",
