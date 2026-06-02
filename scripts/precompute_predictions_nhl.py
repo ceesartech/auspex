@@ -38,7 +38,7 @@ from psycopg2.extras import RealDictCursor
 # Add the scripts dir so the shared telegram_notify helper imports.
 sys.path.insert(0, os.path.dirname(__file__))
 
-from telegram_notify import Alert, send_telegram_digest  # noqa: E402
+from telegram_notify import Alert, enqueue_alerts  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("precompute_predictions_nhl")
@@ -359,27 +359,25 @@ def run(database_url: str, days: int, notify: bool = True) -> dict:
                             )
             conn.commit()
 
-    # One bundled NHL digest covering every market that cleared its
-    # per-market threshold. send_telegram_digest handles env gating +
-    # 4096-char chunking; we just log the outcome.
-    messages_sent = send_telegram_digest(
-        alerts,
-        header=f"Auspex NHL picks · {len(alerts)} high-confidence",
-    )
+    # Push NHL picks onto the same shared Redis queue the soccer
+    # script uses. The DAG's downstream send_pipeline_digest task
+    # drains both and sends ONE combined Telegram message — no longer
+    # one message per sport.
+    queue_depth = enqueue_alerts(alerts) if alerts else 0
     logger.info(
-        "Wrote %d NHL prediction rows across %d matches (%d skipped); " "%d picks digested into %d Telegram message(s)",
+        "Wrote %d NHL prediction rows across %d matches (%d skipped); " "queued %d picks (queue depth now %d)",
         predicted,
         len(upcoming),
         skipped,
         len(alerts),
-        messages_sent,
+        queue_depth,
     )
     return {
         "predicted": predicted,
         "match_count": len(upcoming),
         "skipped": skipped,
-        "alerts": len(alerts),
-        "telegram_messages": messages_sent,
+        "alerts_queued": len(alerts),
+        "queue_depth": queue_depth,
     }
 
 
