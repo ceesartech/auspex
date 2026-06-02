@@ -110,6 +110,23 @@ with DAG(
 
     fetch_upcoming_nhl >> compute_features_nhl >> precompute_predictions_nhl >> generate_recommendations_nhl
 
+    # ── Phase 5: grade finished matches ───────────────────────────
+    # Walks matches whose status flipped to 'finished' in the last
+    # 14 days, computes actual_outcome per market, and:
+    #   - updates predictions.actual_outcome / is_correct
+    #   - settles betting_recommendations (status, profit_loss, settled_at)
+    # Idempotent: WHERE EXISTS guards skip matches already fully graded.
+    # Runs every 15 min so accuracy stats stay fresh as games complete.
+    #
+    # No dependency on the predict/rec tasks above — they're for
+    # UPCOMING matches; grading is for FINISHED matches. The two
+    # don't intersect, so this can run in parallel with the rest of
+    # the pipeline.
+    grade_completed_matches = BashOperator(
+        task_id="grade_completed_matches",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/grade_completed_matches.py --days 14",
+    )
+
     # ── Combined digest (fan-in) ──────────────────────────────────
     # Drains the shared Redis queue both branches push into and sends
     # ONE Telegram message with every sport's picks. Runs after both

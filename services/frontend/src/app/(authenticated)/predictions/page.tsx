@@ -4,6 +4,7 @@ import { useUpcomingPredictions, useLivePredictions } from '@/lib/hooks/use-pred
 import { usePredictionsStore } from '@/lib/store/predictions-store';
 import { PredictionCard } from '@/components/predictions/prediction-card';
 import { PredictionFilters } from '@/components/predictions/prediction-filters';
+import { AccuracyWidget } from '@/components/predictions/accuracy-widget';
 import { LoadingPage } from '@/components/shared/loading';
 import { ErrorDisplay } from '@/components/shared/error-display';
 import { EmptyState } from '@/components/shared/empty-state';
@@ -37,6 +38,11 @@ export default function PredictionsPage() {
       </div>
 
       <PredictionFilters />
+
+      {/* Phase 5: accuracy / ROI panel — scopes to the same filters
+          as the predictions list so the headline numbers match what
+          the user is currently viewing. */}
+      <AccuracyWidget />
 
       {live && live.length > 0 && (
         <div>

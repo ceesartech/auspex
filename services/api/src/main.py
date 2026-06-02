@@ -13,7 +13,7 @@ from middleware.error_handler import error_handler_middleware
 from middleware.metrics import metrics_middleware
 from middleware.rate_limiter import RateLimitMiddleware
 from prometheus_client import make_asgi_app
-from routes import lottery, matches
+from routes import accuracy, lottery, matches
 from routes import models as model_routes
 from routes import odds, predictions, recommendations, user, websocket
 
@@ -80,6 +80,7 @@ app.include_router(odds.router, prefix="/api/v1/odds", tags=["Odds"])
 app.include_router(user.router, prefix="/api/v1/user", tags=["User"])
 app.include_router(model_routes.router, prefix="/api/v1/models", tags=["Models"])
 app.include_router(lottery.router, prefix="/api/v1/lottery", tags=["Lottery"])
+app.include_router(accuracy.router, prefix="/api/v1/accuracy", tags=["Accuracy"])
 
 if settings.ENABLE_WEBSOCKET:
     app.include_router(websocket.router, prefix="/ws", tags=["WebSocket"])
