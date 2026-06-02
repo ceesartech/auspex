@@ -123,7 +123,24 @@ with DAG(
         bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_nba.py --days 14",
     )
 
-    fetch_upcoming_nba >> compute_features_nba
+    precompute_predictions_nba = BashOperator(
+        task_id="precompute_predictions_nba",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/precompute_predictions_nba.py --days 14",
+    )
+
+    # NBA value-bet recommendations. Compares the model's per-market
+    # probabilities (moneyline + spread + total) against the best
+    # available bookmaker price and writes positive-EV picks to
+    # betting_recommendations with quarter-Kelly sizing. Spread + total
+    # only recommend at the closing line the model was trained on
+    # (line-as-feature design — see scripts/generate_recommendations_nba.py
+    # docstring for why).
+    generate_recommendations_nba = BashOperator(
+        task_id="generate_recommendations_nba",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/generate_recommendations_nba.py --days 14",
+    )
+
+    fetch_upcoming_nba >> compute_features_nba >> precompute_predictions_nba >> generate_recommendations_nba
 
     # ── Phase 5: grade finished matches ───────────────────────────
     # Walks matches whose status flipped to 'finished' in the last
@@ -159,4 +176,8 @@ with DAG(
         trigger_rule=TriggerRule.ALL_DONE,
     )
 
-    [generate_recommendations, generate_recommendations_nhl] >> send_pipeline_digest
+    [
+        generate_recommendations,
+        generate_recommendations_nhl,
+        generate_recommendations_nba,
+    ] >> send_pipeline_digest

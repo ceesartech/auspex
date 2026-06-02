@@ -34,18 +34,35 @@ _NHL_NOTIFY_THRESHOLDS: Dict[str, float] = {
     "puck_line": 0.58,
     "total": 0.58,
 }
+_NBA_NOTIFY_THRESHOLDS: Dict[str, float] = {
+    "moneyline": 0.60,
+    "spread": 0.58,
+    "total": 0.58,
+}
 _SOCCER_NOTIFY_THRESHOLD = 0.65
 
-# Friendly market labels mirror the precompute_predictions_nhl
-# MARKET_DISPLAY_LABELS map. Single source of truth in this codebase
-# would be nice; for now keep them aligned manually.
-_MARKET_DISPLAY_LABELS: Dict[str, str] = {
-    "moneyline": "Moneyline",
-    "regulation": "Regulation (60 min)",
-    "puck_line": "Puck Line",
-    "total": "Total Goals O/U 5.5",
-    "match_result": "1X2",
+# Friendly market labels keyed by (sport, market) so the few overloaded
+# names disambiguate cleanly:
+#   NHL "total"  = Over/Under 5.5 goals
+#   NBA "total"  = Over/Under ~225 points
+#   NHL "spread" = Puck Line ±1.5
+#   NBA "spread" = variable closing line (line-as-feature)
+# Lookup helper falls back to market-only for legacy callers and
+# finally to the raw market string.
+_MARKET_DISPLAY_LABELS: Dict[tuple, str] = {
+    ("soccer", "match_result"): "1X2",
+    ("nhl", "moneyline"): "Moneyline",
+    ("nhl", "regulation"): "Regulation (60 min)",
+    ("nhl", "puck_line"): "Puck Line",
+    ("nhl", "total"): "Total Goals O/U 5.5",
+    ("nba", "moneyline"): "Moneyline",
+    ("nba", "spread"): "Spread",
+    ("nba", "total"): "Total Points",
 }
+
+
+def _display_label(sport: str, market: str) -> str:
+    return _MARKET_DISPLAY_LABELS.get((sport, market), market)
 
 
 # ── Multi-sport task registry ─────────────────────────────────────────
@@ -197,6 +214,42 @@ TASKS: Dict[str, TaskSpec] = {
         base_models=["xgboost_nhl_tot", "lightgbm_nhl_tot", "neural_network_nhl_tot", "hockey_poisson_nhl_tot"],
         feature_set="nhl_baseline",
     ),
+    # NBA: line-as-feature design. Spread + total models consume the
+    # actual closing line as an input column so one trained model
+    # handles every line the book offers per game. No Poisson —
+    # basketball scoring is too continuous / high-variance for a
+    # discrete prior. See services/ml-models/src/training/
+    # train_all_models.py for the matching bundle definitions.
+    "nba:moneyline": TaskSpec(
+        sport="nba",
+        market="moneyline",
+        ensemble_name="ensemble_nba_ml",
+        labels=["home", "away"],
+        prediction_type="moneyline",
+        base_models=["xgboost_nba_ml", "lightgbm_nba_ml", "neural_network_nba_ml"],
+        feature_set="nba_baseline",
+    ),
+    "nba:spread": TaskSpec(
+        sport="nba",
+        market="spread",
+        ensemble_name="ensemble_nba_sp",
+        # 'home' = home covers closing line, 'away' = away covers
+        # (i.e. home did not cover). The CONDITIONAL probability —
+        # given the closing line, what's the chance home covers?
+        labels=["home", "away"],
+        prediction_type="spread",
+        base_models=["xgboost_nba_sp", "lightgbm_nba_sp", "neural_network_nba_sp"],
+        feature_set="nba_baseline",
+    ),
+    "nba:total": TaskSpec(
+        sport="nba",
+        market="total",
+        ensemble_name="ensemble_nba_tot",
+        labels=["over", "under"],
+        prediction_type="total",
+        base_models=["xgboost_nba_tot", "lightgbm_nba_tot", "neural_network_nba_tot"],
+        feature_set="nba_baseline",
+    ),
 }
 
 
@@ -307,17 +360,26 @@ def _klass_registry():
         HOCKEY_POISSON_NHL_REGULATION,
         HOCKEY_POISSON_NHL_TOTAL,
         LIGHTGBM_MATCH_OUTCOME,
+        LIGHTGBM_NBA_MONEYLINE,
+        LIGHTGBM_NBA_SPREAD,
+        LIGHTGBM_NBA_TOTAL,
         LIGHTGBM_NHL_MONEYLINE,
         LIGHTGBM_NHL_PUCK_LINE,
         LIGHTGBM_NHL_REGULATION,
         LIGHTGBM_NHL_TOTAL,
         NEURAL_NETWORK_CONFIG,
+        NEURAL_NETWORK_NBA_MONEYLINE,
+        NEURAL_NETWORK_NBA_SPREAD,
+        NEURAL_NETWORK_NBA_TOTAL,
         NEURAL_NETWORK_NHL_MONEYLINE,
         NEURAL_NETWORK_NHL_PUCK_LINE,
         NEURAL_NETWORK_NHL_REGULATION,
         NEURAL_NETWORK_NHL_TOTAL,
         POISSON_CONFIG,
         XGBOOST_MATCH_OUTCOME,
+        XGBOOST_NBA_MONEYLINE,
+        XGBOOST_NBA_SPREAD,
+        XGBOOST_NBA_TOTAL,
         XGBOOST_NHL_MONEYLINE,
         XGBOOST_NHL_PUCK_LINE,
         XGBOOST_NHL_REGULATION,
@@ -355,6 +417,18 @@ def _klass_registry():
         "lightgbm_nhl_tot": (LightGBMMatchPredictor, LIGHTGBM_NHL_TOTAL),
         "neural_network_nhl_tot": (NeuralNetworkMatchPredictor, NEURAL_NETWORK_NHL_TOTAL),
         "hockey_poisson_nhl_tot": (HockeyPoissonPredictor, HOCKEY_POISSON_NHL_TOTAL),
+        # NBA moneyline
+        "xgboost_nba_ml": (XGBoostMatchPredictor, XGBOOST_NBA_MONEYLINE),
+        "lightgbm_nba_ml": (LightGBMMatchPredictor, LIGHTGBM_NBA_MONEYLINE),
+        "neural_network_nba_ml": (NeuralNetworkMatchPredictor, NEURAL_NETWORK_NBA_MONEYLINE),
+        # NBA spread (line-as-feature)
+        "xgboost_nba_sp": (XGBoostMatchPredictor, XGBOOST_NBA_SPREAD),
+        "lightgbm_nba_sp": (LightGBMMatchPredictor, LIGHTGBM_NBA_SPREAD),
+        "neural_network_nba_sp": (NeuralNetworkMatchPredictor, NEURAL_NETWORK_NBA_SPREAD),
+        # NBA total (line-as-feature)
+        "xgboost_nba_tot": (XGBoostMatchPredictor, XGBOOST_NBA_TOTAL),
+        "lightgbm_nba_tot": (LightGBMMatchPredictor, LIGHTGBM_NBA_TOTAL),
+        "neural_network_nba_tot": (NeuralNetworkMatchPredictor, NEURAL_NETWORK_NBA_TOTAL),
     }
 
 
@@ -388,6 +462,9 @@ def _build_ensemble_for_task(
     from predictors.ensemble import EnsemblePredictor
     from predictors.model_config import (
         ENSEMBLE_CONFIG,
+        ENSEMBLE_NBA_MONEYLINE,
+        ENSEMBLE_NBA_SPREAD,
+        ENSEMBLE_NBA_TOTAL,
         ENSEMBLE_NHL_MONEYLINE,
         ENSEMBLE_NHL_PUCK_LINE,
         ENSEMBLE_NHL_REGULATION,
@@ -404,6 +481,9 @@ def _build_ensemble_for_task(
         "ensemble_nhl_reg": ENSEMBLE_NHL_REGULATION,
         "ensemble_nhl_pl": ENSEMBLE_NHL_PUCK_LINE,
         "ensemble_nhl_tot": ENSEMBLE_NHL_TOTAL,
+        "ensemble_nba_ml": ENSEMBLE_NBA_MONEYLINE,
+        "ensemble_nba_sp": ENSEMBLE_NBA_SPREAD,
+        "ensemble_nba_tot": ENSEMBLE_NBA_TOTAL,
     }
     ensemble_cfg = ensemble_cfg_for.get(task.ensemble_name, ENSEMBLE_CONFIG)
 
@@ -1039,9 +1119,12 @@ class PredictionService:
         """
         try:
             confidence = float(prediction.get("confidence", 0.0))
-            threshold = (
-                _NHL_NOTIFY_THRESHOLDS.get(task.market, 0.70) if task.sport == "nhl" else _SOCCER_NOTIFY_THRESHOLD
-            )
+            if task.sport == "nhl":
+                threshold = _NHL_NOTIFY_THRESHOLDS.get(task.market, 0.70)
+            elif task.sport == "nba":
+                threshold = _NBA_NOTIFY_THRESHOLDS.get(task.market, 0.65)
+            else:
+                threshold = _SOCCER_NOTIFY_THRESHOLD
             if confidence < threshold:
                 return
 
@@ -1081,7 +1164,7 @@ class PredictionService:
             home_team=match_data.get("home_team", ""),
             away_team=match_data.get("away_team", ""),
             match_date=match_data["match_date"],
-            market_label=_MARKET_DISPLAY_LABELS.get(task.market, task.market),
+            market_label=_display_label(task.sport, task.market),
             predicted_outcome=prediction["predicted_label"],
             confidence=confidence,
             probabilities={k: float(v) for k, v in (prediction.get("probabilities") or {}).items()},
