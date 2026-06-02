@@ -44,7 +44,9 @@ export interface UpcomingMatch {
   venue: string | null;
   odds: {
     home: number | null;
-    draw: number | null;
+    // Optional — only present for 3-way markets (soccer 1X2, tennis).
+    // NHL + NBA + NFL are 2-way so the backend omits the key.
+    draw?: number | null;
     away: number | null;
     bookmaker: string | null;
   };

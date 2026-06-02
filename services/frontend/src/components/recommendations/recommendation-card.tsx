@@ -71,7 +71,10 @@ export function RecommendationCard({ recommendation, onAddToAccumulator }: Recom
           </div>
         </div>
 
-        <p className="text-xs text-muted-foreground">{reasoning}</p>
+        {/* Reasoning strings can be long ("Spread home_-5.00: model 80%
+            (capped from raw 87%)…"). break-words forces wrap inside the
+            fixed-width card so it doesn't bleed past the right edge. */}
+        <p className="text-xs text-muted-foreground break-words">{reasoning}</p>
 
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1 text-xs text-muted-foreground">

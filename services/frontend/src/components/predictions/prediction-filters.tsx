@@ -10,6 +10,7 @@ const sportOptions = [
   { value: 'soccer', label: 'Soccer' },
   { value: 'nfl', label: 'NFL' },
   { value: 'nhl', label: 'NHL' },
+  { value: 'nba', label: 'NBA' },
   { value: 'tennis', label: 'Tennis' },
   { value: 'horse_racing', label: 'Horse Racing' },
   { value: 'boxing', label: 'Boxing' },
@@ -18,9 +19,16 @@ const sportOptions = [
 
 // Markets available per sport. Soccer is single-market so we don't show
 // the market dropdown at all when selectedSport is 'soccer' or empty.
-// NHL exposes the 4 markets shipped in Phase 3 — keep the order
-// matching the most-decisive-to-least: moneyline (headline) → regulation
-// → puck_line → total.
+//
+// NHL exposes the 4 markets shipped in Phase 3 — moneyline (headline) →
+// regulation → puck_line → total, locked to fixed canonical lines
+// (±1.5 / 5.5).
+//
+// NBA exposes the 3 markets shipped in Phase 6 — moneyline → spread →
+// total. Spread + total use LINE-AS-FEATURE: one trained model handles
+// every line the book offers (variable -3.5 to -13.5 spreads, 210-245
+// totals), so labels are intentionally generic — the displayed line
+// per pick comes from the prediction row itself.
 const marketOptionsBySport: Record<string, { value: string; label: string }[]> = {
   nhl: [
     { value: '', label: 'Default (Moneyline)' },
@@ -28,6 +36,12 @@ const marketOptionsBySport: Record<string, { value: string; label: string }[]> =
     { value: 'regulation', label: 'Regulation (60 min)' },
     { value: 'puck_line', label: 'Puck Line' },
     { value: 'total', label: 'Total Goals O/U 5.5' },
+  ],
+  nba: [
+    { value: '', label: 'Default (Moneyline)' },
+    { value: 'moneyline', label: 'Moneyline' },
+    { value: 'spread', label: 'Spread' },
+    { value: 'total', label: 'Total Points' },
   ],
 };
 
