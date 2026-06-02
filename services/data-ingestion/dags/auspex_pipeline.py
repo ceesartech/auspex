@@ -110,6 +110,17 @@ with DAG(
 
     fetch_upcoming_nhl >> compute_features_nhl >> precompute_predictions_nhl >> generate_recommendations_nhl
 
+    # ── NBA branch (Phase 6a: ingest only — features/predictions/
+    #    recommendations land in subsequent commits) ───────────────
+    # Currently this branch JUST pulls upcoming NBA fixtures from
+    # ESPN. compute_features_nba, precompute_predictions_nba, and
+    # generate_recommendations_nba will be added in later commits
+    # once the training corpus is in place.
+    fetch_upcoming_nba = BashOperator(
+        task_id="fetch_upcoming_nba",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport nba --days 14",
+    )
+
     # ── Phase 5: grade finished matches ───────────────────────────
     # Walks matches whose status flipped to 'finished' in the last
     # 14 days, computes actual_outcome per market, and:

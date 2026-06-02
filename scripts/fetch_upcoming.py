@@ -50,6 +50,16 @@ def _season_nhl(dt: datetime) -> str:
     return f"{dt.year - 1}-{dt.year}"
 
 
+def _season_nba(dt: datetime) -> str:
+    """NBA season runs Oct→Jun. Same cutoff month as NHL — preseason
+    starts in early October, so Oct-Dec → YYYY-YYYY+1; Jan-Sep → YYYY-1-YYYY.
+    We use month 10 as the cutoff (vs NHL's 9) because NBA preseason is
+    later than NHL's by about a month."""
+    if dt.month >= 10:
+        return f"{dt.year}-{dt.year + 1}"
+    return f"{dt.year - 1}-{dt.year}"
+
+
 @dataclass(frozen=True)
 class SportConfig:
     """Per-sport ingestion config consumed by the generic ESPN fetcher.
@@ -125,6 +135,15 @@ SOCCER_CLUB_SUFFIXES = frozenset(
 SOCCER_CLUB_PREFIXES = frozenset({"fc", "afc", "as", "sc", "ks"})
 
 
+# ── NBA config ────────────────────────────────────────────────────────
+# ESPN exposes the NBA under basketball/nba with a single league slug.
+# Mirror NHL's shape so the same registry conventions work without
+# special-casing.
+NBA_LEAGUES: dict[str, tuple[str, str, str]] = {
+    "nba": ("NBA", "NBA", "USA"),
+}
+
+
 # ── NHL config ────────────────────────────────────────────────────────
 # ESPN exposes the NHL under hockey/nhl with a single "league" slug.
 # We keep the registry-shape consistent with soccer (slug → triple) even
@@ -153,6 +172,15 @@ SPORT_CONFIGS: dict[str, SportConfig] = {
         espn_path="hockey",
         leagues=NHL_LEAGUES,
         season_func=_season_nhl,
+    ),
+    "nba": SportConfig(
+        sport="nba",
+        # ESPN's basketball API path: /sports/basketball/{league_slug}/scoreboard.
+        # Same shape gotcha as NHL — espn_path is JUST "basketball" so
+        # the slug "nba" doesn't double up to /basketball/nba/nba/.
+        espn_path="basketball",
+        leagues=NBA_LEAGUES,
+        season_func=_season_nba,
     ),
 }
 

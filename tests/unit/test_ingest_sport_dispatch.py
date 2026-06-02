@@ -40,8 +40,8 @@ load_nhl_historical = _load("load_nhl_historical", "load_nhl_historical.py")
 
 
 class TestSportConfigs:
-    def test_both_sports_registered(self):
-        assert set(fetch_upcoming.SPORT_CONFIGS.keys()) == {"soccer", "nhl"}
+    def test_all_sports_registered(self):
+        assert set(fetch_upcoming.SPORT_CONFIGS.keys()) == {"soccer", "nhl", "nba"}
 
     def test_soccer_config_keeps_espn_path(self):
         cfg = fetch_upcoming.SPORT_CONFIGS["soccer"]
@@ -62,16 +62,29 @@ class TestSportConfigs:
         assert not cfg.club_suffixes
         assert not cfg.club_prefixes
 
+    def test_nba_config_uses_basketball_path(self):
+        cfg = fetch_upcoming.SPORT_CONFIGS["nba"]
+        assert cfg.sport == "nba"
+        # Same shape gotcha as NHL — espn_path is JUST "basketball"
+        # so /sports/basketball/nba/scoreboard is built correctly
+        # (NOT /sports/basketball/nba/nba/scoreboard).
+        assert cfg.espn_path == "basketball"
+        assert "nba" in cfg.leagues
+        # NBA team names are unambiguous — no token stripping.
+        assert not cfg.club_suffixes
+        assert not cfg.club_prefixes
+
     @pytest.mark.parametrize(
         "sport, slug, expected_suffix",
         [
             ("soccer", "eng.1", "/sports/soccer/eng.1/scoreboard"),
             ("nhl", "nhl", "/sports/hockey/nhl/scoreboard"),
+            ("nba", "nba", "/sports/basketball/nba/scoreboard"),
         ],
     )
     def test_constructed_scoreboard_url(self, sport, slug, expected_suffix):
         """Lock in the ESPN URL shape per sport. Regression guard for
-        the "hockey/nhl" + "nhl" double-segment bug."""
+        the double-segment bug (hockey/nhl + nhl or basketball/nba + nba)."""
         cfg = fetch_upcoming.SPORT_CONFIGS[sport]
         url = f"{fetch_upcoming.ESPN_BASE}/{cfg.espn_path}/{slug}/scoreboard"
         assert url.endswith(expected_suffix)
@@ -105,6 +118,23 @@ class TestSeasonFunctions:
     def test_nhl_season_boundary(self, month, year, expected):
         dt = datetime(year, month, 15, tzinfo=timezone.utc)
         assert fetch_upcoming._season_nhl(dt) == expected
+
+    @pytest.mark.parametrize(
+        "month, year, expected",
+        [
+            (1, 2025, "2024-2025"),
+            (6, 2025, "2024-2025"),  # late playoffs / Finals
+            (8, 2025, "2024-2025"),  # offseason — last completed season
+            (9, 2025, "2024-2025"),  # late offseason, still last season
+            (10, 2025, "2025-2026"),  # regular season opener (NBA starts ~Oct 22)
+            (12, 2025, "2025-2026"),
+        ],
+    )
+    def test_nba_season_boundary(self, month, year, expected):
+        # NBA preseason starts later than NHL — month 10 is the cutoff
+        # (NHL uses 9). Sep games are still treated as the previous season.
+        dt = datetime(year, month, 15, tzinfo=timezone.utc)
+        assert fetch_upcoming._season_nba(dt) == expected
 
 
 class TestStripClubTokens:
@@ -149,7 +179,10 @@ class TestSportForKey:
             ("soccer_epl", "soccer"),
             ("soccer_usa_mls", "soccer"),
             ("icehockey_nhl", "nhl"),
-            ("basketball_nba", None),  # not registered yet — should fall through
+            ("basketball_nba", "nba"),
+            ("basketball_wnba", "nba"),  # prefix match — wnba isn't ingested
+            #                              # but the prefix mapper says nba
+            ("americanfootball_nfl", None),  # NFL not registered
             ("", None),
         ],
     )
@@ -224,6 +257,41 @@ class TestNhlMarketMapping:
         # No model exists yet; we want all available NHL totals lines.
         mt, sel, keep = fetch_live_odds.map_outcome("nhl", "totals", "Under", "A", "B", point)
         assert (mt, sel, keep) == ("total", "under", True)
+
+
+class TestNbaMarketMapping:
+    """NBA mirrors NHL's market_type values (moneyline / spread / total)
+    structurally, but the LINE varies per game. Tests focus on that
+    distinction — we keep every line the book offers because the NBA
+    training query uses the closing line as a feature."""
+
+    def test_h2h_is_moneyline(self):
+        mt, sel, keep = fetch_live_odds.map_outcome("nba", "h2h", "Lakers", "Lakers", "Celtics", None)
+        assert (mt, sel, keep) == ("moneyline", "home", False)
+
+    def test_h2h_no_draw(self):
+        # Basketball never settles tied in regulation+OT — drop any
+        # rogue draw outcome the API might emit.
+        mt, _, _ = fetch_live_odds.map_outcome("nba", "h2h", "Draw", "Lakers", "Celtics", None)
+        assert mt is None
+
+    @pytest.mark.parametrize("point", [-3.5, -7.0, -10.5, -13.5])
+    def test_spreads_keeps_every_line(self, point):
+        # NBA spread varies per game — we store every line so the
+        # training query can pick up the closing-line feature.
+        mt, sel, keep = fetch_live_odds.map_outcome("nba", "spreads", "Lakers", "Lakers", "Celtics", point)
+        assert (mt, sel, keep) == ("spread", "home", True)
+
+    def test_spreads_requires_point(self):
+        mt, _, _ = fetch_live_odds.map_outcome("nba", "spreads", "Lakers", "Lakers", "Celtics", None)
+        assert mt is None
+
+    @pytest.mark.parametrize("point", [210.5, 220.0, 235.5, 245.0])
+    def test_totals_keeps_every_line(self, point):
+        # NBA total range is much wider than NHL's fixed 5.5 — accept
+        # the full ladder.
+        mt, sel, keep = fetch_live_odds.map_outcome("nba", "totals", "Over", "Lakers", "Celtics", point)
+        assert (mt, sel, keep) == ("total", "over", True)
 
 
 # ── load_nhl_historical: pure parsing/derivations ────────────────────

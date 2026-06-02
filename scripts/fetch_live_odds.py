@@ -96,6 +96,8 @@ DEFAULT_SPORTS = [
     "soccer_concacaf_gold_cup",
     # NHL (in season Oct-Jun, including playoffs)
     "icehockey_nhl",
+    # NBA (in season Oct-Jun, including playoffs)
+    "basketball_nba",
 ]
 
 
@@ -106,6 +108,7 @@ DEFAULT_SPORTS = [
 SPORT_KEY_PREFIXES: dict[str, str] = {
     "soccer_": "soccer",
     "icehockey_": "nhl",
+    "basketball_": "nba",
 }
 
 
@@ -116,6 +119,12 @@ SPORT_KEY_PREFIXES: dict[str, str] = {
 SPORT_MARKETS: dict[str, str] = {
     "soccer": "h2h,totals,spreads",
     "nhl": "h2h,spreads,totals",
+    # NBA: moneyline + variable point spread + variable total. Unlike
+    # NHL we want the FULL spread/total ladder (the-odds-api default
+    # returns the book's main line per bookmaker) because NBA spreads
+    # vary wildly per game and the training query uses the actual
+    # closing line as a feature, not a fixed one.
+    "nba": "h2h,spreads,totals",
 }
 
 # Secondary markets only available via the-odds-api PER-EVENT "additional
@@ -133,6 +142,7 @@ SPORT_ADDITIONAL_MARKETS: dict[str, str] = {
 KNOWN_MARKET_KEYS: dict[str, set[str]] = {
     "soccer": {"h2h", "totals", "spreads", "btts", "double_chance", "draw_no_bet"},
     "nhl": {"h2h", "spreads", "totals"},
+    "nba": {"h2h", "spreads", "totals"},
 }
 
 
@@ -366,6 +376,30 @@ def map_outcome(
         return None, None, False
 
     if sport == "nhl":
+        if market_key == "h2h":
+            side = _team_side(outcome_name, home_team_name, away_team_name)
+            if side is None:
+                return None, None, False
+            return "moneyline", side, False
+        if market_key == "spreads":
+            side = _team_side(outcome_name, home_team_name, away_team_name)
+            if side is None or point is None:
+                return None, None, False
+            return "spread", side, True
+        if market_key == "totals":
+            n = outcome_name.lower()
+            if n not in ("over", "under") or point is None:
+                return None, None, False
+            return "total", n, True
+        return None, None, False
+
+    if sport == "nba":
+        # Structurally identical to NHL — same market_type values, same
+        # selection shape. The difference is in the LINE: NHL puck_line
+        # is fixed at ±1.5 and total at 5.5; NBA spread varies (-3.5 to
+        # -13.5+) and total varies (200 to 245+) per game. The training
+        # query for NBA uses the actual closing line as a feature, so
+        # we keep every line the book offers (no canonical filter here).
         if market_key == "h2h":
             side = _team_side(outcome_name, home_team_name, away_team_name)
             if side is None:
