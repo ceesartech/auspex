@@ -1,6 +1,8 @@
 """Prediction service"""
 
 import logging
+import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +14,38 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
+
+# Make the shared telegram_notify module importable. It lives under
+# /app/scripts/ alongside the precompute scripts because the original
+# consumers were CLI scripts; the API now also enqueues alerts (so
+# UI-triggered predictions show up in the digest), and re-using one
+# Alert dataclass + queue helper avoids two implementations drifting.
+_SCRIPTS_DIR = "/app/scripts"
+if os.path.isdir(_SCRIPTS_DIR) and _SCRIPTS_DIR not in sys.path:
+    sys.path.append(_SCRIPTS_DIR)
+
+# Per-market notify thresholds for the API alert hook. Kept in sync
+# with scripts/precompute_predictions_nhl.py's MARKET_NOTIFY_THRESHOLDS
+# — when those move, move these too. Soccer is single-market and uses
+# the same default the precompute soccer script uses.
+_NHL_NOTIFY_THRESHOLDS: Dict[str, float] = {
+    "moneyline": 0.60,
+    "regulation": 0.55,
+    "puck_line": 0.58,
+    "total": 0.58,
+}
+_SOCCER_NOTIFY_THRESHOLD = 0.65
+
+# Friendly market labels mirror the precompute_predictions_nhl
+# MARKET_DISPLAY_LABELS map. Single source of truth in this codebase
+# would be nice; for now keep them aligned manually.
+_MARKET_DISPLAY_LABELS: Dict[str, str] = {
+    "moneyline": "Moneyline",
+    "regulation": "Regulation (60 min)",
+    "puck_line": "Puck Line",
+    "total": "Total Goals O/U 5.5",
+    "match_result": "1X2",
+}
 
 
 # ── Multi-sport task registry ─────────────────────────────────────────
@@ -476,6 +510,14 @@ class PredictionService:
                 logger.error("predict failed for task %s match %s: %s", task_key, match_id, e)
                 continue
             self._store_prediction(match_id, prediction, task)
+            # Enqueue Telegram alert for high-confidence picks. This is
+            # the same Redis queue the precompute scripts use; the
+            # send_pipeline_digest DAG task drains and sends them in
+            # one combined message. Without this hook, UI-triggered
+            # predictions (predict_match path) would store to DB but
+            # never reach Telegram — that's the regression the
+            # consolidation change introduced.
+            self._maybe_enqueue_alert(prediction, task, match_data)
             if task is headline_task:
                 headline_prediction = prediction
 
@@ -895,3 +937,80 @@ class PredictionService:
             logger.error(f"Failed to store prediction: {e}")
             if self.db is not None:
                 self.db.rollback()
+
+    def _maybe_enqueue_alert(
+        self,
+        prediction: Dict[str, Any],
+        task: TaskSpec,
+        match_data: Dict[str, Any],
+    ) -> None:
+        """Queue a high-confidence prediction for the next Telegram
+        digest. No-op (with a warning, not an exception) on any failure:
+        a broken alert path must never break the predict_match response.
+
+        Dedup: a Redis SETNX-with-TTL guards against duplicates across
+        the day. Without it, every API call that re-predicts the same
+        (match, market) would re-enqueue, producing a digest full of
+        duplicates. The dedup key includes model_version so a fresh
+        deploy with re-tuned weights gets a fresh chance to alert.
+        """
+        try:
+            confidence = float(prediction.get("confidence", 0.0))
+            threshold = (
+                _NHL_NOTIFY_THRESHOLDS.get(task.market, 0.70) if task.sport == "nhl" else _SOCCER_NOTIFY_THRESHOLD
+            )
+            if confidence < threshold:
+                return
+
+            from telegram_notify import Alert, enqueue_alerts  # type: ignore
+        except Exception as e:
+            # Helper not importable (test env / cold container / missing
+            # /app/scripts mount). Don't surface as an error since it
+            # doesn't affect the actual prediction; just log once.
+            logger.debug("telegram_notify unavailable — alert hook skipped: %s", e)
+            return
+
+        # Dedup via Redis SETNX. Falls back to "always enqueue" if Redis
+        # is unreachable so we don't silently drop alerts when dedup
+        # state is unavailable.
+        try:
+            from services.cache_service import CacheService
+
+            cache = CacheService()
+            redis = getattr(cache, "redis", None)
+            model_version = _MODEL_VERSIONS.get(f"{task.sport}:{task.market}", "v1.0")
+            dedup_key = (
+                f"auspex:alert_dedup:"
+                f"{datetime.utcnow().date().isoformat()}:"
+                f"{match_data['match_id']}:{task.sport}:{task.market}:{model_version}"
+            )
+            if redis is not None:
+                # nx=True only sets if absent; True if we won the race
+                # to enqueue, False if a previous call already did.
+                if not redis.set(dedup_key, "1", nx=True, ex=86400):
+                    return
+        except Exception as e:
+            logger.debug("Alert dedup check skipped (%s) — enqueueing anyway", e)
+
+        alert = Alert(
+            sport=task.sport,
+            league_name=match_data.get("league_name", ""),
+            home_team=match_data.get("home_team", ""),
+            away_team=match_data.get("away_team", ""),
+            match_date=match_data["match_date"],
+            market_label=_MARKET_DISPLAY_LABELS.get(task.market, task.market),
+            predicted_outcome=prediction["predicted_label"],
+            confidence=confidence,
+            probabilities={k: float(v) for k, v in (prediction.get("probabilities") or {}).items()},
+        )
+        try:
+            enqueue_alerts([alert])
+            logger.info(
+                "Enqueued %s:%s alert for match %s (confidence=%.2f)",
+                task.sport,
+                task.market,
+                match_data["match_id"],
+                confidence,
+            )
+        except Exception as e:
+            logger.warning("Failed to enqueue alert for %s:%s: %s", task.sport, task.market, e)
