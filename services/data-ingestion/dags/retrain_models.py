@@ -63,6 +63,12 @@ SPORT_BUNDLE_GROUPS: dict[str, list[str]] = {
     # the *_soccer_<market> convention that parallels NHL.
     "soccer": ["soccer_match_result"],
     "nhl": ["nhl_moneyline", "nhl_regulation", "nhl_puck_line", "nhl_total"],
+    # NBA: line-as-feature design for spread + total — one trained
+    # model per market handles every line the book offers (vs NHL's
+    # fixed-line approach). Moneyline is a straight 2-class winner.
+    # All 3 share the nba_baseline feature_set written by
+    # scripts/compute_features_nba.py.
+    "nba": ["nba_moneyline", "nba_spread", "nba_total"],
 }
 
 default_args = {

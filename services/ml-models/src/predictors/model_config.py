@@ -31,6 +31,12 @@ class PredictionTask(Enum):
     NHL_REGULATION = "nhl_regulation"  # 3-class: home reg / tie / away reg
     NHL_PUCK_LINE = "nhl_puck_line"  # 2-class: home covers -1.5 / not
     NHL_TOTAL = "nhl_total"  # 2-class: over 5.5 / under 5.5
+    # NBA tasks. Spread + total are LINE-AS-FEATURE — one trained
+    # model handles every line the book offers (no fixed-line filter).
+    # All three are 2-class softmax for ensemble compatibility.
+    NBA_MONEYLINE = "nba_moneyline"  # 2-class: home/away winner incl. OT
+    NBA_SPREAD = "nba_spread"  # 2-class: home covers closing line / not
+    NBA_TOTAL = "nba_total"  # 2-class: over closing line / under
 
 
 @dataclass
@@ -758,3 +764,139 @@ HOCKEY_POISSON_NHL_PUCK_LINE = _hockey_poisson_config(
     "hockey_poisson_nhl_pl", PredictionTask.NHL_PUCK_LINE, "nhl_puck_line"
 )
 HOCKEY_POISSON_NHL_TOTAL = _hockey_poisson_config("hockey_poisson_nhl_tot", PredictionTask.NHL_TOTAL, "nhl_total")
+
+
+# ─────────────────────── NBA MODEL CONFIGS ───────────────────────────
+#
+# Three markets (moneyline, spread, total), three base models per
+# market (XGBoost, LightGBM, Neural Network) + 1 ensemble = 12
+# configs total. No Poisson/Dixon-Coles — basketball scoring is too
+# continuous and high-variance for a discrete-distribution prior to
+# add signal over GBDT.
+#
+# Hyperparameters mirror the NHL tuning: shallower trees than soccer
+# (less feature interaction), 400 estimators, hist-method XGBoost,
+# 2-class softmax for ensemble compatibility. We may re-tune per
+# market after watching real out-of-sample performance — for now a
+# unified set keeps the matrix small.
+
+
+def _nba_xgb_config(name: str, task: PredictionTask, target: str) -> ModelConfig:
+    return ModelConfig(
+        name=name,
+        model_type=ModelType.XGBOOST,
+        prediction_task=task,
+        version="1.0.0",
+        hyperparameters={
+            "objective": "multi:softprob",
+            "num_class": 2,
+            "max_depth": 6,
+            "learning_rate": 0.05,
+            "n_estimators": 400,
+            "subsample": 0.85,
+            "colsample_bytree": 0.85,
+            "min_child_weight": 5,
+            "gamma": 0.1,
+            "reg_alpha": 0.01,
+            "reg_lambda": 1.0,
+            "tree_method": "hist",
+            "random_state": 42,
+        },
+        features=[],
+        target_column=target,
+        loss_function="multi:softprob",
+        metrics=["accuracy", "log_loss", "brier_score"],
+        training_config={"early_stopping_rounds": 50, "eval_metric": "mlogloss", "verbose": 100},
+    )
+
+
+def _nba_lgb_config(name: str, task: PredictionTask, target: str) -> ModelConfig:
+    return ModelConfig(
+        name=name,
+        model_type=ModelType.LIGHTGBM,
+        prediction_task=task,
+        version="1.0.0",
+        hyperparameters={
+            "objective": "multiclass",
+            "num_class": 2,
+            "boosting_type": "gbdt",
+            "num_leaves": 48,
+            "learning_rate": 0.05,
+            "n_estimators": 400,
+            "subsample": 0.85,
+            "colsample_bytree": 0.85,
+            "min_child_samples": 25,
+            "reg_alpha": 0.01,
+            "reg_lambda": 1.0,
+            "random_state": 42,
+        },
+        features=[],
+        target_column=target,
+        loss_function="multiclass",
+        metrics=["accuracy", "log_loss", "brier_score"],
+        training_config={"early_stopping_rounds": 50, "verbose": 100},
+    )
+
+
+def _nba_nn_config(name: str, task: PredictionTask, target: str) -> ModelConfig:
+    return ModelConfig(
+        name=name,
+        model_type=ModelType.NEURAL_NETWORK,
+        prediction_task=task,
+        version="1.0.0",
+        hyperparameters={
+            "hidden_layers": [128, 64, 32],
+            "dropout_rate": 0.3,
+            "learning_rate": 0.001,
+            "batch_size": 256,
+            "epochs": 100,
+            "optimizer": "adam",
+            "activation": "relu",
+            "output_activation": "softmax",
+            "batch_norm": True,
+        },
+        features=[],
+        target_column=target,
+        loss_function="categorical_crossentropy",
+        metrics=["accuracy", "log_loss"],
+        training_config={"early_stopping_patience": 15, "reduce_lr_patience": 5, "verbose": 1},
+    )
+
+
+def _nba_ensemble_config(name: str, task: PredictionTask, target: str) -> ModelConfig:
+    return ModelConfig(
+        name=name,
+        model_type=ModelType.ENSEMBLE,
+        prediction_task=task,
+        version="1.0.0",
+        hyperparameters={
+            "combination_method": "weighted_average",
+            "optimize_weights": True,
+            "weight_optimization_metric": "log_loss",
+            "min_weight": 0.05,
+        },
+        features=[],
+        target_column=target,
+        loss_function="ensemble",
+        metrics=["accuracy", "log_loss", "brier_score", "roi"],
+        training_config={},
+    )
+
+
+# Moneyline
+XGBOOST_NBA_MONEYLINE = _nba_xgb_config("xgboost_nba_ml", PredictionTask.NBA_MONEYLINE, "nba_moneyline")
+LIGHTGBM_NBA_MONEYLINE = _nba_lgb_config("lightgbm_nba_ml", PredictionTask.NBA_MONEYLINE, "nba_moneyline")
+NEURAL_NETWORK_NBA_MONEYLINE = _nba_nn_config("neural_network_nba_ml", PredictionTask.NBA_MONEYLINE, "nba_moneyline")
+ENSEMBLE_NBA_MONEYLINE = _nba_ensemble_config("ensemble_nba_ml", PredictionTask.NBA_MONEYLINE, "nba_moneyline")
+
+# Spread (line-as-feature)
+XGBOOST_NBA_SPREAD = _nba_xgb_config("xgboost_nba_sp", PredictionTask.NBA_SPREAD, "nba_spread")
+LIGHTGBM_NBA_SPREAD = _nba_lgb_config("lightgbm_nba_sp", PredictionTask.NBA_SPREAD, "nba_spread")
+NEURAL_NETWORK_NBA_SPREAD = _nba_nn_config("neural_network_nba_sp", PredictionTask.NBA_SPREAD, "nba_spread")
+ENSEMBLE_NBA_SPREAD = _nba_ensemble_config("ensemble_nba_sp", PredictionTask.NBA_SPREAD, "nba_spread")
+
+# Total (line-as-feature)
+XGBOOST_NBA_TOTAL = _nba_xgb_config("xgboost_nba_tot", PredictionTask.NBA_TOTAL, "nba_total")
+LIGHTGBM_NBA_TOTAL = _nba_lgb_config("lightgbm_nba_tot", PredictionTask.NBA_TOTAL, "nba_total")
+NEURAL_NETWORK_NBA_TOTAL = _nba_nn_config("neural_network_nba_tot", PredictionTask.NBA_TOTAL, "nba_total")
+ENSEMBLE_NBA_TOTAL = _nba_ensemble_config("ensemble_nba_tot", PredictionTask.NBA_TOTAL, "nba_total")

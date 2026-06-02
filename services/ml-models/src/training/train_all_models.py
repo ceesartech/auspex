@@ -19,6 +19,9 @@ from predictors.lightgbm_model import LightGBMMatchPredictor
 from predictors.model_config import (
     DIXON_COLES_CONFIG,
     ENSEMBLE_CONFIG,
+    ENSEMBLE_NBA_MONEYLINE,
+    ENSEMBLE_NBA_SPREAD,
+    ENSEMBLE_NBA_TOTAL,
     ENSEMBLE_NHL_MONEYLINE,
     ENSEMBLE_NHL_PUCK_LINE,
     ENSEMBLE_NHL_REGULATION,
@@ -28,17 +31,26 @@ from predictors.model_config import (
     HOCKEY_POISSON_NHL_REGULATION,
     HOCKEY_POISSON_NHL_TOTAL,
     LIGHTGBM_MATCH_OUTCOME,
+    LIGHTGBM_NBA_MONEYLINE,
+    LIGHTGBM_NBA_SPREAD,
+    LIGHTGBM_NBA_TOTAL,
     LIGHTGBM_NHL_MONEYLINE,
     LIGHTGBM_NHL_PUCK_LINE,
     LIGHTGBM_NHL_REGULATION,
     LIGHTGBM_NHL_TOTAL,
     NEURAL_NETWORK_CONFIG,
+    NEURAL_NETWORK_NBA_MONEYLINE,
+    NEURAL_NETWORK_NBA_SPREAD,
+    NEURAL_NETWORK_NBA_TOTAL,
     NEURAL_NETWORK_NHL_MONEYLINE,
     NEURAL_NETWORK_NHL_PUCK_LINE,
     NEURAL_NETWORK_NHL_REGULATION,
     NEURAL_NETWORK_NHL_TOTAL,
     POISSON_CONFIG,
     XGBOOST_MATCH_OUTCOME,
+    XGBOOST_NBA_MONEYLINE,
+    XGBOOST_NBA_SPREAD,
+    XGBOOST_NBA_TOTAL,
     XGBOOST_NHL_MONEYLINE,
     XGBOOST_NHL_PUCK_LINE,
     XGBOOST_NHL_REGULATION,
@@ -51,16 +63,25 @@ from predictors.poisson_models import DixonColesPredictor, HockeyPoissonPredicto
 from predictors.xgboost_model import XGBoostMatchPredictor
 from training.calibration import ProbabilityCalibrator
 from utils.training_data import (
+    NBA_MONEYLINE_TARGET,
+    NBA_SPREAD_TARGET,
+    NBA_TOTAL_TARGET,
     NHL_MONEYLINE_TARGET,
     NHL_PUCK_LINE_TARGET,
     NHL_REGULATION_TARGET,
     NHL_TOTAL_TARGET,
     TARGET_COLUMN,
     get_feature_columns,
+    get_nba_moneyline_feature_columns,
+    get_nba_spread_feature_columns,
+    get_nba_total_feature_columns,
     get_nhl_feature_columns,
     get_nhl_puck_line_feature_columns,
     get_nhl_regulation_feature_columns,
     get_nhl_total_feature_columns,
+    load_nba_moneyline_frame,
+    load_nba_spread_frame,
+    load_nba_total_frame,
     load_nhl_moneyline_frame,
     load_nhl_puck_line_frame,
     load_nhl_regulation_frame,
@@ -234,6 +255,63 @@ NHL_TOTAL_BUNDLE = SportBundle(
 )
 
 
+# ── NBA bundles ───────────────────────────────────────────────────────
+# Three markets, line-as-feature design: spread/total models consume
+# the actual closing line as an input column so ONE trained model
+# handles every line the book offers per game. No Poisson/Dixon-Coles
+# — basketball scoring is too high-variance / continuous for a
+# discrete prior to add signal over GBDT + neural net.
+#
+# Suffix convention: _nba_ml / _nba_sp / _nba_tot (matches the
+# concise NHL _nhl_ml / _nhl_pl / _nhl_tot pattern). The features_cache
+# pin is feature_set='nba_baseline', set at compute time by
+# scripts/compute_features_nba.py.
+
+NBA_MONEYLINE_BUNDLE = SportBundle(
+    sport="nba_moneyline",
+    target_column=NBA_MONEYLINE_TARGET,
+    load_frame=load_nba_moneyline_frame,
+    feature_columns=get_nba_moneyline_feature_columns,
+    base_models=[
+        ModelSpec("xgboost_nba_ml", XGBoostMatchPredictor, XGBOOST_NBA_MONEYLINE),
+        ModelSpec("lightgbm_nba_ml", LightGBMMatchPredictor, LIGHTGBM_NBA_MONEYLINE),
+        ModelSpec("neural_network_nba_ml", NeuralNetworkMatchPredictor, NEURAL_NETWORK_NBA_MONEYLINE),
+    ],
+    ensemble_config=ENSEMBLE_NBA_MONEYLINE,
+    ensemble_name="ensemble_nba_ml",
+)
+
+
+NBA_SPREAD_BUNDLE = SportBundle(
+    sport="nba_spread",
+    target_column=NBA_SPREAD_TARGET,
+    load_frame=load_nba_spread_frame,
+    feature_columns=get_nba_spread_feature_columns,
+    base_models=[
+        ModelSpec("xgboost_nba_sp", XGBoostMatchPredictor, XGBOOST_NBA_SPREAD),
+        ModelSpec("lightgbm_nba_sp", LightGBMMatchPredictor, LIGHTGBM_NBA_SPREAD),
+        ModelSpec("neural_network_nba_sp", NeuralNetworkMatchPredictor, NEURAL_NETWORK_NBA_SPREAD),
+    ],
+    ensemble_config=ENSEMBLE_NBA_SPREAD,
+    ensemble_name="ensemble_nba_sp",
+)
+
+
+NBA_TOTAL_BUNDLE = SportBundle(
+    sport="nba_total",
+    target_column=NBA_TOTAL_TARGET,
+    load_frame=load_nba_total_frame,
+    feature_columns=get_nba_total_feature_columns,
+    base_models=[
+        ModelSpec("xgboost_nba_tot", XGBoostMatchPredictor, XGBOOST_NBA_TOTAL),
+        ModelSpec("lightgbm_nba_tot", LightGBMMatchPredictor, LIGHTGBM_NBA_TOTAL),
+        ModelSpec("neural_network_nba_tot", NeuralNetworkMatchPredictor, NEURAL_NETWORK_NBA_TOTAL),
+    ],
+    ensemble_config=ENSEMBLE_NBA_TOTAL,
+    ensemble_name="ensemble_nba_tot",
+)
+
+
 # --sport value → SportBundle. Every key follows the
 # <sport>_<market> convention.
 SPORT_BUNDLES: Dict[str, SportBundle] = {
@@ -242,6 +320,9 @@ SPORT_BUNDLES: Dict[str, SportBundle] = {
     "nhl_regulation": NHL_REGULATION_BUNDLE,
     "nhl_puck_line": NHL_PUCK_LINE_BUNDLE,
     "nhl_total": NHL_TOTAL_BUNDLE,
+    "nba_moneyline": NBA_MONEYLINE_BUNDLE,
+    "nba_spread": NBA_SPREAD_BUNDLE,
+    "nba_total": NBA_TOTAL_BUNDLE,
 }
 
 

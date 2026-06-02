@@ -899,6 +899,293 @@ def get_nhl_total_feature_columns(frame: pd.DataFrame, target: str = NHL_TOTAL_T
     return [column for column in numeric if column not in excluded]
 
 
+# ====================================================================
+# NBA TRAINING QUERIES — 3 markets: moneyline, spread, total
+# ====================================================================
+#
+# Architecture decision: NBA spread + total use LINE-AS-FEATURE design
+# (the closing line is a numeric input column, not a fixed filter
+# like NHL's puck_line=-1.5 / total=5.5). One trained model handles
+# the full ladder of lines the book offers per game. See
+# scripts/compute_features_nba.py for the matching feature-side
+# implementation.
+#
+# Three queries, mirroring the NHL pattern:
+#   * NBA_MONEYLINE_TRAINING_QUERY — 2-class home/away
+#   * NBA_SPREAD_TRAINING_QUERY    — 2-class home-covered / not, derived
+#                                    from (margin, closing_spread_home)
+#   * NBA_TOTAL_TRAINING_QUERY     — 2-class over / under, derived from
+#                                    (total, closing_total_line)
+#
+# Spread + total queries INNER JOIN to the odds table — matches without
+# a real closing line are dropped from the training set (we never want
+# to train on neutral-default lines). With current prod data (89%
+# spread / 85% total coverage) this filters ~4125 finished matches
+# down to ~3678 / ~3499 trainable rows. Plenty.
+
+NBA_MONEYLINE_TARGET = "nba_moneyline"
+NBA_SPREAD_TARGET = "nba_spread"
+NBA_TOTAL_TARGET = "nba_total"
+
+# Moneyline: home win = 0, away win = 1. NBA always has a winner
+# after OT, so no tie row to filter.
+NBA_MONEYLINE_TRAINING_QUERY = """
+    SELECT
+        m.id::text AS match_id,
+        m.match_date,
+        m.season,
+        m.league_id::text AS league_id,
+        m.home_team_id::text AS home_team_id,
+        m.away_team_id::text AS away_team_id,
+        ht.name AS home_team,
+        at.name AS away_team,
+        m.home_score,
+        m.away_score,
+        CASE WHEN m.home_score > m.away_score THEN 0 ELSE 1 END AS nba_moneyline,
+        -- Closing moneyline averaged across books
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'moneyline'
+              AND o.selection = 'home' AND NOT o.is_live) AS odds_home_ml,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'moneyline'
+              AND o.selection = 'away' AND NOT o.is_live) AS odds_away_ml,
+        fc.features
+    FROM matches m
+    JOIN leagues l ON l.id = m.league_id
+    JOIN teams ht ON m.home_team_id = ht.id
+    JOIN teams at ON m.away_team_id = at.id
+    LEFT JOIN LATERAL (
+        SELECT features
+        FROM features_cache
+        WHERE match_id = m.id AND feature_set = 'nba_baseline'
+        ORDER BY computed_at DESC
+        LIMIT 1
+    ) fc ON true
+    WHERE l.sport = 'nba'
+      AND m.status = 'finished'
+      AND m.home_score IS NOT NULL
+      AND m.away_score IS NOT NULL
+      AND m.home_score <> m.away_score  -- NBA never ties; ties = data error
+    ORDER BY m.match_date ASC
+"""
+
+# Spread: home covered = 0, away covered = 1. Cover condition:
+# (home_score - away_score) > -closing_spread_home (the line is from
+# home perspective; -7.5 means home favored by 7.5, so home covers iff
+# margin > 7.5). The LATERAL spread.* subquery returns the avg closing
+# line across books — INNER joined so matches without a closing spread
+# are dropped from the training corpus.
+NBA_SPREAD_TRAINING_QUERY = """
+    SELECT
+        m.id::text AS match_id,
+        m.match_date,
+        m.season,
+        m.league_id::text AS league_id,
+        m.home_team_id::text AS home_team_id,
+        m.away_team_id::text AS away_team_id,
+        ht.name AS home_team,
+        at.name AS away_team,
+        m.home_score,
+        m.away_score,
+        spread.home_line AS closing_spread_home,
+        spread.home_odds AS odds_spread_home,
+        spread.away_odds AS odds_spread_away,
+        CASE
+            WHEN (m.home_score - m.away_score) > -spread.home_line THEN 0  -- home covered
+            ELSE 1                                                          -- away covered
+        END AS nba_spread,
+        fc.features
+    FROM matches m
+    JOIN leagues l ON l.id = m.league_id
+    JOIN teams ht ON m.home_team_id = ht.id
+    JOIN teams at ON m.away_team_id = at.id
+    JOIN LATERAL (
+        SELECT
+            AVG(CASE WHEN o.selection = 'home' THEN o.line END) AS home_line,
+            AVG(CASE WHEN o.selection = 'home' THEN o.odds_decimal END) AS home_odds,
+            AVG(CASE WHEN o.selection = 'away' THEN o.odds_decimal END) AS away_odds
+        FROM odds o
+        WHERE o.match_id = m.id AND o.market_type = 'spread' AND NOT o.is_live
+    ) spread ON spread.home_line IS NOT NULL
+    LEFT JOIN LATERAL (
+        SELECT features
+        FROM features_cache
+        WHERE match_id = m.id AND feature_set = 'nba_baseline'
+        ORDER BY computed_at DESC
+        LIMIT 1
+    ) fc ON true
+    WHERE l.sport = 'nba'
+      AND m.status = 'finished'
+      AND m.home_score IS NOT NULL
+      AND m.away_score IS NOT NULL
+    ORDER BY m.match_date ASC
+"""
+
+# Total: over = 0, under = 1. Cover condition: home_score + away_score
+# > closing_total_line. INNER LATERAL filters to matches with a real
+# total line (~85% of NBA matches in DB after the historical-odds
+# backfill).
+NBA_TOTAL_TRAINING_QUERY = """
+    SELECT
+        m.id::text AS match_id,
+        m.match_date,
+        m.season,
+        m.league_id::text AS league_id,
+        m.home_team_id::text AS home_team_id,
+        m.away_team_id::text AS away_team_id,
+        ht.name AS home_team,
+        at.name AS away_team,
+        m.home_score,
+        m.away_score,
+        total.line AS closing_total_line,
+        total.over_odds AS odds_total_over,
+        total.under_odds AS odds_total_under,
+        CASE
+            WHEN (m.home_score + m.away_score) > total.line THEN 0  -- over
+            ELSE 1                                                   -- under
+        END AS nba_total,
+        fc.features
+    FROM matches m
+    JOIN leagues l ON l.id = m.league_id
+    JOIN teams ht ON m.home_team_id = ht.id
+    JOIN teams at ON m.away_team_id = at.id
+    JOIN LATERAL (
+        SELECT
+            AVG(CASE WHEN o.selection = 'over'  THEN o.line END)        AS line,
+            AVG(CASE WHEN o.selection = 'over'  THEN o.odds_decimal END) AS over_odds,
+            AVG(CASE WHEN o.selection = 'under' THEN o.odds_decimal END) AS under_odds
+        FROM odds o
+        WHERE o.match_id = m.id AND o.market_type = 'total' AND NOT o.is_live
+    ) total ON total.line IS NOT NULL
+    LEFT JOIN LATERAL (
+        SELECT features
+        FROM features_cache
+        WHERE match_id = m.id AND feature_set = 'nba_baseline'
+        ORDER BY computed_at DESC
+        LIMIT 1
+    ) fc ON true
+    WHERE l.sport = 'nba'
+      AND m.status = 'finished'
+      AND m.home_score IS NOT NULL
+      AND m.away_score IS NOT NULL
+    ORDER BY m.match_date ASC
+"""
+
+# Columns each query exposes that must NOT be used as model inputs.
+# Same structure as NHL_NON_FEATURE_COLUMNS — IDs, raw scores (leakage),
+# the target itself, and the features blob (flattened separately).
+NBA_MONEYLINE_NON_FEATURE_COLUMNS = {
+    "match_id",
+    "match_date",
+    "season",
+    "league_id",
+    "home_team_id",
+    "away_team_id",
+    "home_team",
+    "away_team",
+    "home_score",
+    "away_score",
+    NBA_MONEYLINE_TARGET,
+    "features",
+}
+NBA_SPREAD_NON_FEATURE_COLUMNS = NBA_MONEYLINE_NON_FEATURE_COLUMNS - {NBA_MONEYLINE_TARGET} | {NBA_SPREAD_TARGET}
+NBA_TOTAL_NON_FEATURE_COLUMNS = NBA_MONEYLINE_NON_FEATURE_COLUMNS - {NBA_MONEYLINE_TARGET} | {NBA_TOTAL_TARGET}
+
+
+def _flatten_nba_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    """Flatten features_cache JSON + parse match_date. Same shape as
+    the NHL equivalent — no rolling-form recomputation in pandas
+    because compute_features_nba.py already produced the canonical
+    pre-match values that predict-time will use."""
+    if raw.empty:
+        return raw.copy()
+    frame = raw.copy()
+    if "features" in frame.columns:
+        feature_rows = [_flatten_features(value) for value in frame["features"]]
+        flattened = pd.DataFrame(feature_rows, index=frame.index)
+        frame = pd.concat([frame.drop(columns=["features"]), flattened], axis=1)
+    if "match_date" in frame.columns:
+        frame["match_date"] = pd.to_datetime(frame["match_date"], errors="coerce")
+    return frame
+
+
+def _load_nba(query: str, prepare, database_url: Optional[str] = None, input_csv: Optional[str] = None) -> pd.DataFrame:
+    if input_csv:
+        raw = pd.read_csv(input_csv)
+    elif database_url:
+        from sqlalchemy import create_engine
+
+        engine = create_engine(database_url)
+        try:
+            raw = pd.read_sql(query, engine)
+        finally:
+            engine.dispose()
+    else:
+        raise ValueError("Provide input_csv or database_url")
+    return prepare(raw)
+
+
+def prepare_nba_moneyline_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    frame = _flatten_nba_frame(raw)
+    # Defensive: derive target from scores if a CSV input bypassed SQL.
+    if NBA_MONEYLINE_TARGET not in frame.columns and {"home_score", "away_score"}.issubset(frame.columns):
+        frame[NBA_MONEYLINE_TARGET] = np.where(frame["home_score"] > frame["away_score"], 0, 1)
+    return frame
+
+
+def prepare_nba_spread_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    frame = _flatten_nba_frame(raw)
+    if NBA_SPREAD_TARGET not in frame.columns and {"home_score", "away_score", "closing_spread_home"}.issubset(
+        frame.columns
+    ):
+        margin = frame["home_score"] - frame["away_score"]
+        frame[NBA_SPREAD_TARGET] = np.where(margin > -frame["closing_spread_home"], 0, 1)
+    return frame
+
+
+def prepare_nba_total_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    frame = _flatten_nba_frame(raw)
+    if NBA_TOTAL_TARGET not in frame.columns and {"home_score", "away_score", "closing_total_line"}.issubset(
+        frame.columns
+    ):
+        total = frame["home_score"] + frame["away_score"]
+        frame[NBA_TOTAL_TARGET] = np.where(total > frame["closing_total_line"], 0, 1)
+    return frame
+
+
+def load_nba_moneyline_frame(*, database_url: Optional[str] = None, input_csv: Optional[str] = None) -> pd.DataFrame:
+    return _load_nba(NBA_MONEYLINE_TRAINING_QUERY, prepare_nba_moneyline_frame, database_url, input_csv)
+
+
+def load_nba_spread_frame(*, database_url: Optional[str] = None, input_csv: Optional[str] = None) -> pd.DataFrame:
+    return _load_nba(NBA_SPREAD_TRAINING_QUERY, prepare_nba_spread_frame, database_url, input_csv)
+
+
+def load_nba_total_frame(*, database_url: Optional[str] = None, input_csv: Optional[str] = None) -> pd.DataFrame:
+    return _load_nba(NBA_TOTAL_TRAINING_QUERY, prepare_nba_total_frame, database_url, input_csv)
+
+
+def get_nba_moneyline_feature_columns(frame: pd.DataFrame, target: str = NBA_MONEYLINE_TARGET) -> List[str]:
+    excluded = set(NBA_MONEYLINE_NON_FEATURE_COLUMNS)
+    excluded.add(target)
+    numeric = frame.select_dtypes(include=[np.number, bool]).columns.tolist()
+    return [column for column in numeric if column not in excluded]
+
+
+def get_nba_spread_feature_columns(frame: pd.DataFrame, target: str = NBA_SPREAD_TARGET) -> List[str]:
+    excluded = set(NBA_SPREAD_NON_FEATURE_COLUMNS)
+    excluded.add(target)
+    numeric = frame.select_dtypes(include=[np.number, bool]).columns.tolist()
+    return [column for column in numeric if column not in excluded]
+
+
+def get_nba_total_feature_columns(frame: pd.DataFrame, target: str = NBA_TOTAL_TARGET) -> List[str]:
+    excluded = set(NBA_TOTAL_NON_FEATURE_COLUMNS)
+    excluded.add(target)
+    numeric = frame.select_dtypes(include=[np.number, bool]).columns.tolist()
+    return [column for column in numeric if column not in excluded]
+
+
 def _flatten_features(value: Any, prefix: str = "feature") -> Dict[str, float]:
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return {}
