@@ -75,7 +75,6 @@ from utils.training_data import (  # noqa: E402
     prepare_nba_total_frame,
 )
 
-
 # ── Training queries: scope + features_cache pin ────────────────────
 
 
