@@ -126,6 +126,66 @@ class TestKellyConstant:
         assert gr_nba.KELLY_FRACTION == 0.25
 
 
+class TestClosingLineForMatchSQL:
+    """Lockdown for the spread-line averaging bug: spread odds rows
+    carry SIGNED lines (-5 home, +5 away). If closing_line_for_match
+    averaged across both perspectives it'd return ~0 for any favorite,
+    and the downstream `ABS(line - 0) <= 0.5` filter in
+    best_odds_for_market would reject every real offer → 0 spread
+    recs. Pin the average to the home perspective for spread."""
+
+    def test_spread_query_filters_to_home_perspective(self):
+        # The function builds the SQL dynamically; verify by capturing
+        # the executed query through a fake cursor.
+        captured = {}
+
+        class FakeCursor:
+            def execute(self, sql, params):
+                captured["sql"] = sql
+                captured["params"] = params
+
+            def fetchone(self):
+                return {"avg_line": -5.0}
+
+        result = gr_nba.closing_line_for_match(FakeCursor(), "match-id", "spread")
+        # Returned the home-only average.
+        assert result == -5.0
+        # And the SQL pinned to home selection.
+        assert "selection = 'home'" in captured["sql"]
+        assert captured["params"] == ("match-id", "spread")
+
+    def test_total_query_omits_selection_filter(self):
+        # Totals: line is identical on both sides (218.5 for over AND
+        # under). No selection pin needed; averaging across selections
+        # gives the same number as one-side averaging.
+        captured = {}
+
+        class FakeCursor:
+            def execute(self, sql, params):
+                captured["sql"] = sql
+                captured["params"] = params
+
+            def fetchone(self):
+                return {"avg_line": 218.5}
+
+        result = gr_nba.closing_line_for_match(FakeCursor(), "match-id", "total")
+        assert result == 218.5
+        # No selection filter for total — both over/under rows carry
+        # the same line value, so averaging across them is correct.
+        assert "selection = 'home'" not in captured["sql"]
+        assert "selection = 'over'" not in captured["sql"]
+
+    def test_returns_none_when_no_odds(self):
+        class FakeCursor:
+            def execute(self, sql, params):
+                pass
+
+            def fetchone(self):
+                return None
+
+        assert gr_nba.closing_line_for_match(FakeCursor(), "match-id", "spread") is None
+
+
 class TestProbabilityCap:
     def test_cap_clips_overconfident_predictions(self):
         # The 87% spread emit observed on the Finals matchup gets

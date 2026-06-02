@@ -119,15 +119,31 @@ def closing_line_for_match(cur, match_id: str, market_type: str) -> float | None
     """Most-recent pre-match line offered (averaged across books) for
     the spread or total market on this match. Returns None if no odds
     landed — used to decide whether we can recommend a spread/total
-    bet (we only recommend at the line the model was trained on)."""
+    bet (we only recommend at the line the model was trained on).
+
+    Spread quirk: odds rows for the home side carry a SIGNED line
+    (-5 for a 5-point favorite), and away rows the inverse (+5).
+    Averaging both perspectives gives ~0 for any matchup with a
+    favorite, which then fails the ±0.5 line-match filter in
+    best_odds_for_match → 0 spread recs. Pin the average to the
+    home perspective so the target_line is the signed home line
+    (-5 in the example). Totals don't have this issue because the
+    line is the same on both sides (218.5 for over AND under).
+    """
+    selection_filter = "selection = 'home'" if market_type == "spread" else ""
+    where_clauses = [
+        "match_id = %s",
+        "market_type = %s",
+        "NOT is_live",
+        "line IS NOT NULL",
+    ]
+    if selection_filter:
+        where_clauses.append(selection_filter)
     cur.execute(
-        """
+        f"""
         SELECT AVG(line) AS avg_line
         FROM odds
-        WHERE match_id = %s
-          AND market_type = %s
-          AND NOT is_live
-          AND line IS NOT NULL
+        WHERE {' AND '.join(where_clauses)}
         """,
         (match_id, market_type),
     )
