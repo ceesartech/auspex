@@ -69,6 +69,13 @@ SPORT_BUNDLE_GROUPS: dict[str, list[str]] = {
     # All 3 share the nba_baseline feature_set written by
     # scripts/compute_features_nba.py.
     "nba": ["nba_moneyline", "nba_spread", "nba_total"],
+    # NFL: same line-as-feature design as NBA. NFL has FEWER games
+    # per season (~285 vs NBA's ~1230) so the bundles use shallower
+    # trees + smaller NN — see _nfl_xgb_config etc. in
+    # services/ml-models/src/predictors/model_config.py. Features
+    # come from scripts/compute_features_nfl.py (feature_set =
+    # nfl_baseline).
+    "nfl": ["nfl_moneyline", "nfl_spread", "nfl_total"],
 }
 
 default_args = {

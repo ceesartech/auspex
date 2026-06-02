@@ -22,6 +22,9 @@ from predictors.model_config import (
     ENSEMBLE_NBA_MONEYLINE,
     ENSEMBLE_NBA_SPREAD,
     ENSEMBLE_NBA_TOTAL,
+    ENSEMBLE_NFL_MONEYLINE,
+    ENSEMBLE_NFL_SPREAD,
+    ENSEMBLE_NFL_TOTAL,
     ENSEMBLE_NHL_MONEYLINE,
     ENSEMBLE_NHL_PUCK_LINE,
     ENSEMBLE_NHL_REGULATION,
@@ -34,6 +37,9 @@ from predictors.model_config import (
     LIGHTGBM_NBA_MONEYLINE,
     LIGHTGBM_NBA_SPREAD,
     LIGHTGBM_NBA_TOTAL,
+    LIGHTGBM_NFL_MONEYLINE,
+    LIGHTGBM_NFL_SPREAD,
+    LIGHTGBM_NFL_TOTAL,
     LIGHTGBM_NHL_MONEYLINE,
     LIGHTGBM_NHL_PUCK_LINE,
     LIGHTGBM_NHL_REGULATION,
@@ -42,6 +48,9 @@ from predictors.model_config import (
     NEURAL_NETWORK_NBA_MONEYLINE,
     NEURAL_NETWORK_NBA_SPREAD,
     NEURAL_NETWORK_NBA_TOTAL,
+    NEURAL_NETWORK_NFL_MONEYLINE,
+    NEURAL_NETWORK_NFL_SPREAD,
+    NEURAL_NETWORK_NFL_TOTAL,
     NEURAL_NETWORK_NHL_MONEYLINE,
     NEURAL_NETWORK_NHL_PUCK_LINE,
     NEURAL_NETWORK_NHL_REGULATION,
@@ -51,6 +60,9 @@ from predictors.model_config import (
     XGBOOST_NBA_MONEYLINE,
     XGBOOST_NBA_SPREAD,
     XGBOOST_NBA_TOTAL,
+    XGBOOST_NFL_MONEYLINE,
+    XGBOOST_NFL_SPREAD,
+    XGBOOST_NFL_TOTAL,
     XGBOOST_NHL_MONEYLINE,
     XGBOOST_NHL_PUCK_LINE,
     XGBOOST_NHL_REGULATION,
@@ -66,6 +78,9 @@ from utils.training_data import (
     NBA_MONEYLINE_TARGET,
     NBA_SPREAD_TARGET,
     NBA_TOTAL_TARGET,
+    NFL_MONEYLINE_TARGET,
+    NFL_SPREAD_TARGET,
+    NFL_TOTAL_TARGET,
     NHL_MONEYLINE_TARGET,
     NHL_PUCK_LINE_TARGET,
     NHL_REGULATION_TARGET,
@@ -75,6 +90,9 @@ from utils.training_data import (
     get_nba_moneyline_feature_columns,
     get_nba_spread_feature_columns,
     get_nba_total_feature_columns,
+    get_nfl_moneyline_feature_columns,
+    get_nfl_spread_feature_columns,
+    get_nfl_total_feature_columns,
     get_nhl_feature_columns,
     get_nhl_puck_line_feature_columns,
     get_nhl_regulation_feature_columns,
@@ -82,6 +100,9 @@ from utils.training_data import (
     load_nba_moneyline_frame,
     load_nba_spread_frame,
     load_nba_total_frame,
+    load_nfl_moneyline_frame,
+    load_nfl_spread_frame,
+    load_nfl_total_frame,
     load_nhl_moneyline_frame,
     load_nhl_puck_line_frame,
     load_nhl_regulation_frame,
@@ -312,6 +333,54 @@ NBA_TOTAL_BUNDLE = SportBundle(
 )
 
 
+# NFL bundles — same shape as NBA (3 base models + ensemble per market,
+# no Poisson/Dixon-Coles). NFL_SPREAD / NFL_TOTAL use the closing line
+# as a model feature, mirroring NBA's line-as-feature design.
+NFL_MONEYLINE_BUNDLE = SportBundle(
+    sport="nfl_moneyline",
+    target_column=NFL_MONEYLINE_TARGET,
+    load_frame=load_nfl_moneyline_frame,
+    feature_columns=get_nfl_moneyline_feature_columns,
+    base_models=[
+        ModelSpec("xgboost_nfl_ml", XGBoostMatchPredictor, XGBOOST_NFL_MONEYLINE),
+        ModelSpec("lightgbm_nfl_ml", LightGBMMatchPredictor, LIGHTGBM_NFL_MONEYLINE),
+        ModelSpec("neural_network_nfl_ml", NeuralNetworkMatchPredictor, NEURAL_NETWORK_NFL_MONEYLINE),
+    ],
+    ensemble_config=ENSEMBLE_NFL_MONEYLINE,
+    ensemble_name="ensemble_nfl_ml",
+)
+
+
+NFL_SPREAD_BUNDLE = SportBundle(
+    sport="nfl_spread",
+    target_column=NFL_SPREAD_TARGET,
+    load_frame=load_nfl_spread_frame,
+    feature_columns=get_nfl_spread_feature_columns,
+    base_models=[
+        ModelSpec("xgboost_nfl_sp", XGBoostMatchPredictor, XGBOOST_NFL_SPREAD),
+        ModelSpec("lightgbm_nfl_sp", LightGBMMatchPredictor, LIGHTGBM_NFL_SPREAD),
+        ModelSpec("neural_network_nfl_sp", NeuralNetworkMatchPredictor, NEURAL_NETWORK_NFL_SPREAD),
+    ],
+    ensemble_config=ENSEMBLE_NFL_SPREAD,
+    ensemble_name="ensemble_nfl_sp",
+)
+
+
+NFL_TOTAL_BUNDLE = SportBundle(
+    sport="nfl_total",
+    target_column=NFL_TOTAL_TARGET,
+    load_frame=load_nfl_total_frame,
+    feature_columns=get_nfl_total_feature_columns,
+    base_models=[
+        ModelSpec("xgboost_nfl_tot", XGBoostMatchPredictor, XGBOOST_NFL_TOTAL),
+        ModelSpec("lightgbm_nfl_tot", LightGBMMatchPredictor, LIGHTGBM_NFL_TOTAL),
+        ModelSpec("neural_network_nfl_tot", NeuralNetworkMatchPredictor, NEURAL_NETWORK_NFL_TOTAL),
+    ],
+    ensemble_config=ENSEMBLE_NFL_TOTAL,
+    ensemble_name="ensemble_nfl_tot",
+)
+
+
 # --sport value → SportBundle. Every key follows the
 # <sport>_<market> convention.
 SPORT_BUNDLES: Dict[str, SportBundle] = {
@@ -323,6 +392,9 @@ SPORT_BUNDLES: Dict[str, SportBundle] = {
     "nba_moneyline": NBA_MONEYLINE_BUNDLE,
     "nba_spread": NBA_SPREAD_BUNDLE,
     "nba_total": NBA_TOTAL_BUNDLE,
+    "nfl_moneyline": NFL_MONEYLINE_BUNDLE,
+    "nfl_spread": NFL_SPREAD_BUNDLE,
+    "nfl_total": NFL_TOTAL_BUNDLE,
 }
 
 

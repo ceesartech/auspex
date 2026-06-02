@@ -37,6 +37,12 @@ class PredictionTask(Enum):
     NBA_MONEYLINE = "nba_moneyline"  # 2-class: home/away winner incl. OT
     NBA_SPREAD = "nba_spread"  # 2-class: home covers closing line / not
     NBA_TOTAL = "nba_total"  # 2-class: over closing line / under
+    # NFL tasks. Same line-as-feature design as NBA — spread + total
+    # consume the actual closing line as a numeric input. NFL ties are
+    # excluded from training so moneyline stays cleanly 2-class.
+    NFL_MONEYLINE = "nfl_moneyline"  # 2-class: home/away (non-tie games)
+    NFL_SPREAD = "nfl_spread"  # 2-class: home covers closing line / not
+    NFL_TOTAL = "nfl_total"  # 2-class: over closing line / under
 
 
 @dataclass
@@ -900,3 +906,66 @@ XGBOOST_NBA_TOTAL = _nba_xgb_config("xgboost_nba_tot", PredictionTask.NBA_TOTAL,
 LIGHTGBM_NBA_TOTAL = _nba_lgb_config("lightgbm_nba_tot", PredictionTask.NBA_TOTAL, "nba_total")
 NEURAL_NETWORK_NBA_TOTAL = _nba_nn_config("neural_network_nba_tot", PredictionTask.NBA_TOTAL, "nba_total")
 ENSEMBLE_NBA_TOTAL = _nba_ensemble_config("ensemble_nba_tot", PredictionTask.NBA_TOTAL, "nba_total")
+
+
+# ─────────────────────── NFL MODEL CONFIGS ───────────────────────────
+#
+# Three markets (moneyline, spread, total), three base models per
+# market (XGBoost, LightGBM, Neural Network) + 1 ensemble = 12
+# configs total. Same shape as NBA — no Poisson/Dixon-Coles (NFL
+# scoring is too high-variance + matchup-specific for a discrete
+# prior to add signal over GBDT + NN).
+#
+# NFL has FEWER training rows than NBA (~855 across 3 seasons vs
+# NBA's 4125), so we use SHALLOWER trees + smaller learning rate
+# than NBA to avoid overfitting. n_estimators stays at 400 but
+# max_depth drops to 5 (NBA uses 6) and num_leaves to 32 (NBA's
+# 48) to keep model capacity proportional to sample size.
+
+# NFL uses the same factory functions as NBA — _nba_xgb_config etc.
+# are sport-agnostic at the moment; we just override max_depth /
+# num_leaves per-bundle on top. Define small NFL-specific factory
+# wrappers so the hyperparameter delta is explicit rather than
+# scattered.
+
+
+def _nfl_xgb_config(name: str, task: PredictionTask, target: str) -> ModelConfig:
+    cfg = _nba_xgb_config(name, task, target)
+    # Shallower trees on smaller corpus to reduce overfit risk.
+    cfg.hyperparameters["max_depth"] = 5
+    cfg.hyperparameters["min_child_weight"] = 8  # was 5 for NBA
+    return cfg
+
+
+def _nfl_lgb_config(name: str, task: PredictionTask, target: str) -> ModelConfig:
+    cfg = _nba_lgb_config(name, task, target)
+    cfg.hyperparameters["num_leaves"] = 32  # was 48 for NBA
+    cfg.hyperparameters["min_child_samples"] = 40  # was 25 for NBA
+    return cfg
+
+
+def _nfl_nn_config(name: str, task: PredictionTask, target: str) -> ModelConfig:
+    cfg = _nba_nn_config(name, task, target)
+    # Smaller layers — fewer params for fewer rows.
+    cfg.hyperparameters["hidden_layers"] = [64, 32, 16]
+    cfg.hyperparameters["dropout_rate"] = 0.4  # was 0.3 for NBA
+    return cfg
+
+
+# Moneyline
+XGBOOST_NFL_MONEYLINE = _nfl_xgb_config("xgboost_nfl_ml", PredictionTask.NFL_MONEYLINE, "nfl_moneyline")
+LIGHTGBM_NFL_MONEYLINE = _nfl_lgb_config("lightgbm_nfl_ml", PredictionTask.NFL_MONEYLINE, "nfl_moneyline")
+NEURAL_NETWORK_NFL_MONEYLINE = _nfl_nn_config("neural_network_nfl_ml", PredictionTask.NFL_MONEYLINE, "nfl_moneyline")
+ENSEMBLE_NFL_MONEYLINE = _nba_ensemble_config("ensemble_nfl_ml", PredictionTask.NFL_MONEYLINE, "nfl_moneyline")
+
+# Spread (line-as-feature)
+XGBOOST_NFL_SPREAD = _nfl_xgb_config("xgboost_nfl_sp", PredictionTask.NFL_SPREAD, "nfl_spread")
+LIGHTGBM_NFL_SPREAD = _nfl_lgb_config("lightgbm_nfl_sp", PredictionTask.NFL_SPREAD, "nfl_spread")
+NEURAL_NETWORK_NFL_SPREAD = _nfl_nn_config("neural_network_nfl_sp", PredictionTask.NFL_SPREAD, "nfl_spread")
+ENSEMBLE_NFL_SPREAD = _nba_ensemble_config("ensemble_nfl_sp", PredictionTask.NFL_SPREAD, "nfl_spread")
+
+# Total (line-as-feature)
+XGBOOST_NFL_TOTAL = _nfl_xgb_config("xgboost_nfl_tot", PredictionTask.NFL_TOTAL, "nfl_total")
+LIGHTGBM_NFL_TOTAL = _nfl_lgb_config("lightgbm_nfl_tot", PredictionTask.NFL_TOTAL, "nfl_total")
+NEURAL_NETWORK_NFL_TOTAL = _nfl_nn_config("neural_network_nfl_tot", PredictionTask.NFL_TOTAL, "nfl_total")
+ENSEMBLE_NFL_TOTAL = _nba_ensemble_config("ensemble_nfl_tot", PredictionTask.NFL_TOTAL, "nfl_total")
