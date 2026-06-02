@@ -175,3 +175,160 @@ class TestSendTelegramDigest:
         assert sent == 0
         # Exactly one attempt before giving up.
         assert mock_requests.post.call_count == 1
+
+
+class _FakeRedisPipeline:
+    """Minimal redis pipeline stub: collects ops and replays them on
+    execute(). Good enough to verify the helper's queue semantics
+    without a live redis."""
+
+    def __init__(self, client):
+        self.client = client
+        self.ops = []
+
+    def rpush(self, key, *values):
+        self.ops.append(("rpush", key, values))
+        return self
+
+    def expire(self, key, ttl):
+        self.ops.append(("expire", key, ttl))
+        return self
+
+    def lrange(self, key, start, end):
+        self.ops.append(("lrange", key, start, end))
+        return self
+
+    def delete(self, key):
+        self.ops.append(("delete", key))
+        return self
+
+    def execute(self):
+        results = []
+        for op in self.ops:
+            if op[0] == "rpush":
+                self.client.store.setdefault(op[1], []).extend(op[2])
+                results.append(len(self.client.store[op[1]]))
+            elif op[0] == "expire":
+                results.append(True)
+            elif op[0] == "lrange":
+                results.append(list(self.client.store.get(op[1], [])))
+            elif op[0] == "delete":
+                self.client.store.pop(op[1], None)
+                results.append(1)
+        return results
+
+
+class _FakeRedis:
+    def __init__(self):
+        self.store: dict = {}
+
+    def pipeline(self):
+        return _FakeRedisPipeline(self)
+
+
+class TestEnqueueAndDrain:
+    def test_enqueue_empty_returns_zero_no_redis_lookup(self):
+        with patch.object(tn, "_redis_client") as mock_rc:
+            depth = tn.enqueue_alerts([])
+        assert depth == 0
+        mock_rc.assert_not_called()
+
+    def test_enqueue_without_redis_returns_zero(self):
+        with patch.object(tn, "_redis_client", return_value=None):
+            depth = tn.enqueue_alerts([_alert()])
+        assert depth == 0
+
+    def test_enqueue_pushes_and_sets_ttl(self):
+        fake = _FakeRedis()
+        with patch.object(tn, "_redis_client", return_value=fake):
+            depth = tn.enqueue_alerts([_alert(), _alert()])
+        assert depth == 2
+        assert len(fake.store[tn.DEFAULT_QUEUE_KEY]) == 2
+
+    def test_enqueue_accumulates_across_calls(self):
+        # Soccer pushes, then NHL pushes — drain should see both.
+        fake = _FakeRedis()
+        with patch.object(tn, "_redis_client", return_value=fake):
+            tn.enqueue_alerts([_alert(sport="soccer")])
+            depth = tn.enqueue_alerts([_alert(sport="nhl", market_label="Moneyline")])
+        assert depth == 2
+        assert len(fake.store[tn.DEFAULT_QUEUE_KEY]) == 2
+
+    def test_drain_sends_one_combined_digest_with_both_sports(self):
+        fake = _FakeRedis()
+        env = {
+            "ENABLE_TELEGRAM_NOTIFICATIONS": "true",
+            "TELEGRAM_BOT_TOKEN": "tok",
+            "TELEGRAM_CHAT_ID": "12345",
+        }
+        with patch.object(tn, "_redis_client", return_value=fake):
+            tn.enqueue_alerts([_alert(sport="soccer", home="Arsenal", away="Chelsea")])
+            tn.enqueue_alerts([_alert(sport="nhl", market_label="Moneyline", home="Canadiens", away="Rangers")])
+
+            with patch.dict("os.environ", env, clear=False), patch.object(tn, "requests") as mock_requests:
+                mock_requests.post.return_value.raise_for_status.return_value = None
+                result = tn.drain_and_send_digest(header="Auspex picks")
+
+        assert result == {"drained": 2, "sent": 1}
+        body = mock_requests.post.call_args.kwargs["json"]["text"]
+        # Both sports present in the same message — this is the core
+        # promise of the combined digest path.
+        assert "Arsenal vs Chelsea" in body
+        assert "Canadiens vs Rangers" in body
+        assert "⚽" in body
+        assert "🏒" in body
+        # Queue is empty after drain so the next pipeline run starts clean.
+        assert tn.DEFAULT_QUEUE_KEY not in fake.store
+
+    def test_drain_orders_soccer_before_nhl(self):
+        # Within the digest, soccer picks should appear before NHL — the
+        # frontend already shows them in this order so the digest should
+        # match. Locked here so a future re-sort doesn't silently flip it.
+        fake = _FakeRedis()
+        env = {
+            "ENABLE_TELEGRAM_NOTIFICATIONS": "true",
+            "TELEGRAM_BOT_TOKEN": "tok",
+            "TELEGRAM_CHAT_ID": "12345",
+        }
+        with patch.object(tn, "_redis_client", return_value=fake):
+            # Push NHL first to prove the sort isn't relying on insertion
+            # order.
+            tn.enqueue_alerts([_alert(sport="nhl", market_label="Moneyline", home="A", away="B")])
+            tn.enqueue_alerts([_alert(sport="soccer", home="C", away="D")])
+
+            with patch.dict("os.environ", env, clear=False), patch.object(tn, "requests") as mock_requests:
+                mock_requests.post.return_value.raise_for_status.return_value = None
+                tn.drain_and_send_digest()
+
+        body = mock_requests.post.call_args.kwargs["json"]["text"]
+        assert body.index("C vs D") < body.index("A vs B")
+
+    def test_drain_empty_queue_sends_nothing(self):
+        fake = _FakeRedis()
+        env = {
+            "ENABLE_TELEGRAM_NOTIFICATIONS": "true",
+            "TELEGRAM_BOT_TOKEN": "tok",
+            "TELEGRAM_CHAT_ID": "12345",
+        }
+        with (
+            patch.object(tn, "_redis_client", return_value=fake),
+            patch.dict("os.environ", env, clear=False),
+            patch.object(tn, "requests") as mock_requests,
+        ):
+            result = tn.drain_and_send_digest()
+        assert result == {"drained": 0, "sent": 0}
+        mock_requests.post.assert_not_called()
+
+    def test_alert_roundtrips_through_redis(self):
+        # The dict serializer + parser pair must preserve every field,
+        # including the datetime, otherwise the drained digest would
+        # render with wrong / missing data.
+        original = _alert(sport="nhl", market_label="Puck Line", home="Canadiens", away="Rangers")
+        d = tn._alert_to_dict(original)
+        # Sanity: datetime is JSON-safe.
+        import json as _json
+
+        encoded = _json.dumps(d)
+        decoded = _json.loads(encoded)
+        restored = tn._alert_from_dict(decoded)
+        assert restored == original

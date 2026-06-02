@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.operators.bash import BashOperator
+from airflow.utils.trigger_rule import TriggerRule
 
 default_args = {
     "owner": "auspex",
@@ -78,10 +79,10 @@ with DAG(
     # ── NHL branch (Phase 4a: full ingest → features → predictions) ─
     # Predict task runs all 4 NHL ensembles (moneyline, regulation,
     # puck-line, total) per match via the Phase 4a TASKS registry and
-    # writes one prediction row per task. Telegram alerts stay
-    # soccer-only until Phase 4d ships a sport-aware notification
-    # template; recommendations also stay soccer-only until the
-    # NHL-aware generate_recommendations equivalent lands.
+    # writes one prediction row per task. High-confidence NHL picks
+    # are pushed onto the same shared Redis queue as soccer picks; the
+    # send_pipeline_digest task downstream drains both into one
+    # combined Telegram message.
     fetch_upcoming_nhl = BashOperator(
         task_id="fetch_upcoming_nhl",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport nhl --days 14",
@@ -98,3 +99,18 @@ with DAG(
     )
 
     fetch_upcoming_nhl >> compute_features_nhl >> precompute_predictions_nhl
+
+    # ── Combined digest (fan-in) ──────────────────────────────────
+    # Drains the shared Redis queue both branches push into and sends
+    # ONE Telegram message with every sport's picks. Runs after both
+    # branches' precompute steps; trigger_rule="none_failed_min_one_success"
+    # so a failure in one branch (say, NHL features can't load) still
+    # surfaces the other branch's picks instead of losing the digest
+    # entirely. Empty queue → no-op (helper handles that).
+    send_pipeline_digest = BashOperator(
+        task_id="send_pipeline_digest",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/send_pipeline_digest.py",
+        trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
+    )
+
+    [precompute_predictions, precompute_predictions_nhl] >> send_pipeline_digest

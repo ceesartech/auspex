@@ -32,7 +32,7 @@ from psycopg2.extras import RealDictCursor
 sys.path.insert(0, "/app/services/api/src")
 sys.path.insert(0, os.path.dirname(__file__))
 
-from telegram_notify import Alert, send_telegram_digest  # noqa: E402
+from telegram_notify import Alert, enqueue_alerts  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("precompute_predictions")
@@ -245,7 +245,7 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
     upcoming = list_upcoming(database_url, days)
     if not upcoming:
         logger.info("No upcoming matches with features in the next %d days", days)
-        return {"predicted": 0, "market_rows": 0, "alerts": 0, "telegram_messages": 0}
+        return {"predicted": 0, "market_rows": 0, "alerts_queued": 0, "queue_depth": 0}
 
     predicted = 0
     market_rows = 0
@@ -277,8 +277,8 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                     return {
                         "predicted": predicted,
                         "market_rows": market_rows,
-                        "alerts": len(alerts),
-                        "telegram_messages": 0,
+                        "alerts_queued": len(alerts),
+                        "queue_depth": 0,
                     }
 
                 try:
@@ -352,25 +352,24 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
 
             conn.commit()
 
-    # One bundled Telegram message instead of N per-pick alerts. The
-    # digest helper handles the disabled / unconfigured / network-fail
-    # gates and chunks if the digest exceeds Telegram's 4096-char limit.
-    messages_sent = send_telegram_digest(
-        alerts,
-        header=f"Auspex soccer picks · {len(alerts)} high-confidence",
-    )
+    # Push picks onto the shared Redis queue. The DAG's downstream
+    # send_pipeline_digest task drains both sports' queues and sends
+    # ONE combined Telegram message — this script does NOT send
+    # directly anymore, because doing so would split soccer + NHL
+    # across two messages.
+    queue_depth = enqueue_alerts(alerts) if alerts else 0
     logger.info(
-        "Stored %d match-result predictions (+%d market rows), %d picks digested into %d Telegram message(s)",
+        "Stored %d match-result predictions (+%d market rows); queued %d picks (queue depth now %d)",
         predicted,
         market_rows,
         len(alerts),
-        messages_sent,
+        queue_depth,
     )
     return {
         "predicted": predicted,
         "market_rows": market_rows,
-        "alerts": len(alerts),
-        "telegram_messages": messages_sent,
+        "alerts_queued": len(alerts),
+        "queue_depth": queue_depth,
     }
 
 

@@ -1,29 +1,40 @@
-"""Telegram digest helper used by both precompute_predictions scripts.
+"""Telegram digest helper used by the precompute pipeline.
 
-Both the soccer and NHL precompute jobs accumulate one Alert per
-high-confidence prediction and call `send_telegram_digest(alerts)` once
-at the end of their run. This collapses what used to be one Telegram
-message per pick into a single bundled digest — at most one outbound
-message per script run instead of dozens.
+Both the soccer and NHL precompute scripts push their high-confidence
+Alerts into a shared Redis queue with `enqueue_alerts(alerts)`. After
+both branches finish, the DAG's final `send_pipeline_digest` task
+calls `drain_and_send_digest()` once — that drains the queue, renders
+one combined HTML digest containing every sport's picks, and sends
+it as a single Telegram message (or chunks across messages if the
+digest exceeds 4096 chars).
 
-If the rendered digest exceeds Telegram's 4096-char hard limit it is
-split into multiple messages, each capped to stay under the limit
-without breaking a line mid-row. Returns the number of messages
-actually sent (0 if disabled / unconfigured / no alerts / network
-failure).
+Why a shared queue + final drain (not per-script send)? The soccer
+and NHL precompute tasks run as separate Airflow BashOperators in
+parallel branches. Each lives in its own Python process, so they
+can't share an in-memory list. The Redis queue stitches them together
+without coupling the two scripts.
+
+`send_telegram_digest()` is kept as a low-level primitive: render +
+chunk + POST. It's used internally by `drain_and_send_digest()` and
+is also testable in isolation.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+# Redis list key the pipeline pushes pending picks into. The drain
+# task pops everything and sends one combined digest.
+DEFAULT_QUEUE_KEY = "auspex:pending_alerts"
 
 # Telegram's documented sendMessage hard limit. We chunk just under it
 # to leave room for the HTML envelope.
@@ -147,3 +158,120 @@ def send_telegram_digest(alerts: List[Alert], *, header: Optional[str] = None) -
             logger.warning("Telegram digest send failed (%d/%d chunks sent): %s", sent, len(chunks), e)
             break
     return sent
+
+
+# ── Shared-queue digest path (the soccer+NHL combined message) ──────
+
+
+def _alert_to_dict(alert: Alert) -> dict:
+    """Alert → JSON-safe dict. datetime serializes to ISO so it round-
+    trips cleanly through Redis."""
+    d = asdict(alert)
+    d["match_date"] = alert.match_date.isoformat()
+    return d
+
+
+def _alert_from_dict(d: dict) -> Alert:
+    """Inverse of _alert_to_dict. Tolerant of older queue entries that
+    were written before we added new fields — defaults applied here so
+    a mid-deploy drain of a stale queue still works."""
+    return Alert(
+        sport=d["sport"],
+        league_name=d["league_name"],
+        home_team=d["home_team"],
+        away_team=d["away_team"],
+        match_date=datetime.fromisoformat(d["match_date"]),
+        market_label=d["market_label"],
+        predicted_outcome=d["predicted_outcome"],
+        confidence=float(d["confidence"]),
+        probabilities={k: float(v) for k, v in (d.get("probabilities") or {}).items()},
+    )
+
+
+def _redis_client(redis_url: Optional[str] = None):
+    """Lazy import + connect. Falls back to REDIS_URL env. Returns None
+    if redis isn't reachable so callers can degrade to per-script send."""
+    url = redis_url or os.environ.get("REDIS_URL")
+    if not url:
+        logger.warning("REDIS_URL not set — combined digest queue unavailable")
+        return None
+    try:
+        from redis import Redis  # type: ignore
+
+        return Redis.from_url(url, decode_responses=True)
+    except Exception as e:  # pragma: no cover - import / connect guard
+        logger.warning("Redis client unavailable (%s) — combined digest queue offline", e)
+        return None
+
+
+def enqueue_alerts(
+    alerts: List[Alert],
+    *,
+    redis_url: Optional[str] = None,
+    queue_key: str = DEFAULT_QUEUE_KEY,
+    ttl_seconds: int = 6 * 3600,
+) -> int:
+    """Push every Alert onto the Redis list at `queue_key`. Returns the
+    list length AFTER the push so callers can log progress.
+
+    TTL is set on the key so a queue that's never drained (DAG broken /
+    misconfigured) auto-expires instead of growing forever. 6 hours is
+    well past the 15-min pipeline cadence — if no digest task drains in
+    that window something else is wrong and surfacing stale picks would
+    be worse than dropping them.
+
+    Returns 0 if the list is empty or Redis is unavailable. The caller
+    can fall back to send_telegram_digest in the latter case if it
+    wants per-script behavior."""
+    if not alerts:
+        return 0
+    client = _redis_client(redis_url)
+    if client is None:
+        return 0
+    payloads = [json.dumps(_alert_to_dict(a)) for a in alerts]
+    pipe = client.pipeline()
+    pipe.rpush(queue_key, *payloads)
+    pipe.expire(queue_key, ttl_seconds)
+    results = pipe.execute()
+    return int(results[0]) if results else 0
+
+
+def drain_and_send_digest(
+    *,
+    redis_url: Optional[str] = None,
+    queue_key: str = DEFAULT_QUEUE_KEY,
+    header: Optional[str] = None,
+) -> dict:
+    """Pop every queued Alert atomically, send one combined digest,
+    return a count summary.
+
+    The pop+del is done in a MULTI/EXEC so a concurrent enqueue can't
+    race in and have its alerts silently discarded between LRANGE and
+    DEL. Returns {drained, sent} so the DAG task log shows how many
+    picks were aggregated vs how many Telegram messages were sent.
+    """
+    client = _redis_client(redis_url)
+    if client is None:
+        return {"drained": 0, "sent": 0}
+
+    pipe = client.pipeline()
+    pipe.lrange(queue_key, 0, -1)
+    pipe.delete(queue_key)
+    results = pipe.execute()
+    raw_payloads = results[0] if results else []
+
+    alerts: List[Alert] = []
+    for payload in raw_payloads:
+        try:
+            alerts.append(_alert_from_dict(json.loads(payload)))
+        except Exception as e:  # pragma: no cover - poison-pill guard
+            logger.warning("Skipping malformed queued alert: %s", e)
+
+    # Sort: soccer first then NHL (matches the order the user already
+    # sees in the dashboard), then by match_date so picks within a
+    # sport are ordered by kickoff/puck-drop.
+    sport_order = {"soccer": 0, "nhl": 1}
+    alerts.sort(key=lambda a: (sport_order.get(a.sport, 99), a.match_date))
+
+    sent = send_telegram_digest(alerts, header=header)
+    return {"drained": len(alerts), "sent": sent}
