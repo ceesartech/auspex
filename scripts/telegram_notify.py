@@ -98,7 +98,16 @@ def _format_alert_line(alert: Alert) -> str:
             f" <b>EV {alert.expected_value:+.0%}</b> · {when}\n"
             f"   <i>{' · '.join(meta_parts)}</i>"
         )
-    probs = ", ".join(f"{k} {v:.0%}" for k, v in alert.probabilities.items())
+
+    # Some alert flavors (e.g. monitor_models drift alerts) stuff
+    # free-form text into probabilities to piggyback on the digest —
+    # render those values as-is rather than as percentages.
+    def _fmt_prob(v):
+        if isinstance(v, (int, float)):
+            return f"{v:.0%}"
+        return str(v)
+
+    probs = ", ".join(f"{k} {_fmt_prob(v)}" for k, v in alert.probabilities.items())
     return (
         f"{header}\n"
         f"   {alert.market_label}: <b>{alert.predicted_outcome}</b> "

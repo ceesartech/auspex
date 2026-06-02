@@ -110,6 +110,16 @@ class TestRenderDigest:
         # Raw probability breakdown is present in prediction mode.
         assert "home" in out
 
+    def test_non_numeric_probability_value_renders_as_string(self):
+        # monitor_models piggybacks on the Alert shape by stuffing a
+        # markdown body into probabilities={"body": "..."}. The
+        # renderer must not crash trying to format a string as %.
+        alert = _alert(sport="soccer")
+        alert.probabilities = {"body": "drift detected: ECE 0.15"}
+        out = tn.render_digest([alert])
+        # The string passes through verbatim.
+        assert "body drift detected: ECE 0.15" in out
+
 
 class TestChunking:
     def test_short_digest_is_single_chunk(self):
