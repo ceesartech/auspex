@@ -8,12 +8,22 @@ the host daemon, which already has the api container with all our
 Python dependencies.
 
 Flow:
-  1. validate_data: ensures the matches table has enough rows + valid
-     feature columns. Aborts the run with a clear error if not.
-  2. train_models: writes new artifacts to /app/models/staging
-     inside the api container (which is the host's ./models/ dir).
-  3. swap_production: cp staging → production atomically. Backs up
-     the previous production dir as production-prev-<timestamp>.
+  1. validate_data: ensures the soccer matches table has enough rows
+     + valid feature columns. Aborts the run with a clear error if
+     not. NHL bundles do their own validation inside load_frame, so
+     this gate is soccer-specific (gates train_soccer only).
+  2. train_<sport>: one task per SportBundle (soccer + 4 NHL markets).
+     All write to /app/models/staging. Run sequentially so the api
+     container isn't running 5 ensembles' worth of training in
+     parallel. If any one fails, the others still execute — that's
+     `trigger_rule=all_done` on swap_production, which then MERGES
+     whatever made it into staging on top of the existing production
+     (instead of wholesale replacing). Partial-retrain safety.
+  3. swap_production: merges staging → production, preserving any
+     existing production artifacts not covered by this run. Backs up
+     production to production-prev-<timestamp> first for rollback.
+     The merge semantics matter: if e.g. NHL puck_line training
+     fails, the previous puck_line model stays in production.
   4. reload_api: restart the api container so the new model files
      are picked up by load_models_into_process() at startup.
   5. cleanup_old_backups: keep only the most recent 3 backups.
@@ -29,6 +39,13 @@ from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.operators.bash import BashOperator
+from airflow.utils.trigger_rule import TriggerRule
+
+# Sports trained on every run. Matches the SPORT_BUNDLES keys in
+# services/ml-models/src/training/train_all_models.py — add a new
+# bundle there, add it here, and the DAG starts training it on the
+# next Sunday run.
+SPORTS = ["soccer", "nhl_moneyline", "nhl_regulation", "nhl_puck_line", "nhl_total"]
 
 default_args = {
     "owner": "auspex",
@@ -65,35 +82,66 @@ with DAG(
         ),
     )
 
-    train_models = BashOperator(
-        task_id="train_models",
-        # Poisson + Dixon-Coles do per-team MLE fits that can take 20-30
-        # minutes on a full corpus. They're part of the ensemble so we
-        # train them — but the task needs enough execution time. Default
-        # Airflow task SLA is too short on a fresh worker; bump explicitly.
-        execution_timeout=timedelta(minutes=90),
-        bash_command=(
-            f"{DOCKER_EXEC} bash -c '"
-            "cd /app/services/ml-models && "
-            "PYTHONPATH=src python -m training.train_all_models "
-            "--model-type all "
-            '--database-url "$DATABASE_URL" '
-            "--output-dir /app/models/staging "
-            "--export-onnx"
-            "'"
-        ),
-    )
+    # One BashOperator per SportBundle. Sequential (not parallel)
+    # because each training run is CPU-heavy — Poisson + Dixon-Coles
+    # do per-team MLE fits that can take 20-30 minutes on a full
+    # corpus, and running five in parallel would saturate the api
+    # container. Sequential keeps the resource profile predictable;
+    # total wall-clock is still under the 90-minute per-task SLA
+    # because NHL bundles are smaller than soccer.
+    train_tasks = {}
+    for sport in SPORTS:
+        train_tasks[sport] = BashOperator(
+            task_id=f"train_{sport}",
+            execution_timeout=timedelta(minutes=90),
+            # Don't let a single sport's data hiccup block the others —
+            # all five tasks should attempt, and swap_production will
+            # merge whatever made it into staging.
+            trigger_rule=TriggerRule.ALL_DONE,
+            bash_command=(
+                f"{DOCKER_EXEC} bash -c '"
+                "cd /app/services/ml-models && "
+                "PYTHONPATH=src python -m training.train_all_models "
+                f"--sport {sport} "
+                "--model-type all "
+                '--database-url "$DATABASE_URL" '
+                "--output-dir /app/models/staging "
+                "--export-onnx"
+                "'"
+            ),
+        )
 
+    # MERGE staging into production (don't wholesale replace). The
+    # previous wholesale `mv staging production` clobbered any sport's
+    # artifacts that weren't in staging — which was the root cause of
+    # NHL models disappearing after a soccer-only retrain. `cp -aR`
+    # with the `staging/.` trailing slash copies the CONTENTS of
+    # staging into production, overwriting anything with the same
+    # path and leaving everything else alone. Partial retrains stay
+    # safe: a sport that failed to train keeps its previous model in
+    # production.
+    #
+    # trigger_rule=ALL_DONE: run even if some train_<sport> tasks
+    # failed. Without this, one finicky NHL bundle would skip the
+    # whole swap and the operator would have to manually intervene.
     swap_production = BashOperator(
         task_id="swap_production",
+        trigger_rule=TriggerRule.ALL_DONE,
         bash_command=(
             f"{DOCKER_EXEC} bash -c '"
             "set -euo pipefail; "
             "STAMP=$(date -u +%%Y%%m%%d-%%H%%M%%S); "
-            "if [ -d /app/models/production ]; then "
-            "mv /app/models/production /app/models/production-prev-${STAMP}; "
+            "if [ ! -d /app/models/staging ]; then "
+            'echo "No staging dir — every train_<sport> task failed. Leaving production untouched."; '
+            "exit 0; "
             "fi; "
-            "mv /app/models/staging /app/models/production; "
+            "if [ -d /app/models/production ]; then "
+            "cp -a /app/models/production /app/models/production-prev-${STAMP}; "
+            "fi; "
+            "mkdir -p /app/models/production; "
+            "cp -aR /app/models/staging/. /app/models/production/; "
+            "rm -rf /app/models/staging; "
+            'echo "--- production after merge ---"; '
             "ls /app/models/production"
             "'"
         ),
@@ -116,4 +164,23 @@ with DAG(
         ),
     )
 
-    validate_data >> train_models >> swap_production >> reload_api >> cleanup_old_backups
+    # Validate gates SOCCER training only — NHL bundles handle their
+    # own data validation inside load_frame, and a soccer corpus issue
+    # shouldn't block NHL retraining.
+    validate_data >> train_tasks["soccer"]
+
+    # Chain each sport's training task to the previous one's completion
+    # (not success — trigger_rule on each is ALL_DONE, so a soccer
+    # training failure still lets the NHL bundles run). Sequential
+    # because each training run is CPU-heavy; running them in parallel
+    # would saturate the api container.
+    prev = train_tasks["soccer"]
+    for sport in SPORTS[1:]:
+        prev >> train_tasks[sport]
+        prev = train_tasks[sport]
+
+    # The last sport feeds swap_production, which then chains through
+    # reload + cleanup. (swap_production's own trigger_rule=ALL_DONE
+    # makes it run even if some sports failed — see comment on the
+    # swap_production BashOperator.)
+    prev >> swap_production >> reload_api >> cleanup_old_backups
