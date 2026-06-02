@@ -29,6 +29,10 @@ const sportOptions = [
 // every line the book offers (variable -3.5 to -13.5 spreads, 210-245
 // totals), so labels are intentionally generic — the displayed line
 // per pick comes from the prediction row itself.
+//
+// NFL (Phase 10) mirrors the NBA shape — same 3 markets, same
+// line-as-feature design. NFL spreads typically live on key numbers
+// (3, 7, 10, 14) and totals in the 40-50 range; labels stay generic.
 const marketOptionsBySport: Record<string, { value: string; label: string }[]> = {
   nhl: [
     { value: '', label: 'Default (Moneyline)' },
@@ -38,6 +42,12 @@ const marketOptionsBySport: Record<string, { value: string; label: string }[]> =
     { value: 'total', label: 'Total Goals O/U 5.5' },
   ],
   nba: [
+    { value: '', label: 'Default (Moneyline)' },
+    { value: 'moneyline', label: 'Moneyline' },
+    { value: 'spread', label: 'Spread' },
+    { value: 'total', label: 'Total Points' },
+  ],
+  nfl: [
     { value: '', label: 'Default (Moneyline)' },
     { value: 'moneyline', label: 'Moneyline' },
     { value: 'spread', label: 'Spread' },

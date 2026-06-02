@@ -142,10 +142,11 @@ with DAG(
 
     fetch_upcoming_nba >> compute_features_nba >> precompute_predictions_nba >> generate_recommendations_nba
 
-    # ── NFL branch (Phase 10b: ingestion + features) ──────────────
-    # Predictions + recommendations land in subsequent commits once
-    # the historical backfill (E2.5) + training corpus (E3) are in
-    # place.
+    # ── NFL branch (Phase 10: end-to-end pipeline) ────────────────
+    # Same chain shape as NBA: ingest → features → precompute → recs.
+    # Spread + total recommendations are gated on the closing line
+    # (line-as-feature design — see
+    # scripts/generate_recommendations_nfl.py docstring).
     fetch_upcoming_nfl = BashOperator(
         task_id="fetch_upcoming_nfl",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport nfl --days 14",
@@ -156,7 +157,17 @@ with DAG(
         bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_nfl.py --days 14",
     )
 
-    fetch_upcoming_nfl >> compute_features_nfl
+    precompute_predictions_nfl = BashOperator(
+        task_id="precompute_predictions_nfl",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/precompute_predictions_nfl.py --days 14",
+    )
+
+    generate_recommendations_nfl = BashOperator(
+        task_id="generate_recommendations_nfl",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/generate_recommendations_nfl.py --days 14",
+    )
+
+    fetch_upcoming_nfl >> compute_features_nfl >> precompute_predictions_nfl >> generate_recommendations_nfl
 
     # ── Phase 5: grade finished matches ───────────────────────────
     # Walks matches whose status flipped to 'finished' in the last
@@ -196,6 +207,7 @@ with DAG(
         generate_recommendations,
         generate_recommendations_nhl,
         generate_recommendations_nba,
+        generate_recommendations_nfl,
     ] >> send_pipeline_digest
 
     # ── Model monitoring (Phase 9) ────────────────────────────────

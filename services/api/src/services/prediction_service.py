@@ -39,6 +39,11 @@ _NBA_NOTIFY_THRESHOLDS: Dict[str, float] = {
     "spread": 0.58,
     "total": 0.58,
 }
+_NFL_NOTIFY_THRESHOLDS: Dict[str, float] = {
+    "moneyline": 0.60,
+    "spread": 0.58,
+    "total": 0.58,
+}
 _SOCCER_NOTIFY_THRESHOLD = 0.65
 
 # Friendly market labels keyed by (sport, market) so the few overloaded
@@ -58,6 +63,9 @@ _MARKET_DISPLAY_LABELS: Dict[tuple, str] = {
     ("nba", "moneyline"): "Moneyline",
     ("nba", "spread"): "Spread",
     ("nba", "total"): "Total Points",
+    ("nfl", "moneyline"): "Moneyline",
+    ("nfl", "spread"): "Spread",
+    ("nfl", "total"): "Total Points",
 }
 
 
@@ -250,6 +258,38 @@ TASKS: Dict[str, TaskSpec] = {
         base_models=["xgboost_nba_tot", "lightgbm_nba_tot", "neural_network_nba_tot"],
         feature_set="nba_baseline",
     ),
+    # NFL: same shape as NBA — three markets (moneyline, spread, total)
+    # with line-as-feature for spread + total. No Poisson / Dixon-Coles
+    # entries — NFL scoring is too matchup-specific for a discrete
+    # prior to help. Bundles in
+    # services/ml-models/src/training/train_all_models.py.
+    "nfl:moneyline": TaskSpec(
+        sport="nfl",
+        market="moneyline",
+        ensemble_name="ensemble_nfl_ml",
+        labels=["home", "away"],
+        prediction_type="moneyline",
+        base_models=["xgboost_nfl_ml", "lightgbm_nfl_ml", "neural_network_nfl_ml"],
+        feature_set="nfl_baseline",
+    ),
+    "nfl:spread": TaskSpec(
+        sport="nfl",
+        market="spread",
+        ensemble_name="ensemble_nfl_sp",
+        labels=["home", "away"],
+        prediction_type="spread",
+        base_models=["xgboost_nfl_sp", "lightgbm_nfl_sp", "neural_network_nfl_sp"],
+        feature_set="nfl_baseline",
+    ),
+    "nfl:total": TaskSpec(
+        sport="nfl",
+        market="total",
+        ensemble_name="ensemble_nfl_tot",
+        labels=["over", "under"],
+        prediction_type="total",
+        base_models=["xgboost_nfl_tot", "lightgbm_nfl_tot", "neural_network_nfl_tot"],
+        feature_set="nfl_baseline",
+    ),
 }
 
 
@@ -363,6 +403,9 @@ def _klass_registry():
         LIGHTGBM_NBA_MONEYLINE,
         LIGHTGBM_NBA_SPREAD,
         LIGHTGBM_NBA_TOTAL,
+        LIGHTGBM_NFL_MONEYLINE,
+        LIGHTGBM_NFL_SPREAD,
+        LIGHTGBM_NFL_TOTAL,
         LIGHTGBM_NHL_MONEYLINE,
         LIGHTGBM_NHL_PUCK_LINE,
         LIGHTGBM_NHL_REGULATION,
@@ -371,6 +414,9 @@ def _klass_registry():
         NEURAL_NETWORK_NBA_MONEYLINE,
         NEURAL_NETWORK_NBA_SPREAD,
         NEURAL_NETWORK_NBA_TOTAL,
+        NEURAL_NETWORK_NFL_MONEYLINE,
+        NEURAL_NETWORK_NFL_SPREAD,
+        NEURAL_NETWORK_NFL_TOTAL,
         NEURAL_NETWORK_NHL_MONEYLINE,
         NEURAL_NETWORK_NHL_PUCK_LINE,
         NEURAL_NETWORK_NHL_REGULATION,
@@ -380,6 +426,9 @@ def _klass_registry():
         XGBOOST_NBA_MONEYLINE,
         XGBOOST_NBA_SPREAD,
         XGBOOST_NBA_TOTAL,
+        XGBOOST_NFL_MONEYLINE,
+        XGBOOST_NFL_SPREAD,
+        XGBOOST_NFL_TOTAL,
         XGBOOST_NHL_MONEYLINE,
         XGBOOST_NHL_PUCK_LINE,
         XGBOOST_NHL_REGULATION,
@@ -429,6 +478,18 @@ def _klass_registry():
         "xgboost_nba_tot": (XGBoostMatchPredictor, XGBOOST_NBA_TOTAL),
         "lightgbm_nba_tot": (LightGBMMatchPredictor, LIGHTGBM_NBA_TOTAL),
         "neural_network_nba_tot": (NeuralNetworkMatchPredictor, NEURAL_NETWORK_NBA_TOTAL),
+        # NFL moneyline
+        "xgboost_nfl_ml": (XGBoostMatchPredictor, XGBOOST_NFL_MONEYLINE),
+        "lightgbm_nfl_ml": (LightGBMMatchPredictor, LIGHTGBM_NFL_MONEYLINE),
+        "neural_network_nfl_ml": (NeuralNetworkMatchPredictor, NEURAL_NETWORK_NFL_MONEYLINE),
+        # NFL spread (line-as-feature)
+        "xgboost_nfl_sp": (XGBoostMatchPredictor, XGBOOST_NFL_SPREAD),
+        "lightgbm_nfl_sp": (LightGBMMatchPredictor, LIGHTGBM_NFL_SPREAD),
+        "neural_network_nfl_sp": (NeuralNetworkMatchPredictor, NEURAL_NETWORK_NFL_SPREAD),
+        # NFL total (line-as-feature)
+        "xgboost_nfl_tot": (XGBoostMatchPredictor, XGBOOST_NFL_TOTAL),
+        "lightgbm_nfl_tot": (LightGBMMatchPredictor, LIGHTGBM_NFL_TOTAL),
+        "neural_network_nfl_tot": (NeuralNetworkMatchPredictor, NEURAL_NETWORK_NFL_TOTAL),
     }
 
 
@@ -465,6 +526,9 @@ def _build_ensemble_for_task(
         ENSEMBLE_NBA_MONEYLINE,
         ENSEMBLE_NBA_SPREAD,
         ENSEMBLE_NBA_TOTAL,
+        ENSEMBLE_NFL_MONEYLINE,
+        ENSEMBLE_NFL_SPREAD,
+        ENSEMBLE_NFL_TOTAL,
         ENSEMBLE_NHL_MONEYLINE,
         ENSEMBLE_NHL_PUCK_LINE,
         ENSEMBLE_NHL_REGULATION,
@@ -484,6 +548,9 @@ def _build_ensemble_for_task(
         "ensemble_nba_ml": ENSEMBLE_NBA_MONEYLINE,
         "ensemble_nba_sp": ENSEMBLE_NBA_SPREAD,
         "ensemble_nba_tot": ENSEMBLE_NBA_TOTAL,
+        "ensemble_nfl_ml": ENSEMBLE_NFL_MONEYLINE,
+        "ensemble_nfl_sp": ENSEMBLE_NFL_SPREAD,
+        "ensemble_nfl_tot": ENSEMBLE_NFL_TOTAL,
     }
     ensemble_cfg = ensemble_cfg_for.get(task.ensemble_name, ENSEMBLE_CONFIG)
 
@@ -1123,6 +1190,8 @@ class PredictionService:
                 threshold = _NHL_NOTIFY_THRESHOLDS.get(task.market, 0.70)
             elif task.sport == "nba":
                 threshold = _NBA_NOTIFY_THRESHOLDS.get(task.market, 0.65)
+            elif task.sport == "nfl":
+                threshold = _NFL_NOTIFY_THRESHOLDS.get(task.market, 0.65)
             else:
                 threshold = _SOCCER_NOTIFY_THRESHOLD
             if confidence < threshold:

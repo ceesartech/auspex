@@ -55,6 +55,13 @@ NHL_REGULATION_MODEL_NAME = "ensemble_nhl_reg"
 NBA_SPREAD_MODEL_NAME = "ensemble_nba_sp"
 NBA_TOTAL_MODEL_NAME = "ensemble_nba_tot"
 
+# NFL spread + total mirror NBA: same prediction_type values + variable
+# closing lines stored in features_cache. NFL moneyline grades the same
+# as NHL/NBA — final score winner; ties (rare but possible in NFL)
+# leave the row ungraded via nhl_moneyline_outcome's None return.
+NFL_SPREAD_MODEL_NAME = "ensemble_nfl_sp"
+NFL_TOTAL_MODEL_NAME = "ensemble_nfl_tot"
+
 
 def is_nhl_regulation(model_name: str) -> bool:
     return model_name == NHL_REGULATION_MODEL_NAME
@@ -66,6 +73,14 @@ def is_nba_spread(model_name: str) -> bool:
 
 def is_nba_total(model_name: str) -> bool:
     return model_name == NBA_TOTAL_MODEL_NAME
+
+
+def is_nfl_spread(model_name: str) -> bool:
+    return model_name == NFL_SPREAD_MODEL_NAME
+
+
+def is_nfl_total(model_name: str) -> bool:
+    return model_name == NFL_TOTAL_MODEL_NAME
 
 
 def _extract_over_under_line(predicted_outcome: Optional[str]) -> Optional[float]:
@@ -247,18 +262,20 @@ def actual_outcome(
         # Same dispatch for NHL + NBA — both use final score.
         return nhl_moneyline_outcome(home_score, away_score)
     if prediction_type == "spread":
-        # NHL: fixed puck line -1.5. NBA: variable line stored in
-        # features_cache.closing_spread_home. Distinguish by
-        # model_name — same prediction_type, different math.
-        if is_nba_spread(model_name):
+        # NHL: fixed puck line -1.5. NBA + NFL: variable line stored in
+        # features_cache.closing_spread_home. Distinguish by model_name
+        # — same prediction_type, same line-as-feature math (reuses
+        # nba_spread_outcome which is sport-agnostic), different
+        # ensemble artifact.
+        if is_nba_spread(model_name) or is_nfl_spread(model_name):
             line = (features or {}).get("closing_spread_home")
             if line is None:
                 return None
             return nba_spread_outcome(home_score, away_score, float(line))
         return nhl_puck_line_outcome(home_score, away_score)
     if prediction_type == "total":
-        # Same pattern: NHL fixed at 5.5, NBA reads from features.
-        if is_nba_total(model_name):
+        # Same pattern: NHL fixed at 5.5, NBA + NFL read from features.
+        if is_nba_total(model_name) or is_nfl_total(model_name):
             line = (features or {}).get("closing_total_line")
             if line is None:
                 return None

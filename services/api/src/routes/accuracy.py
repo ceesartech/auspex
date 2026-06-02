@@ -39,7 +39,7 @@ class MarketAccuracy(BaseModel):
     # the warning instead of renaming.
     model_config = ConfigDict(protected_namespaces=())
 
-    sport: str  # leagues.sport — 'soccer' | 'nhl'
+    sport: str  # leagues.sport — 'soccer' | 'nhl' | 'nba' | 'nfl'
     prediction_type: str  # predictions.prediction_type
     model_name: str  # predictions.model_name
     total: int  # all graded + ungraded predictions in window
@@ -81,7 +81,7 @@ class AccuracySummary(BaseModel):
 
 @router.get("/summary", response_model=AccuracySummary)
 async def accuracy_summary(
-    sport: Optional[str] = Query(None, description="Filter by leagues.sport (e.g. 'soccer', 'nhl')."),
+    sport: Optional[str] = Query(None, description="Filter by leagues.sport ('soccer' | 'nhl' | 'nba' | 'nfl')."),
     market: Optional[str] = Query(None, description="Filter by predictions.prediction_type."),
     days: int = Query(30, ge=1, le=365, description="Lookback window in days (default 30)."),
     db: Session = Depends(get_db),

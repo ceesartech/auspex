@@ -114,18 +114,18 @@ def list_ungraded_predictions(cur, match_id: str) -> list[dict]:
 
 def fetch_match_features(cur, match_id: str) -> Optional[dict]:
     """Most-recent features_cache JSON for the match, regardless of
-    feature_set. Used by NBA spread/total grading to read the closing
-    line the model conditioned on (closing_spread_home /
+    feature_set. Used by NBA + NFL spread/total grading to read the
+    closing line the model conditioned on (closing_spread_home /
     closing_total_line). Returns None if no features were ever cached
     — caller falls back to grading without line context, which means
-    NBA spread/total predictions for that match stay ungraded until
-    a feature row appears.
+    NBA/NFL spread/total predictions for that match stay ungraded
+    until a feature row appears.
 
     Returns the freshest row by computed_at; for matches with multiple
-    feature_sets, the latest pipeline write wins (typically nba_baseline
-    for NBA, nhl_baseline for NHL, baseline for soccer). The dispatch
-    only reads NBA-specific keys, so soccer/NHL features pass through
-    harmlessly."""
+    feature_sets, the latest pipeline write wins (nba_baseline for
+    NBA, nfl_baseline for NFL, nhl_baseline for NHL, baseline for
+    soccer). The dispatch only reads the shared closing-line keys,
+    so soccer/NHL features pass through harmlessly."""
     cur.execute(
         """
         SELECT features

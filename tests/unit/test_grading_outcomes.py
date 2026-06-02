@@ -475,6 +475,133 @@ class TestNbaTotal:
         assert result == "over"
 
 
+# ── NFL spread + total (mirrors NBA — variable closing line dispatch) ──
+
+
+class TestNflSpread:
+    """NFL spread uses the same line-as-feature design + variable
+    closing line as NBA. Sport-agnostic math (reuses nba_spread_outcome).
+    Dispatched by model_name='ensemble_nfl_sp'."""
+
+    def test_dispatch_reads_features_for_nfl(self):
+        # Home -7 favored. Final 31-21, margin = 10 > 7 → home covers.
+        result = go.actual_outcome(
+            prediction_type="spread",
+            model_name="ensemble_nfl_sp",
+            predicted_outcome="home",
+            home_score=31,
+            away_score=21,
+            features={"closing_spread_home": -7.0},
+        )
+        assert result == "home"
+
+    def test_dispatch_returns_none_when_features_missing(self):
+        # Without the closing line, refuse to grade — would otherwise
+        # fall through to NHL puck-line logic which is wrong for NFL.
+        result = go.actual_outcome(
+            prediction_type="spread",
+            model_name="ensemble_nfl_sp",
+            predicted_outcome="home",
+            home_score=31,
+            away_score=21,
+            features=None,
+        )
+        assert result is None
+
+    def test_dispatch_distinguishes_from_nba(self):
+        # NFL spread should use features_cache the same way NBA does.
+        # Defensive: a stray NBA-specific dispatch path wouldn't catch
+        # NFL model_name and would grade as NHL puck-line.
+        result = go.actual_outcome(
+            prediction_type="spread",
+            model_name="ensemble_nfl_sp",
+            predicted_outcome="home",
+            home_score=24,
+            away_score=27,  # NFL margin -3
+            features={"closing_spread_home": 2.5},  # NFL home dog by 2.5
+        )
+        # -3 > -2.5 is false → away covers
+        assert result == "away"
+
+
+class TestNflTotal:
+    """NFL total mirrors NBA — variable line (typical 40-55) stored
+    in features_cache, dispatched by model_name='ensemble_nfl_tot'."""
+
+    def test_dispatch_reads_features_for_nfl(self):
+        # Total 31+24=55 > line 44.5 → over.
+        result = go.actual_outcome(
+            prediction_type="total",
+            model_name="ensemble_nfl_tot",
+            predicted_outcome="over",
+            home_score=31,
+            away_score=24,
+            features={"closing_total_line": 44.5},
+        )
+        assert result == "over"
+
+    def test_dispatch_returns_none_when_features_missing(self):
+        result = go.actual_outcome(
+            prediction_type="total",
+            model_name="ensemble_nfl_tot",
+            predicted_outcome="under",
+            home_score=17,
+            away_score=14,
+            features=None,
+        )
+        assert result is None
+
+    def test_under_at_variable_line(self):
+        # 17+14=31 < 44.5 → under
+        result = go.actual_outcome(
+            prediction_type="total",
+            model_name="ensemble_nfl_tot",
+            predicted_outcome="under",
+            home_score=17,
+            away_score=14,
+            features={"closing_total_line": 44.5},
+        )
+        assert result == "under"
+
+
+class TestNflMoneylineGrading:
+    """NFL moneyline reuses nhl_moneyline_outcome — same final-score
+    winner math. NFL ties (rare but possible) leave the row ungraded."""
+
+    def test_home_win(self):
+        result = go.actual_outcome(
+            prediction_type="moneyline",
+            model_name="ensemble_nfl_ml",
+            predicted_outcome="home",
+            home_score=31,
+            away_score=24,
+        )
+        assert result == "home"
+
+    def test_away_win(self):
+        result = go.actual_outcome(
+            prediction_type="moneyline",
+            model_name="ensemble_nfl_ml",
+            predicted_outcome="away",
+            home_score=17,
+            away_score=24,
+        )
+        assert result == "away"
+
+    def test_tie_leaves_ungraded(self):
+        # NFL ties happen (e.g. Steelers-Lions 16-16 in 2022). 2-class
+        # classifier can't represent them — moneyline_outcome returns
+        # None so the row stays ungraded.
+        result = go.actual_outcome(
+            prediction_type="moneyline",
+            model_name="ensemble_nfl_ml",
+            predicted_outcome="home",
+            home_score=16,
+            away_score=16,
+        )
+        assert result is None
+
+
 # ── Model-name dispatch helpers ──────────────────────────────────────
 
 
@@ -493,3 +620,13 @@ class TestModelNameHelpers:
         # Existing helper still works (regression guard).
         assert go.is_nhl_regulation("ensemble_nhl_reg") is True
         assert go.is_nhl_regulation("ensemble_nba_sp") is False
+
+    def test_is_nfl_spread(self):
+        assert go.is_nfl_spread("ensemble_nfl_sp") is True
+        assert go.is_nfl_spread("ensemble_nba_sp") is False
+        assert go.is_nfl_spread("ensemble_nfl_tot") is False
+
+    def test_is_nfl_total(self):
+        assert go.is_nfl_total("ensemble_nfl_tot") is True
+        assert go.is_nfl_total("ensemble_nba_tot") is False
+        assert go.is_nfl_total("ensemble_nfl_sp") is False
