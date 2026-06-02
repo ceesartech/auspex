@@ -103,14 +103,17 @@ with DAG(
     # ── Combined digest (fan-in) ──────────────────────────────────
     # Drains the shared Redis queue both branches push into and sends
     # ONE Telegram message with every sport's picks. Runs after both
-    # branches' precompute steps; trigger_rule="none_failed_min_one_success"
-    # so a failure in one branch (say, NHL features can't load) still
-    # surfaces the other branch's picks instead of losing the digest
-    # entirely. Empty queue → no-op (helper handles that).
+    # branches' precompute steps.
+    #
+    # trigger_rule=ALL_DONE so the digest runs whether or not a branch
+    # failed. NONE_FAILED_MIN_ONE_SUCCESS (what we tried first) skips
+    # the digest entirely when one branch errors, which silently drops
+    # the OTHER branch's queued picks — exactly the regression we were
+    # trying to avoid. Empty queue → no-op (the helper handles that).
     send_pipeline_digest = BashOperator(
         task_id="send_pipeline_digest",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/send_pipeline_digest.py",
-        trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
+        trigger_rule=TriggerRule.ALL_DONE,
     )
 
     [precompute_predictions, precompute_predictions_nhl] >> send_pipeline_digest

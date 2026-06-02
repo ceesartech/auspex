@@ -239,6 +239,79 @@ class TestPredictionService:
         with pytest.raises(ValueError, match="not found"):
             service.get_match_predictions(str(uuid.uuid4()))
 
+    def test_maybe_enqueue_alert_below_threshold_is_noop(self, mock_db, mock_settings):
+        """Low-confidence picks must NOT enqueue — otherwise the digest
+        fills with junk and the user loses trust in the alerts."""
+        from services.prediction_service import TASKS, PredictionService
+
+        service = PredictionService(mock_db)
+        task = TASKS["nhl:moneyline"]  # threshold = 0.60
+
+        with patch("services.prediction_service._MODEL_VERSIONS", {"nhl:moneyline": "v1.0"}):
+            # 0.55 is below the 0.60 moneyline gate.
+            prediction = {
+                "predicted_label": "home",
+                "confidence": 0.55,
+                "probabilities": {"home": 0.55, "away": 0.45},
+            }
+            match_data = {
+                "match_id": "abc123",
+                "league_name": "NHL",
+                "home_team": "Canadiens",
+                "away_team": "Rangers",
+                "match_date": datetime(2025, 3, 15, 19, 0),
+            }
+            with patch("services.cache_service.CacheService") as mock_cache_cls:
+                mock_cache_cls.return_value.redis = MagicMock()
+                service._maybe_enqueue_alert(prediction, task, match_data)
+            # The dedup SETNX must not have been touched (we never got
+            # past the threshold check).
+            mock_cache_cls.return_value.redis.set.assert_not_called()
+
+    def test_maybe_enqueue_alert_dedup_blocks_repeat(self, mock_db, mock_settings):
+        """Second call for the same (date, match, market, model_version)
+        must short-circuit — opening the same UI match twice should NOT
+        produce two digest entries."""
+        from services.prediction_service import TASKS, PredictionService
+
+        service = PredictionService(mock_db)
+        task = TASKS["nhl:moneyline"]
+
+        prediction = {
+            "predicted_label": "home",
+            "confidence": 0.82,
+            "probabilities": {"home": 0.82, "away": 0.18},
+        }
+        match_data = {
+            "match_id": "abc123",
+            "league_name": "NHL",
+            "home_team": "Canadiens",
+            "away_team": "Rangers",
+            "match_date": datetime(2025, 3, 15, 19, 0),
+        }
+
+        with (
+            patch("services.prediction_service._MODEL_VERSIONS", {"nhl:moneyline": "v1.0"}),
+            patch("services.cache_service.CacheService") as mock_cache_cls,
+            patch.dict(
+                "sys.modules",
+                {"telegram_notify": MagicMock(Alert=MagicMock, enqueue_alerts=MagicMock(return_value=1))},
+            ),
+        ):
+            mock_redis = MagicMock()
+            # First call wins (returns truthy), second loses.
+            mock_redis.set.side_effect = [True, False]
+            mock_cache_cls.return_value.redis = mock_redis
+
+            service._maybe_enqueue_alert(prediction, task, match_data)
+            service._maybe_enqueue_alert(prediction, task, match_data)
+
+            # SETNX called twice (one per call), but enqueue_alerts only
+            # once — second call short-circuits at dedup.
+            assert mock_redis.set.call_count == 2
+            telegram_mock = sys.modules["telegram_notify"]
+            assert telegram_mock.enqueue_alerts.call_count == 1
+
     def test_get_live_predictions_empty(self, mock_db, mock_settings):
         from services.prediction_service import PredictionService
 
