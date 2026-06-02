@@ -100,6 +100,7 @@ class TestHelperReuse:
         assert fetch_live_odds.sport_for_key("basketball_nba") == "nba"
         assert fetch_live_odds.sport_for_key("americanfootball_nfl") == "nfl"
         assert fetch_live_odds.sport_for_key("soccer_epl") == "soccer"
+        assert fetch_live_odds.sport_for_key("tennis_atp_wimbledon") == "tennis"
         assert fetch_live_odds.sport_for_key("bogus_keykey") is None
 
     def test_default_markets_picked_from_live_basket(self):

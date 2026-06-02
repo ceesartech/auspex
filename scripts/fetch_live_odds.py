@@ -100,6 +100,19 @@ DEFAULT_SPORTS = [
     "basketball_nba",
     # NFL (in season Sep-Feb, Super Bowl early Feb)
     "americanfootball_nfl",
+    # Tennis — the-odds-api keys are EVENT-specific (Grand Slam +
+    # major tour events). Out-of-tournament keys 422 silently so
+    # the off-season cost is one round-trip per dormant key.
+    # If we need broader coverage later, a /sports auto-discovery
+    # pass can replace these hard-coded keys.
+    "tennis_atp_australian_open",
+    "tennis_atp_french_open",
+    "tennis_atp_wimbledon",
+    "tennis_atp_us_open",
+    "tennis_wta_australian_open",
+    "tennis_wta_french_open",
+    "tennis_wta_wimbledon",
+    "tennis_wta_us_open",
 ]
 
 
@@ -112,6 +125,7 @@ SPORT_KEY_PREFIXES: dict[str, str] = {
     "icehockey_": "nhl",
     "basketball_": "nba",
     "americanfootball_": "nfl",
+    "tennis_": "tennis",
 }
 
 
@@ -132,6 +146,11 @@ SPORT_MARKETS: dict[str, str] = {
     # (typical range -14.5 to +14.5), totals vary (typical 38-55).
     # h2h covers moneyline.
     "nfl": "h2h,spreads,totals",
+    # Tennis: h2h (match-winner moneyline) + totals (total games
+    # over/under — typical line ~22.5 for best-of-3, ~37.5 for
+    # best-of-5). No "spreads" market on tennis at most US books —
+    # set-handicap is a UK/EU specialty we can layer in later.
+    "tennis": "h2h,totals",
 }
 
 # Secondary markets only available via the-odds-api PER-EVENT "additional
@@ -151,6 +170,7 @@ KNOWN_MARKET_KEYS: dict[str, set[str]] = {
     "nhl": {"h2h", "spreads", "totals"},
     "nba": {"h2h", "spreads", "totals"},
     "nfl": {"h2h", "spreads", "totals"},
+    "tennis": {"h2h", "totals"},
 }
 
 
@@ -442,6 +462,23 @@ def map_outcome(
             if side is None or point is None:
                 return None, None, False
             return "spread", side, True
+        if market_key == "totals":
+            n = outcome_name.lower()
+            if n not in ("over", "under") or point is None:
+                return None, None, False
+            return "total", n, True
+        return None, None, False
+
+    if sport == "tennis":
+        # 1v1, no draw. h2h → match-winner moneyline; totals → games
+        # over/under (line varies: best-of-3 ≈ 22.5, best-of-5 ≈ 37.5).
+        # No spreads market — set-handicap is a UK/EU specialty not in
+        # the default US odds basket.
+        if market_key == "h2h":
+            side = _team_side(outcome_name, home_team_name, away_team_name)
+            if side is None:
+                return None, None, False
+            return "moneyline", side, False
         if market_key == "totals":
             n = outcome_name.lower()
             if n not in ("over", "under") or point is None:

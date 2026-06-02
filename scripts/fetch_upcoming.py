@@ -70,6 +70,14 @@ def _season_nfl(dt: datetime) -> str:
     return f"{dt.year - 1}-{dt.year}"
 
 
+def _season_tennis(dt: datetime) -> str:
+    """ATP/WTA tour year is a calendar year (Jan-Nov regular season +
+    Nov Finals). Pre-season exhibitions in December roll into the next
+    season for the ATP rankings rollover. Single-year string so
+    cross-year tournaments don't fragment the season label."""
+    return str(dt.year)
+
+
 @dataclass(frozen=True)
 class SportConfig:
     """Per-sport ingestion config consumed by the generic ESPN fetcher.
@@ -88,6 +96,12 @@ class SportConfig:
     # ("FC", "AFC", "BK"); NHL teams are unambiguous and need none.
     club_suffixes: frozenset[str] = frozenset()
     club_prefixes: frozenset[str] = frozenset()
+    # True for 1v1 sports (tennis, MMA, boxing) where ESPN's competitors
+    # don't carry homeAway and use 'athlete' instead of 'team'. Triggers
+    # the positional fallback in process_event and the per-player team
+    # rows (one "team" per player in the teams table — pragmatic reuse
+    # of the team-sports schema for individual sports).
+    is_individual: bool = False
 
 
 # ── Soccer config ─────────────────────────────────────────────────────
@@ -174,6 +188,16 @@ NFL_LEAGUES: dict[str, tuple[str, str, str]] = {
 }
 
 
+# ── Tennis config ─────────────────────────────────────────────────────
+# Two tours, both 1v1: ATP (men) and WTA (women). ESPN path is
+# tennis/{atp,wta}/scoreboard. Country = "World" since both tours are
+# global; the league row's external_ids.espn carries the tour code.
+TENNIS_LEAGUES: dict[str, tuple[str, str, str]] = {
+    "atp": ("ATP", "ATP Tour", "World"),
+    "wta": ("WTA", "WTA Tour", "World"),
+}
+
+
 SPORT_CONFIGS: dict[str, SportConfig] = {
     "soccer": SportConfig(
         sport="soccer",
@@ -210,6 +234,19 @@ SPORT_CONFIGS: dict[str, SportConfig] = {
         espn_path="football",
         leagues=NFL_LEAGUES,
         season_func=_season_nfl,
+    ),
+    "tennis": SportConfig(
+        sport="tennis",
+        # ESPN's tennis API path: /sports/tennis/{atp|wta}/scoreboard.
+        # Same shape gotcha as NHL/NBA/NFL — espn_path is JUST "tennis"
+        # so the slug "atp" doesn't double up.
+        espn_path="tennis",
+        leagues=TENNIS_LEAGUES,
+        season_func=_season_tennis,
+        # ESPN tennis competitors use 'athlete' not 'team' and lack
+        # the homeAway field — flip on positional / athlete handling
+        # in process_event.
+        is_individual=True,
     ),
 }
 
@@ -343,16 +380,39 @@ def insert_scheduled_match(cur, cfg: SportConfig, league_id, home_id, away_id, m
     return cur.rowcount
 
 
+def _competitor_name(competitor: dict, is_individual: bool) -> str | None:
+    """Pull the canonical name from a competitor entry. Team sports use
+    .team.displayName; individual sports use .athlete.displayName.
+    Falls back to .name on either nested dict if the displayName is
+    missing (ESPN occasionally omits it for less-tracked athletes)."""
+    if is_individual:
+        athlete = competitor.get("athlete") or {}
+        return athlete.get("displayName") or athlete.get("shortName") or athlete.get("name")
+    team = competitor.get("team") or {}
+    return team.get("displayName") or team.get("name")
+
+
 def process_event(cur, cfg: SportConfig, league_id: str, event: dict) -> bool:
     comp = (event.get("competitions") or [{}])[0]
     competitors = comp.get("competitors") or []
-    home = next((c for c in competitors if c.get("homeAway") == "home"), None)
-    away = next((c for c in competitors if c.get("homeAway") == "away"), None)
-    if not (home and away):
-        return False
 
-    home_name = home.get("team", {}).get("displayName") or home.get("team", {}).get("name")
-    away_name = away.get("team", {}).get("displayName") or away.get("team", {}).get("name")
+    if cfg.is_individual:
+        # 1v1 sports: ESPN doesn't populate homeAway. Use positional
+        # ordering — index 0 → home, index 1 → away. The convention is
+        # arbitrary (no real "home" in tennis/MMA/boxing) but stays
+        # consistent so downstream features can encode "player1" /
+        # "player2" semantics from the same column.
+        if len(competitors) < 2:
+            return False
+        home, away = competitors[0], competitors[1]
+    else:
+        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+        if not (home and away):
+            return False
+
+    home_name = _competitor_name(home, cfg.is_individual)
+    away_name = _competitor_name(away, cfg.is_individual)
     if not (home_name and away_name):
         return False
 
