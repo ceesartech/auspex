@@ -104,22 +104,6 @@ NEUTRAL_DEFAULTS: dict[str, float] = {
     "odds_spread_away": 1.91,
     "odds_total_over": 1.91,
     "odds_total_under": 1.91,
-    # Line movement (closing − opening). 0.0 = "no movement" / "single
-    # snapshot only". NFL closing lines incorporate sharp action; the
-    # delta from opening tells the model whether the public is fading
-    # or backing the favorite. Spread movement: positive = home line
-    # moved AWAY from home (less favored). Total movement: positive =
-    # total moved UP (over got more action). Both clamped to ±5 in
-    # the computation since extreme moves usually mean steam chase or
-    # bad-data opening lines.
-    "spread_movement": 0.0,
-    "total_movement": 0.0,
-    # Derivative-market bookie margins. Spread/total are usually -110
-    # both sides → ~5% margin. A 0.0 default means "single-sided odds
-    # / market unavailable" so the model treats it as missing rather
-    # than implying a fair market.
-    "spread_bookie_margin": 0.0,
-    "total_bookie_margin": 0.0,
     # Rolling team form — league-average scoring + .500 record.
     "home_roll_pts_scored": 22.5,
     "home_roll_pts_allowed": 22.5,
@@ -241,14 +225,7 @@ def fetch_match_meta(cur, match_id: str) -> Optional[dict]:
 def fetch_closing_odds(cur, match_id: str) -> dict:
     """Pull the most-recent pre-match odds row per (market_type, selection,
     line) and project into the feature shape. NFL uses 'moneyline',
-    'spread', 'total' with line as an INPUT FEATURE.
-
-    Also pulls the OPENING line per (market_type, selection) to compute
-    line-movement features. Movement is closing minus opening — a
-    positive spread_movement means the home line drifted AWAY from
-    home (less favored as kickoff approached), which historically
-    correlates with sharp money on the away side. Same idea for totals.
-    """
+    'spread', 'total' with line as an INPUT FEATURE."""
     cur.execute(
         """
         SELECT DISTINCT ON (market_type, selection)
@@ -290,47 +267,6 @@ def fetch_closing_odds(cur, match_id: str) -> dict:
             out["implied_prob_home_ml"] = raw_h / (raw_h + raw_a)
             out["implied_prob_away_ml"] = raw_a / (raw_h + raw_a)
             out["ml_bookie_margin"] = margin
-
-    # Spread + total bookie margins. Mirror of moneyline calc — derived
-    # from the two-sided -110/-110-ish odds we already pulled above.
-    # 0.0 left as default (per NEUTRAL_DEFAULTS) when either side is
-    # missing so a single-sided market doesn't fake a fair-market value.
-    if "odds_spread_home" in out and "odds_spread_away" in out:
-        sp_h = 1.0 / out["odds_spread_home"]
-        sp_a = 1.0 / out["odds_spread_away"]
-        if sp_h + sp_a > 0:
-            out["spread_bookie_margin"] = sp_h + sp_a - 1.0
-    if "odds_total_over" in out and "odds_total_under" in out:
-        to_o = 1.0 / out["odds_total_over"]
-        to_u = 1.0 / out["odds_total_under"]
-        if to_o + to_u > 0:
-            out["total_bookie_margin"] = to_o + to_u - 1.0
-
-    # Line movement: closing − opening for spread (home perspective)
-    # and total. Computed from the EARLIEST pre-match snapshot per
-    # market vs the closing line already captured above. Clamped to
-    # ±5 because larger swings are nearly always opening-line errors,
-    # bookmaker steam moves, or postponement-then-relisting artifacts
-    # — none of which carry useful pre-kickoff signal.
-    cur.execute(
-        """
-        SELECT DISTINCT ON (market_type, selection)
-               market_type, selection, line
-        FROM odds
-        WHERE match_id = %s AND is_live = false
-          AND market_type IN ('spread', 'total')
-          AND line IS NOT NULL
-        ORDER BY market_type, selection, timestamp ASC NULLS LAST
-        """,
-        (match_id,),
-    )
-    opening = {(r["market_type"], r["selection"]): float(r["line"]) for r in cur.fetchall()}
-    if ("spread", "home") in opening and out.get("closing_spread_home") is not None:
-        move = out["closing_spread_home"] - opening[("spread", "home")]
-        out["spread_movement"] = max(-5.0, min(5.0, move))
-    if ("total", "over") in opening and out.get("closing_total_line") is not None:
-        move = out["closing_total_line"] - opening[("total", "over")]
-        out["total_movement"] = max(-5.0, min(5.0, move))
 
     return out
 

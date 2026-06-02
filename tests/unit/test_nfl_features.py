@@ -152,34 +152,6 @@ class TestDiffHelper:
         assert "x_diff" not in features
 
 
-# ── Line movement + derivative bookie margins ───────────────────────
-
-
-class TestLineMovementDefaults:
-    """The four new features added to fight NFL spread/total's
-    coin-flip OOS performance — line movement carries sharp-action
-    signal, derivative-market vigs distinguish efficient vs sloppy
-    books."""
-
-    def test_movement_defaults_to_zero(self):
-        # 0.0 = "no movement" / "single snapshot only" — model treats
-        # it as the neutral case.
-        assert fnfl.NEUTRAL_DEFAULTS["spread_movement"] == 0.0
-        assert fnfl.NEUTRAL_DEFAULTS["total_movement"] == 0.0
-
-    def test_derivative_bookie_margins_default_to_zero(self):
-        # 0.0 means "market unavailable" rather than implying a fair
-        # market (which would be a misleading signal to the model).
-        assert fnfl.NEUTRAL_DEFAULTS["spread_bookie_margin"] == 0.0
-        assert fnfl.NEUTRAL_DEFAULTS["total_bookie_margin"] == 0.0
-
-    def test_all_four_features_present_in_defaults(self):
-        # Ensures _with_defaults() fills them even when the odds
-        # query found no spread/total rows.
-        for k in ("spread_movement", "total_movement", "spread_bookie_margin", "total_bookie_margin"):
-            assert k in fnfl.NEUTRAL_DEFAULTS
-
-
 # ── Argparse plumbing ──────────────────────────────────────────────
 
 
