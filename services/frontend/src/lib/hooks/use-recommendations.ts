@@ -76,3 +76,10 @@ export function useLotteryAnalysis(game: string, numDraws = 100) {
     enabled: !!game,
   });
 }
+
+export function useLotteryRecommendations() {
+  return useMutation({
+    mutationFn: (params: { game: string; strategy: string; numSets: number }) =>
+      recommendationsApi.getLotteryRecommendations(params.game, params.strategy, params.numSets),
+  });
+}
