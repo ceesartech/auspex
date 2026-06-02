@@ -234,14 +234,10 @@ NHL_TOTAL_BUNDLE = SportBundle(
 )
 
 
-# --sport value → SportBundle. The new explicit "soccer_match_result"
-# key parallels NHL ("nhl_moneyline", etc.). The legacy "soccer" alias
-# is kept so older retrain DAG runs, ad-hoc scripts, and operator
-# muscle memory (`--sport soccer`) keep working. Both point at the
-# same bundle.
+# --sport value → SportBundle. Every key follows the
+# <sport>_<market> convention.
 SPORT_BUNDLES: Dict[str, SportBundle] = {
     "soccer_match_result": SOCCER_BUNDLE,
-    "soccer": SOCCER_BUNDLE,  # legacy alias — same bundle, same artifacts
     "nhl_moneyline": NHL_MONEYLINE_BUNDLE,
     "nhl_regulation": NHL_REGULATION_BUNDLE,
     "nhl_puck_line": NHL_PUCK_LINE_BUNDLE,
@@ -440,7 +436,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--sport",
-        default=os.getenv("TRAIN_SPORT", "soccer"),
+        default=os.getenv("TRAIN_SPORT", "soccer_match_result"),
         choices=sorted(SPORT_BUNDLES.keys()),
         help="Which sport/task bundle to train. Picks the data loader, "
         "feature selector, model list, and ensemble config.",

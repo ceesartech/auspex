@@ -62,7 +62,7 @@ _MARKET_DISPLAY_LABELS: Dict[str, str] = {
 class TaskSpec:
     """Configuration for one prediction task (sport + market combo).
 
-    Naming conventions, kept parallel across sports so it's obvious at a
+    Naming convention, kept parallel across sports so it's obvious at a
     glance what each artifact is for:
 
       ensemble_<sport>_<market>      e.g. ensemble_soccer_match_result,
@@ -70,13 +70,6 @@ class TaskSpec:
       <base_model>_<sport>_<market>  e.g. xgboost_soccer_match_result,
                                           dixon_coles_soccer_match_result,
                                           hockey_poisson_nhl_ml
-
-    The legacy_* fields exist purely for the soccer rename transition:
-    on-disk artifacts trained before the rename live at the unprefixed
-    `ensemble` / `xgboost` / etc. paths, and the loader falls back to
-    those names if the new-name dirs don't exist yet. Drop the legacy
-    fields once a full retrain cycle has populated new-name artifacts
-    on every deployed prod.
     """
 
     sport: str  # leagues.sport value: 'soccer' or 'nhl'
@@ -86,16 +79,12 @@ class TaskSpec:
     prediction_type: str  # value persisted to predictions.prediction_type (CHECK constraint)
     base_models: List[str]  # registry directories of base models to load alongside the ensemble
     feature_set: str  # features_cache.feature_set filter for compute / lookup
-    # Pre-rename ensemble + base model dir names. Tried as a fallback by
-    # _build_ensemble_for_task when the new-name dirs aren't on disk.
-    # Only set for soccer until the next retrain cycle.
-    legacy_ensemble_name: Optional[str] = None
-    legacy_base_models: Optional[List[str]] = None
     # Override for `predictions.model_name` column (and the SQL filter
     # in generate_recommendations.py). Defaults to ensemble_name, but
-    # soccer pins to legacy "ensemble" so recommendations + analytics
-    # queries don't need a parallel rename. Decouples the on-disk
-    # artifact identifier from the persistent DB identifier.
+    # soccer pins to "ensemble" so the DB column stays stable —
+    # recommendations + analytics queries reference that value and
+    # renaming would require a multi-row migration. Decouples the
+    # on-disk artifact identifier from the persistent DB identifier.
     db_model_name: Optional[str] = None
 
     @property
@@ -154,7 +143,6 @@ TASKS: Dict[str, TaskSpec] = {
         sport="soccer",
         market="match_result",
         ensemble_name="ensemble_soccer_match_result",
-        legacy_ensemble_name="ensemble",
         labels=["home", "draw", "away"],
         prediction_type="match_result",
         base_models=[
@@ -164,12 +152,9 @@ TASKS: Dict[str, TaskSpec] = {
             "poisson_soccer_match_result",
             "dixon_coles_soccer_match_result",
         ],
-        legacy_base_models=["xgboost", "lightgbm", "neural_network", "poisson", "dixon_coles"],
-        # Keep DB model_name stable across the rename: the
-        # recommendations engine, analytics, and existing rows in the
-        # predictions table all reference "ensemble". Renaming on disk
-        # is safe; renaming the DB column would be a multi-step
-        # migration we don't need to take on right now.
+        # DB column stays "ensemble" (existing rows + recommendations
+        # SQL reference it). The on-disk artifact name and the DB
+        # identifier are intentionally decoupled.
         db_model_name="ensemble",
         feature_set="baseline",
     ),
@@ -223,10 +208,10 @@ def tasks_for_sport(sport: str) -> List[TaskSpec]:
 # Process-wide model registry. Populated once during app startup
 # (see services/api/src/main.py lifespan) and shared across requests.
 # Loading joblib pickles on every request adds ~10-50ms; this avoids that.
-# Keys are the TaskSpec composite key ("soccer:match_result", "nhl:moneyline",
-# etc.). Soccer's "ensemble" entry is also mirrored at the legacy key
-# "ensemble" for backwards compatibility with any callers that still
-# reach in directly.
+# Keys are the TaskSpec composite key ("soccer:match_result",
+# "nhl:moneyline", etc.). Soccer is also mirrored under the bare
+# ensemble_name ("ensemble_soccer_match_result") so call sites that
+# look up by ensemble_name resolve.
 _MODELS: Dict[str, Any] = {}
 _MODEL_VERSIONS: Dict[str, str] = {}
 _MODEL_VERSION: str = "ensemble_v1.0"  # Legacy global; soccer version
@@ -342,28 +327,14 @@ def _klass_registry():
     from predictors.poisson_models import DixonColesPredictor, HockeyPoissonPredictor, PoissonMatchPredictor
     from predictors.xgboost_model import XGBoostMatchPredictor
 
-    soccer_xgb = (XGBoostMatchPredictor, XGBOOST_MATCH_OUTCOME)
-    soccer_lgb = (LightGBMMatchPredictor, LIGHTGBM_MATCH_OUTCOME)
-    soccer_nn = (NeuralNetworkMatchPredictor, NEURAL_NETWORK_CONFIG)
-    soccer_poisson = (PoissonMatchPredictor, POISSON_CONFIG)
-    soccer_dc = (DixonColesPredictor, DIXON_COLES_CONFIG)
     return {
-        # Soccer match_result base models — both the new explicit names
-        # (matching the *_soccer_match_result convention) and the legacy
-        # unprefixed names (for ensembles trained before the rename).
-        # Same (class, config) tuples — only the registry directory name
-        # changes — so a single soccer ensemble can blend whichever set
-        # is actually on disk.
-        "xgboost_soccer_match_result": soccer_xgb,
-        "lightgbm_soccer_match_result": soccer_lgb,
-        "neural_network_soccer_match_result": soccer_nn,
-        "poisson_soccer_match_result": soccer_poisson,
-        "dixon_coles_soccer_match_result": soccer_dc,
-        "xgboost": soccer_xgb,
-        "lightgbm": soccer_lgb,
-        "neural_network": soccer_nn,
-        "poisson": soccer_poisson,
-        "dixon_coles": soccer_dc,
+        # Soccer match_result base models. Same *_<sport>_<market>
+        # naming convention as NHL.
+        "xgboost_soccer_match_result": (XGBoostMatchPredictor, XGBOOST_MATCH_OUTCOME),
+        "lightgbm_soccer_match_result": (LightGBMMatchPredictor, LIGHTGBM_MATCH_OUTCOME),
+        "neural_network_soccer_match_result": (NeuralNetworkMatchPredictor, NEURAL_NETWORK_CONFIG),
+        "poisson_soccer_match_result": (PoissonMatchPredictor, POISSON_CONFIG),
+        "dixon_coles_soccer_match_result": (DixonColesPredictor, DIXON_COLES_CONFIG),
         # NHL moneyline
         "xgboost_nhl_ml": (XGBoostMatchPredictor, XGBOOST_NHL_MONEYLINE),
         "lightgbm_nhl_ml": (LightGBMMatchPredictor, LIGHTGBM_NHL_MONEYLINE),
@@ -425,64 +396,35 @@ def _build_ensemble_for_task(
 
     # Pick the task-specific ensemble config so the EnsemblePredictor's
     # internal LabelEncoder and prediction_task match what was used at
-    # training time. The map keys cover BOTH the new explicit names and
-    # the legacy ones — see TaskSpec.legacy_ensemble_name. Falls back
-    # to ENSEMBLE_CONFIG (soccer's) for any unmapped key.
+    # training time. Falls back to ENSEMBLE_CONFIG (soccer's) for any
+    # unmapped key.
     ensemble_cfg_for = {
         "ensemble_soccer_match_result": ENSEMBLE_CONFIG,
-        "ensemble": ENSEMBLE_CONFIG,  # legacy soccer name
         "ensemble_nhl_ml": ENSEMBLE_NHL_MONEYLINE,
         "ensemble_nhl_reg": ENSEMBLE_NHL_REGULATION,
         "ensemble_nhl_pl": ENSEMBLE_NHL_PUCK_LINE,
         "ensemble_nhl_tot": ENSEMBLE_NHL_TOTAL,
     }
+    ensemble_cfg = ensemble_cfg_for.get(task.ensemble_name, ENSEMBLE_CONFIG)
 
-    # Try the new (explicit) ensemble + base model names first; fall
-    # back to legacy_* if the new dirs aren't on disk yet. This covers
-    # the soccer rename window where the next retrain hasn't yet
-    # populated /app/models/production/ensemble_soccer_match_result.
-    # Returns (ensemble_name_used, base_models_used) or (None, None).
-    def _resolve_artifact_names() -> Tuple[Optional[str], Optional[List[str]]]:
-        if _latest_model_bin(model_path / task.ensemble_name) is not None:
-            return task.ensemble_name, list(task.base_models)
-        if task.legacy_ensemble_name and _latest_model_bin(model_path / task.legacy_ensemble_name) is not None:
-            logger.info(
-                "Task %s: ensemble not at %s/, falling back to legacy alias %s/",
-                f"{task.sport}:{task.market}",
-                task.ensemble_name,
-                task.legacy_ensemble_name,
-            )
-            return task.legacy_ensemble_name, list(task.legacy_base_models or task.base_models)
-        return None, None
-
-    ensemble_name_used, base_models_to_resolve = _resolve_artifact_names()
-    if ensemble_name_used is None:
-        return None, None
-
-    ensemble_cfg = ensemble_cfg_for.get(ensemble_name_used, ENSEMBLE_CONFIG)
-    ensemble_meta = _latest_model_bin(model_path / ensemble_name_used)
-    if ensemble_meta is None:  # pragma: no cover - already checked in _resolve
+    ensemble_meta = _latest_model_bin(model_path / task.ensemble_name)
+    if ensemble_meta is None:
         return None, None
 
     with open(ensemble_meta) as f:
         meta = json.load(f)
 
-    # The ensemble's meta records the EXACT base-model names it was
-    # trained with — i.e. the names that exist on disk for THIS
-    # specific ensemble. We use those as the source of truth (not
-    # task.base_models) so a legacy-aliased load uses the legacy base
-    # model dirs and a new-name load uses the new ones.
     ensemble = EnsemblePredictor(ensemble_cfg)
     loaded_names: List[str] = []
     for name in meta.get("model_names", []):
         if name not in klass_for:
-            logger.warning("Task %s ensemble references unknown base model %r; skipping", ensemble_name_used, name)
+            logger.warning("Task %s ensemble references unknown base model %r; skipping", task.ensemble_name, name)
             continue
         artifact = _latest_model_bin(model_path / name)
         if artifact is None:
             logger.warning(
                 "Task %s ensemble references %r but no artifact under %s/%s/",
-                ensemble_name_used,
+                task.ensemble_name,
                 name,
                 model_path,
                 name,
@@ -498,13 +440,8 @@ def _build_ensemble_for_task(
             logger.error("Failed to load base model %r from %s: %s", name, artifact, e)
 
     if not loaded_names:
-        logger.error("Could not reconstitute any base models for task %s", ensemble_name_used)
+        logger.error("Could not reconstitute any base models for task %s", task.ensemble_name)
         return None, None
-
-    # Quiet the unused-variable lint for base_models_to_resolve — it's
-    # there for documentation/parity with task.base_models but the
-    # meta.model_names is the actual source of truth for what to load.
-    del base_models_to_resolve
 
     # ensemble.load() restores the blend weights from JSON metadata.
     ensemble.load(str(ensemble_meta))
@@ -558,15 +495,12 @@ def load_models_into_process(model_dir: Optional[Path] = None) -> Dict[str, Any]
             list(ensemble.models.keys()),
         )
 
-    # Legacy compatibility: pre-rename callers reach for
-    # _MODELS["ensemble"] (the bare key) and _MODEL_VERSION as a global.
-    # The new explicit key is _MODELS["ensemble_soccer_match_result"].
-    # Mirror soccer's loaded model into BOTH keys + the legacy global
-    # so old direct lookups + new-name lookups both work during the
-    # rename transition.
+    # Mirror soccer's loaded model under the bare explicit name so
+    # call sites that look up by ensemble_name (instead of composite
+    # task key) still resolve. _MODEL_VERSION stays a global for
+    # callers that want a default cache-key version string.
     soccer_key = "soccer:match_result"
     if soccer_key in _MODELS:
-        _MODELS["ensemble"] = _MODELS[soccer_key]
         _MODELS["ensemble_soccer_match_result"] = _MODELS[soccer_key]
         _MODEL_VERSION = _MODEL_VERSIONS[soccer_key]
 

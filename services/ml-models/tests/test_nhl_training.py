@@ -253,19 +253,14 @@ class TestSportBundles:
     def test_all_sports_registered(self):
         # Lock the exact set so a sport added but not threaded through
         # the orchestrator fails this test rather than ghost-loading at
-        # train time. "soccer" is kept as a legacy alias of
-        # "soccer_match_result" for backwards-compat with older DAG
-        # runs + operator muscle memory.
+        # train time. Every key follows the <sport>_<market> convention.
         assert set(SPORT_BUNDLES.keys()) == {
             "soccer_match_result",
-            "soccer",  # legacy alias → SOCCER_BUNDLE
             "nhl_moneyline",
             "nhl_regulation",
             "nhl_puck_line",
             "nhl_total",
         }
-        # Both keys must resolve to the same bundle.
-        assert SPORT_BUNDLES["soccer"] is SPORT_BUNDLES["soccer_match_result"]
 
     def test_nhl_bundle_uses_nhl_loader_and_target(self):
         assert NHL_MONEYLINE_BUNDLE.target_column == NHL_MONEYLINE_TARGET
