@@ -47,9 +47,25 @@ logger = logging.getLogger(__name__)
 # trained-ensemble registry name.
 NHL_REGULATION_MODEL_NAME = "ensemble_nhl_reg"
 
+# NBA spread + total use the SAME prediction_type values as NHL
+# (spread / total) but with VARIABLE closing lines. NHL uses fixed
+# lines (puck_line -1.5, total 5.5); NBA's line is whatever the book
+# closed at and lives in features_cache.closing_spread_home /
+# closing_total_line. Disambiguate by model_name.
+NBA_SPREAD_MODEL_NAME = "ensemble_nba_sp"
+NBA_TOTAL_MODEL_NAME = "ensemble_nba_tot"
+
 
 def is_nhl_regulation(model_name: str) -> bool:
     return model_name == NHL_REGULATION_MODEL_NAME
+
+
+def is_nba_spread(model_name: str) -> bool:
+    return model_name == NBA_SPREAD_MODEL_NAME
+
+
+def is_nba_total(model_name: str) -> bool:
+    return model_name == NBA_TOTAL_MODEL_NAME
 
 
 def _extract_over_under_line(predicted_outcome: Optional[str]) -> Optional[float]:
@@ -129,6 +145,30 @@ def nhl_total_outcome(home_score: int, away_score: int, line: float = 5.5) -> st
     return "over" if (home_score + away_score) > line else "under"
 
 
+def nba_spread_outcome(home_score: int, away_score: int, line: float) -> str:
+    """NBA spread at the closing `line` (home perspective; -5 means
+    home was favored by 5). Home covers iff (home - away) > -line.
+    Integer lines can push, half-point lines (.5) never do — same
+    convention as the rec engine."""
+    margin = home_score - away_score
+    if margin > -line:
+        return "home"
+    if margin < -line:
+        return "away"
+    return "push"
+
+
+def nba_total_outcome(home_score: int, away_score: int, line: float) -> str:
+    """NBA total over/under at the closing `line`. Over iff total
+    points > line. Integer lines (rare in NBA, usually .5) push."""
+    total = home_score + away_score
+    if total > line:
+        return "over"
+    if total < line:
+        return "under"
+    return "push"
+
+
 def btts_outcome(home_score: int, away_score: int) -> str:
     """Both Teams To Score — yes if both > 0, else no."""
     return "yes" if home_score > 0 and away_score > 0 else "no"
@@ -178,11 +218,18 @@ def actual_outcome(
     home_score: Optional[int],
     away_score: Optional[int],
     metadata: Optional[dict] = None,
+    features: Optional[dict] = None,
 ) -> Optional[str]:
     """Compute the canonical actual_outcome for one prediction. Returns
     None for ungradable rows (missing scores, regulation_winner not
-    backfilled, market not in the dispatch table). The grading script
-    treats None as "leave is_correct NULL; try again next run".
+    backfilled, missing closing line for an NBA spread/total, market
+    not in the dispatch table). The grading script treats None as
+    "leave is_correct NULL; try again next run".
+
+    `features` (NEW): the features_cache JSON for this match. Used by
+    NBA spread/total to read the closing line the model conditioned
+    on (which is also the line the bet was effectively placed at).
+    NHL fixed lines and other markets ignore it.
     """
     # NHL regulation gets scored from metadata, not the goal columns —
     # check it FIRST since it shares prediction_type='match_result'
@@ -197,10 +244,25 @@ def actual_outcome(
     if prediction_type == "match_result":
         return soccer_match_result(home_score, away_score)
     if prediction_type == "moneyline":
+        # Same dispatch for NHL + NBA — both use final score.
         return nhl_moneyline_outcome(home_score, away_score)
     if prediction_type == "spread":
+        # NHL: fixed puck line -1.5. NBA: variable line stored in
+        # features_cache.closing_spread_home. Distinguish by
+        # model_name — same prediction_type, different math.
+        if is_nba_spread(model_name):
+            line = (features or {}).get("closing_spread_home")
+            if line is None:
+                return None
+            return nba_spread_outcome(home_score, away_score, float(line))
         return nhl_puck_line_outcome(home_score, away_score)
     if prediction_type == "total":
+        # Same pattern: NHL fixed at 5.5, NBA reads from features.
+        if is_nba_total(model_name):
+            line = (features or {}).get("closing_total_line")
+            if line is None:
+                return None
+            return nba_total_outcome(home_score, away_score, float(line))
         return nhl_total_outcome(home_score, away_score)
     if prediction_type == "btts":
         return btts_outcome(home_score, away_score)

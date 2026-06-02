@@ -30,17 +30,25 @@ gcm = _load("grade_completed_matches", "grade_completed_matches.py")
 
 
 class FakeCursor:
-    """Minimal stub: respond to the four SQL shapes the grader uses
-    (list ungraded preds, update pred, list open recs, settle rec)."""
+    """Minimal stub: respond to the SQL shapes the grader uses
+    (list ungraded preds, update pred, list open recs, settle rec,
+    features fetch). Features map is optional; defaults to no rows."""
 
-    def __init__(self, predictions, recs):
+    def __init__(self, predictions, recs, features=None):
         # predictions: list of dicts keyed by id
         self.predictions = {p["id"]: dict(p) for p in predictions}
         self.recs = {r["id"]: dict(r) for r in recs}
+        # features: {match_id: features_dict}
+        self.features = dict(features or {})
         self._last = None
 
     def execute(self, sql, params=None):
         sql_norm = " ".join(sql.split())
+        if "FROM features_cache" in sql_norm:
+            match_id = params[0]
+            feat = self.features.get(match_id)
+            self._last = ("features", {"features": feat} if feat is not None else None)
+            return
         if "FROM predictions" in sql_norm and "is_correct IS NULL" in sql_norm:
             match_id = params[0]
             rows = []
@@ -99,6 +107,12 @@ class FakeCursor:
         if kind in ("preds", "recs"):
             return rows
         return []
+
+    def fetchone(self):
+        kind, row = self._last or (None, None)
+        if kind == "features":
+            return row
+        return None
 
 
 def _pred(pid, match_id, ptype, model_name, predicted_outcome, is_correct=None, actual_outcome=None):
@@ -317,6 +331,143 @@ class TestModuleSurface:
         assert callable(gcm.run)
         assert callable(gcm.profit_loss_for)
         assert callable(gcm.list_finished_matches)
+        assert callable(gcm.fetch_match_features)
+
+
+# ── NBA: variable-line grading via features_cache ────────────────────
+
+
+class TestGradeMatchNba:
+    """NBA spread + total are graded against the closing line from
+    features_cache, not a fixed line. These tests prove the grader
+    fetches features once per match and threads them through to
+    actual_outcome's dispatch."""
+
+    def test_nba_spread_home_covers(self):
+        # Game: SAS 110, NYK 100 (margin 10). Closing line: -5 home.
+        # 10 > 5 → home covers → grading marks the 'home' pick correct.
+        match = {
+            "match_id": "m-nba",
+            "home_score": 110,
+            "away_score": 100,
+            "metadata": None,
+        }
+        preds = [_pred("p1", "m-nba", "spread", "ensemble_nba_sp", "home")]
+        recs = [_rec("r1", "m-nba", "p1", stake=100, odds=1.95)]
+        cur = FakeCursor(preds, recs, features={"m-nba": {"closing_spread_home": -5.0}})
+
+        counts = gcm.grade_match(cur, match)
+
+        assert counts["predictions_graded"] == 1
+        assert counts["predictions_skipped"] == 0
+        assert cur.predictions["p1"]["actual_outcome"] == "home"
+        assert cur.predictions["p1"]["is_correct"] is True
+        # Rec settled: win @ 1.95 stake 100 → +95.
+        assert counts["recs_settled"] == 1
+        assert cur.recs["r1"]["status"] == "won"
+        assert cur.recs["r1"]["profit_loss"] == Decimal("95.00")
+
+    def test_nba_spread_home_fails_to_cover(self):
+        # Game: 103-100, margin 3. Closing -5 → away covers.
+        match = {
+            "match_id": "m-nba",
+            "home_score": 103,
+            "away_score": 100,
+            "metadata": None,
+        }
+        preds = [_pred("p1", "m-nba", "spread", "ensemble_nba_sp", "home")]
+        recs = [_rec("r1", "m-nba", "p1", stake=100, odds=1.95)]
+        cur = FakeCursor(preds, recs, features={"m-nba": {"closing_spread_home": -5.0}})
+
+        gcm.grade_match(cur, match)
+
+        assert cur.predictions["p1"]["actual_outcome"] == "away"
+        assert cur.predictions["p1"]["is_correct"] is False
+        assert cur.recs["r1"]["status"] == "lost"
+        assert cur.recs["r1"]["profit_loss"] == Decimal("-100.00")
+
+    def test_nba_total_over(self):
+        # 110+108=218, line 215 → over.
+        match = {
+            "match_id": "m-nba",
+            "home_score": 110,
+            "away_score": 108,
+            "metadata": None,
+        }
+        preds = [_pred("p1", "m-nba", "total", "ensemble_nba_tot", "over")]
+        recs = []
+        cur = FakeCursor(preds, recs, features={"m-nba": {"closing_total_line": 215.0}})
+
+        gcm.grade_match(cur, match)
+
+        assert cur.predictions["p1"]["actual_outcome"] == "over"
+        assert cur.predictions["p1"]["is_correct"] is True
+
+    def test_nba_spread_skipped_when_features_missing(self):
+        # If features_cache doesn't carry the closing line (NBA odds
+        # never landed or features expired), refuse to grade rather
+        # than fall back to NHL's fixed -1.5 which would be wildly
+        # wrong for NBA. is_correct stays NULL → re-tried next run.
+        match = {
+            "match_id": "m-nba",
+            "home_score": 110,
+            "away_score": 100,
+            "metadata": None,
+        }
+        preds = [_pred("p1", "m-nba", "spread", "ensemble_nba_sp", "home")]
+        cur = FakeCursor(preds, recs=[], features={})  # no features for this match
+
+        counts = gcm.grade_match(cur, match)
+
+        assert counts["predictions_graded"] == 0
+        assert counts["predictions_skipped"] == 1
+        assert cur.predictions["p1"].get("is_correct") is None
+        assert cur.predictions["p1"].get("actual_outcome") is None
+
+    def test_nba_features_fetched_once_per_match(self):
+        # Multiple predictions for the same match should NOT spam the
+        # features_cache query — one fetch, threaded through every
+        # per-prediction dispatch.
+        match = {
+            "match_id": "m-nba",
+            "home_score": 110,
+            "away_score": 100,
+            "metadata": None,
+        }
+        preds = [
+            _pred("p1", "m-nba", "moneyline", "ensemble_nba_ml", "home"),
+            _pred("p2", "m-nba", "spread", "ensemble_nba_sp", "home"),
+            _pred("p3", "m-nba", "total", "ensemble_nba_tot", "over"),
+        ]
+        cur = FakeCursor(
+            preds,
+            recs=[],
+            features={"m-nba": {"closing_spread_home": -5.0, "closing_total_line": 215.0}},
+        )
+
+        gcm.grade_match(cur, match)
+
+        # All three predictions graded successfully.
+        for pid in ("p1", "p2", "p3"):
+            assert cur.predictions[pid]["is_correct"] is not None
+
+    def test_nhl_spread_uses_fixed_line_not_features(self):
+        # Regression guard: adding NBA dispatch must not break NHL
+        # spread (which still uses fixed -1.5 puck line). NHL match's
+        # features_cache might or might not exist; doesn't matter.
+        match = {
+            "match_id": "m-nhl",
+            "home_score": 4,
+            "away_score": 2,  # margin 2 → home covers -1.5
+            "metadata": None,
+        }
+        preds = [_pred("p1", "m-nhl", "spread", "ensemble_nhl_pl", "cover")]
+        cur = FakeCursor(preds, recs=[], features={})
+
+        gcm.grade_match(cur, match)
+
+        assert cur.predictions["p1"]["actual_outcome"] == "cover"
+        assert cur.predictions["p1"]["is_correct"] is True
 
 
 # Quiet a flake8 import-unused warning on pytest in test discovery.

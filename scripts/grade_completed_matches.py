@@ -112,6 +112,36 @@ def list_ungraded_predictions(cur, match_id: str) -> list[dict]:
     return [dict(r) for r in cur.fetchall()]
 
 
+def fetch_match_features(cur, match_id: str) -> Optional[dict]:
+    """Most-recent features_cache JSON for the match, regardless of
+    feature_set. Used by NBA spread/total grading to read the closing
+    line the model conditioned on (closing_spread_home /
+    closing_total_line). Returns None if no features were ever cached
+    — caller falls back to grading without line context, which means
+    NBA spread/total predictions for that match stay ungraded until
+    a feature row appears.
+
+    Returns the freshest row by computed_at; for matches with multiple
+    feature_sets, the latest pipeline write wins (typically nba_baseline
+    for NBA, nhl_baseline for NHL, baseline for soccer). The dispatch
+    only reads NBA-specific keys, so soccer/NHL features pass through
+    harmlessly."""
+    cur.execute(
+        """
+        SELECT features
+        FROM features_cache
+        WHERE match_id = %s
+        ORDER BY computed_at DESC
+        LIMIT 1
+        """,
+        (match_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return row.get("features") or None
+
+
 def update_prediction(cur, prediction_id: str, actual: Optional[str], correct: Optional[bool]) -> None:
     """Persist one prediction's grade. actual_outcome is set even on
     pushes so the recommendation settler can detect the push from the
@@ -200,6 +230,10 @@ def grade_match(cur, match: dict) -> dict:
     recommendation for one match. Returns counts for the run summary."""
     counts = {"predictions_graded": 0, "predictions_skipped": 0, "recs_settled": 0}
 
+    # Features carry the closing line for NBA spread/total grading.
+    # Fetched once per match instead of per-prediction.
+    features = fetch_match_features(cur, match["match_id"])
+
     for pred in list_ungraded_predictions(cur, match["match_id"]):
         actual = actual_outcome(
             prediction_type=pred["prediction_type"],
@@ -208,6 +242,7 @@ def grade_match(cur, match: dict) -> dict:
             home_score=match["home_score"],
             away_score=match["away_score"],
             metadata=match["metadata"],
+            features=features,
         )
         if actual is None:
             counts["predictions_skipped"] += 1
