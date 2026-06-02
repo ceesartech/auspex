@@ -169,16 +169,21 @@ with DAG(
 
     fetch_upcoming_nfl >> compute_features_nfl >> precompute_predictions_nfl >> generate_recommendations_nfl
 
-    # ── Tennis branch (T1: ingestion + odds scaffolding only) ─────
-    # Predictions, features, recommendations land in subsequent
-    # commits once the historical backfill + training corpus are in
-    # place. T1 just fetches upcoming ATP + WTA fixtures so that the
-    # downstream phases have rows to work with — same incremental
-    # rollout pattern as NFL.
+    # ── Tennis branch (T2: ingestion + features) ──────────────────
+    # Predictions + recommendations land in subsequent commits once
+    # the historical backfill (T2.5) + training corpus (T3) are in
+    # place. Same incremental rollout pattern as NFL.
     fetch_upcoming_tennis = BashOperator(
         task_id="fetch_upcoming_tennis",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport tennis --days 14",
     )
+
+    compute_features_tennis = BashOperator(
+        task_id="compute_features_tennis",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_tennis.py --days 14",
+    )
+
+    fetch_upcoming_tennis >> compute_features_tennis
 
     # ── Phase 5: grade finished matches ───────────────────────────
     # Walks matches whose status flipped to 'finished' in the last
