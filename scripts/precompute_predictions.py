@@ -270,10 +270,16 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                     continue
                 features = row["features"] or {}
 
+                # Look up the soccer ensemble via the TaskSpec composite
+                # key. The legacy bare "ensemble" key is still populated
+                # in _MODELS during the rename transition, but using the
+                # composite key keeps the lookup explicit about which
+                # task we're loading. Falls back to the legacy key for
+                # forward-compat with very old loaded states.
                 models = svc.models
-                ensemble = models.get("ensemble")
+                ensemble = models.get("soccer:match_result") or models.get("ensemble")
                 if not ensemble:
-                    logger.error("No ensemble model loaded; aborting")
+                    logger.error("No soccer:match_result ensemble loaded; aborting")
                     return {
                         "predicted": predicted,
                         "market_rows": market_rows,
@@ -328,10 +334,16 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                 predicted += 1
 
                 # Derive the wider market catalog from the Dixon-Coles
-                # scoreline, reconciled to the ensemble 1x2 so every market's
-                # home/draw/away split matches `match_result`. Best-effort: any
-                # failure leaves the match_result prediction intact.
-                dc = ensemble.models.get("dixon_coles") if derive_from_lambdas else None
+                # scoreline, reconciled to the ensemble 1x2 so every
+                # market's home/draw/away split matches `match_result`.
+                # The Dixon-Coles base model is registered under either
+                # "dixon_coles_soccer_match_result" (new) or the legacy
+                # "dixon_coles", depending on which artifact set the
+                # loader resolved. Best-effort: any failure here leaves
+                # the match_result prediction intact.
+                dc = None
+                if derive_from_lambdas:
+                    dc = ensemble.models.get("dixon_coles_soccer_match_result") or ensemble.models.get("dixon_coles")
                 if dc is not None and getattr(dc, "is_fitted", False):
                     try:
                         h_lam, a_lam = dc.lambdas_for_match(m["home_team"], m["away_team"])

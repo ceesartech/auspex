@@ -253,14 +253,19 @@ class TestSportBundles:
     def test_all_sports_registered(self):
         # Lock the exact set so a sport added but not threaded through
         # the orchestrator fails this test rather than ghost-loading at
-        # train time.
+        # train time. "soccer" is kept as a legacy alias of
+        # "soccer_match_result" for backwards-compat with older DAG
+        # runs + operator muscle memory.
         assert set(SPORT_BUNDLES.keys()) == {
-            "soccer",
+            "soccer_match_result",
+            "soccer",  # legacy alias → SOCCER_BUNDLE
             "nhl_moneyline",
             "nhl_regulation",
             "nhl_puck_line",
             "nhl_total",
         }
+        # Both keys must resolve to the same bundle.
+        assert SPORT_BUNDLES["soccer"] is SPORT_BUNDLES["soccer_match_result"]
 
     def test_nhl_bundle_uses_nhl_loader_and_target(self):
         assert NHL_MONEYLINE_BUNDLE.target_column == NHL_MONEYLINE_TARGET
@@ -295,14 +300,21 @@ class TestSportBundles:
         assert NHL_MONEYLINE_BUNDLE.ensemble_name == "ensemble_nhl_ml"
         assert NHL_MONEYLINE_BUNDLE.ensemble_config is ENSEMBLE_NHL_MONEYLINE
 
-    def test_soccer_bundle_unchanged(self):
-        # Soccer is the regression-risk surface for this phase — the
-        # registry name, target, and 5-model list must stay identical
-        # so the existing prod soccer pipeline doesn't drift.
+    def test_soccer_bundle_uses_explicit_match_result_naming(self):
+        # Soccer follows the same *_<sport>_<market> convention as NHL.
+        # Locks in the rename so future edits don't accidentally drift
+        # back to the bare "ensemble" / "xgboost" forms.
+        assert SOCCER_BUNDLE.sport == "soccer_match_result"
         assert SOCCER_BUNDLE.target_column == "match_outcome"
-        assert SOCCER_BUNDLE.ensemble_name == "ensemble"
+        assert SOCCER_BUNDLE.ensemble_name == "ensemble_soccer_match_result"
         names = [m.name for m in SOCCER_BUNDLE.base_models]
-        assert names == ["xgboost", "lightgbm", "neural_network", "poisson", "dixon_coles"]
+        assert names == [
+            "xgboost_soccer_match_result",
+            "lightgbm_soccer_match_result",
+            "neural_network_soccer_match_result",
+            "poisson_soccer_match_result",
+            "dixon_coles_soccer_match_result",
+        ]
 
 
 # ── Regulation 3-way: query shape, prep, configs, bundle ─────────────

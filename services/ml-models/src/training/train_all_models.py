@@ -103,20 +103,42 @@ class SportBundle:
     ensemble_name: str  # registry name for the ensemble
 
 
+# Soccer trains EXACTLY ONE ensemble for match_result (1X2). The other
+# ~15 soccer markets (BTTS, over/under variants, double-chance, draw-no-bet,
+# Asian handicaps, correct score) are DERIVED at predict time from this
+# ensemble's Dixon-Coles base model — see scripts/precompute_predictions.py
+# and the DERIVED_SOCCER_MARKETS list in
+# services/api/src/services/prediction_service.py.
+#
+# The "_soccer_match_result" suffix on every artifact name is intentional:
+# it mirrors the NHL naming (xgboost_nhl_ml etc.) so the on-disk layout
+# under /app/models/production/ explicitly tells you what each model
+# trained for. Ensembles trained before this rename still load via the
+# legacy_ensemble_name / legacy_base_models fallback in TaskSpec.
 SOCCER_BUNDLE = SportBundle(
-    sport="soccer",
+    sport="soccer_match_result",
     target_column=TARGET_COLUMN,
     load_frame=load_training_frame,
     feature_columns=get_feature_columns,
     base_models=[
-        ModelSpec("xgboost", XGBoostMatchPredictor, XGBOOST_MATCH_OUTCOME),
-        ModelSpec("lightgbm", LightGBMMatchPredictor, LIGHTGBM_MATCH_OUTCOME),
-        ModelSpec("neural_network", NeuralNetworkMatchPredictor, NEURAL_NETWORK_CONFIG),
-        ModelSpec("poisson", PoissonMatchPredictor, POISSON_CONFIG, needs_team_columns=True),
-        ModelSpec("dixon_coles", DixonColesPredictor, DIXON_COLES_CONFIG, needs_team_columns=True),
+        ModelSpec("xgboost_soccer_match_result", XGBoostMatchPredictor, XGBOOST_MATCH_OUTCOME),
+        ModelSpec("lightgbm_soccer_match_result", LightGBMMatchPredictor, LIGHTGBM_MATCH_OUTCOME),
+        ModelSpec("neural_network_soccer_match_result", NeuralNetworkMatchPredictor, NEURAL_NETWORK_CONFIG),
+        ModelSpec(
+            "poisson_soccer_match_result",
+            PoissonMatchPredictor,
+            POISSON_CONFIG,
+            needs_team_columns=True,
+        ),
+        ModelSpec(
+            "dixon_coles_soccer_match_result",
+            DixonColesPredictor,
+            DIXON_COLES_CONFIG,
+            needs_team_columns=True,
+        ),
     ],
     ensemble_config=ENSEMBLE_CONFIG,
-    ensemble_name="ensemble",
+    ensemble_name="ensemble_soccer_match_result",
 )
 
 
@@ -212,8 +234,14 @@ NHL_TOTAL_BUNDLE = SportBundle(
 )
 
 
+# --sport value → SportBundle. The new explicit "soccer_match_result"
+# key parallels NHL ("nhl_moneyline", etc.). The legacy "soccer" alias
+# is kept so older retrain DAG runs, ad-hoc scripts, and operator
+# muscle memory (`--sport soccer`) keep working. Both point at the
+# same bundle.
 SPORT_BUNDLES: Dict[str, SportBundle] = {
-    "soccer": SOCCER_BUNDLE,
+    "soccer_match_result": SOCCER_BUNDLE,
+    "soccer": SOCCER_BUNDLE,  # legacy alias — same bundle, same artifacts
     "nhl_moneyline": NHL_MONEYLINE_BUNDLE,
     "nhl_regulation": NHL_REGULATION_BUNDLE,
     "nhl_puck_line": NHL_PUCK_LINE_BUNDLE,

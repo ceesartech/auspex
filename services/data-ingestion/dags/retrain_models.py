@@ -55,7 +55,13 @@ from airflow.utils.trigger_rule import TriggerRule
 # (moneyline, regulation, puck_line, total) are direct classifiers
 # with different label sets, so each gets its own bundle.
 SPORT_BUNDLE_GROUPS: dict[str, list[str]] = {
-    "soccer": ["soccer"],
+    # Soccer trains ONE bundle (match_result / 1X2). The other ~15
+    # soccer markets are derived from the Dixon-Coles base model at
+    # predict time (see DERIVED_SOCCER_MARKETS in
+    # services/api/src/services/prediction_service.py), so soccer
+    # doesn't need a per-market bundle list. The bundle key follows
+    # the *_soccer_<market> convention that parallels NHL.
+    "soccer": ["soccer_match_result"],
     "nhl": ["nhl_moneyline", "nhl_regulation", "nhl_puck_line", "nhl_total"],
 }
 
