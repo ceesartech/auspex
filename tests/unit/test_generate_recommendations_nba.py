@@ -124,3 +124,38 @@ class TestKellyConstant:
         # Conservative bankroll sizing — matches the soccer engine.
         # Locked so it doesn't accidentally creep up to full Kelly.
         assert gr_nba.KELLY_FRACTION == 0.25
+
+
+class TestProbabilityCap:
+    def test_cap_clips_overconfident_predictions(self):
+        # The 87% spread emit observed on the Finals matchup gets
+        # capped to PROB_CAP_FOR_EV before EV / Kelly math.
+        capped = gr_nba.cap_prob(0.87)
+        assert capped == gr_nba.PROB_CAP_FOR_EV
+
+    def test_cap_leaves_low_confidence_alone(self):
+        # 65% moneyline confidence on a favorite stays at 65% — no
+        # cap fires.
+        assert gr_nba.cap_prob(0.65) == 0.65
+
+    def test_cap_exactly_at_threshold_unchanged(self):
+        # Boundary: a prob exactly at the cap passes through.
+        assert gr_nba.cap_prob(0.80) == 0.80
+
+    def test_cap_value_locked(self):
+        # 0.80 leaves a ~7-point margin vs the model's MCE of 0.21.
+        # If someone bumps it to 0.90 the cap becomes meaningless;
+        # if they drop to 0.70 too many real edges get killed. Test
+        # the band.
+        assert 0.75 <= gr_nba.PROB_CAP_FOR_EV <= 0.85
+
+    def test_capped_ev_smaller_than_raw_ev(self):
+        # End-to-end: a raw 87% pick at 1.95 odds emits +70% EV. With
+        # the cap, same offer drops to (0.80 × 1.95 - 1) = +56% EV.
+        # Still positive — the rec still fires — but stake-size will
+        # be lower because Kelly fraction shrinks.
+        raw_ev = gr_nba.expected_value(0.87, 1.95)
+        capped = gr_nba.cap_prob(0.87)
+        capped_ev = gr_nba.expected_value(capped, 1.95)
+        assert capped_ev < raw_ev
+        assert capped_ev > 0  # still positive — rec still fires

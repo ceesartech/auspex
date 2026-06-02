@@ -39,9 +39,16 @@ logger = logging.getLogger("precompute_predictions")
 
 
 def list_upcoming(database_url: str, days: int) -> list[dict]:
-    """Matches in the next N days with features available, no fresh
-    prediction. The query also pulls human-readable team names so the
-    Telegram payload is useful."""
+    """Soccer matches in the next N days with features available.
+
+    The l.sport='soccer' filter is load-bearing: without it, this
+    script picks up NHL + NBA scheduled games and runs the soccer
+    ensemble on them, producing nonsense match_result predictions
+    and ~15 Dixon-Coles-derived market rows per non-soccer match.
+    None of those rows ever get served (the API filters by sport
+    via TaskSpec) but they bloat the predictions table and waste
+    compute cycles. The features_cache join already pinned to
+    feature_set is the second guard."""
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -56,8 +63,11 @@ def list_upcoming(database_url: str, days: int) -> list[dict]:
                 JOIN teams at ON at.id = m.away_team_id
                 JOIN leagues l ON l.id = m.league_id
                 JOIN features_cache f
-                  ON f.match_id = m.id AND f.expires_at > NOW()
+                  ON f.match_id = m.id
+                 AND f.feature_set = 'baseline'
+                 AND f.expires_at > NOW()
                 WHERE m.status = 'scheduled'
+                  AND l.sport = 'soccer'
                   AND m.match_date BETWEEN NOW() AND NOW() + INTERVAL %s
                 ORDER BY m.match_date ASC
                 """,

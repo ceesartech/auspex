@@ -67,6 +67,34 @@ logger = logging.getLogger("generate_recommendations_nba")
 # enough that a 5% miscalibrated edge doesn't blow up the bankroll.
 KELLY_FRACTION = 0.25
 
+# Cap the model probability before EV / Kelly math.
+#
+# Why: the NBA spread + total ensembles hit val accuracy of ~60% with
+# MCE (worst-bucket calibration error) ~0.20. That means the model's
+# most-confident predictions can be ~20 points overconfident vs the
+# true rate. A raw 0.87 emit might really be 0.67-0.87 in expectation.
+#
+# Without a cap, miscalibration on the tail translates directly into
+# huge implied EV (0.87 × 1.95 - 1 = +0.70) and proportionally huge
+# Kelly stakes. Capping at 0.80 gives a 7-point safety margin against
+# the worst observed bucket and prevents a single overconfident
+# matchup from sizing the bankroll.
+#
+# This affects the rec sizing ONLY — predictions.confidence stays
+# uncapped (the model's raw output is preserved for monitoring +
+# calibration analysis). A future commit can replace the hard cap
+# with a learned calibrator (isotonic / Platt) once we have settled
+# bets to fit it on.
+PROB_CAP_FOR_EV = 0.80
+
+
+def cap_prob(p: float, cap: float = PROB_CAP_FOR_EV) -> float:
+    """Defensive cap on model probability for EV / Kelly math."""
+    if p > cap:
+        return cap
+    return p
+
+
 # Ensemble names → (prediction_type, market_label). Used to look up
 # the right model rows for each NBA market.
 NBA_MARKETS: dict[str, tuple[str, str]] = {
@@ -266,9 +294,14 @@ def recommend_for_match(
             selection = offer["selection"]
             if selection not in labels:
                 continue
-            prob = float(probs.get(selection, 0.0))
-            if prob < prob_floor:
+            raw_prob = float(probs.get(selection, 0.0))
+            if raw_prob < prob_floor:
                 continue
+            # Apply the cap for EV / Kelly math. Predictions table
+            # keeps the uncapped value; reasoning string surfaces both
+            # the raw model output and the capped working number so
+            # the user understands the rec sizing.
+            prob = cap_prob(raw_prob)
             odds_decimal = float(offer["odds_decimal"])
             ev = expected_value(prob, odds_decimal)
             if ev < ev_threshold:
@@ -279,8 +312,12 @@ def recommend_for_match(
             offered_line = offer.get("line")
             display_sel = _selection_with_line(market, selection, offered_line)
 
+            # Surface the cap explicitly when it fires so the user can
+            # see why the rec is more conservative than the raw model
+            # would suggest.
+            cap_note = f" (capped from raw {raw_prob:.0%})" if prob < raw_prob else ""
             reasoning = (
-                f"{market_label} {display_sel}: model {prob:.0%}, "
+                f"{market_label} {display_sel}: model {prob:.0%}{cap_note}, "
                 f"book {1/odds_decimal:.0%} (@ {odds_decimal:.2f}) → "
                 f"EV {ev:+.1%}, quarter-Kelly stake ${stake:.2f}."
             )
