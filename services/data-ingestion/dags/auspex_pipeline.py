@@ -142,6 +142,19 @@ with DAG(
 
     fetch_upcoming_nba >> compute_features_nba >> precompute_predictions_nba >> generate_recommendations_nba
 
+    # ── NFL branch (Phase 10a: ingest scaffolding) ────────────────
+    # NFL fixtures land via ESPN — same path as NBA/NHL. Features /
+    # predictions / recommendations come in subsequent commits as we
+    # add compute_features_nfl, the training bundles, and the
+    # precompute_predictions_nfl + generate_recommendations_nfl
+    # scripts. For now the branch just hydrates the matches table
+    # with upcoming NFL games so the trained-model pipeline has
+    # rows to score later.
+    fetch_upcoming_nfl = BashOperator(
+        task_id="fetch_upcoming_nfl",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport nfl --days 14",
+    )
+
     # ── Phase 5: grade finished matches ───────────────────────────
     # Walks matches whose status flipped to 'finished' in the last
     # 14 days, computes actual_outcome per market, and:

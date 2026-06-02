@@ -41,7 +41,7 @@ load_nhl_historical = _load("load_nhl_historical", "load_nhl_historical.py")
 
 class TestSportConfigs:
     def test_all_sports_registered(self):
-        assert set(fetch_upcoming.SPORT_CONFIGS.keys()) == {"soccer", "nhl", "nba"}
+        assert set(fetch_upcoming.SPORT_CONFIGS.keys()) == {"soccer", "nhl", "nba", "nfl"}
 
     def test_soccer_config_keeps_espn_path(self):
         cfg = fetch_upcoming.SPORT_CONFIGS["soccer"]
@@ -182,7 +182,10 @@ class TestSportForKey:
             ("basketball_nba", "nba"),
             ("basketball_wnba", "nba"),  # prefix match — wnba isn't ingested
             #                              # but the prefix mapper says nba
-            ("americanfootball_nfl", None),  # NFL not registered
+            ("americanfootball_nfl", "nfl"),  # NFL registered (Phase 10)
+            ("americanfootball_ncaaf", "nfl"),  # prefix match — NCAAF not
+            #                                   # ingested but the prefix
+            #                                   # mapper says nfl
             ("", None),
         ],
     )

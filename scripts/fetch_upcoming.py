@@ -60,6 +60,16 @@ def _season_nba(dt: datetime) -> str:
     return f"{dt.year - 1}-{dt.year}"
 
 
+def _season_nfl(dt: datetime) -> str:
+    """NFL season runs Sep→Feb (regular season Sep-Jan, playoffs Jan,
+    Super Bowl early Feb). Aug-Dec → YYYY-YYYY+1 (the new season);
+    Jan-Jul → YYYY-1-YYYY (the season that ended that Feb). Cutoff
+    month 8 catches preseason (early August)."""
+    if dt.month >= 8:
+        return f"{dt.year}-{dt.year + 1}"
+    return f"{dt.year - 1}-{dt.year}"
+
+
 @dataclass(frozen=True)
 class SportConfig:
     """Per-sport ingestion config consumed by the generic ESPN fetcher.
@@ -154,6 +164,16 @@ NHL_LEAGUES: dict[str, tuple[str, str, str]] = {
 }
 
 
+# ── NFL config ────────────────────────────────────────────────────────
+# ESPN exposes the NFL under football/nfl with a single league slug.
+# Same shape as NBA/NHL — single league, no slug variations to worry
+# about. NCAA / preseason / Super Bowl all roll up under the same nfl
+# slug on ESPN's scoreboard.
+NFL_LEAGUES: dict[str, tuple[str, str, str]] = {
+    "nfl": ("NFL", "NFL", "USA"),
+}
+
+
 SPORT_CONFIGS: dict[str, SportConfig] = {
     "soccer": SportConfig(
         sport="soccer",
@@ -181,6 +201,15 @@ SPORT_CONFIGS: dict[str, SportConfig] = {
         espn_path="basketball",
         leagues=NBA_LEAGUES,
         season_func=_season_nba,
+    ),
+    "nfl": SportConfig(
+        sport="nfl",
+        # ESPN's football API path: /sports/football/{league_slug}/scoreboard.
+        # Same shape gotcha as NBA/NHL — espn_path is JUST "football" so
+        # the slug "nfl" doesn't double up to /football/nfl/nfl/.
+        espn_path="football",
+        leagues=NFL_LEAGUES,
+        season_func=_season_nfl,
     ),
 }
 

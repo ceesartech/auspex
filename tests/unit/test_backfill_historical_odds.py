@@ -98,6 +98,7 @@ class TestHelperReuse:
         # pipelines.
         assert fetch_live_odds.sport_for_key("icehockey_nhl") == "nhl"
         assert fetch_live_odds.sport_for_key("basketball_nba") == "nba"
+        assert fetch_live_odds.sport_for_key("americanfootball_nfl") == "nfl"
         assert fetch_live_odds.sport_for_key("soccer_epl") == "soccer"
         assert fetch_live_odds.sport_for_key("bogus_keykey") is None
 
@@ -106,13 +107,14 @@ class TestHelperReuse:
         # picks it up via SPORT_MARKETS. NHL stays at h2h+spreads+totals.
         assert fetch_live_odds.SPORT_MARKETS["nhl"] == "h2h,spreads,totals"
         assert fetch_live_odds.SPORT_MARKETS["nba"] == "h2h,spreads,totals"
+        assert fetch_live_odds.SPORT_MARKETS["nfl"] == "h2h,spreads,totals"
         # And our script falls back to it when --markets isn't passed:
         argv = ["--start", "2024-10-01", "--end", "2024-10-02", "--dry-run"]
         args = backfill.parse_args(argv)
         assert args.markets is None  # the resolution happens in main()
         # main() falls back to SPORT_MARKETS[sport], so verify we'd
-        # pick up "h2h,spreads,totals" for both NHL and NBA.
-        for live_key in ("icehockey_nhl", "basketball_nba"):
+        # pick up "h2h,spreads,totals" for NHL, NBA, and NFL.
+        for live_key in ("icehockey_nhl", "basketball_nba", "americanfootball_nfl"):
             sport = fetch_live_odds.sport_for_key(live_key)
             assert fetch_live_odds.SPORT_MARKETS[sport] == "h2h,spreads,totals"
 
