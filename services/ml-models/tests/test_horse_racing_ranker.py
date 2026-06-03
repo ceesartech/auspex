@@ -316,6 +316,15 @@ class TestLoadFromArtifacts:
                 {"fit_result": {"temperature": ranker.temperature}, "test_metrics": {}},
                 f,
             )
+        # Mirror the trainer: write the calibrator artefact when
+        # fit() populated one. Without this the loaded model is
+        # uncalibrated and the round-trip prob comparison fails.
+        if ranker.calibrator_x is not None and ranker.calibrator_y is not None:
+            with open(out_dir / "calibrator.json", "w") as f:
+                json.dump(
+                    {"x": ranker.calibrator_x.tolist(), "y": ranker.calibrator_y.tolist()},
+                    f,
+                )
         return ranker, out_dir, df, groups
 
     def test_load_reconstructs_predictions(self, tmp_path):
@@ -363,3 +372,141 @@ class TestLoadFromArtifacts:
         # script.
         with pytest.raises(FileNotFoundError):
             HorseRacingRanker.load(tmp_path / "does-not-exist")
+
+
+# ── Isotonic calibrator ────────────────────────────────────────────
+
+
+class TestIsotonicCalibrator:
+    """The temperature tuner finds the softmax T that minimises val
+    Brier, but per-bucket calibration is still imperfect — e.g. the
+    ranker softmax(temp=0.06) maps 10%-prob horses to actual ~3% win
+    rate on the 13k-race corpus. Isotonic post-cal fixes that bucket-
+    by-bucket without touching rank order. These tests pin the
+    invariants the recs engine depends on."""
+
+    def _train_with_calibrator(self):
+        # Train on a synthetic corpus where the model can learn
+        # ranking but the raw scores produce mis-calibrated probs.
+        df = _synthetic_dataset(n_races=200, runners_per_race=6, seed=3)
+        feature_cols = ["signal", "noise_a", "noise_b", "noise_c"]
+        ranker = HorseRacingRanker(
+            HorseRacingRankerConfig(n_estimators=50, learning_rate=0.1, early_stopping_rounds=10)
+        )
+        groups = df["race_id"].value_counts(sort=False).values
+        ranker.fit(
+            X_train=df[feature_cols],
+            y_train=df["target"].to_numpy(dtype=np.int64),
+            groups_train=groups,
+            X_val=df[feature_cols],
+            y_val=df["target"].to_numpy(dtype=np.int64),
+            groups_val=groups,
+        )
+        return ranker, df, groups, feature_cols
+
+    def test_calibrator_fit_writes_knot_arrays(self):
+        # The fit() call should populate calibrator_x / calibrator_y
+        # whenever a val set is provided. Without the calibrator the
+        # ranker ships uncalibrated softmax and the recs engine
+        # over-fires (verified empirically on prod).
+        ranker, *_ = self._train_with_calibrator()
+        assert ranker.calibrator_x is not None
+        assert ranker.calibrator_y is not None
+        assert ranker.calibrator_x.shape == ranker.calibrator_y.shape
+        # X monotonically non-decreasing (sklearn IsotonicRegression
+        # invariant); Y bounded in [0, 1].
+        assert np.all(np.diff(ranker.calibrator_x) >= 0)
+        assert ranker.calibrator_y.min() >= 0.0
+        assert ranker.calibrator_y.max() <= 1.0
+
+    def test_no_calibrator_when_no_val_set(self):
+        # Without a val set we can't fit a calibrator. fit() should
+        # still succeed but calibrator_x / calibrator_y stay None.
+        df = _synthetic_dataset(n_races=80, runners_per_race=5, seed=4)
+        feature_cols = ["signal", "noise_a", "noise_b", "noise_c"]
+        ranker = HorseRacingRanker(HorseRacingRankerConfig(n_estimators=10, learning_rate=0.1))
+        groups = df["race_id"].value_counts(sort=False).values
+        ranker.fit(
+            X_train=df[feature_cols],
+            y_train=df["target"].to_numpy(dtype=np.int64),
+            groups_train=groups,
+        )
+        assert ranker.is_fitted is True
+        assert ranker.calibrator_x is None
+        assert ranker.calibrator_y is None
+
+    def test_calibrated_probs_still_sum_to_one_per_race(self):
+        # Calibration remaps each entrant's prob independently which
+        # naively breaks the per-race sum-to-1 invariant. The predict
+        # path must renormalise so the recs engine's EV math doesn't
+        # see a half-race that adds to 0.7 (silent under-counting).
+        ranker, df, groups, feature_cols = self._train_with_calibrator()
+        probs = ranker.predict_probabilities(df[feature_cols], groups)
+        for race_probs in probs:
+            assert race_probs.sum() == pytest.approx(1.0, abs=1e-6)
+
+    def test_calibrated_predictions_differ_from_raw_softmax(self):
+        # If the calibrator silently no-ops the result would equal the
+        # raw softmax. Compare to a fresh ranker without calibrator —
+        # at least one race's distribution should differ measurably.
+        ranker, df, groups, feature_cols = self._train_with_calibrator()
+        original_x, original_y = ranker.calibrator_x, ranker.calibrator_y
+        ranker.calibrator_x = None
+        ranker.calibrator_y = None
+        raw_probs = ranker.predict_probabilities(df[feature_cols], groups)
+        ranker.calibrator_x = original_x
+        ranker.calibrator_y = original_y
+        cal_probs = ranker.predict_probabilities(df[feature_cols], groups)
+        any_diff = any(not np.allclose(r, c, atol=1e-6) for r, c in zip(raw_probs, cal_probs))
+        assert any_diff, "calibrator had no effect; possible no-op bug"
+
+    def test_save_load_calibrator_round_trip(self, tmp_path):
+        # The calibrator MUST survive save → load. Without that, the
+        # precompute task in the DAG ships uncalibrated softmax (which
+        # we know fires 520 false-positive recs/day; memory:
+        # horse-racing-ml-ranker-v1).
+        import json
+
+        ranker, df, groups, feature_cols = self._train_with_calibrator()
+        out_dir = tmp_path / "ranker_with_cal"
+        out_dir.mkdir()
+        ranker.model.booster_.save_model(str(out_dir / "model.bin"))
+        with open(out_dir / "feature_names.json", "w") as f:
+            json.dump(ranker.feature_names, f)
+        with open(out_dir / "metadata.json", "w") as f:
+            json.dump({"fit_result": {"temperature": ranker.temperature}}, f)
+        with open(out_dir / "calibrator.json", "w") as f:
+            json.dump({"x": ranker.calibrator_x.tolist(), "y": ranker.calibrator_y.tolist()}, f)
+
+        loaded = HorseRacingRanker.load(out_dir)
+        np.testing.assert_allclose(loaded.calibrator_x, ranker.calibrator_x)
+        np.testing.assert_allclose(loaded.calibrator_y, ranker.calibrator_y)
+        original_probs = ranker.predict_probabilities(df[feature_cols], groups)
+        loaded_probs = loaded.predict_probabilities(df[feature_cols], groups)
+        for a, b in zip(original_probs, loaded_probs):
+            np.testing.assert_allclose(a, b, atol=1e-6)
+
+    def test_load_without_calibrator_file_keeps_uncalibrated(self, tmp_path):
+        # Backwards compat: model dirs saved before the calibrator
+        # was added load cleanly with calibrator_x / calibrator_y None.
+        import json
+
+        df = _synthetic_dataset(n_races=80, runners_per_race=5, seed=5)
+        feature_cols = ["signal", "noise_a", "noise_b", "noise_c"]
+        groups = df["race_id"].value_counts(sort=False).values
+        ranker = HorseRacingRanker(HorseRacingRankerConfig(n_estimators=20, learning_rate=0.1))
+        ranker.fit(
+            X_train=df[feature_cols],
+            y_train=df["target"].to_numpy(dtype=np.int64),
+            groups_train=groups,
+        )
+        out_dir = tmp_path / "no_cal"
+        out_dir.mkdir()
+        ranker.model.booster_.save_model(str(out_dir / "model.bin"))
+        with open(out_dir / "feature_names.json", "w") as f:
+            json.dump(ranker.feature_names, f)
+        with open(out_dir / "metadata.json", "w") as f:
+            json.dump({"fit_result": {"temperature": 1.0}}, f)
+        loaded = HorseRacingRanker.load(out_dir)
+        assert loaded.calibrator_x is None
+        assert loaded.calibrator_y is None

@@ -116,11 +116,20 @@ class HorseRacingRanker:
         self.model = None
         self.feature_names: List[str] = []
         self.is_fitted = False
-        # Picked on the validation set by minimising race-level cross
-        # entropy. 1.0 = vanilla softmax; <1.0 sharpens (favourite
-        # gets more mass); >1.0 flattens. Stored so predict-time
-        # gets the same calibration as training-time evaluation.
+        # Picked on the validation set by minimising race-level Brier.
+        # 1.0 = vanilla softmax; <1.0 sharpens (favourite gets more
+        # mass); >1.0 flattens. Stored so predict-time gets the same
+        # calibration as training-time evaluation.
         self.temperature: float = 1.0
+        # Isotonic calibrator (post-softmax). Two parallel arrays
+        # representing a monotonic piecewise-linear mapping from
+        # softmax_prob → calibrated_prob, fit on the val set against
+        # actual win/lose outcomes. Predict-time interpolates via
+        # numpy.interp, no sklearn dependency at inference. None when
+        # the model was fit without a val set (precompute-time
+        # fallback) — the predictor then ships uncalibrated softmax.
+        self.calibrator_x: Optional[np.ndarray] = None
+        self.calibrator_y: Optional[np.ndarray] = None
         self.training_history: Dict[str, Any] = {}
         self.feature_importance: Dict[str, float] = {}
         self.validation_metrics: Dict[str, float] = {}
@@ -163,6 +172,8 @@ class HorseRacingRanker:
         with open(names_path) as f:
             instance.feature_names = list(json.load(f))
         instance.temperature = 1.0
+        instance.calibrator_x = None
+        instance.calibrator_y = None
         instance.training_history = {}
         instance.feature_importance = {}
         instance.validation_metrics = {}
@@ -175,6 +186,15 @@ class HorseRacingRanker:
             # script rather than ship without calibration.
             instance.temperature = float(meta.get("fit_result", {}).get("temperature", 1.0))
             instance.validation_metrics = meta.get("test_metrics", {})
+        # Isotonic calibrator is a separate artefact (calibrator.json)
+        # so loading it stays optional — backwards-compatible with
+        # model directories saved before the calibrator was added.
+        cal_path = model_dir / "calibrator.json"
+        if cal_path.exists():
+            with open(cal_path) as f:
+                cal = json.load(f)
+            instance.calibrator_x = np.asarray(cal["x"], dtype=np.float64)
+            instance.calibrator_y = np.asarray(cal["y"], dtype=np.float64)
         instance.is_fitted = True
         return instance
 
@@ -266,12 +286,18 @@ class HorseRacingRanker:
             )
         )
 
-        # Temperature calibration + validation metrics (only when val
-        # available — without val we ship with temperature=1.0 and
-        # accept the spike).
+        # Temperature calibration + isotonic post-cal + validation
+        # metrics (only when val available — without val we ship with
+        # temperature=1.0 and no calibrator).
         if X_val is not None and y_val is not None and groups_val is not None:
             X_val_filled = X_val[self.feature_names].fillna(median)
             self.temperature = self._fit_temperature(X_val_filled, y_val, groups_val)
+            # Fit isotonic AFTER temperature is set so the calibrator
+            # maps post-softmax probs (at the chosen temperature) to
+            # actual win rates. Order is load-bearing — fitting before
+            # the temperature is picked would calibrate against a
+            # different probability scale than predict-time uses.
+            self._fit_isotonic_calibrator(X_val_filled, y_val, groups_val)
             self.validation_metrics = self._evaluate(X_val_filled, y_val, groups_val)
 
         return {
@@ -279,7 +305,55 @@ class HorseRacingRanker:
             "validation_metrics": self.validation_metrics,
             "temperature": self.temperature,
             "best_iteration": getattr(self.model, "best_iteration_", None),
+            "has_calibrator": self.calibrator_x is not None,
         }
+
+    def _fit_isotonic_calibrator(
+        self,
+        X_val: pd.DataFrame,
+        y_val: np.ndarray,
+        groups_val: np.ndarray,
+    ) -> None:
+        """Fit an isotonic calibrator on (softmax_prob, actual_outcome)
+        across all val rows. The calibrator is a monotonic piecewise-
+        linear mapping from raw softmax prob to calibrated win-rate
+        prob; predict-time interpolates via numpy.interp.
+
+        Why this matters: the temperature tuner finds the softmax T
+        that minimises race-level Brier, but the per-bucket calibration
+        is still imperfect — e.g. on the 13k-race corpus, ranker
+        softmax(temp=0.06) puts 10%-prob horses where actual win rate
+        is ~3%. Isotonic post-cal fixes that bucket-by-bucket without
+        touching the rank order.
+
+        Stores only the knot points (X / Y arrays) so the loaded model
+        doesn't need sklearn at inference — numpy.interp suffices.
+        """
+        from sklearn.isotonic import IsotonicRegression
+
+        scores = self.predict_scores(X_val)
+        # Generate per-row softmax probs at the tuned temperature.
+        probs_pre = np.empty_like(scores, dtype=np.float64)
+        cursor = 0
+        for size in groups_val:
+            race_probs = _softmax(scores[cursor : cursor + int(size)], self.temperature)
+            probs_pre[cursor : cursor + int(size)] = race_probs
+            cursor += int(size)
+
+        iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+        iso.fit(probs_pre, y_val.astype(np.float64))
+        # Store the piecewise-linear knot points. sklearn exposes them
+        # as IsotonicRegression's X_thresholds_ / y_thresholds_ after fit.
+        self.calibrator_x = np.asarray(iso.X_thresholds_, dtype=np.float64)
+        self.calibrator_y = np.asarray(iso.y_thresholds_, dtype=np.float64)
+        logger.info(
+            "Fit isotonic calibrator: %d knots, X∈[%.3f,%.3f], Y∈[%.3f,%.3f]",
+            len(self.calibrator_x),
+            float(self.calibrator_x.min()),
+            float(self.calibrator_x.max()),
+            float(self.calibrator_y.min()),
+            float(self.calibrator_y.max()),
+        )
 
     # ── Score / probability ────────────────────────────────────────
 
@@ -294,9 +368,19 @@ class HorseRacingRanker:
     def predict_probabilities(
         self, X: pd.DataFrame, groups: np.ndarray, temperature: Optional[float] = None
     ) -> List[np.ndarray]:
-        """Per-race-softmax probabilities. Returns a list of arrays,
+        """Per-race calibrated probabilities. Returns a list of arrays,
         one per race, each summing to 1.0 across the race's entrants.
-        Temperature defaults to the value tuned during fit."""
+
+        Pipeline:
+          1. softmax(scores / temperature) → per-race raw probs
+          2. (optional) apply isotonic calibrator to each raw prob
+          3. renormalise per race so the row sums back to 1.0
+
+        Without the calibrator the result is just the temperature-
+        scaled softmax. With the calibrator the per-bucket mapping
+        corrects the systematic over/under-confidence patterns picked
+        up at training time (e.g. ranker softmax(0.06) putting 10%
+        prob on horses whose actual win rate is ~3%)."""
         if not self.is_fitted:
             raise ValueError("Model not fitted")
         if int(np.sum(groups)) != len(X):
@@ -310,7 +394,24 @@ class HorseRacingRanker:
         for size in groups:
             race_scores = scores[cursor : cursor + size]
             cursor += int(size)
-            out.append(_softmax(race_scores, temperature=t))
+            race_probs = _softmax(race_scores, temperature=t)
+            if self.calibrator_x is not None and self.calibrator_y is not None:
+                # Apply isotonic via piecewise-linear interpolation.
+                # numpy.interp clips X out-of-range to the endpoint Y,
+                # matching IsotonicRegression(out_of_bounds='clip').
+                race_probs = np.interp(race_probs, self.calibrator_x, self.calibrator_y)
+                # Renormalise so the race's probs still sum to 1.0
+                # — calibration can break that invariant since it
+                # remaps each entrant independently.
+                s = race_probs.sum()
+                if s > 0:
+                    race_probs = race_probs / s
+                else:
+                    # Pathological edge case: calibrator mapped every
+                    # entrant to 0. Fall back to uniform so downstream
+                    # code never sees a NaN-or-divide-by-zero.
+                    race_probs = np.full(len(race_probs), 1.0 / len(race_probs))
+            out.append(race_probs)
         return out
 
     # ── Temperature calibration ────────────────────────────────────

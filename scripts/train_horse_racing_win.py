@@ -111,6 +111,29 @@ def _consensus_baseline_topk(test_frame: pd.DataFrame) -> dict:
     }
 
 
+def _per_entrant_brier(
+    race_probs: list,
+    groups: np.ndarray,
+    y_true: np.ndarray,
+) -> float:
+    """Mean per-entrant Brier on the calibrated probabilities. Matches
+    the consensus baseline's Brier computation (memory:
+    horse-racing-baseline) so the two numbers are directly comparable."""
+    total = 0.0
+    n = 0
+    cursor = 0
+    for race_arr, size in zip(race_probs, groups):
+        actuals = y_true[cursor : cursor + int(size)].astype(np.float64)
+        cursor += int(size)
+        if actuals.sum() == 0:
+            # Race with no winner row in the test set — skip; matches
+            # the grader's "no actual_outcome" handling.
+            continue
+        total += float(np.mean((race_arr - actuals) ** 2))
+        n += 1
+    return total / n if n else float("inf")
+
+
 def _save_artefacts(
     output_dir: Path,
     model: HorseRacingRanker,
@@ -126,6 +149,19 @@ def _save_artefacts(
         json.dump(metadata, f, indent=2)
     with open(output_dir / "feature_importance.json", "w") as f:
         json.dump(model.feature_importance, f, indent=2)
+    # Isotonic calibrator (optional — written only when the model was
+    # fit with a val set). Two parallel arrays giving the piecewise-
+    # linear knot points; load() reconstitutes them via numpy.interp,
+    # no sklearn dependency at inference.
+    if model.calibrator_x is not None and model.calibrator_y is not None:
+        with open(output_dir / "calibrator.json", "w") as f:
+            json.dump(
+                {
+                    "x": model.calibrator_x.tolist(),
+                    "y": model.calibrator_y.tolist(),
+                },
+                f,
+            )
 
 
 # ── Orchestration ──────────────────────────────────────────────────
@@ -195,11 +231,20 @@ def run(
     test_metrics = model._evaluate(X_test, y_test, g_test)
     consensus_baseline = _consensus_baseline_topk(test_frame)
 
+    # Compute post-calibration Brier on the test set directly — the
+    # ranker's PROBABILITY quality (not just ranking quality) is what
+    # determines whether it can replace consensus in the recs engine.
+    # Consensus baseline's reference Brier is 0.0831 on the same kind
+    # of corpus (memory: horse-racing-baseline).
+    test_probs = model.predict_probabilities(X_test, g_test)
+    test_brier = _per_entrant_brier(test_probs, g_test, y_test)
+
     logger.info(
-        "Test metrics — top1 acc %.3f, MRR %.3f, NLL %.4f, races %d",
+        "Test metrics — top1 acc %.3f, MRR %.3f, NLL %.4f, Brier %.4f, races %d",
         test_metrics.get("top1_accuracy", 0.0),
         test_metrics.get("mrr", 0.0),
         test_metrics.get("nll", 0.0),
+        test_brier,
         test_metrics.get("races", 0),
     )
     logger.info(
@@ -209,6 +254,7 @@ def run(
     )
     delta = test_metrics.get("top1_accuracy", 0.0) - consensus_baseline["top1_accuracy"]
     logger.info("Ranker vs consensus top1 delta: %+.3f pts", delta * 100)
+    test_metrics["brier"] = test_brier
 
     metadata = {
         "model_name": "lightgbm_ranker_v1",
