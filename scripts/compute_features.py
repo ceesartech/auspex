@@ -82,6 +82,23 @@ NEUTRAL_DEFAULTS: dict[str, float] = {
     "away_roll_points": 1.40,
     "form_diff_points": 0.0,
     "form_diff_goals": 0.0,
+    # Weather (Phase 13, Open-Meteo via match_weather_latest view).
+    # Soccer defaults: ~15°C (typical EU match-day temp across the
+    # Aug-May season), light wind, dry. Most outdoor leagues don't
+    # play under domes; weather_indoor stays 0 since soccer doesn't
+    # have the NFL dome category.
+    "weather_temp_c": 15.0,
+    "weather_wind_kmh": 10.0,
+    "weather_precip_mm": 0.0,
+    "weather_humidity_pct": 70.0,
+    # Binary extreme-condition flags. Wind > 25 km/h hurts crosses
+    # and long passing; precip > 5mm = measurable rain affecting
+    # ball roll + footing; temp > 30°C reduces stamina (relevant for
+    # summer leagues like MLS / Brasileirão).
+    "weather_high_wind": 0.0,
+    "weather_wet": 0.0,
+    "weather_hot": 0.0,
+    "weather_indoor": 0.0,
 }
 
 
@@ -256,7 +273,58 @@ def compute_match_features(cur, match_id: str):
     features["form_diff_points"] = _safe_diff(home_form.get("home_roll_points"), away_form.get("away_roll_points"))
     features["form_diff_goals"] = _safe_diff(home_form.get("home_roll_goals_for"), away_form.get("away_roll_goals_for"))
 
+    features.update(_fetch_weather(cur, match_id))
+
     return features
+
+
+# Weather thresholds — see scripts/compute_features_nfl.py for the
+# NFL versions. Soccer-specific: hot weather (>30°C) matters more
+# than freezing since most leagues run Aug-May (cold rare for play
+# anyway) but summer leagues (MLS, Brasileirão) push into 30+.
+HIGH_WIND_KMH = 25.0
+WET_PRECIP_MM = 5.0
+HOT_TEMP_C = 30.0
+
+
+def _fetch_weather(cur, match_id: str) -> dict:
+    """Pull the freshest weather snapshot for this soccer match.
+    Same shape as the NFL helper — leaves missing values as no-ops
+    so NEUTRAL_DEFAULTS fills them in."""
+    cur.execute(
+        """
+        SELECT mwl.temperature_c, mwl.wind_kmh, mwl.precipitation_mm,
+               mwl.humidity_pct, vc.is_indoor
+        FROM match_weather_latest mwl
+        LEFT JOIN venue_coords vc ON vc.id = mwl.venue_coords_id
+        WHERE mwl.match_id = %s
+        """,
+        (match_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return {}
+    if row.get("is_indoor"):
+        return {"weather_indoor": 1.0}
+
+    out: dict[str, float] = {"weather_indoor": 0.0}
+    temp = row.get("temperature_c")
+    wind = row.get("wind_kmh")
+    precip = row.get("precipitation_mm")
+    humidity = row.get("humidity_pct")
+
+    if temp is not None:
+        out["weather_temp_c"] = float(temp)
+        out["weather_hot"] = 1.0 if float(temp) > HOT_TEMP_C else 0.0
+    if wind is not None:
+        out["weather_wind_kmh"] = float(wind)
+        out["weather_high_wind"] = 1.0 if float(wind) > HIGH_WIND_KMH else 0.0
+    if precip is not None:
+        out["weather_precip_mm"] = float(precip)
+        out["weather_wet"] = 1.0 if float(precip) > WET_PRECIP_MM else 0.0
+    if humidity is not None:
+        out["weather_humidity_pct"] = float(humidity)
+    return out
 
 
 def write_features(cur, match_id: str, features: dict) -> None:

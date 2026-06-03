@@ -126,6 +126,29 @@ NEUTRAL_DEFAULTS: dict[str, float] = {
     "margin_diff": 0.0,
     "wins_diff": 0.0,
     "rest_diff": 0.0,
+    # Weather (Phase 13, Open-Meteo via match_weather_latest view).
+    # Defaults match a "fair indoor / mild outdoor" condition so a
+    # missing weather row doesn't bias the model toward any extreme.
+    # NFL temperature modal ≈ 50°F (10°C) for Sep-Jan games; wind
+    # modal ≈ 10km/h (light breeze); precipitation ≈ 0 (most NFL
+    # games are dry). Domes always default — is_indoor=true at the
+    # venue_coords level keeps the fetcher from writing rows for them.
+    "weather_temp_c": 10.0,
+    "weather_wind_kmh": 10.0,
+    "weather_precip_mm": 0.0,
+    "weather_humidity_pct": 60.0,
+    # Binary "is the game in extreme conditions" flags. Threshold
+    # rationale: wind > 25 km/h (~15 mph) degrades passing accuracy
+    # and kicking; precipitation > 5 mm in the 4h window means
+    # measurable rain/snow during the game; temp < 0°C (freezing)
+    # impacts ball grip + kicker leg strength.
+    "weather_high_wind": 0.0,
+    "weather_wet": 0.0,
+    "weather_freezing": 0.0,
+    # Indoor flag — 1.0 for dome games, 0.0 for outdoor. Lets the
+    # model learn that indoor games systematically differ (no
+    # weather variance + faster turf).
+    "weather_indoor": 0.0,
 }
 
 
@@ -353,6 +376,83 @@ def _diff(features: dict, h_key: str, a_key: str, out_key: str) -> None:
         features[out_key] = float(h) - float(a)
 
 
+# Wind threshold: ~15 mph degrades passing accuracy + kicking.
+HIGH_WIND_KMH = 25.0
+# Precipitation threshold: ~5mm in the 4h window = measurable rain.
+WET_PRECIP_MM = 5.0
+# Temperature threshold: freezing affects ball grip + kicker legs.
+FREEZING_TEMP_C = 0.0
+
+
+def fetch_weather(cur, match_id: str) -> dict:
+    """Pull the freshest weather snapshot for this match from the
+    match_weather_latest view. Returns a dict of weather_* features
+    suitable for merging into the main features dict.
+
+    Indoor games (venue is_indoor=true) bypass the fetcher entirely,
+    so the JOIN against match_weather_latest returns nothing — the
+    venue_coords lookup catches that case and we set weather_indoor=1.
+    """
+    cur.execute(
+        """
+        SELECT
+            mwl.temperature_c, mwl.wind_kmh, mwl.precipitation_mm,
+            mwl.humidity_pct, vc.is_indoor
+        FROM match_weather_latest mwl
+        LEFT JOIN venue_coords vc ON vc.id = mwl.venue_coords_id
+        WHERE mwl.match_id = %s
+        """,
+        (match_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        # No weather row at all — could be a new match that hasn't
+        # had the fetcher run yet, or a venue we couldn't resolve.
+        # Check the venue_coords lookup directly to see if it's
+        # actually indoor (in which case we set the flag); otherwise
+        # leave all weather features at neutral defaults.
+        cur.execute(
+            """
+            SELECT vc.is_indoor
+            FROM matches m
+            LEFT JOIN venue_coords vc
+              ON LOWER(TRIM(m.venue)) = vc.normalized_venue_name
+            WHERE m.id = %s
+            """,
+            (match_id,),
+        )
+        venue_row = cur.fetchone()
+        if venue_row and venue_row.get("is_indoor"):
+            return {"weather_indoor": 1.0}
+        return {}
+
+    is_indoor = bool(row.get("is_indoor"))
+    if is_indoor:
+        # Dome game — fetcher should never have written a row but the
+        # LEFT JOIN above could surface a stale snapshot from before
+        # the venue was flagged. Treat as indoor regardless.
+        return {"weather_indoor": 1.0}
+
+    out: dict[str, float] = {"weather_indoor": 0.0}
+    temp = row.get("temperature_c")
+    wind = row.get("wind_kmh")
+    precip = row.get("precipitation_mm")
+    humidity = row.get("humidity_pct")
+
+    if temp is not None:
+        out["weather_temp_c"] = float(temp)
+        out["weather_freezing"] = 1.0 if float(temp) < FREEZING_TEMP_C else 0.0
+    if wind is not None:
+        out["weather_wind_kmh"] = float(wind)
+        out["weather_high_wind"] = 1.0 if float(wind) > HIGH_WIND_KMH else 0.0
+    if precip is not None:
+        out["weather_precip_mm"] = float(precip)
+        out["weather_wet"] = 1.0 if float(precip) > WET_PRECIP_MM else 0.0
+    if humidity is not None:
+        out["weather_humidity_pct"] = float(humidity)
+    return out
+
+
 def compute_for_match(cur, match_id: str) -> Optional[dict]:
     """End-to-end feature computation for one match. Returns None
     if the match itself can't be found."""
@@ -370,6 +470,7 @@ def compute_for_match(cur, match_id: str) -> Optional[dict]:
         sched = fetch_schedule_context(cur, team_id, when)
         for k, v in sched.items():
             features[f"{side}_{k}"] = v
+    features.update(fetch_weather(cur, match_id))
     _diff(features, "home_roll_pts_scored", "away_roll_pts_scored", "pts_scored_diff")
     _diff(features, "home_roll_pts_allowed", "away_roll_pts_allowed", "pts_allowed_diff")
     _diff(features, "home_roll_margin", "away_roll_margin", "margin_diff")

@@ -157,6 +157,40 @@ class TestDiffHelper:
 # ── Argparse plumbing ──────────────────────────────────────────────
 
 
+class TestWeatherDefaults:
+    """Weather features (Phase 13). Tennis-specific defaults: ~20°C
+    is typical Slam weather (AO/RG/W/USO combined), light wind, dry."""
+
+    def test_temperature_default_is_typical_slam_temp(self):
+        assert ftennis.NEUTRAL_DEFAULTS["weather_temp_c"] == 20.0
+
+    def test_wind_default_is_light_breeze(self):
+        assert ftennis.NEUTRAL_DEFAULTS["weather_wind_kmh"] == 10.0
+
+    def test_precip_default_is_dry(self):
+        assert ftennis.NEUTRAL_DEFAULTS["weather_precip_mm"] == 0.0
+
+    def test_extreme_condition_flags_default_zero(self):
+        assert ftennis.NEUTRAL_DEFAULTS["weather_high_wind"] == 0.0
+        assert ftennis.NEUTRAL_DEFAULTS["weather_wet"] == 0.0
+        assert ftennis.NEUTRAL_DEFAULTS["weather_hot"] == 0.0
+
+    def test_indoor_default_zero(self):
+        assert ftennis.NEUTRAL_DEFAULTS["weather_indoor"] == 0.0
+
+
+class TestWeatherThresholds:
+    def test_hot_threshold_matches_aussie_open_heat_policy(self):
+        # AO's extreme-heat policy kicks in around 32°C. Tennis-
+        # specific (NFL uses freezing, soccer uses 30°C hot).
+        assert ftennis.HOT_TEMP_C == 32.0
+
+    def test_high_wind_threshold_consistent_with_nfl(self):
+        # Same 25 km/h cutoff as NFL — small ball + long flight
+        # means wind disrupts tennis serves at similar speeds.
+        assert ftennis.HIGH_WIND_KMH == 25.0
+
+
 class TestCli:
     def test_default_days_is_seven(self):
         args = ftennis.parse_args(["--database-url", "postgresql://x"])

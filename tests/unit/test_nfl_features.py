@@ -155,6 +155,50 @@ class TestDiffHelper:
 # ── Argparse plumbing ──────────────────────────────────────────────
 
 
+class TestWeatherDefaults:
+    """Weather features (Phase 13) — defaults represent a 'fair mild
+    outdoor game' so missing weather data doesn't bias predictions
+    toward any extreme."""
+
+    def test_temperature_default_is_modal_nfl_season(self):
+        # ~50°F = 10°C is the modal NFL game temp (Sep-Jan).
+        assert fnfl.NEUTRAL_DEFAULTS["weather_temp_c"] == 10.0
+
+    def test_wind_default_is_light_breeze(self):
+        # 10 km/h ≈ 6 mph = light breeze, no impact on play.
+        assert fnfl.NEUTRAL_DEFAULTS["weather_wind_kmh"] == 10.0
+
+    def test_precip_default_is_dry(self):
+        # Most NFL games are dry — default to 0 so a missing row
+        # doesn't bias the model toward predicting rain effects.
+        assert fnfl.NEUTRAL_DEFAULTS["weather_precip_mm"] == 0.0
+
+    def test_extreme_condition_flags_default_zero(self):
+        assert fnfl.NEUTRAL_DEFAULTS["weather_high_wind"] == 0.0
+        assert fnfl.NEUTRAL_DEFAULTS["weather_wet"] == 0.0
+        assert fnfl.NEUTRAL_DEFAULTS["weather_freezing"] == 0.0
+
+    def test_indoor_default_zero(self):
+        # Default to outdoor; flag flips to 1.0 only when the venue
+        # is explicitly tagged is_indoor=true in venue_coords.
+        assert fnfl.NEUTRAL_DEFAULTS["weather_indoor"] == 0.0
+
+
+class TestWeatherThresholds:
+    def test_high_wind_threshold_is_15_mph(self):
+        # 25 km/h ≈ 15 mph — passing accuracy + field-goal range
+        # degrade meaningfully above this.
+        assert fnfl.HIGH_WIND_KMH == 25.0
+
+    def test_wet_threshold_is_5mm(self):
+        # 5mm over the 4h window ≈ measurable rain/snow during play.
+        assert fnfl.WET_PRECIP_MM == 5.0
+
+    def test_freezing_threshold_is_zero_c(self):
+        # 0°C / 32°F — affects ball grip and kicker leg power.
+        assert fnfl.FREEZING_TEMP_C == 0.0
+
+
 class TestCli:
     def test_default_days_is_seven(self):
         args = fnfl.parse_args(["--database-url", "postgresql://x"])
