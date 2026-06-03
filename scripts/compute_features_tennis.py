@@ -123,25 +123,6 @@ NEUTRAL_DEFAULTS: dict[str, float] = {
     "h2h_balance": 0.0,
     "days_rest_diff": 0.0,
     "odds_implied_diff": 0.30,  # matches the 65/35 favorite/dog default
-    # Weather (Phase 13, Open-Meteo). Tennis is uniquely sensitive
-    # to weather: heat slows hard-court matches, wind disrupts
-    # serves, rain pauses outdoor play (and now retractable roofs
-    # close — flagged by is_indoor at the venue level). Grand Slams
-    # only — regular tour events don't have venue coords in v1.
-    # Defaults: ~20°C (typical Slam weather across AO/RG/W/USO),
-    # light wind, dry.
-    "weather_temp_c": 20.0,
-    "weather_wind_kmh": 10.0,
-    "weather_precip_mm": 0.0,
-    "weather_humidity_pct": 60.0,
-    # Tennis-specific: hot weather hurts performance over best-of-5
-    # at AO/USO (extreme heat policy at 32°C / 35°C respectively);
-    # high wind disrupts serves more than groundstrokes; wet =
-    # match suspended (rare since roofs).
-    "weather_high_wind": 0.0,
-    "weather_wet": 0.0,
-    "weather_hot": 0.0,
-    "weather_indoor": 0.0,
 }
 
 
@@ -407,58 +388,6 @@ def _diff(features: dict, h_key: str, a_key: str, out_key: str) -> None:
         features[out_key] = float(h) - float(a)
 
 
-# Weather thresholds — tennis-tuned. 25 km/h wind disrupts serves
-# more than NFL passing (smaller ball, longer flight). 5mm precip
-# = match suspended (and grass at Wimbledon doesn't recover for
-# hours). Hot threshold 32°C matches AO's extreme-heat policy.
-HIGH_WIND_KMH = 25.0
-WET_PRECIP_MM = 5.0
-HOT_TEMP_C = 32.0
-
-
-def fetch_weather(cur, match_id: str) -> dict:
-    """Pull the freshest weather snapshot for this tennis match.
-    Indoor coverage in v1 only includes Grand Slam complexes —
-    retractable-roof venues (AO, Wimbledon, USO) close the roof
-    when conditions warrant; the venue_coords seed currently marks
-    them outdoor so weather features still apply. v2 could read
-    roof_closed from match metadata if ESPN surfaces it."""
-    cur.execute(
-        """
-        SELECT mwl.temperature_c, mwl.wind_kmh, mwl.precipitation_mm,
-               mwl.humidity_pct, vc.is_indoor
-        FROM match_weather_latest mwl
-        LEFT JOIN venue_coords vc ON vc.id = mwl.venue_coords_id
-        WHERE mwl.match_id = %s
-        """,
-        (match_id,),
-    )
-    row = cur.fetchone()
-    if not row:
-        return {}
-    if row.get("is_indoor"):
-        return {"weather_indoor": 1.0}
-
-    out: dict[str, float] = {"weather_indoor": 0.0}
-    temp = row.get("temperature_c")
-    wind = row.get("wind_kmh")
-    precip = row.get("precipitation_mm")
-    humidity = row.get("humidity_pct")
-
-    if temp is not None:
-        out["weather_temp_c"] = float(temp)
-        out["weather_hot"] = 1.0 if float(temp) > HOT_TEMP_C else 0.0
-    if wind is not None:
-        out["weather_wind_kmh"] = float(wind)
-        out["weather_high_wind"] = 1.0 if float(wind) > HIGH_WIND_KMH else 0.0
-    if precip is not None:
-        out["weather_precip_mm"] = float(precip)
-        out["weather_wet"] = 1.0 if float(precip) > WET_PRECIP_MM else 0.0
-    if humidity is not None:
-        out["weather_humidity_pct"] = float(humidity)
-    return out
-
-
 def compute_for_match(cur, match_id: str) -> Optional[dict]:
     """End-to-end feature computation for one match. Returns None
     if the match itself can't be found."""
@@ -477,7 +406,6 @@ def compute_for_match(cur, match_id: str) -> Optional[dict]:
         for k, v in sched.items():
             features[f"{side}_{k}"] = v
     features.update(fetch_head_to_head(cur, meta["home_team_id"], meta["away_team_id"], when))
-    features.update(fetch_weather(cur, match_id))
 
     _diff(features, "home_roll_win_pct", "away_roll_win_pct", "roll_win_pct_diff")
     _diff(features, "home_days_rest", "away_days_rest", "days_rest_diff")
