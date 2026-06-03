@@ -52,29 +52,38 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class HorseRacingRankerConfig:
-    """LightGBM Ranker hyperparameters + training knobs."""
+    """LightGBM Ranker hyperparameters + training knobs.
 
-    # LightGBM ranker hyperparameters. The defaults here are mid-of-
-    # road for LambdaMART on N≈8 to N≈22 group sizes — adjust if the
-    # corpus grows beyond what these knobs can model. Locked here so
-    # callers can override one knob without touching the model.
-    n_estimators: int = 500
-    learning_rate: float = 0.05
+    Defaults reflect a tuning pass on the 5,770-race UK/IRE corpus
+    (commit a547bef): top-1 acc 22.9% vs 20.7% baseline (+2.2pts)
+    with best_iteration=78 and a sensible softmax temperature of
+    0.35. The v1 defaults (n_estimators=500, learning_rate=0.05,
+    num_leaves=31, reg_lambda=0.1, early_stopping=30) early-stopped
+    at iteration 1 with a degenerate temperature of 0.05 — see
+    `horse-racing-ml-ranker-v1` memory for the comparison.
+
+    For corpora >>10x larger, expect to need more boosting headroom
+    (higher n_estimators) + stronger regularisation. The current
+    defaults are a tested sweet spot for ~3 months of UK+IRE data.
+    """
+
+    n_estimators: int = 2000
+    learning_rate: float = 0.01
     max_depth: int = -1
-    num_leaves: int = 31
-    min_child_samples: int = 20
+    num_leaves: int = 63
+    min_child_samples: int = 50
     subsample: float = 0.8
     subsample_freq: int = 1
     colsample_bytree: float = 0.8
     reg_alpha: float = 0.0
-    reg_lambda: float = 0.1
+    reg_lambda: float = 1.0
     label_gain: List[int] = field(default_factory=lambda: [0, 1])
     # LambdaMART truncation depth — the NDCG / LambdaRank gradient is
     # computed over the top-`max_position` results. For horse racing
     # we only care about top-1 (the winner) so this is the strongest
     # signal we have; v2 could expose place / show by lifting to 3.
     eval_at_n: int = 1
-    early_stopping_rounds: int = 30
+    early_stopping_rounds: int = 100
     random_state: int = 42
     verbose: int = -1
 
