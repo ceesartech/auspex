@@ -255,6 +255,18 @@ with DAG(
         task_id="precompute_predictions_horse_racing",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/precompute_predictions_horse_racing.py --days 7",
     )
+    # LambdaMART ranker — beats the consensus baseline by +2.2pts
+    # top-1 on the held-out test (memory: horse-racing-ml-ranker-v1).
+    # Writes alongside the consensus into race_predictions under a
+    # distinct model_name so the recs engine can prefer the ranker
+    # when present and fall back to consensus when not. Runs AFTER
+    # precompute_predictions_horse_racing so the ranker has access
+    # to consensus_prob as an input feature (it's the top-importance
+    # feature by a wide margin).
+    precompute_predictions_horse_racing_ranker = BashOperator(
+        task_id="precompute_predictions_horse_racing_ranker",
+        bash_command=(f"{DOCKER_EXEC} python " "/app/scripts/precompute_predictions_horse_racing_ranker.py --days 7"),
+    )
     generate_recommendations_horse_racing = BashOperator(
         task_id="generate_recommendations_horse_racing",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/generate_recommendations_horse_racing.py --days 2",
@@ -264,6 +276,7 @@ with DAG(
         >> fetch_horse_racing_results
         >> compute_features_horse_racing
         >> precompute_predictions_horse_racing
+        >> precompute_predictions_horse_racing_ranker
         >> generate_recommendations_horse_racing
     )
 

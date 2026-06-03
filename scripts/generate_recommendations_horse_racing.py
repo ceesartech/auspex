@@ -55,20 +55,26 @@ from psycopg2.extras import RealDictCursor
 # Reuse the EV/Kelly + bankroll helpers from the soccer engine. Same
 # math; horse racing doesn't need a different formulation.
 sys.path.insert(0, os.path.dirname(__file__))
-from generate_recommendations import (  # noqa: E402
-    confidence_rating,
-    expected_value,
-    get_bankroll,
-    kelly_fraction,
-)
+from generate_recommendations import confidence_rating, expected_value, get_bankroll, kelly_fraction  # noqa: E402
 from telegram_notify import Alert, enqueue_alerts  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("generate_recommendations_horse_racing")
 
 KELLY_FRACTION = 0.25
-MODEL_NAME = "market_consensus_v1"
-MODEL_VERSION = "1.0.0"
+
+# Model precedence: the recs engine prefers the LambdaMART ranker
+# when it has scored a race (it beats the consensus baseline by
+# +2.2pts top-1 on the held-out test; memory:
+# horse-racing-ml-ranker-v1). Falls back to the consensus baseline
+# for races the ranker didn't reach — typically the freshest races
+# whose features_cache row hasn't been written yet. The DB query
+# walks this list in order per-race and uses the first available
+# row, so a ranker-prediction-when-present invariant comes for free.
+MODEL_PRECEDENCE: list[tuple[str, str]] = [
+    ("lightgbm_ranker_v1", "1.0.0"),
+    ("market_consensus_v1", "1.0.0"),
+]
 
 
 # ── Best-of-N pricing across bookmakers ────────────────────────────
@@ -111,6 +117,7 @@ def list_upcoming_races(cur, days: int) -> list[dict]:
     market_consensus_v1 prediction. Returns the race_id alongside
     the track + race_date the Telegram alert needs to identify the
     race — skips races without predictions so we don't waste cycles."""
+    eligible_model_names = [m for m, _ in MODEL_PRECEDENCE]
     cur.execute(
         """
         SELECT DISTINCT
@@ -122,10 +129,10 @@ def list_upcoming_races(cur, days: int) -> list[dict]:
         JOIN race_predictions rp ON rp.race_id = r.id
         WHERE r.status = 'scheduled'
           AND r.race_date BETWEEN NOW() AND NOW() + (%s || ' days')::interval
-          AND rp.model_name = %s
+          AND rp.model_name = ANY(%s)
         ORDER BY r.race_date ASC, r.id::text
         """,
-        (str(days), MODEL_NAME),
+        (str(days), eligible_model_names),
     )
     return list(cur.fetchall())
 
@@ -133,25 +140,49 @@ def list_upcoming_races(cur, days: int) -> list[dict]:
 def load_race_candidates(cur, race_id: str) -> list[dict]:
     """Per-entrant pricing + prediction context for one race. Returns
     list of {entrant_id, prediction_id, confidence, bookmaker_odds,
-    horse_name}."""
+    horse_name, model_name}.
+
+    The DISTINCT ON + ORDER BY (entrant_id, precedence) picks the
+    BEST available model per entrant — the ranker when present, the
+    consensus baseline otherwise. Surfaces model_name so the
+    recommendation reasoning can show which model fired."""
+    eligible: list[str] = [m for m, _ in MODEL_PRECEDENCE]
+    # CASE WHEN ladder ranks rows by model precedence so DISTINCT ON
+    # picks the first match per entrant. Index in the array (1-based
+    # for the CASE statement) maps to precedence rank.
     cur.execute(
         """
-        SELECT
-            e.id::text AS entrant_id,
-            rp.id::text AS prediction_id,
-            rp.confidence,
-            e.metadata->'bookmaker_odds' AS bookmaker_odds,
-            h.name AS horse_name
-        FROM race_entrants e
-        JOIN race_predictions rp ON rp.entrant_id = e.id
-        JOIN horses h ON h.id = e.horse_id
-        WHERE e.race_id = %s
-          AND NOT e.scratched
-          AND rp.model_name = %s
-          AND rp.model_version = %s
-          AND rp.prediction_type = 'win'
+        SELECT DISTINCT ON (entrant_id)
+            entrant_id,
+            prediction_id,
+            confidence,
+            bookmaker_odds,
+            horse_name,
+            model_name
+        FROM (
+            SELECT
+                e.id::text          AS entrant_id,
+                rp.id::text         AS prediction_id,
+                rp.confidence       AS confidence,
+                e.metadata->'bookmaker_odds' AS bookmaker_odds,
+                h.name              AS horse_name,
+                rp.model_name       AS model_name,
+                CASE rp.model_name
+                    WHEN %s THEN 1
+                    WHEN %s THEN 2
+                    ELSE          3
+                END                 AS precedence
+            FROM race_entrants e
+            JOIN race_predictions rp ON rp.entrant_id = e.id
+            JOIN horses h ON h.id = e.horse_id
+            WHERE e.race_id = %s
+              AND NOT e.scratched
+              AND rp.model_name = ANY(%s)
+              AND rp.prediction_type = 'win'
+        ) ranked
+        ORDER BY entrant_id, precedence ASC
         """,
-        (race_id, MODEL_NAME, MODEL_VERSION),
+        (eligible[0], eligible[1] if len(eligible) > 1 else "", race_id, eligible),
     )
     return list(cur.fetchall())
 
@@ -295,8 +326,13 @@ def recommend_for_race(
         k = kelly_fraction(prob, odds_decimal)
         stake = round(bankroll * k * KELLY_FRACTION, 2)
 
+        # Display label per model so the user sees WHICH model fired.
+        # The ranker is sharper than consensus on the held-out test
+        # (+2.2pts top-1) so showing the source matters for trust +
+        # post-hoc analysis.
+        model_label = "ranker" if cand.get("model_name") == "lightgbm_ranker_v1" else "consensus"
         reasoning = (
-            f"Win: {cand['horse_name']} — consensus {prob:.0%}, "
+            f"Win: {cand['horse_name']} — {model_label} {prob:.0%}, "
             f"book {1/odds_decimal:.0%} (@ {odds_decimal:.2f} on "
             f"{best['bookmaker']}) → EV {ev:+.1%}, quarter-Kelly "
             f"stake ${stake:.2f}."
@@ -362,8 +398,7 @@ def run(
     counts["alerts_queued"] = len(all_alerts) if notify else 0
     counts["queue_depth"] = queue_depth
     logger.info(
-        "Wrote %d horse racing value-bet recommendations across %d races; "
-        "queued %d alerts (queue depth now %d)",
+        "Wrote %d horse racing value-bet recommendations across %d races; " "queued %d alerts (queue depth now %d)",
         counts["recommendations"],
         counts["races_processed"],
         counts["alerts_queued"],

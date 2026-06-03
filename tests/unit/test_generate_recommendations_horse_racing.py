@@ -40,13 +40,24 @@ class TestConstants:
         # for no documented reason.
         assert ghr.KELLY_FRACTION == 0.25
 
-    def test_model_name_locked(self):
+    def test_model_precedence_lock(self):
         # race_recommendations.race_prediction_id FKs into
-        # race_predictions, and that lookup is keyed on
-        # (model_name, model_version). Renaming the consensus model
-        # without updating this drops every rec to zero hits.
-        assert ghr.MODEL_NAME == "market_consensus_v1"
-        assert ghr.MODEL_VERSION == "1.0.0"
+        # race_predictions; that lookup is keyed on (model_name,
+        # model_version). Renaming the consensus model without
+        # updating this drops every rec to zero hits.
+        #
+        # Precedence rule (load-bearing): the LambdaMART ranker
+        # comes FIRST, the consensus baseline SECOND. The recs
+        # engine picks per-entrant via the highest-precedence
+        # available model, so a flip here would silently
+        # downgrade every recommendation to consensus quality even
+        # when ranker scores exist. v1 corpus result: ranker
+        # +2.2pts top-1 vs consensus (memory: horse-racing-ml-
+        # ranker-v1).
+        assert ghr.MODEL_PRECEDENCE == [
+            ("lightgbm_ranker_v1", "1.0.0"),
+            ("market_consensus_v1", "1.0.0"),
+        ]
 
 
 # ── best_decimal: longest decimal across bookmakers ─────────────────
