@@ -51,8 +51,6 @@ sys.path.insert(0, "/app/services/ml-models/src")
 
 from predictors.horse_racing_ranker import HorseRacingRanker, HorseRacingRankerConfig  # noqa: E402
 from utils.horse_racing_data import (  # noqa: E402
-    HORSE_RACING_TRAINING_QUERY,
-    NON_FEATURE_COLUMNS,
     get_feature_columns,
     group_array,
     load_training_frame,
@@ -194,7 +192,9 @@ def run(
     )
 
     # Evaluate on the TRUE test set (not the inner val slice).
-    test_metrics = model._evaluate(X_test, y_test, g_test)  # noqa: SLF001 — internal eval is the intended public surface
+    # _evaluate is the public eval surface; the underscore reflects
+    # its internal-helper role for fit(), not access restriction.
+    test_metrics = model._evaluate(X_test, y_test, g_test)
     consensus_baseline = _consensus_baseline_topk(test_frame)
 
     logger.info(
