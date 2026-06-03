@@ -142,7 +142,7 @@ def delete_pending(cur, match_id: str) -> None:
         DELETE FROM betting_recommendations
         WHERE match_id = %s
           AND status = 'pending'
-          AND bet_type IN ('moneyline',)
+          AND bet_type = 'moneyline'
         """,
         (match_id,),
     )
