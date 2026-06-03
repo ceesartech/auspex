@@ -52,10 +52,16 @@ fi
 OLD_SHA="$(git rev-parse HEAD)"
 log "Currently at: $OLD_SHA"
 
-# Defensive stash if there are any working-tree changes.
-if ! git diff --quiet HEAD -- || ! git diff --cached --quiet; then
-  warn "Local changes detected; stashing before pull."
-  git stash push -m "auto-stash before deploy_remote $(date -Iseconds)" >/dev/null
+# Defensive stash if there are any working-tree changes — including
+# untracked files. The previous version only checked tracked-file
+# diffs, which let untracked files (e.g. a script scp'd onto the VM
+# for ad-hoc testing) block the pull when the same path arrived as
+# a committed addition. --include-untracked stashes both modifications
+# AND untracked files; restore via `git stash list` on the VM if
+# anything operator-meaningful was caught.
+if [ -n "$(git status --porcelain)" ]; then
+  warn "Local changes detected; stashing (incl. untracked) before pull."
+  git stash push --include-untracked -m "auto-stash before deploy_remote $(date -Iseconds)" >/dev/null
 fi
 
 log "Fetching $REMOTE/$BRANCH..."
