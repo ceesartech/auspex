@@ -43,22 +43,24 @@ class TestConstants:
     def test_model_precedence_lock(self):
         # race_recommendations.race_prediction_id FKs into
         # race_predictions; that lookup is keyed on (model_name,
-        # model_version). Renaming either model without updating
-        # this drops every rec to zero hits.
+        # model_version). Renaming the consensus model without
+        # updating this drops every rec to zero hits.
         #
-        # Precedence rule (load-bearing for rec QUALITY):
-        # consensus baseline comes FIRST even though the ranker
-        # has better top-1 accuracy, because the recs engine
-        # consumes probabilities (EV = prob × odds) and the
-        # ranker's Brier score on the current corpus (0.0898) is
-        # WORSE than consensus's (0.0831). Better ranking is not
-        # better calibration. Flipping this list silently re-
-        # introduces the 520-false-positive-recs-per-day
-        # regression that motivated the demotion (memory:
-        # horse-racing-ml-ranker-v1 has the full breakdown).
+        # Precedence rule (load-bearing for rec QUALITY): the
+        # ranker is INTENTIONALLY ABSENT from this list even
+        # though it has better top-1 accuracy. The recs engine
+        # consumes probabilities directly (EV = prob × odds) and
+        # the ranker's Brier on the 13k-race corpus (0.0898) is
+        # WORSE than consensus's (0.0831). Listing it even as a
+        # fallback silently leaks ranker probs into races where
+        # consensus hasn't scored yet (verified empirically:
+        # consensus-first-with-ranker-fallback fired 146 picks
+        # vs ~30 consensus-only). Until isotonic re-calibration
+        # closes the Brier gap, this list stays consensus-only.
+        # The ranker keeps writing to race_predictions via the
+        # precompute task in the DAG — analysis path stays intact.
         assert ghr.MODEL_PRECEDENCE == [
             ("market_consensus_v1", "1.0.0"),
-            ("lightgbm_ranker_v1", "1.0.0"),
         ]
 
 

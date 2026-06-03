@@ -63,28 +63,23 @@ logger = logging.getLogger("generate_recommendations_horse_racing")
 
 KELLY_FRACTION = 0.25
 
-# Model precedence: the consensus baseline comes FIRST for EV math
-# even though the ranker has better top-1 accuracy. The reason is
-# strict — the recs engine consumes probabilities (EV = prob × odds)
-# and the ranker is BETTER at RANKING but WORSE at CALIBRATION on the
-# current corpus:
+# Model precedence: consensus-only for EV math right now. The
+# LambdaMART ranker has BETTER top-1 accuracy (+2.7pts on the 13k-
+# race corpus) but WORSE Brier (0.0898 vs 0.0831), and the recs
+# engine consumes probabilities directly (EV = prob × odds). A
+# worse-calibrated model inflates the value-bet count by 17x —
+# verified empirically (memory: horse-racing-ml-ranker-v1).
 #
-#   variant                            top-1 acc   Brier
-#   market_consensus_v1                19.9%       0.0831
-#   lightgbm_ranker_v1 (13k corpus)    22.7%       0.0898
-#
-# A model with worse Brier produces probabilities that don't match
-# real win frequencies (verified empirically: ranker-prob-driven EV
-# fired 520 picks across 672 races, a 17x false-positive rate vs the
-# consensus-only run which sat around 30/day). Keeping the consensus
-# at the top of the precedence list means the recs engine uses the
-# more honest probabilities for EV; the ranker stays in the predictions
-# table for analysis + future-work iteration on its own probability
-# calibration (memory: horse-racing-ml-ranker-v1 has the full
-# breakdown + the open paths to closing the gap).
+# Listing the ranker even as a FALLBACK is wrong: every race the
+# ranker scores but consensus hasn't yet (e.g., races added between
+# the two precompute tasks' runs) silently picks up the ranker's
+# probabilities and the ~30-picks/day budget blows out again. Keep
+# this list consensus-only until we close the calibration gap
+# (isotonic regression on (ranker_prob, actual_win_rate) is the
+# obvious next try). The ranker keeps writing to race_predictions
+# via the precompute task in the DAG — analysis path stays intact.
 MODEL_PRECEDENCE: list[tuple[str, str]] = [
     ("market_consensus_v1", "1.0.0"),
-    ("lightgbm_ranker_v1", "1.0.0"),
 ]
 
 
@@ -154,15 +149,17 @@ def load_race_candidates(cur, race_id: str) -> list[dict]:
     horse_name, model_name}.
 
     The DISTINCT ON + ORDER BY (entrant_id, precedence) picks the
-    BEST available model per entrant — the ranker when present, the
-    consensus baseline otherwise. Surfaces model_name so the
-    recommendation reasoning can show which model fired."""
+    highest-precedence available model per entrant. The CASE WHEN
+    ladder is built from MODEL_PRECEDENCE so adding / removing a
+    model from the list is a one-place change."""
     eligible: list[str] = [m for m, _ in MODEL_PRECEDENCE]
-    # CASE WHEN ladder ranks rows by model precedence so DISTINCT ON
-    # picks the first match per entrant. Index in the array (1-based
-    # for the CASE statement) maps to precedence rank.
+    # Build the CASE WHEN ladder dynamically so this works with any
+    # number of models. The ELSE branch puts unknown models at the
+    # bottom, but the ANY(%s) filter excludes them anyway — defensive.
+    when_clauses = " ".join(f"WHEN {ghr_arg(i)} THEN {i + 1}" for i in range(len(eligible)))
+    case_sql = f"CASE rp.model_name {when_clauses} ELSE {len(eligible) + 1} END"
     cur.execute(
-        """
+        f"""
         SELECT DISTINCT ON (entrant_id)
             entrant_id,
             prediction_id,
@@ -178,11 +175,7 @@ def load_race_candidates(cur, race_id: str) -> list[dict]:
                 e.metadata->'bookmaker_odds' AS bookmaker_odds,
                 h.name              AS horse_name,
                 rp.model_name       AS model_name,
-                CASE rp.model_name
-                    WHEN %s THEN 1
-                    WHEN %s THEN 2
-                    ELSE          3
-                END                 AS precedence
+                {case_sql}          AS precedence
             FROM race_entrants e
             JOIN race_predictions rp ON rp.entrant_id = e.id
             JOIN horses h ON h.id = e.horse_id
@@ -193,9 +186,17 @@ def load_race_candidates(cur, race_id: str) -> list[dict]:
         ) ranked
         ORDER BY entrant_id, precedence ASC
         """,
-        (eligible[0], eligible[1] if len(eligible) > 1 else "", race_id, eligible),
+        (*eligible, race_id, eligible),
     )
     return list(cur.fetchall())
+
+
+def ghr_arg(_i: int) -> str:
+    """Return a literal positional placeholder for the dynamic CASE
+    WHEN clause. Kept as a tiny helper so the call site reads as a
+    single f-string template — substituting %s directly inside the
+    f-string would be ambiguous with the outer execute() params."""
+    return "%s"
 
 
 def delete_pending(cur, race_id: str) -> None:
