@@ -392,19 +392,41 @@ def _competitor_name(competitor: dict, is_individual: bool) -> str | None:
     return team.get("displayName") or team.get("name")
 
 
-def process_event(cur, cfg: SportConfig, league_id: str, event: dict) -> bool:
-    comp = (event.get("competitions") or [{}])[0]
+def _iter_event_competitions(event: dict, cfg: SportConfig):
+    """Yield each competition (= match) from an ESPN event.
+
+    For team sports, an ESPN event IS a match — its `competitions[0]`
+    holds the competitors. We yield that single competition.
+
+    For tennis (and other individual-sport tournaments), the ESPN
+    event is a TOURNAMENT and matches are nested two layers deep:
+        event.groupings[].competitions[]
+    We walk that structure and yield each leaf competition. Each one
+    is treated as a standalone match downstream.
+    """
+    if cfg.is_individual and event.get("groupings"):
+        for grouping in event["groupings"]:
+            for competition in grouping.get("competitions") or []:
+                yield competition
+    else:
+        for competition in event.get("competitions") or []:
+            yield competition
+
+
+def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict) -> bool:
+    """Insert one scheduled match from a single competition object."""
     competitors = comp.get("competitors") or []
 
     if cfg.is_individual:
-        # 1v1 sports: ESPN doesn't populate homeAway. Use positional
-        # ordering — index 0 → home, index 1 → away. The convention is
-        # arbitrary (no real "home" in tennis/MMA/boxing) but stays
-        # consistent so downstream features can encode "player1" /
-        # "player2" semantics from the same column.
-        if len(competitors) < 2:
-            return False
-        home, away = competitors[0], competitors[1]
+        # Tennis competitors carry homeAway (set by ESPN seed ordering).
+        # Fall back to positional ordering if missing — arbitrary but
+        # consistent labeling of player1 / player2.
+        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+        if home is None or away is None:
+            if len(competitors) < 2:
+                return False
+            home, away = competitors[0], competitors[1]
     else:
         home = next((c for c in competitors if c.get("homeAway") == "home"), None)
         away = next((c for c in competitors if c.get("homeAway") == "away"), None)
@@ -416,12 +438,15 @@ def process_event(cur, cfg: SportConfig, league_id: str, event: dict) -> bool:
     if not (home_name and away_name):
         return False
 
+    raw_date = comp.get("date") or comp.get("startDate")
+    if not raw_date:
+        return False
     try:
-        match_dt = datetime.fromisoformat(event["date"].replace("Z", "+00:00"))
-    except (KeyError, ValueError):
+        match_dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
         return False
 
-    state = (event.get("status", {}).get("type", {}).get("state") or "pre").lower()
+    state = (comp.get("status", {}).get("type", {}).get("state") or "pre").lower()
     if state != "pre":
         return False  # skip in-progress and finished events here
 
@@ -433,6 +458,18 @@ def process_event(cur, cfg: SportConfig, league_id: str, event: dict) -> bool:
         return False
 
     return bool(insert_scheduled_match(cur, cfg, league_id, home_id, away_id, match_dt, venue))
+
+
+def process_event(cur, cfg: SportConfig, league_id: str, event: dict) -> int:
+    """Process every match in an ESPN event. Returns the count of
+    matches inserted. For team sports this is 0 or 1 (one match per
+    event); for tennis tournaments it can be dozens (one event =
+    full bracket of matches in progress on the same day)."""
+    inserted = 0
+    for comp in _iter_event_competitions(event, cfg):
+        if _process_competition(cur, cfg, league_id, comp):
+            inserted += 1
+    return inserted
 
 
 def fetch_all(database_url: str, cfg: SportConfig, leagues: list[str], days: int) -> dict[str, int]:
@@ -452,8 +489,10 @@ def fetch_all(database_url: str, cfg: SportConfig, leagues: list[str], days: int
                 for offset in range(days):
                     day = today + timedelta(days=offset)
                     for ev in fetch_day(cfg, slug, day):
-                        if process_event(cur, cfg, league_id, ev):
-                            n += 1
+                        # process_event returns the count of matches
+                        # inserted (>=1 for tennis tournaments that
+                        # contain multiple matches per ESPN event).
+                        n += process_event(cur, cfg, league_id, ev)
                 counts[slug] = n
                 conn.commit()
                 logger.info("Fetched %d upcoming %s fixtures for %s (%s)", n, cfg.sport, name, slug)

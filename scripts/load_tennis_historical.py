@@ -4,16 +4,23 @@ ESPN's tennis scoreboard endpoints
   /apis/site/v2/sports/tennis/atp/scoreboard?dates=YYYYMMDD
   /apis/site/v2/sports/tennis/wta/scoreboard?dates=YYYYMMDD
 
-return every ATP/WTA match on the requested date, including finished
-ones with their final set-score totals. We walk the date range one
-day at a time per tour and upsert each finished match into the
-`matches` table as status='finished' with home_score / away_score
-populated (= sets won, not games).
+return active TOURNAMENTS (e.g., "Wimbledon") on the requested date,
+NOT individual matches. The match list is nested:
+    events[] (tournaments)
+      groupings[] (brackets: men's singles, women's singles, doubles)
+        competitions[] (individual matches)
+            competitors[] (athletes with winner + linescores)
 
-Tennis is the first 1v1 sport in the system. ESPN tennis competitors
-use 'athlete' instead of 'team' and don't carry homeAway. We use
-positional ordering (index 0 → home, 1 → away) — same convention as
-fetch_upcoming.process_event when is_individual=True.
+We walk that nested structure, treating each leaf competition as a
+match. Each match's home_score/away_score is set to 1/0 (or 0/1)
+based on the competitor.winner boolean — tennis matches always have
+exactly one winner, no draws/ties. Per-set linescore parsing is a
+v2 follow-up (needed for total-games modeling).
+
+Competitors DO carry homeAway in tennis (set by ESPN's own ordering,
+typically higher-seeded player as home). v2 could read from
+.linescores to recover actual game counts; for now the binary
+winner is sufficient for moneyline training.
 
 Idempotent: matches.{home_team_id, away_team_id, match_date} is the
 upsert key. Re-running picks up missing matches + refreshes scores
@@ -92,33 +99,35 @@ DEFAULT_TOURS = ("atp", "wta")
 # ── Pure parsing helpers (unit-tested) ──────────────────────────────
 
 
-def parse_sets(competitor: dict) -> Optional[int]:
-    """Tennis competitors carry score = sets won (string). Doubles
-    matches use the same shape. Returns None for missing / non-numeric
-    (e.g. retired matches sometimes drop the score)."""
-    raw = competitor.get("score")
-    if raw is None or raw == "":
-        return None
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
+def iter_match_competitions(event: dict):
+    """Walk one tournament's nested structure and yield each leaf
+    competition (= individual match). ESPN tennis events are
+    tournaments (Wimbledon, US Open, etc.); the actual matches live
+    in events[].groupings[].competitions[]."""
+    for grouping in event.get("groupings") or []:
+        for competition in grouping.get("competitions") or []:
+            yield competition
 
 
-def extract_finished_match(event: dict) -> Optional[dict]:
+def extract_finished_match(competition: dict, venue_fallback: Optional[str] = None) -> Optional[dict]:
     """Pluck the fields we need for a finished-match UPSERT, or None
-    if this event isn't usable.
+    if this competition isn't usable.
 
     Returns a dict with: home_name, away_name, match_dt, home_score,
-    away_score (= sets won by each player), venue. The caller resolves
-    player IDs and writes the row.
+    away_score (binary winner flag — 1 for winner, 0 for loser),
+    venue. The caller resolves player IDs and writes the row.
 
-    Tennis-specific: competitors are accessed positionally (index 0 =
-    home, index 1 = away) and the name comes from .athlete.displayName
-    not .team.displayName. The helper _competitor_name from
-    fetch_upcoming handles both cases via the is_individual flag.
+    Tennis-specific:
+    * Competitors use .athlete.displayName instead of .team.displayName.
+    * The competition.competitors carry a winner boolean — tennis
+      always has exactly one winner, no draws. We use the boolean
+      directly (per-set linescore parsing is a v2 follow-up).
+    * Competitors DO carry homeAway in tennis (ESPN orders them by
+      seed); we use that rather than positional fallback.
+    * Match date is on the competition, not the parent event (event
+      date is the tournament-start date which spans 2 weeks).
     """
-    state = (event.get("status", {}).get("type", {}).get("state") or "").lower()
+    state = (competition.get("status", {}).get("type", {}).get("state") or "").lower()
     if state in LIVE_PRE_STATES:
         return None
     if state not in FINAL_STATES:
@@ -127,30 +136,45 @@ def extract_finished_match(event: dict) -> Optional[dict]:
         # incomplete and would skew rolling-form stats).
         return None
 
-    comp = (event.get("competitions") or [{}])[0]
-    competitors = comp.get("competitors") or []
+    competitors = competition.get("competitors") or []
     if len(competitors) < 2:
         return None
-    home, away = competitors[0], competitors[1]
 
-    # is_individual=True → reads .athlete.displayName.
+    # Tennis competitors carry homeAway (set by ESPN seed ordering).
+    # If for some reason it's missing, fall back to positional ordering.
+    home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+    away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+    if home is None or away is None:
+        home, away = competitors[0], competitors[1]
+
     home_name = _competitor_name(home, is_individual=True)
     away_name = _competitor_name(away, is_individual=True)
     if not (home_name and away_name):
         return None
 
-    home_score = parse_sets(home)
-    away_score = parse_sets(away)
-    if home_score is None or away_score is None:
-        # "Final" but missing a score — usually a retirement or
-        # walkover that ESPN didn't tag explicitly. Skip rather
-        # than insert NULL scores.
+    # winner is a boolean on each competitor — exactly one is True
+    # for a completed match (no draws in tennis).
+    home_won = bool(home.get("winner"))
+    away_won = bool(away.get("winner"))
+    if home_won == away_won:
+        # Both true or both false → data quality issue (often a
+        # walkover or in-progress that the state filter missed).
+        # Skip rather than insert ambiguous row.
+        return None
+    home_score = 1 if home_won else 0
+    away_score = 1 if away_won else 0
+
+    # competition.date carries the actual match time. Fall back to
+    # any explicit date field at the competition level.
+    raw_date = competition.get("date") or competition.get("startDate")
+    if not raw_date:
+        return None
+    try:
+        match_dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
         return None
 
-    try:
-        match_dt = datetime.fromisoformat(event["date"].replace("Z", "+00:00"))
-    except (KeyError, ValueError):
-        return None
+    venue = (competition.get("venue") or {}).get("fullName") or venue_fallback
 
     return {
         "home_name": home_name,
@@ -158,7 +182,7 @@ def extract_finished_match(event: dict) -> Optional[dict]:
         "home_score": home_score,
         "away_score": away_score,
         "match_dt": match_dt,
-        "venue": (comp.get("venue") or {}).get("fullName"),
+        "venue": venue,
     }
 
 
@@ -250,33 +274,37 @@ def run(database_url: str, start: date, end: date, tours: tuple[str, ...]) -> di
                 league_ids[tour] = lid
 
             for day in iter_dates(start, end):
-                day_events = 0
                 for tour, lid in league_ids.items():
                     events = fetch_day(tour, day)
-                    counts["events_seen"] += len(events)
-                    day_events += len(events)
                     for ev in events:
-                        parsed = extract_finished_match(ev)
-                        if parsed is None:
-                            counts["skipped"] += 1
-                            continue
-                        home_id = ensure_team(cur, cfg, parsed["home_name"], lid)
-                        away_id = ensure_team(cur, cfg, parsed["away_name"], lid)
-                        if not (home_id and away_id):
-                            counts["skipped"] += 1
-                            continue
-                        season = cfg.season_func(parsed["match_dt"])
-                        counts["matches_written"] += upsert_finished_match(
-                            cur,
-                            lid,
-                            home_id,
-                            away_id,
-                            parsed["match_dt"],
-                            parsed["home_score"],
-                            parsed["away_score"],
-                            parsed["venue"],
-                            season,
-                        )
+                        # Each ESPN tennis event is a TOURNAMENT;
+                        # individual matches live in its nested
+                        # competitions. Walk the structure and treat
+                        # each leaf competition as a match.
+                        ev_venue = (ev.get("venue") or {}).get("fullName")
+                        for competition in iter_match_competitions(ev):
+                            counts["events_seen"] += 1
+                            parsed = extract_finished_match(competition, venue_fallback=ev_venue)
+                            if parsed is None:
+                                counts["skipped"] += 1
+                                continue
+                            home_id = ensure_team(cur, cfg, parsed["home_name"], lid)
+                            away_id = ensure_team(cur, cfg, parsed["away_name"], lid)
+                            if not (home_id and away_id):
+                                counts["skipped"] += 1
+                                continue
+                            season = cfg.season_func(parsed["match_dt"])
+                            counts["matches_written"] += upsert_finished_match(
+                                cur,
+                                lid,
+                                home_id,
+                                away_id,
+                                parsed["match_dt"],
+                                parsed["home_score"],
+                                parsed["away_score"],
+                                parsed["venue"],
+                                season,
+                            )
                     time.sleep(REQUEST_DELAY_SEC)
                 counts["days_processed"] += 1
                 conn.commit()

@@ -1,9 +1,20 @@
 """Unit tests for load_tennis_historical — pure ESPN-event parsing.
 
-Same coverage shape as test_load_nfl_historical: parse_sets quirks,
-finished-match extraction with state filters, date-range iteration,
-CLI defaults. Tennis ESPN payload uses 'athlete' not 'team' and lacks
-homeAway — covered explicitly here.
+ESPN tennis events are TOURNAMENTS, not matches. The structure is:
+    events[] (tournaments)
+      groupings[] (brackets: men's/women's singles, doubles)
+        competitions[] (individual matches)
+            competitors[] (athletes with winner + homeAway)
+
+These tests cover the leaf-competition parser (`extract_finished_match`)
+plus the helper that flattens the nested structure
+(`iter_match_competitions`).
+
+The score-comparison approach used by team sports doesn't apply to
+tennis — competitor.score is None. Instead each competitor carries
+a `winner` boolean, exactly one of which is True for a finished
+match (no draws). The parser sets home_score=1 / away_score=0 (or
+vice versa) based on which side won.
 """
 
 from __future__ import annotations
@@ -31,51 +42,81 @@ _load("fetch_upcoming", "fetch_upcoming.py")
 lth = _load("load_tennis_historical", "load_tennis_historical.py")
 
 
-def _make_event(
+def _make_competition(
     state: str = "post",
-    home_score: str = "3",
-    away_score: str = "1",
+    home_winner: bool = True,
+    away_winner: bool = False,
     home_name: str = "Novak Djokovic",
     away_name: str = "Carlos Alcaraz",
     date_str: str = "2024-09-09T18:00Z",
     venue: str = "Arthur Ashe Stadium",
+    set_homeaway: bool = True,
 ):
-    """Minimal ESPN tennis scoreboard event payload — only the fields
-    the parser reaches into. Tennis competitors use 'athlete' instead
-    of 'team' and have NO homeAway field (positional ordering)."""
+    """Minimal ESPN tennis competition (leaf-level match) payload —
+    only the fields the parser reaches into. Each competitor carries
+    a `winner` boolean; `score` is None on tennis (per-set scores
+    live in linescores which v1 doesn't parse)."""
+    home = {
+        "score": None,
+        "winner": home_winner,
+        "athlete": {"displayName": home_name},
+    }
+    away = {
+        "score": None,
+        "winner": away_winner,
+        "athlete": {"displayName": away_name},
+    }
+    if set_homeaway:
+        home["homeAway"] = "home"
+        away["homeAway"] = "away"
     return {
         "date": date_str,
         "status": {"type": {"state": state}},
-        "competitions": [
-            {
-                "venue": {"fullName": venue},
-                "competitors": [
-                    {"score": home_score, "athlete": {"displayName": home_name}},
-                    {"score": away_score, "athlete": {"displayName": away_name}},
-                ],
-            }
-        ],
+        "venue": {"fullName": venue},
+        "competitors": [home, away],
     }
 
 
-# ── parse_sets ──────────────────────────────────────────────────────
+def _make_tournament(competitions: list, name: str = "Wimbledon", venue: str | None = None):
+    """ESPN tennis event shape — a tournament that nests competitions
+    inside groupings. The actual structure has multiple groupings
+    (men's/women's singles, doubles); we put all competitions under
+    one grouping for tests since the parser doesn't care about the
+    grouping label."""
+    out = {
+        "name": name,
+        "groupings": [{"competitions": competitions}],
+    }
+    if venue:
+        out["venue"] = {"fullName": venue}
+    return out
 
 
-class TestParseSets:
-    def test_string_int_parses(self):
-        assert lth.parse_sets({"score": "3"}) == 3
+# ── iter_match_competitions ─────────────────────────────────────────
 
-    def test_missing_score_returns_none(self):
-        # Retired / walkover matches sometimes drop the score.
-        assert lth.parse_sets({}) is None
 
-    def test_empty_string_returns_none(self):
-        assert lth.parse_sets({"score": ""}) is None
+class TestIterMatchCompetitions:
+    def test_walks_nested_structure(self):
+        # Wimbledon-style: one event, 3 groupings, multiple matches each.
+        ev = {
+            "groupings": [
+                {"competitions": [{"id": "1"}, {"id": "2"}]},
+                {"competitions": [{"id": "3"}]},
+                {"competitions": []},
+            ]
+        }
+        ids = [c["id"] for c in lth.iter_match_competitions(ev)]
+        assert ids == ["1", "2", "3"]
 
-    def test_non_numeric_returns_none(self):
-        # Defensive — if ESPN ever ships "W" for a walkover, refuse
-        # rather than crash.
-        assert lth.parse_sets({"score": "W"}) is None
+    def test_handles_missing_groupings(self):
+        # Some ESPN payloads omit groupings (off-day, no matches).
+        assert list(lth.iter_match_competitions({})) == []
+        assert list(lth.iter_match_competitions({"groupings": []})) == []
+
+    def test_handles_grouping_without_competitions(self):
+        # A bracket may exist but have no scheduled matches for the day.
+        ev = {"groupings": [{"competitions": None}]}
+        assert list(lth.iter_match_competitions(ev)) == []
 
 
 # ── extract_finished_match ──────────────────────────────────────────
@@ -83,80 +124,88 @@ class TestParseSets:
 
 class TestExtractFinishedMatch:
     def test_finished_match_round_trips(self):
-        out = lth.extract_finished_match(_make_event())
+        out = lth.extract_finished_match(_make_competition())
         assert out["home_name"] == "Novak Djokovic"
         assert out["away_name"] == "Carlos Alcaraz"
-        assert out["home_score"] == 3
-        assert out["away_score"] == 1
+        assert out["home_score"] == 1
+        assert out["away_score"] == 0
         assert out["venue"] == "Arthur Ashe Stadium"
         assert out["match_dt"].year == 2024
-        assert out["match_dt"].month == 9
+
+    def test_away_winner_round_trips(self):
+        out = lth.extract_finished_match(_make_competition(home_winner=False, away_winner=True))
+        assert out["home_score"] == 0
+        assert out["away_score"] == 1
 
     def test_pregame_skipped(self):
-        assert lth.extract_finished_match(_make_event(state="pre")) is None
+        assert lth.extract_finished_match(_make_competition(state="pre")) is None
 
     def test_in_progress_skipped(self):
-        assert lth.extract_finished_match(_make_event(state="in")) is None
+        assert lth.extract_finished_match(_make_competition(state="in")) is None
 
     def test_postponed_skipped(self):
-        # Tennis postponements happen (rain delay across days).
-        # Don't write rows for them.
-        assert lth.extract_finished_match(_make_event(state="postponed")) is None
+        assert lth.extract_finished_match(_make_competition(state="postponed")) is None
 
     def test_walkover_skipped(self):
-        # ESPN tags some walkovers / retirements with non-final states.
-        assert lth.extract_finished_match(_make_event(state="walkover")) is None
-
-    def test_retired_match_with_partial_score_skipped(self):
-        # If a player retires mid-match the final score on ESPN is
-        # often missing or marked with non-numeric values — already
-        # tested at parse_sets level; the extract path skips when
-        # parse_sets returns None.
-        ev = _make_event()
-        ev["competitions"][0]["competitors"][0]["score"] = ""
-        assert lth.extract_finished_match(ev) is None
+        # ESPN sometimes tags walkovers / retirements with non-final states.
+        assert lth.extract_finished_match(_make_competition(state="walkover")) is None
 
     def test_final_state_alias_accepted(self):
-        out = lth.extract_finished_match(_make_event(state="final"))
+        out = lth.extract_finished_match(_make_competition(state="final"))
         assert out is not None
-        assert out["home_score"] == 3
 
-    def test_missing_athlete_drops_event(self):
-        ev = _make_event()
-        ev["competitions"][0]["competitors"][0]["athlete"] = {}
-        assert lth.extract_finished_match(ev) is None
+    def test_both_winners_true_dropped(self):
+        # Data quality bug — exactly one winner is the contract.
+        # Both true (or both false) means we can't tell who won;
+        # skip rather than insert an ambiguous row.
+        assert lth.extract_finished_match(_make_competition(home_winner=True, away_winner=True)) is None
+        assert lth.extract_finished_match(_make_competition(home_winner=False, away_winner=False)) is None
+
+    def test_missing_athlete_drops(self):
+        comp = _make_competition()
+        comp["competitors"][0]["athlete"] = {}
+        assert lth.extract_finished_match(comp) is None
 
     def test_fewer_than_two_competitors_drops(self):
-        ev = _make_event()
-        ev["competitions"][0]["competitors"] = ev["competitions"][0]["competitors"][:1]
-        assert lth.extract_finished_match(ev) is None
+        comp = _make_competition()
+        comp["competitors"] = comp["competitors"][:1]
+        assert lth.extract_finished_match(comp) is None
 
-    def test_bad_date_format_drops_event(self):
-        ev = _make_event(date_str="not-a-date")
-        assert lth.extract_finished_match(ev) is None
+    def test_bad_date_format_drops(self):
+        comp = _make_competition(date_str="not-a-date")
+        assert lth.extract_finished_match(comp) is None
 
-    def test_no_competitions_array_drops_event(self):
-        ev = {"status": {"type": {"state": "post"}}, "date": "2024-09-09T18:00Z"}
-        assert lth.extract_finished_match(ev) is None
+    def test_missing_date_drops(self):
+        comp = _make_competition()
+        del comp["date"]
+        assert lth.extract_finished_match(comp) is None
 
-    def test_venue_optional(self):
-        # Qualifying rounds + early-round tournament matches occasionally
-        # drop the court (venue) field.
-        ev = _make_event(venue=None)
-        ev["competitions"][0]["venue"] = {}
-        out = lth.extract_finished_match(ev)
+    def test_homeaway_used_when_present(self):
+        # ESPN orders tennis competitors by seed and carries homeAway.
+        # Even if positional order differs, homeAway wins.
+        comp = _make_competition()
+        comp["competitors"].reverse()
+        # After reverse: competitors[0] is away (away seed). homeAway
+        # value pins it to the right side.
+        out = lth.extract_finished_match(comp)
+        assert out["home_name"] == "Novak Djokovic"  # found via homeAway
+        assert out["away_name"] == "Carlos Alcaraz"
+
+    def test_positional_fallback_when_homeaway_absent(self):
+        # If a future ESPN payload drops homeAway, fall back to index
+        # 0 = home / 1 = away.
+        comp = _make_competition(set_homeaway=False)
+        out = lth.extract_finished_match(comp)
         assert out is not None
-        assert out["venue"] is None
-
-    def test_positional_ordering_no_homeaway_field(self):
-        # Tennis events don't carry homeAway. Index 0 → home, 1 → away.
-        # If this test breaks because someone added homeAway parsing,
-        # tennis matches will go missing.
-        ev = _make_event()
-        for c in ev["competitions"][0]["competitors"]:
-            assert "homeAway" not in c
-        out = lth.extract_finished_match(ev)
         assert out["home_name"] == "Novak Djokovic"  # positional
+
+    def test_venue_fallback_to_tournament(self):
+        # Match-level venue can be missing on lesser-tracked matches;
+        # fall back to the parent tournament's venue.
+        comp = _make_competition(venue=None)
+        comp["venue"] = {}
+        out = lth.extract_finished_match(comp, venue_fallback="All England Club")
+        assert out["venue"] == "All England Club"
 
 
 # ── iter_dates ──────────────────────────────────────────────────────
@@ -215,3 +264,8 @@ class TestCli:
         assert args.end_date == "2024-12-31"
         assert args.database_url == "postgresql://x"
         assert args.tour == "atp"
+
+
+# Suppress the _make_tournament unused-warning — it's a doc helper for
+# future tests that exercise the orchestration layer.
+_ = _make_tournament
