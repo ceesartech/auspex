@@ -194,9 +194,20 @@ def filter_frame_before(frame, split_date: str):
     return frame[md < cutoff].copy()
 
 
-def train_snapshot(bundle: str, split_date: str, snapshots_dir: Path, database_url: str) -> Path:
+def train_snapshot(
+    bundle: str,
+    split_date: str,
+    snapshots_dir: Path,
+    database_url: str,
+    skip_models: str = "",
+) -> Path:
     """Train one bundle on data BEFORE split_date. Returns the path
     where artifacts landed.
+
+    skip_models is a comma-separated list passed through to
+    train_all_models --skip-models. Use it to drop a base model that's
+    known to misbehave in the snapshot context (e.g. neural_network for
+    tennis where the small per-snapshot frame can't fit a stable NN).
 
     Pipeline:
       1. Load the bundle's frame in-process via training.train_all_models
@@ -236,18 +247,21 @@ def train_snapshot(bundle: str, split_date: str, snapshots_dir: Path, database_u
     logger.info("Wrote training CSV: %s", csv_path)
 
     logger.info("Training bundle=%s → %s", bundle, output_dir)
+    cmd = [
+        sys.executable,
+        "-m",
+        "training.train_all_models",
+        "--sport",
+        bundle,
+        "--input-csv",
+        str(csv_path),
+        "--output-dir",
+        str(output_dir),
+    ]
+    if skip_models:
+        cmd.extend(["--skip-models", skip_models])
     result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "training.train_all_models",
-            "--sport",
-            bundle,
-            "--input-csv",
-            str(csv_path),
-            "--output-dir",
-            str(output_dir),
-        ],
+        cmd,
         cwd="/app/services/ml-models",
         env={**os.environ, "PYTHONPATH": "/app/services/ml-models/src"},
         check=False,
@@ -438,7 +452,13 @@ def run(args: argparse.Namespace) -> dict:
         logger.info("=" * 60)
         logger.info("BUNDLE %s", bundle)
         logger.info("=" * 60)
-        snapshot_dir = train_snapshot(bundle, args.split_date, snapshots_dir, args.database_url)
+        snapshot_dir = train_snapshot(
+            bundle,
+            args.split_date,
+            snapshots_dir,
+            args.database_url,
+            skip_models=args.skip_models,
+        )
         counts = predict_test_period(bundle, args.split_date, snapshot_dir, args.database_url)
         total[bundle] = counts
 
@@ -469,6 +489,16 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Where to drop training CSVs + trained-model artifacts.",
     )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
+    p.add_argument(
+        "--skip-models",
+        default="",
+        help=(
+            "Comma-separated list of base-model types to skip when training the "
+            "snapshot (passed through to train_all_models --skip-models). E.g. "
+            "'neural_network' for tennis where the small snapshot frame can't "
+            "fit a stable NN."
+        ),
+    )
     p.add_argument("--dry-run", action="store_true", help="List bundles + exit; no training, no DB writes.")
     return p.parse_args(argv)
 
