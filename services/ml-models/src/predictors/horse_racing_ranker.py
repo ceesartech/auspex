@@ -62,18 +62,26 @@ class HorseRacingRankerConfig:
     at iteration 1 with a degenerate temperature of 0.05 — see
     `horse-racing-ml-ranker-v1` memory for the comparison.
 
-    For corpora >>10x larger, expect to need more boosting headroom
-    (higher n_estimators) + stronger regularisation. The current
-    defaults are a tested sweet spot for ~3 months of UK+IRE data.
+    n_estimators is sized at 400 not 2000 because the best iteration
+    on the small-corpus tuning was 78 and ~150 was where the val NDCG
+    plateaued; 400 leaves 5x headroom for the larger corpus while
+    avoiding 26x over-provisioning. early_stopping_rounds=50 closes
+    the loop fast when the model converges. n_jobs is explicit (not
+    -1) so we don't over-thread on shared hosts.
+
+    For corpora >>10x larger again, expect to need more boosting
+    headroom (raise n_estimators) + stronger regularisation. The
+    current defaults are a tested sweet spot for the 13k-race
+    UK+IRE corpus.
     """
 
-    n_estimators: int = 2000
+    n_estimators: int = 400
     learning_rate: float = 0.01
     max_depth: int = -1
     num_leaves: int = 63
     min_child_samples: int = 50
     subsample: float = 0.8
-    subsample_freq: int = 1
+    subsample_freq: int = 5
     colsample_bytree: float = 0.8
     reg_alpha: float = 0.0
     reg_lambda: float = 1.0
@@ -83,7 +91,8 @@ class HorseRacingRankerConfig:
     # we only care about top-1 (the winner) so this is the strongest
     # signal we have; v2 could expose place / show by lifting to 3.
     eval_at_n: int = 1
-    early_stopping_rounds: int = 100
+    early_stopping_rounds: int = 50
+    n_jobs: int = 4
     random_state: int = 42
     verbose: int = -1
 
@@ -208,6 +217,7 @@ class HorseRacingRanker:
             reg_alpha=self.config.reg_alpha,
             reg_lambda=self.config.reg_lambda,
             label_gain=self.config.label_gain,
+            n_jobs=self.config.n_jobs,
             random_state=self.config.random_state,
             verbose=self.config.verbose,
         )
