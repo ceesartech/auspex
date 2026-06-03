@@ -48,6 +48,10 @@ class PredictionTask(Enum):
     # tie-exclusion filter. Total games + set-betting are v2 (need
     # linescore parsing).
     TENNIS_MONEYLINE = "tennis_moneyline"  # 2-class: player1 / player2
+    # MMA tasks. 1v1 fight winner. Draws (~1% of MMA decisions) are
+    # dropped at ingest so the training corpus is cleanly 2-class.
+    # Method-of-victory / round-group are v2 (separate models).
+    MMA_MONEYLINE = "mma_moneyline"  # 2-class: fighter1 / fighter2
 
 
 @dataclass
@@ -995,3 +999,21 @@ NEURAL_NETWORK_TENNIS_MONEYLINE = _nba_nn_config(
 ENSEMBLE_TENNIS_MONEYLINE = _nba_ensemble_config(
     "ensemble_tennis_ml", PredictionTask.TENNIS_MONEYLINE, "tennis_moneyline"
 )
+
+
+# ─────────────────────── MMA MODEL CONFIGS ───────────────────────────
+#
+# Same shape as tennis (single moneyline market, XGB+LGB+NN+Ensemble).
+# UFC corpus is ~1500 fights/3 yrs — between NFL (855) and NBA (4125),
+# so use NBA hyperparameters with no NFL-style shallowing.
+#
+# NOTE: tennis NN trains to all-zeros for some reason (see
+# tennis-pipeline-state memory). MMA may hit the same issue given the
+# smaller corpus; if so, production training should run with
+# --skip-models neural_network. Locked here for v1; revisit when we
+# debug the NN failure.
+
+XGBOOST_MMA_MONEYLINE = _nba_xgb_config("xgboost_mma_ml", PredictionTask.MMA_MONEYLINE, "mma_moneyline")
+LIGHTGBM_MMA_MONEYLINE = _nba_lgb_config("lightgbm_mma_ml", PredictionTask.MMA_MONEYLINE, "mma_moneyline")
+NEURAL_NETWORK_MMA_MONEYLINE = _nba_nn_config("neural_network_mma_ml", PredictionTask.MMA_MONEYLINE, "mma_moneyline")
+ENSEMBLE_MMA_MONEYLINE = _nba_ensemble_config("ensemble_mma_ml", PredictionTask.MMA_MONEYLINE, "mma_moneyline")

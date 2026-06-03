@@ -84,6 +84,12 @@ SPORT_BUNDLE_GROUPS: dict[str, list[str]] = {
     # tennis_baseline). Total games + set-betting are v2 — they
     # need linescore parsing which the ESPN backfill doesn't carry.
     "tennis": ["tennis_moneyline"],
+    # MMA: second 1v1 sport (UFC). One market in v1 (moneyline).
+    # ~1500 fights across 3 seasons (UFC schedules ~40-45
+    # cards/year × ~12 fights). Method-of-victory / round-group
+    # markets are v2 specialties. Features come from
+    # scripts/compute_features_mma.py (feature_set = mma_baseline).
+    "mma": ["mma_moneyline"],
 }
 
 default_args = {

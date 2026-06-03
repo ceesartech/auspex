@@ -267,6 +267,7 @@ class TestSportBundles:
             "nfl_spread",
             "nfl_total",
             "tennis_moneyline",
+            "mma_moneyline",
         }
 
     def test_nhl_bundle_uses_nhl_loader_and_target(self):

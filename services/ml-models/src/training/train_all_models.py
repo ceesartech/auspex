@@ -19,6 +19,7 @@ from predictors.lightgbm_model import LightGBMMatchPredictor
 from predictors.model_config import (
     DIXON_COLES_CONFIG,
     ENSEMBLE_CONFIG,
+    ENSEMBLE_MMA_MONEYLINE,
     ENSEMBLE_NBA_MONEYLINE,
     ENSEMBLE_NBA_SPREAD,
     ENSEMBLE_NBA_TOTAL,
@@ -35,6 +36,7 @@ from predictors.model_config import (
     HOCKEY_POISSON_NHL_REGULATION,
     HOCKEY_POISSON_NHL_TOTAL,
     LIGHTGBM_MATCH_OUTCOME,
+    LIGHTGBM_MMA_MONEYLINE,
     LIGHTGBM_NBA_MONEYLINE,
     LIGHTGBM_NBA_SPREAD,
     LIGHTGBM_NBA_TOTAL,
@@ -47,6 +49,7 @@ from predictors.model_config import (
     LIGHTGBM_NHL_TOTAL,
     LIGHTGBM_TENNIS_MONEYLINE,
     NEURAL_NETWORK_CONFIG,
+    NEURAL_NETWORK_MMA_MONEYLINE,
     NEURAL_NETWORK_NBA_MONEYLINE,
     NEURAL_NETWORK_NBA_SPREAD,
     NEURAL_NETWORK_NBA_TOTAL,
@@ -60,6 +63,7 @@ from predictors.model_config import (
     NEURAL_NETWORK_TENNIS_MONEYLINE,
     POISSON_CONFIG,
     XGBOOST_MATCH_OUTCOME,
+    XGBOOST_MMA_MONEYLINE,
     XGBOOST_NBA_MONEYLINE,
     XGBOOST_NBA_SPREAD,
     XGBOOST_NBA_TOTAL,
@@ -79,6 +83,7 @@ from predictors.poisson_models import DixonColesPredictor, HockeyPoissonPredicto
 from predictors.xgboost_model import XGBoostMatchPredictor
 from training.calibration import ProbabilityCalibrator
 from utils.training_data import (
+    MMA_MONEYLINE_TARGET,
     NBA_MONEYLINE_TARGET,
     NBA_SPREAD_TARGET,
     NBA_TOTAL_TARGET,
@@ -92,6 +97,7 @@ from utils.training_data import (
     TARGET_COLUMN,
     TENNIS_MONEYLINE_TARGET,
     get_feature_columns,
+    get_mma_moneyline_feature_columns,
     get_nba_moneyline_feature_columns,
     get_nba_spread_feature_columns,
     get_nba_total_feature_columns,
@@ -103,6 +109,7 @@ from utils.training_data import (
     get_nhl_regulation_feature_columns,
     get_nhl_total_feature_columns,
     get_tennis_moneyline_feature_columns,
+    load_mma_moneyline_frame,
     load_nba_moneyline_frame,
     load_nba_spread_frame,
     load_nba_total_frame,
@@ -407,6 +414,23 @@ TENNIS_MONEYLINE_BUNDLE = SportBundle(
 )
 
 
+# MMA bundle — same shape as tennis (XGB+LGB+NN+Ensemble, no team
+# columns). UFC corpus ~1500 fights/3 yrs, NBA-shape hyperparameters.
+MMA_MONEYLINE_BUNDLE = SportBundle(
+    sport="mma_moneyline",
+    target_column=MMA_MONEYLINE_TARGET,
+    load_frame=load_mma_moneyline_frame,
+    feature_columns=get_mma_moneyline_feature_columns,
+    base_models=[
+        ModelSpec("xgboost_mma_ml", XGBoostMatchPredictor, XGBOOST_MMA_MONEYLINE),
+        ModelSpec("lightgbm_mma_ml", LightGBMMatchPredictor, LIGHTGBM_MMA_MONEYLINE),
+        ModelSpec("neural_network_mma_ml", NeuralNetworkMatchPredictor, NEURAL_NETWORK_MMA_MONEYLINE),
+    ],
+    ensemble_config=ENSEMBLE_MMA_MONEYLINE,
+    ensemble_name="ensemble_mma_ml",
+)
+
+
 # --sport value → SportBundle. Every key follows the
 # <sport>_<market> convention.
 SPORT_BUNDLES: Dict[str, SportBundle] = {
@@ -422,6 +446,7 @@ SPORT_BUNDLES: Dict[str, SportBundle] = {
     "nfl_spread": NFL_SPREAD_BUNDLE,
     "nfl_total": NFL_TOTAL_BUNDLE,
     "tennis_moneyline": TENNIS_MONEYLINE_BUNDLE,
+    "mma_moneyline": MMA_MONEYLINE_BUNDLE,
 }
 
 
