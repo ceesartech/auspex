@@ -60,15 +60,43 @@ def _uniform_prob(field_size: int) -> float:
     return 1.0 / max(field_size, 1)
 
 
-def list_target_races(database_url: str, days: int, race_ids: Optional[list[str]]) -> list[str]:
-    """Scheduled races in the next N days. With --race-ids, restricts
-    to that list."""
+def list_target_races(
+    database_url: str,
+    days: int,
+    race_ids: Optional[list[str]],
+    all_finished: bool = False,
+) -> list[str]:
+    """Race ids to score. By default: scheduled races in the next N days.
+    With --race-ids: restricts to that list. With --all-finished:
+    scores every finished race that doesn't already have a
+    market_consensus_v1 prediction — used for retrospective backfill
+    so the grader has something to evaluate."""
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             if race_ids:
                 cur.execute(
                     "SELECT id::text AS id FROM races WHERE id::text = ANY(%s)",
                     (race_ids,),
+                )
+                return [r["id"] for r in cur.fetchall()]
+            if all_finished:
+                # Backfill mode: finished races without any
+                # market_consensus_v1 prediction yet. Skips races
+                # already scored so re-running is cheap.
+                cur.execute(
+                    """
+                    SELECT r.id::text AS id
+                    FROM races r
+                    WHERE r.status = 'finished'
+                      AND NOT EXISTS (
+                        SELECT 1 FROM race_predictions rp
+                        WHERE rp.race_id = r.id
+                          AND rp.model_name = %s
+                          AND rp.model_version = %s
+                      )
+                    ORDER BY r.race_date ASC
+                    """,
+                    (MODEL_NAME, MODEL_VERSION),
                 )
                 return [r["id"] for r in cur.fetchall()]
             cur.execute(
@@ -84,14 +112,19 @@ def list_target_races(database_url: str, days: int, race_ids: Optional[list[str]
 
 
 def fetch_entrants(cur, race_id: str) -> list[dict]:
-    """All non-scratched entrants for a race with their morning-line
-    odds. Caller devigs across the returned set."""
+    """All non-scratched entrants for a race with their odds. Caller
+    devigs across the returned set. Both morning_line_odds (pre-race
+    bookmaker decimal) and starting_price (closing pari-mutuel) come
+    back — devig() prefers ML when set and falls back to SP for
+    retrospective scoring of historical races, where ML is NULL by
+    design (the /results endpoint doesn't deliver pre-race lines)."""
     cur.execute(
         """
         SELECT
             e.id::text AS entrant_id,
             e.program_number,
             e.morning_line_odds,
+            e.starting_price,
             e.scratched,
             h.name AS horse_name
         FROM race_entrants e
@@ -104,11 +137,37 @@ def fetch_entrants(cur, race_id: str) -> list[dict]:
     return [dict(r) for r in cur.fetchall()]
 
 
+def _consensus_decimal(entrant: dict) -> Optional[float]:
+    """Pick the odds value the consensus devig should treat as the
+    market signal. Prefers morning_line_odds (live / upcoming races
+    via the racecard endpoint); falls back to starting_price (post-
+    race closing decimal from /results) for historical races where
+    ML is NULL.
+
+    Methodological note: using SP turns the baseline into a
+    closing-line-consensus retrospect — strictly stronger than the
+    morning line because the market has absorbed all pre-race
+    information by the off. For evaluating the consensus baseline's
+    floor accuracy on historical data this is the right signal; a
+    real ML model that beats this is genuinely sharper than the
+    market at the off."""
+    ml = entrant.get("morning_line_odds")
+    if ml is not None and float(ml) > 1.0:
+        return float(ml)
+    sp = entrant.get("starting_price")
+    if sp is not None and float(sp) > 1.0:
+        return float(sp)
+    return None
+
+
 def devig(entrants: list[dict]) -> dict[str, float]:
     """Compute devigged win probabilities per entrant. Returns
     {entrant_id: probability}. Probabilities sum to 1.0 across
-    priced entrants; unpriced entrants (no morning-line odds)
-    get a uniform 1/field_size fallback then everything renormalises.
+    priced entrants; unpriced entrants (no usable decimal) get a
+    uniform 1/field_size fallback then everything renormalises.
+
+    Per-entrant signal precedence (see _consensus_decimal):
+      morning_line_odds → starting_price → uniform fallback
 
     Examples:
       - 8-horse field, all with morning lines → exact devigging.
@@ -125,9 +184,9 @@ def devig(entrants: list[dict]) -> dict[str, float]:
     priced_total = 0.0
     priced_count = 0
     for ent in entrants:
-        ml = ent.get("morning_line_odds")
-        if ml is not None and ml > 1.0:
-            inv = 1.0 / float(ml)
+        decimal = _consensus_decimal(ent)
+        if decimal is not None:
+            inv = 1.0 / decimal
             raw[ent["entrant_id"]] = inv
             priced_total += inv
             priced_count += 1
@@ -217,10 +276,13 @@ def predict_for_race(cur, race_id: str) -> int:
     return written
 
 
-def run(database_url: str, days: int, race_ids: Optional[list[str]]) -> dict:
-    targets = list_target_races(database_url, days, race_ids)
+def run(database_url: str, days: int, race_ids: Optional[list[str]], all_finished: bool = False) -> dict:
+    targets = list_target_races(database_url, days, race_ids, all_finished=all_finished)
     if not targets:
-        logger.info("No upcoming races in the next %d days", days)
+        if all_finished:
+            logger.info("No finished races without market_consensus_v1 predictions")
+        else:
+            logger.info("No upcoming races in the next %d days", days)
         return {"races": 0, "predictions": 0}
 
     logger.info("Scoring %d races with market-consensus baseline", len(targets))
@@ -241,6 +303,17 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--days", type=int, default=2, help="Lookahead window in days (default 2).")
     p.add_argument("--race-ids", help="Comma-separated UUID list to score specific races.")
+    p.add_argument(
+        "--all-finished",
+        action="store_true",
+        help=(
+            "Backfill: score every finished race that doesn't already "
+            "have a market_consensus_v1 prediction. Uses starting_price "
+            "as the consensus signal (morning_line_odds is NULL on "
+            "historical /results rows). One-shot retrospective for "
+            "grader / monitor evaluation."
+        ),
+    )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
 
@@ -251,7 +324,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.error("DATABASE_URL not set")
         return 2
     race_ids = [s.strip() for s in args.race_ids.split(",") if s.strip()] if args.race_ids else None
-    run(args.database_url, args.days, race_ids)
+    run(args.database_url, args.days, race_ids, all_finished=args.all_finished)
     return 0
 
 
