@@ -241,13 +241,48 @@ def run(database_url: str, days: int, race_ids: Optional[list[str]]) -> dict:
         quality.missing_feature_rate * 100,
     )
     feature_cols = get_feature_columns(train_frame)
-    X_train = train_frame[feature_cols]
-    y_train = train_frame["target"].to_numpy(dtype=np.int64)
-    g_train = group_array(train_frame)
+
+    # Reserve the last `val_fraction` of training races as a
+    # held-out validation set. Two reasons this matters more than
+    # it might look:
+    #   1. Early stopping needs an out-of-fold metric to track —
+    #      without it the model trains to its full n_estimators
+    #      cap and overfits.
+    #   2. The score → softmax-probability temperature is tuned on
+    #      this val set. WITHOUT a val split, temperature stays at
+    #      the default 1.0, which produces TOO-SHARP probs
+    #      (verified empirically: full-corpus training gave temp=1.0
+    #      and the recs engine fired 1,223 picks vs the more honest
+    #      ~30 we should expect from a properly calibrated model).
+    val_fraction = 0.15
+    race_ids_ordered = list(dict.fromkeys(train_frame["race_id"].tolist()))
+    cutoff = int(len(race_ids_ordered) * (1.0 - val_fraction))
+    train_race_set = set(race_ids_ordered[:cutoff])
+    inner_train = train_frame[train_frame["race_id"].isin(train_race_set)].reset_index(drop=True)
+    inner_val = train_frame[~train_frame["race_id"].isin(train_race_set)].reset_index(drop=True)
+
+    X_train = inner_train[feature_cols]
+    y_train = inner_train["target"].to_numpy(dtype=np.int64)
+    g_train = group_array(inner_train)
+    X_val = inner_val[feature_cols] if not inner_val.empty else None
+    y_val = inner_val["target"].to_numpy(dtype=np.int64) if not inner_val.empty else None
+    g_val = group_array(inner_val) if not inner_val.empty else None
 
     model = HorseRacingRanker()
-    model.fit(X_train, y_train, g_train)
-    logger.info("Trained ranker (temperature %.3f)", model.temperature)
+    model.fit(
+        X_train,
+        y_train,
+        g_train,
+        X_val=X_val,
+        y_val=y_val,
+        groups_val=g_val,
+    )
+    logger.info(
+        "Trained ranker on %d/%d train/val races (temperature %.3f)",
+        len(g_train),
+        len(g_val) if g_val is not None else 0,
+        model.temperature,
+    )
 
     # 2. Find target races + score them.
     with psycopg2.connect(database_url) as conn:
