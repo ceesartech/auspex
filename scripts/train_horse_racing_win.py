@@ -258,7 +258,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("/tmp/hr_ranker_v1"),
+        # Default to the persisted models volume so the DAG's
+        # precompute task can load the artefact immediately after
+        # this script finishes. /tmp is ephemeral — saving there
+        # means a container restart wipes the model.
+        default=Path("/app/models/horse_racing_ranker_v1"),
         help="Where to write model.bin + metadata.json + feature_names.json",
     )
     p.add_argument(

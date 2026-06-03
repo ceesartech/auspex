@@ -116,6 +116,59 @@ class HorseRacingRanker:
         self.feature_importance: Dict[str, float] = {}
         self.validation_metrics: Dict[str, float] = {}
 
+    # ── Persistence ─────────────────────────────────────────────────
+
+    @classmethod
+    def load(cls, model_dir) -> "HorseRacingRanker":
+        """Reconstruct a fitted ranker from artefacts written by the
+        training script (model.bin + feature_names.json + metadata.json).
+
+        Critical for production: training on the full corpus
+        (155k+ rows × 32 features) blows the api container's memory
+        budget at every cron tick. The training script runs as a
+        one-shot (weekly or on demand), saves to /app/models/, and
+        the precompute task in the DAG just loads + scores.
+
+        Skips reconstructing the LGBMRanker sklearn wrapper —
+        loaded ranker uses the lightgbm Booster directly. predict()
+        works the same way on both, so predict_scores /
+        predict_probabilities stay unchanged on the read path.
+        """
+        import json
+        from pathlib import Path
+
+        import lightgbm as lgb
+
+        model_dir = Path(model_dir)
+        model_path = model_dir / "model.bin"
+        names_path = model_dir / "feature_names.json"
+        meta_path = model_dir / "metadata.json"
+        if not model_path.exists():
+            raise FileNotFoundError(f"Saved model not found at {model_path}")
+        if not names_path.exists():
+            raise FileNotFoundError(f"feature_names.json not found at {names_path}")
+
+        instance = cls.__new__(cls)
+        instance.config = HorseRacingRankerConfig()
+        instance.model = lgb.Booster(model_file=str(model_path))
+        with open(names_path) as f:
+            instance.feature_names = list(json.load(f))
+        instance.temperature = 1.0
+        instance.training_history = {}
+        instance.feature_importance = {}
+        instance.validation_metrics = {}
+        if meta_path.exists():
+            with open(meta_path) as f:
+                meta = json.load(f)
+            # Walk through the training metadata for the tuned softmax
+            # temperature. Default 1.0 (uniform-like) is intentionally
+            # bad to force operators to retrain via the standalone
+            # script rather than ship without calibration.
+            instance.temperature = float(meta.get("fit_result", {}).get("temperature", 1.0))
+            instance.validation_metrics = meta.get("test_metrics", {})
+        instance.is_fitted = True
+        return instance
+
     # ── Fit ─────────────────────────────────────────────────────────
 
     def fit(

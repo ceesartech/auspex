@@ -207,3 +207,100 @@ class TestFitAndPredict:
         ranker = HorseRacingRanker()
         with pytest.raises(ValueError, match="not fitted"):
             ranker.predict_scores(pd.DataFrame({"x": [1.0]}))
+
+
+class TestLoadFromArtifacts:
+    """The precompute path loads a model from /app/models/ rather than
+    training fresh on every cron tick — training a model on the full
+    155k-row corpus OOM'd the api container. These tests pin the
+    save → load → predict round-trip so a future refactor can't
+    silently break the artefact format the DAG depends on."""
+
+    def _train_and_save(self, tmp_path):
+        import json
+
+        from predictors.horse_racing_ranker import HorseRacingRankerConfig
+
+        rng = np.random.RandomState(0)
+        rows = []
+        for race in range(80):
+            signal = rng.uniform(0, 1, 6)
+            for j in range(6):
+                rows.append(
+                    {
+                        "race_id": f"r{race}",
+                        "signal": float(signal[j]),
+                        "noise": float(rng.normal()),
+                        "target": 1 if j == int(np.argmax(signal)) else 0,
+                    }
+                )
+        df = pd.DataFrame(rows)
+        groups = df["race_id"].value_counts(sort=False).values
+        ranker = HorseRacingRanker(
+            HorseRacingRankerConfig(n_estimators=30, learning_rate=0.1, early_stopping_rounds=10)
+        )
+        ranker.fit(
+            X_train=df[["signal", "noise"]],
+            y_train=df["target"].to_numpy(dtype=np.int64),
+            groups_train=groups,
+            X_val=df[["signal", "noise"]],
+            y_val=df["target"].to_numpy(dtype=np.int64),
+            groups_val=groups,
+        )
+        out_dir = tmp_path / "ranker_v1"
+        out_dir.mkdir()
+        ranker.model.booster_.save_model(str(out_dir / "model.bin"))
+        with open(out_dir / "feature_names.json", "w") as f:
+            json.dump(ranker.feature_names, f)
+        with open(out_dir / "metadata.json", "w") as f:
+            json.dump(
+                {"fit_result": {"temperature": ranker.temperature}, "test_metrics": {}},
+                f,
+            )
+        return ranker, out_dir, df, groups
+
+    def test_load_reconstructs_predictions(self, tmp_path):
+        # Save a trained model, load it back, predict — scores from
+        # the loaded model should match what the original model
+        # produces, otherwise the DAG-deployed predictions drift
+        # from what training measured.
+        ranker, out_dir, df, groups = self._train_and_save(tmp_path)
+
+        loaded = HorseRacingRanker.load(out_dir)
+        assert loaded.is_fitted is True
+        assert loaded.feature_names == ranker.feature_names
+        assert loaded.temperature == pytest.approx(ranker.temperature)
+
+        # Same scoring frame through both — outputs should match
+        # within numerical tolerance.
+        X = df[["signal", "noise"]]
+        original = ranker.predict_scores(X)
+        loaded_scores = loaded.predict_scores(X)
+        np.testing.assert_allclose(loaded_scores, original, rtol=1e-6, atol=1e-9)
+
+    def test_load_preserves_softmax_temperature(self, tmp_path):
+        # Per-race probabilities must round-trip too — temperature
+        # is the load-bearing calibration knob. If we lose it on
+        # load, the recs engine sees too-sharp probs and the
+        # false-positive value-bet rate explodes (verified
+        # empirically: 27 → 1,223 picks when temperature defaulted
+        # to 1.0 instead of the tuned ~0.35).
+        ranker, out_dir, df, groups = self._train_and_save(tmp_path)
+        loaded = HorseRacingRanker.load(out_dir)
+        X = df[["signal", "noise"]]
+        original_probs = ranker.predict_probabilities(X, groups)
+        loaded_probs = loaded.predict_probabilities(X, groups)
+        assert len(original_probs) == len(loaded_probs)
+        for a, b in zip(original_probs, loaded_probs):
+            assert a.sum() == pytest.approx(1.0, abs=1e-6)
+            assert b.sum() == pytest.approx(1.0, abs=1e-6)
+            for orig, lod in zip(a, b):
+                assert orig == pytest.approx(lod, abs=1e-6)
+
+    def test_load_raises_when_artifacts_missing(self, tmp_path):
+        # Empty directory: should raise rather than silently load a
+        # half-initialised model — the precompute uses that error to
+        # log a clear bootstrap message pointing to the training
+        # script.
+        with pytest.raises(FileNotFoundError):
+            HorseRacingRanker.load(tmp_path / "does-not-exist")

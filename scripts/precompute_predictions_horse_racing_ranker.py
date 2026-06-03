@@ -13,21 +13,30 @@ table but under a distinct model_name so:
     present and fall back to consensus when not (see
     generate_recommendations_horse_racing.MODEL_PRECEDENCE).
 
-v1 design choice: train fresh on every run rather than persist
-the model to disk + load on subsequent runs. Training on the full
-~6k-race corpus takes ~30 seconds — small enough to fit inside
-the cron tick. Promotes to a disk-cached / MLflow-registered model
-once corpus size makes per-tick training meaningfully expensive.
+Architecture (changed at the 13k-race corpus mark): the precompute
+LOADS a saved model artefact from --model-dir (default
+/app/models/horse_racing_ranker_v1/). Training itself runs
+out-of-band via scripts/train_horse_racing_win.py — fits + tunes
+temperature + saves model.bin + feature_names.json + metadata.json.
+Per-tick re-training OOMed the api container at 152k-row scale;
+the load-only path is bounded by the scoring window (~few hundred
+races) regardless of corpus size.
 
-Model: lightgbm_ranker_v1 / 1.0.0. The tuned hyperparameter
-defaults (see services/ml-models/src/predictors/horse_racing_ranker
-docstring) beat the consensus baseline by +2.2 pts on a 2,663-race
-held-out test (memory: horse-racing-ml-ranker-v1).
+Model: lightgbm_ranker_v1 / 1.0.0. Re-run the training script when
+the corpus grows materially or when you change the feature set;
+otherwise the same artefact serves indefinitely.
 
 Usage (inside the api container):
     python /app/scripts/precompute_predictions_horse_racing_ranker.py
     python /app/scripts/precompute_predictions_horse_racing_ranker.py --days 3
     python /app/scripts/precompute_predictions_horse_racing_ranker.py --race-ids id1,id2
+    python /app/scripts/precompute_predictions_horse_racing_ranker.py \
+        --model-dir /tmp/hr_ranker_v2   # smoke a fresh training run
+
+Bootstrap:
+    python /app/scripts/train_horse_racing_win.py \
+        --split-date 2026-05-15 \
+        --output-dir /app/models/horse_racing_ranker_v1
 """
 
 from __future__ import annotations
@@ -40,7 +49,6 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -49,18 +57,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "services" / "ml
 sys.path.insert(0, "/app/services/ml-models/src")
 
 from predictors.horse_racing_ranker import HorseRacingRanker  # noqa: E402
-from utils.horse_racing_data import (  # noqa: E402
-    get_feature_columns,
-    group_array,
-    load_training_frame,
-    validate_training_frame,
-)
+from utils.horse_racing_data import group_array  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("precompute_predictions_horse_racing_ranker")
 
 MODEL_NAME = "lightgbm_ranker_v1"
 MODEL_VERSION = "1.0.0"
+DEFAULT_MODEL_DIR = Path("/app/models/horse_racing_ranker_v1")
 
 
 # ── Scoring SQL ────────────────────────────────────────────────────
@@ -223,65 +227,34 @@ def predict_for_races(
 # ── Orchestration ─────────────────────────────────────────────────
 
 
-def run(database_url: str, days: int, race_ids: Optional[list[str]]) -> dict:
+def run(
+    database_url: str,
+    days: int,
+    race_ids: Optional[list[str]],
+    model_dir: Path = DEFAULT_MODEL_DIR,
+) -> dict:
     counts = {"races": 0, "predictions": 0, "skipped_races": 0}
 
-    # 1. Train fresh on the full graded corpus.
-    logger.info("Loading training frame...")
-    train_frame = load_training_frame(database_url=database_url)
-    if train_frame.empty:
-        logger.error("Empty training frame; abort.")
+    # 1. Load the saved model. The training script (run out-of-band)
+    #    produces these artefacts; we never re-train here because the
+    #    full-corpus train OOM'd the api container at 152k-row scale.
+    try:
+        model = HorseRacingRanker.load(model_dir)
+    except FileNotFoundError as e:
+        logger.error(
+            "No saved ranker at %s: %s. Bootstrap via " "scripts/train_horse_racing_win.py --output-dir %s",
+            model_dir,
+            e,
+            model_dir,
+        )
         return counts
-    quality = validate_training_frame(train_frame)
+
+    feature_cols = list(model.feature_names)
     logger.info(
-        "Corpus: %d rows / %d races / %d features (%.1f%% missing)",
-        quality.rows,
-        quality.races,
-        quality.feature_count,
-        quality.missing_feature_rate * 100,
-    )
-    feature_cols = get_feature_columns(train_frame)
-
-    # Reserve the last `val_fraction` of training races as a
-    # held-out validation set. Two reasons this matters more than
-    # it might look:
-    #   1. Early stopping needs an out-of-fold metric to track —
-    #      without it the model trains to its full n_estimators
-    #      cap and overfits.
-    #   2. The score → softmax-probability temperature is tuned on
-    #      this val set. WITHOUT a val split, temperature stays at
-    #      the default 1.0, which produces TOO-SHARP probs
-    #      (verified empirically: full-corpus training gave temp=1.0
-    #      and the recs engine fired 1,223 picks vs the more honest
-    #      ~30 we should expect from a properly calibrated model).
-    val_fraction = 0.15
-    race_ids_ordered = list(dict.fromkeys(train_frame["race_id"].tolist()))
-    cutoff = int(len(race_ids_ordered) * (1.0 - val_fraction))
-    train_race_set = set(race_ids_ordered[:cutoff])
-    inner_train = train_frame[train_frame["race_id"].isin(train_race_set)].reset_index(drop=True)
-    inner_val = train_frame[~train_frame["race_id"].isin(train_race_set)].reset_index(drop=True)
-
-    X_train = inner_train[feature_cols]
-    y_train = inner_train["target"].to_numpy(dtype=np.int64)
-    g_train = group_array(inner_train)
-    X_val = inner_val[feature_cols] if not inner_val.empty else None
-    y_val = inner_val["target"].to_numpy(dtype=np.int64) if not inner_val.empty else None
-    g_val = group_array(inner_val) if not inner_val.empty else None
-
-    model = HorseRacingRanker()
-    model.fit(
-        X_train,
-        y_train,
-        g_train,
-        X_val=X_val,
-        y_val=y_val,
-        groups_val=g_val,
-    )
-    logger.info(
-        "Trained ranker on %d/%d train/val races (temperature %.3f)",
-        len(g_train),
-        len(g_val) if g_val is not None else 0,
+        "Loaded ranker from %s (temperature %.3f, %d features)",
+        model_dir,
         model.temperature,
+        len(feature_cols),
     )
 
     # 2. Find target races + score them.
@@ -331,6 +304,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--days", type=int, default=2, help="Lookahead window in days (default 2).")
     p.add_argument("--race-ids", help="Comma-separated UUID list to score specific races.")
+    p.add_argument(
+        "--model-dir",
+        type=Path,
+        default=DEFAULT_MODEL_DIR,
+        help=("Directory containing model.bin + feature_names.json + metadata.json. " f"Default: {DEFAULT_MODEL_DIR}."),
+    )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
 
@@ -341,7 +320,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.error("DATABASE_URL not set")
         return 2
     race_ids = [s.strip() for s in args.race_ids.split(",") if s.strip()] if args.race_ids else None
-    run(args.database_url, args.days, race_ids)
+    run(args.database_url, args.days, race_ids, model_dir=args.model_dir)
     return 0
 
 
