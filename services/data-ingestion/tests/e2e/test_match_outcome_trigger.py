@@ -447,6 +447,45 @@ class TestNbaGrading:
 # ── NFL (new in migration 011 — same line-as-feature dispatch) ───────
 
 
+class TestTennisGrading:
+    """Tennis moneyline shares the prediction_type='moneyline' branch
+    of the trigger. No tennis-specific dispatch was added because the
+    grade_moneyline_2way SQL helper handles 1v1 final-score winners
+    identically to NHL/NBA/NFL. This test locks that integration."""
+
+    def test_player1_wins(self, trigger_tables, engine):
+        with engine.begin() as conn:
+            ids = _seed_match(conn, sport="tennis")
+            pred = _seed_prediction(
+                conn,
+                match_id=ids["match_id"],
+                model_name="ensemble_tennis_ml",
+                prediction_type="moneyline",
+                predicted_outcome="home",
+            )
+            # Best-of-3 final, player1 won 2-1.
+            _finish_match(conn, match_id=ids["match_id"], home_score=2, away_score=1)
+            row = _read_prediction(conn, pred)
+        assert row["actual_outcome"] == "home"
+        assert row["is_correct"] is True
+
+    def test_player2_wins(self, trigger_tables, engine):
+        with engine.begin() as conn:
+            ids = _seed_match(conn, sport="tennis")
+            pred = _seed_prediction(
+                conn,
+                match_id=ids["match_id"],
+                model_name="ensemble_tennis_ml",
+                prediction_type="moneyline",
+                predicted_outcome="home",
+            )
+            # Best-of-5 final, player2 won 2-3.
+            _finish_match(conn, match_id=ids["match_id"], home_score=2, away_score=3)
+            row = _read_prediction(conn, pred)
+        assert row["actual_outcome"] == "away"
+        assert row["is_correct"] is False
+
+
 class TestNflGrading:
     def test_moneyline_tie_leaves_ungraded(self, trigger_tables, engine):
         # NFL ties happen rarely (~1-2/year). 2-class model can't

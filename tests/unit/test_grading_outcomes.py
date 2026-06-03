@@ -602,6 +602,54 @@ class TestNflMoneylineGrading:
         assert result is None
 
 
+class TestTennisMoneylineGrading:
+    """Tennis moneyline reuses the shared 2-way grading path. No
+    schema or dispatch changes were needed — the existing
+    `prediction_type='moneyline'` branch handles tennis correctly via
+    nhl_moneyline_outcome (returns None on ties; tennis matches never
+    tie so this is belt-and-suspenders).
+
+    Lock the dispatch here so a future refactor that introduces
+    sport-specific moneyline grading doesn't accidentally exclude
+    tennis."""
+
+    def test_player1_wins(self):
+        # home_score = sets won by player1; tennis best-of-3
+        # final 2-1 → home (player1) won.
+        result = go.actual_outcome(
+            prediction_type="moneyline",
+            model_name="ensemble_tennis_ml",
+            predicted_outcome="home",
+            home_score=2,
+            away_score=1,
+        )
+        assert result == "home"
+
+    def test_player2_wins(self):
+        # Best-of-5 final 2-3 → away (player2) won.
+        result = go.actual_outcome(
+            prediction_type="moneyline",
+            model_name="ensemble_tennis_ml",
+            predicted_outcome="away",
+            home_score=2,
+            away_score=3,
+        )
+        assert result == "away"
+
+    def test_retired_or_data_quality_tie_leaves_ungraded(self):
+        # Tennis matches never tie in completion. A 0-0 row here would
+        # mean a retirement-before-play or data quality bug — the
+        # grader returns None so we don't write a false win/loss.
+        result = go.actual_outcome(
+            prediction_type="moneyline",
+            model_name="ensemble_tennis_ml",
+            predicted_outcome="home",
+            home_score=0,
+            away_score=0,
+        )
+        assert result is None
+
+
 # ── Model-name dispatch helpers ──────────────────────────────────────
 
 
