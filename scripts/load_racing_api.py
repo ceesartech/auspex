@@ -1,15 +1,20 @@
 """Ingest UK + Irish horse racing data from theracingapi.com.
 
 Plan-aware endpoint dispatch:
-  Basic ($30/mo)   → /racecards/basic (TODAY only, no date param)
-                     /results is Standard+ only.
-  Standard         → /racecards/standard + /results (date-rangeable)
-  Pro              → /racecards/pro + /results + deeper per-horse data
+  Basic ($30/mo)   → /racecards/basic (TODAY only, no date param,
+                     no odds). /results is Standard+.
+  Standard         → /racecards/standard (TODAY only, no date param,
+                     bookmaker odds array per runner) +
+                     /results (date-rangeable via start_date/end_date,
+                     with sp/sp_dec and finish position).
+  Pro              → /racecards/pro (date-rangeable, deepest payload)
+                     + /results + per-horse stable/quotes data.
 
 The script tries pro → standard → basic in order and falls back on
-403/422 ("Plan required"). On Basic, --upcoming N is silently
-capped to today's racecards; --results returns "plan required" and
-no historical backfill is possible (accumulate forward instead).
+401/403/422 ("Plan required" or rejected params). On Basic, the
+date range to --upcoming N is silently capped to today (one call);
+ditto on Standard since /racecards/standard also returns today only.
+--results is the multi-day workhorse (Standard+).
 
 Auth: HTTP Basic with THE_RACING_API_USER + THE_RACING_API_PASS.
 
@@ -141,22 +146,26 @@ def _try_racecards_endpoint(path: str, day: date, auth: HTTPBasicAuth, send_date
     return r.status_code, r.json().get("racecards", []) or []
 
 
+# Only /racecards/pro accepts a `date` query param. /racecards/standard
+# and /racecards/basic both reject it with 422 and return today's card
+# regardless. Keep this in sync with _ONLY_TODAY_ENDPOINTS in run().
+_PATHS_THAT_ACCEPT_DATE = frozenset({"/racecards/pro"})
+_ONLY_TODAY_ENDPOINTS = frozenset({"/racecards/standard", "/racecards/basic"})
+
+
 def fetch_racecards(day: date, auth: HTTPBasicAuth) -> list[dict]:
     """Pull racecards. Tries /racecards/pro → /standard → /basic and
-    caches the first tier that succeeds. Basic doesn't accept the
-    date param — when the cached tier is Basic, the day argument is
-    ignored (the endpoint returns today's racecards regardless)."""
+    caches the first tier that succeeds. Standard + Basic return
+    today's racecards regardless of the day param, so we don't send
+    one to them (would 422). Only /pro is date-rangeable."""
     global _CACHED_RACECARDS_PATH
     if _CACHED_RACECARDS_PATH:
-        send_date = _CACHED_RACECARDS_PATH != "/racecards/basic"
+        send_date = _CACHED_RACECARDS_PATH in _PATHS_THAT_ACCEPT_DATE
         _, cards = _try_racecards_endpoint(_CACHED_RACECARDS_PATH, day, auth, send_date)
         return cards
 
-    for path, send_date in (
-        ("/racecards/pro", True),
-        ("/racecards/standard", True),
-        ("/racecards/basic", False),
-    ):
+    for path in ("/racecards/pro", "/racecards/standard", "/racecards/basic"):
+        send_date = path in _PATHS_THAT_ACCEPT_DATE
         status, cards = _try_racecards_endpoint(path, day, auth, send_date)
         if status == 200:
             _CACHED_RACECARDS_PATH = path
@@ -607,14 +616,16 @@ def run(database_url: str, kind: str, start: date, end: date) -> dict:
                     totals[k] += counts.get(k, 0)
                 conn.commit()
                 time.sleep(REQUEST_DELAY_SEC)
-                # Basic plan: /racecards/basic returns today's data
+                # Basic + Standard /racecards/{tier} return today's data
                 # regardless of the day param. After the first call
                 # the rest of the date range is wasted work — break
-                # out and log the cap.
-                if kind == "upcoming" and _CACHED_RACECARDS_PATH == "/racecards/basic":
+                # out and log the cap. Pro is date-rangeable so it
+                # keeps iterating.
+                if kind == "upcoming" and _CACHED_RACECARDS_PATH in _ONLY_TODAY_ENDPOINTS:
                     logger.info(
-                        "Basic plan: /racecards/basic returns today only — "
-                        "stopping after pass 1 (date range %s..%s ignored)",
+                        "%s returns today only — stopping after pass 1 "
+                        "(date range %s..%s ignored)",
+                        _CACHED_RACECARDS_PATH,
                         start,
                         end,
                     )
