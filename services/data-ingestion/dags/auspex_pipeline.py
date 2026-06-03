@@ -194,6 +194,15 @@ with DAG(
 
     fetch_upcoming_tennis >> compute_features_tennis >> precompute_predictions_tennis >> generate_recommendations_tennis
 
+    # ── MMA branch (M1: ingestion + odds scaffolding only) ────────
+    # Predictions / features / recommendations land in subsequent
+    # commits once the historical backfill + training corpus are in
+    # place. Standalone for now — no downstream chain yet.
+    fetch_upcoming_mma = BashOperator(
+        task_id="fetch_upcoming_mma",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport mma --days 14",
+    )
+
     # ── Phase 5: grade finished matches ───────────────────────────
     # Walks matches whose status flipped to 'finished' in the last
     # 14 days, computes actual_outcome per market, and:

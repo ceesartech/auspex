@@ -41,7 +41,7 @@ load_nhl_historical = _load("load_nhl_historical", "load_nhl_historical.py")
 
 class TestSportConfigs:
     def test_all_sports_registered(self):
-        assert set(fetch_upcoming.SPORT_CONFIGS.keys()) == {"soccer", "nhl", "nba", "nfl", "tennis"}
+        assert set(fetch_upcoming.SPORT_CONFIGS.keys()) == {"soccer", "nhl", "nba", "nfl", "tennis", "mma"}
 
     def test_soccer_config_keeps_espn_path(self):
         cfg = fetch_upcoming.SPORT_CONFIGS["soccer"]
@@ -188,6 +188,7 @@ class TestSportForKey:
             #                                   # mapper says nfl
             ("tennis_atp_wimbledon", "tennis"),  # Tennis registered (Phase 11)
             ("tennis_wta_australian_open", "tennis"),
+            ("mma_mixed_martial_arts", "mma"),  # MMA registered (Phase 12)
             ("", None),
         ],
     )

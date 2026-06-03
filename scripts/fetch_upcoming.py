@@ -78,6 +78,13 @@ def _season_tennis(dt: datetime) -> str:
     return str(dt.year)
 
 
+def _season_mma(dt: datetime) -> str:
+    """UFC events span the full calendar year (~40-45 cards/yr). No
+    cross-year season — each year is its own self-contained 'season'
+    for stats purposes."""
+    return str(dt.year)
+
+
 @dataclass(frozen=True)
 class SportConfig:
     """Per-sport ingestion config consumed by the generic ESPN fetcher.
@@ -198,6 +205,15 @@ TENNIS_LEAGUES: dict[str, tuple[str, str, str]] = {
 }
 
 
+# ── MMA config ────────────────────────────────────────────────────────
+# 1v1, professional mixed martial arts. ESPN's path is /mma/ufc/
+# scoreboard for UFC events. PFL / Bellator / ONE could layer in as
+# additional slugs once the dataset stabilises.
+MMA_LEAGUES: dict[str, tuple[str, str, str]] = {
+    "ufc": ("UFC", "UFC", "USA"),
+}
+
+
 SPORT_CONFIGS: dict[str, SportConfig] = {
     "soccer": SportConfig(
         sport="soccer",
@@ -246,6 +262,20 @@ SPORT_CONFIGS: dict[str, SportConfig] = {
         # ESPN tennis competitors use 'athlete' not 'team' and lack
         # the homeAway field — flip on positional / athlete handling
         # in process_event.
+        is_individual=True,
+    ),
+    "mma": SportConfig(
+        sport="mma",
+        # ESPN MMA endpoint: /sports/mma/ufc/scoreboard. UFC cards
+        # arrive as single events containing competitions[] (12-15
+        # fights per card). Same espn_path-vs-slug split as the
+        # team sports — espn_path is just "mma".
+        espn_path="mma",
+        leagues=MMA_LEAGUES,
+        season_func=_season_mma,
+        # MMA competitors use 'athlete' (no team) and lack homeAway;
+        # positional fallback gives a consistent fighter1/fighter2
+        # labeling.
         is_individual=True,
     ),
 }

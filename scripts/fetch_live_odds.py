@@ -113,6 +113,10 @@ DEFAULT_SPORTS = [
     "tennis_wta_french_open",
     "tennis_wta_wimbledon",
     "tennis_wta_us_open",
+    # MMA — UFC + Bellator. the-odds-api key is a single global
+    # 'mma_mixed_martial_arts' that returns every active card across
+    # promotions, so no per-promotion fanout needed.
+    "mma_mixed_martial_arts",
 ]
 
 
@@ -126,6 +130,7 @@ SPORT_KEY_PREFIXES: dict[str, str] = {
     "basketball_": "nba",
     "americanfootball_": "nfl",
     "tennis_": "tennis",
+    "mma_": "mma",
 }
 
 
@@ -151,6 +156,11 @@ SPORT_MARKETS: dict[str, str] = {
     # best-of-5). No "spreads" market on tennis at most US books —
     # set-handicap is a UK/EU specialty we can layer in later.
     "tennis": "h2h,totals",
+    # MMA: h2h only in v1. Method-of-victory / round-group / fight-
+    # goes-the-distance are MMA specialties available via per-event
+    # additional markets — defer to v2 once we have the moneyline
+    # corpus calibrated.
+    "mma": "h2h",
 }
 
 # Secondary markets only available via the-odds-api PER-EVENT "additional
@@ -171,6 +181,7 @@ KNOWN_MARKET_KEYS: dict[str, set[str]] = {
     "nba": {"h2h", "spreads", "totals"},
     "nfl": {"h2h", "spreads", "totals"},
     "tennis": {"h2h", "totals"},
+    "mma": {"h2h"},
 }
 
 
@@ -484,6 +495,17 @@ def map_outcome(
             if n not in ("over", "under") or point is None:
                 return None, None, False
             return "total", n, True
+        return None, None, False
+
+    if sport == "mma":
+        # 1v1, no draws (draws are technically possible — split-decision
+        # draws happen ~1% — but the model treats them as ungradable;
+        # see grading_outcomes.mma handling). Single market in v1.
+        if market_key == "h2h":
+            side = _team_side(outcome_name, home_team_name, away_team_name)
+            if side is None:
+                return None, None, False
+            return "moneyline", side, False
         return None, None, False
 
     return None, None, False
