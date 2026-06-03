@@ -399,18 +399,35 @@ HIGH_WIND_KMH = 25.0
 WET_PRECIP_MM = 5.0
 HOT_TEMP_C = 32.0
 
+# Canonical tennis weather feature key set — mirrors the NFL design
+# (see compute_features_nfl.NFL_WEATHER_KEYS). Tennis omits the
+# freezing flag and adds a hot flag; otherwise identical. Always-emit
+# + None-for-missing keeps train/predict shapes aligned and dodges
+# both the v3 default-bias trap and the v4a corpus-shrinkage trap.
+TENNIS_WEATHER_KEYS: tuple[str, ...] = (
+    "weather_indoor",
+    "weather_temp_c",
+    "weather_wind_kmh",
+    "weather_precip_mm",
+    "weather_humidity_pct",
+    "weather_high_wind",
+    "weather_wet",
+    "weather_hot",
+)
+
+
+def _empty_weather() -> dict:
+    return {k: None for k in TENNIS_WEATHER_KEYS}
+
 
 def fetch_weather(cur, match_id: str) -> dict:
-    """Pull the freshest weather snapshot for this match and project
-    it into a dict of weather_* features.
+    """Project the freshest weather snapshot for this match into a
+    dict of weather_* features.
 
-    OMIT-on-missing: returns an empty dict when no weather row exists
-    (and the venue isn't known to be indoor). Phase 14's EXISTS-gate
-    on TENNIS_MONEYLINE_TRAINING_QUERY means the training corpus
-    contains only matches with actual weather, so the model never
-    learns the "missing-data sentinel" pattern that the reverted v3
-    attempt (commit 17b3eb6) suffered from. At predict-time, GBDTs
-    route missing features through their learned default branches.
+    Always returns a dict with every key in TENNIS_WEATHER_KEYS, using
+    None (→ pandas NaN) for unknown values. See the matching docstring
+    in compute_features_nfl.fetch_weather for the rationale behind
+    the always-emit invariant — same reasoning applies.
     """
     cur.execute(
         """
@@ -426,8 +443,10 @@ def fetch_weather(cur, match_id: str) -> dict:
     row = cur.fetchone()
 
     if not row:
-        # No weather row at all. Still try the venue lookup so we
-        # can flag indoor tournament play (Paris Bercy, ATP Finals).
+        # No weather row — still flag indoor tournament play (Paris
+        # Bercy, ATP Finals) from venue_coords directly. Outdoor
+        # known venues get weather_indoor=0 with numerics NaN;
+        # unknown venues stay all-NaN.
         cur.execute(
             """
             SELECT vc.is_indoor
@@ -439,14 +458,17 @@ def fetch_weather(cur, match_id: str) -> dict:
             (match_id,),
         )
         venue_row = cur.fetchone()
-        if venue_row and venue_row.get("is_indoor"):
-            return {"weather_indoor": 1.0}
-        return {}
+        out = _empty_weather()
+        if venue_row and venue_row.get("is_indoor") is not None:
+            out["weather_indoor"] = 1.0 if venue_row.get("is_indoor") else 0.0
+        return out
 
+    out = _empty_weather()
     if row.get("is_indoor"):
-        return {"weather_indoor": 1.0}
+        out["weather_indoor"] = 1.0
+        return out
 
-    out: dict[str, float] = {"weather_indoor": 0.0}
+    out["weather_indoor"] = 0.0
     temp = row.get("temperature_c")
     wind = row.get("wind_kmh")
     precip = row.get("precipitation_mm")

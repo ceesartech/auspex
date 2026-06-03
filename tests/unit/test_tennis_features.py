@@ -226,10 +226,47 @@ class TestWeatherThresholds:
         assert not hasattr(ftennis, "FREEZING_TEMP_C")
 
 
+class TestCanonicalWeatherKeySet:
+    """v4b invariant — see test_nfl_features.TestCanonicalWeatherKeySet
+    docstring for the rationale. Tennis has its own canonical set
+    (TENNIS_WEATHER_KEYS) that differs from NFL's by omitting
+    weather_freezing and including weather_hot."""
+
+    def test_outdoor_with_weather_emits_all_keys(self):
+        cur = _FakeCursor(
+            [
+                {
+                    "temperature_c": 22.0,
+                    "wind_kmh": 8.0,
+                    "precipitation_mm": 0.0,
+                    "humidity_pct": 55.0,
+                    "is_indoor": False,
+                }
+            ]
+        )
+        out = ftennis.fetch_weather(cur, "match-1")
+        assert set(out.keys()) == set(ftennis.TENNIS_WEATHER_KEYS)
+
+    def test_indoor_emits_all_keys(self):
+        cur = _FakeCursor(
+            [{"temperature_c": 24.0, "wind_kmh": 0.0, "precipitation_mm": 0.0, "humidity_pct": 50.0, "is_indoor": True}]
+        )
+        out = ftennis.fetch_weather(cur, "match-1")
+        assert set(out.keys()) == set(ftennis.TENNIS_WEATHER_KEYS)
+
+    def test_no_weather_known_outdoor_venue_emits_all_keys(self):
+        cur = _FakeCursor([None, {"is_indoor": False}])
+        out = ftennis.fetch_weather(cur, "match-1")
+        assert set(out.keys()) == set(ftennis.TENNIS_WEATHER_KEYS)
+
+    def test_no_weather_unknown_venue_emits_all_keys(self):
+        cur = _FakeCursor([None, None])
+        out = ftennis.fetch_weather(cur, "match-1")
+        assert set(out.keys()) == set(ftennis.TENNIS_WEATHER_KEYS)
+
+
 class TestFetchWeatherOutdoor:
-    def test_mild_outdoor_match_emits_all_features(self):
-        # 22°C / 8 km/h wind / 0mm precip / 55% humidity — typical
-        # day match at a Slam. All numerics present, all flags 0.
+    def test_mild_outdoor_match_values_populated(self):
         cur = _FakeCursor(
             [
                 {
@@ -252,7 +289,6 @@ class TestFetchWeatherOutdoor:
         assert out["weather_hot"] == 0.0
 
     def test_hot_flag_fires_above_32_c(self):
-        # AO extreme-heat day.
         cur = _FakeCursor(
             [{"temperature_c": 35.0, "wind_kmh": 5.0, "precipitation_mm": 0.0, "humidity_pct": 30.0, "is_indoor": False}]
         )
@@ -260,7 +296,6 @@ class TestFetchWeatherOutdoor:
         assert out["weather_hot"] == 1.0
 
     def test_hot_flag_does_not_fire_at_32_c(self):
-        # Strict > threshold.
         cur = _FakeCursor(
             [{"temperature_c": 32.0, "wind_kmh": 5.0, "precipitation_mm": 0.0, "humidity_pct": 30.0, "is_indoor": False}]
         )
@@ -268,8 +303,8 @@ class TestFetchWeatherOutdoor:
         assert out["weather_hot"] == 0.0
 
     def test_emits_no_freezing_feature_key(self):
-        # Tennis omits freezing; NFL has it. Distinct invariants per
-        # sport.
+        # Tennis canonical set omits freezing; sport-specific schema
+        # divergence locked here.
         cur = _FakeCursor(
             [{"temperature_c": -3.0, "wind_kmh": 5.0, "precipitation_mm": 0.0, "humidity_pct": 70.0, "is_indoor": False}]
         )
@@ -278,39 +313,45 @@ class TestFetchWeatherOutdoor:
 
 
 class TestFetchWeatherIndoor:
-    def test_indoor_venue_emits_only_indoor_flag(self):
-        # Paris Bercy / ATP Finals / occasional rain-suspended roof.
+    def test_indoor_venue_numerics_are_none(self):
         cur = _FakeCursor(
             [{"temperature_c": 24.0, "wind_kmh": 0.0, "precipitation_mm": 0.0, "humidity_pct": 50.0, "is_indoor": True}]
         )
         out = ftennis.fetch_weather(cur, "match-1")
-        assert out == {"weather_indoor": 1.0}
+        assert out["weather_indoor"] == 1.0
+        assert out["weather_temp_c"] is None
+        assert out["weather_wind_kmh"] is None
+        assert out["weather_hot"] is None
 
-    def test_no_weather_row_but_indoor_venue(self):
+    def test_no_weather_indoor_venue(self):
         cur = _FakeCursor([None, {"is_indoor": True}])
         out = ftennis.fetch_weather(cur, "match-1")
-        assert out == {"weather_indoor": 1.0}
+        assert out["weather_indoor"] == 1.0
+        assert out["weather_temp_c"] is None
 
 
 class TestFetchWeatherMissing:
-    def test_no_weather_and_outdoor_venue_returns_empty_dict(self):
+    def test_no_weather_known_outdoor_venue(self):
         cur = _FakeCursor([None, {"is_indoor": False}])
-        assert ftennis.fetch_weather(cur, "match-1") == {}
+        out = ftennis.fetch_weather(cur, "match-1")
+        assert out["weather_indoor"] == 0.0
+        assert out["weather_temp_c"] is None
 
-    def test_no_weather_and_unknown_venue_returns_empty_dict(self):
+    def test_no_weather_unknown_venue(self):
         cur = _FakeCursor([None, None])
-        assert ftennis.fetch_weather(cur, "match-1") == {}
+        out = ftennis.fetch_weather(cur, "match-1")
+        assert out["weather_indoor"] is None
+        assert out["weather_temp_c"] is None
 
-    def test_partial_nulls_emit_only_present_subfeatures(self):
+    def test_partial_nulls_keep_absent_numerics_as_none(self):
         cur = _FakeCursor(
             [{"temperature_c": 33.0, "wind_kmh": None, "precipitation_mm": None, "humidity_pct": None, "is_indoor": False}]
         )
         out = ftennis.fetch_weather(cur, "match-1")
         assert out["weather_temp_c"] == 33.0
-        assert "weather_wind_kmh" not in out
-        assert "weather_precip_mm" not in out
-        assert "weather_humidity_pct" not in out
-        # Only the hot flag derives from temp; others stay absent.
         assert out["weather_hot"] == 1.0
-        assert "weather_high_wind" not in out
-        assert "weather_wet" not in out
+        assert out["weather_wind_kmh"] is None
+        assert out["weather_high_wind"] is None
+        assert out["weather_precip_mm"] is None
+        assert out["weather_wet"] is None
+        assert out["weather_humidity_pct"] is None

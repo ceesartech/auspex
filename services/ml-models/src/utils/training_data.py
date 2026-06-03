@@ -1209,20 +1209,23 @@ NFL_TOTAL_TARGET = "nfl_total"
 # exclude them (home_score <> away_score) so the model trains on a
 # clean 2-class target.
 #
-# Weather gate (applies to all NFL + tennis queries below): we require
-# EXISTS (match_weather mw WHERE mw.data_kind='actual') so the
-# corpus contains ONLY matches with real weather observations. The
-# previous integration attempt (commit 61d1d84, reverted at 17b3eb6)
-# trained on the full 955-match NFL corpus but only 61% had real
-# weather; the other 39% used NEUTRAL_DEFAULTS, which the GBDT
-# overfit as a "missing-data sentinel" predicting indoor/older games
-# rather than learning real weather effects. Walk-forward showed
-# NFL moneyline -7pts OOS. Gating the corpus to weather-present rows
-# (587 NFL / 1189 tennis) eliminates that leakage by construction —
-# the model never sees defaults during training, so it can't learn
-# them as signal. Soccer query stays ungated until the venue
-# geocoder lands (currently 0 actual-weather rows would make the
-# gate empty out the corpus).
+# Weather strategy (full Phase 14 history is worth understanding so
+# this doesn't get re-attempted naively):
+#   * v3 (commit 61d1d84) added weather features with NEUTRAL_DEFAULTS
+#     for missing rows → -7pts OOS on NFL ML. The GBDT overfit
+#     value=10.0 as a "missing-data sentinel." Reverted at 17b3eb6.
+#   * v4a (commits 5e699f5 + a72a3b4) added an EXISTS-gate requiring
+#     match_weather.data_kind='actual' + OMIT-on-missing in
+#     compute_features → -13pts vs v1. The gate cut the training
+#     corpus from ~620 to 363 pre-2024 rows, and inference broke
+#     on test matches lacking weather columns. Walk-forward result
+#     58.1% vs 71.3% v1 baseline.
+#   * v4b (current): drop the gate. Train on the full corpus.
+#     compute_features_*.fetch_weather now always emits the canonical
+#     weather key set with None (→ NaN) for missing values. GBDTs
+#     treat NaN as a "missing direction" in split learning — a
+#     distinct concept from any literal default value, so no
+#     leakage even though the corpus contains missing rows.
 NFL_MONEYLINE_TRAINING_QUERY = """
     SELECT
         m.id::text AS match_id,
@@ -1259,10 +1262,6 @@ NFL_MONEYLINE_TRAINING_QUERY = """
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
       AND m.home_score <> m.away_score
-      AND EXISTS (
-          SELECT 1 FROM match_weather mw
-          WHERE mw.match_id = m.id AND mw.data_kind = 'actual'
-      )
     ORDER BY m.match_date ASC
 """
 
@@ -1313,10 +1312,6 @@ NFL_SPREAD_TRAINING_QUERY = """
       AND m.status = 'finished'
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
-      AND EXISTS (
-          SELECT 1 FROM match_weather mw
-          WHERE mw.match_id = m.id AND mw.data_kind = 'actual'
-      )
     ORDER BY m.match_date ASC
 """
 
@@ -1364,10 +1359,6 @@ NFL_TOTAL_TRAINING_QUERY = """
       AND m.status = 'finished'
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
-      AND EXISTS (
-          SELECT 1 FROM match_weather mw
-          WHERE mw.match_id = m.id AND mw.data_kind = 'actual'
-      )
     ORDER BY m.match_date ASC
 """
 
@@ -1528,10 +1519,6 @@ TENNIS_MONEYLINE_TRAINING_QUERY = """
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
       AND m.home_score <> m.away_score
-      AND EXISTS (
-          SELECT 1 FROM match_weather mw
-          WHERE mw.match_id = m.id AND mw.data_kind = 'actual'
-      )
     ORDER BY m.match_date ASC
 """
 

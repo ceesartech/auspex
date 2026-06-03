@@ -68,18 +68,13 @@ class TestQueryScopedToTennis:
         # training.
         assert "m.home_score <> m.away_score" in TENNIS_MONEYLINE_TRAINING_QUERY
 
-    def test_query_gates_on_actual_weather(self):
-        # Tennis is an outdoor sport (except for a small share of
-        # indoor finals). Same default-bias risk as NFL: training on
-        # rows without real weather would push the model toward the
-        # neutral defaults instead of actual conditions. Gate the
-        # corpus to matches with match_weather.data_kind='actual' so
-        # the GBDT never sees a default during training. Drop the
-        # gate when every tracked tour-level match has a weather row.
-        assert "EXISTS" in TENNIS_MONEYLINE_TRAINING_QUERY
-        assert "match_weather" in TENNIS_MONEYLINE_TRAINING_QUERY
-        assert "mw.data_kind = 'actual'" in TENNIS_MONEYLINE_TRAINING_QUERY
-        assert "mw.match_id = m.id" in TENNIS_MONEYLINE_TRAINING_QUERY
+    def test_query_does_not_gate_on_match_weather(self):
+        # v4a gate retired — see TestNoWeatherGate docstring in
+        # test_nfl_training. Same justification applies to tennis:
+        # NaN-padded features at compute time mean the corpus stays
+        # at full size and inference shape always matches training.
+        assert "match_weather" not in TENNIS_MONEYLINE_TRAINING_QUERY
+        assert "data_kind" not in TENNIS_MONEYLINE_TRAINING_QUERY
 
 
 # ── Target derivation: pure pandas fallback ─────────────────────────

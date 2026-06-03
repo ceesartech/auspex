@@ -130,31 +130,30 @@ class TestLineAsFeatureFiltering:
         assert "total.line AS closing_total_line" in NFL_TOTAL_TRAINING_QUERY
 
 
-class TestWeatherGate:
-    """All three NFL queries must filter the corpus to matches with
-    real weather observations (match_weather.data_kind='actual'). The
-    previous integration trained on the full corpus where 39% of rows
-    used NEUTRAL_DEFAULTS for missing weather; the GBDT overfit those
-    defaults as a leakage sentinel (commit 17b3eb6). The gate makes
-    the leakage impossible by construction — the model never sees a
-    default value during training. Drop the gate only when EVERY
-    finished NFL match has actual weather; until then keep the
-    invariant locked in tests."""
+class TestNoWeatherGate:
+    """The v4a EXISTS-gate (commits 5e699f5 + a72a3b4) shrank the NFL
+    training corpus from ~620 to 363 pre-2024 rows and crashed
+    walk-forward accuracy to 58.1% (vs 71.3% v1 baseline). The v4b
+    design relies instead on compute_features always emitting the
+    canonical weather key set with NaN for missing values — GBDTs
+    treat NaN as a missing-direction signal, distinct from any
+    literal default. No gate needed; full corpus available.
+
+    Lock the no-gate invariant here so a future "let's just filter
+    out rows without weather" PR can't silently re-introduce the
+    v4a regression."""
 
     @pytest.mark.parametrize(
         "query",
         [NFL_MONEYLINE_TRAINING_QUERY, NFL_SPREAD_TRAINING_QUERY, NFL_TOTAL_TRAINING_QUERY],
     )
-    def test_query_gates_on_actual_weather(self, query):
-        # EXISTS subquery references match_weather.data_kind='actual'.
-        # We assert the substrings independently so the test still
-        # catches accidental loosening (e.g., dropping the data_kind
-        # filter would leave only forecast rows in training — same
-        # leakage risk as defaults).
-        assert "EXISTS" in query
-        assert "match_weather" in query
-        assert "mw.data_kind = 'actual'" in query
-        assert "mw.match_id = m.id" in query
+    def test_query_does_not_gate_on_match_weather(self, query):
+        # Neither the EXISTS shape nor a direct JOIN on match_weather
+        # should appear in the training query body. Inline comments
+        # in training_data.py reference "match_weather" historically,
+        # but the query string itself must stay weather-agnostic.
+        assert "match_weather" not in query
+        assert "data_kind" not in query
 
 
 # ── Target derivation: pure pandas fallback ─────────────────────────

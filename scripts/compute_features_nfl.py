@@ -362,27 +362,63 @@ HIGH_WIND_KMH = 25.0
 WET_PRECIP_MM = 5.0
 FREEZING_TEMP_C = 0.0
 
+# Canonical NFL weather feature key set — every match's feature dict
+# emits exactly these keys, with None for any unknown values. The
+# Phase-14 v4a EXISTS-gate retry shipped at 5e699f5 / a72a3b4 used
+# OMIT-on-missing, which caused two distinct downstream failures:
+#   1. Walk-forward inference errored on test matches without weather
+#      because their feature DataFrames lacked columns the trained
+#      model expected (XGB/LGBM treat absent columns as a hard error,
+#      not as missing values).
+#   2. The corpus shrinkage from gating to weather-present rows
+#      (587 of 955 NFL matches) crashed NFL ML accuracy to 58.1%,
+#      below v1 (71.3%) and even below v3 with default-bias (64.3%).
+# The fix here: emit every key, with Python None (→ pandas NaN) for
+# missing values. GBDTs handle NaN natively as "missing direction"
+# during split learning — semantically distinct from a literal 10.0
+# default value, so no leakage. Inference shape now matches training
+# shape unconditionally. Tracked: see `weather-features-attempted`
+# memory + the v4b walk-forward result.
+NFL_WEATHER_KEYS: tuple[str, ...] = (
+    "weather_indoor",
+    "weather_temp_c",
+    "weather_wind_kmh",
+    "weather_precip_mm",
+    "weather_humidity_pct",
+    "weather_high_wind",
+    "weather_wet",
+    "weather_freezing",
+)
+
+
+def _empty_weather() -> dict:
+    """Canonical weather dict shape, every key present, all values None.
+    Subroutines override specific keys when data lets them."""
+    return {k: None for k in NFL_WEATHER_KEYS}
+
 
 def fetch_weather(cur, match_id: str) -> dict:
-    """Pull the freshest weather snapshot for this match and project it
-    into a dict of weather_* features.
+    """Project the freshest weather snapshot for this match into a
+    dict of weather_* features.
 
-    Returns an EMPTY dict when no weather row exists and the venue
-    isn't known to be indoor — by design, weather features are then
-    omitted from the feature dict entirely (not defaulted), because
-    Phase 14's EXISTS-gate on the training query means the model is
-    only trained on rows with real weather. The reverted v3 attempt
-    (commit 17b3eb6) defaulted missing rows to NEUTRAL_DEFAULTS values,
-    which created a "value 10.0 = missing-data sentinel" pattern the
-    GBDT overfit. With OMIT-on-missing here, the model never sees a
-    fake value at training time, and at predict-time GBDTs route
-    missing features through their learned default branches —
-    no spurious signal.
+    Always returns a dict containing every key in NFL_WEATHER_KEYS.
+    Unknown values are None (which pandas reads as NaN); GBDTs handle
+    NaN as a "missing direction" in split learning, semantically
+    distinct from any literal value, so the v3 default-bias issue
+    (commit 61d1d84) cannot recur.
 
-    Indoor venues are special-cased: we emit only weather_indoor=1.0
-    (a hard ground-truth fact about the venue, not a fill-in for
-    missing data). Numeric weather features are omitted for indoor
-    matches because temperature/wind/precip don't apply.
+    Branches:
+      * Weather row + outdoor venue: numerics populated from
+        match_weather_latest; categorical flags derived from
+        thresholds; weather_indoor=0.0.
+      * Weather row + indoor venue (stale snapshot from before the
+        venue was flagged): venue authoritative, weather_indoor=1.0,
+        numerics left None.
+      * No weather row + venue known indoor: weather_indoor=1.0,
+        rest None.
+      * No weather row + venue known outdoor: weather_indoor=0.0,
+        rest None (we know it's outdoor but lack measurements).
+      * No weather row + unknown venue: every key None.
     """
     cur.execute(
         """
@@ -398,8 +434,11 @@ def fetch_weather(cur, match_id: str) -> dict:
     row = cur.fetchone()
 
     if not row:
-        # No weather row. Fall back to venue_coords lookup so we can
-        # still flag indoor games (a hard fact, not a default fill).
+        # No weather row. Check the venue_coords table directly so
+        # we can flag indoor games (a hard ground-truth fact) and
+        # also distinguish "outdoor-known-but-no-measurements" from
+        # "venue entirely unknown" — both populate weather_indoor
+        # with the right value, leaving numerics as NaN.
         cur.execute(
             """
             SELECT vc.is_indoor
@@ -411,14 +450,21 @@ def fetch_weather(cur, match_id: str) -> dict:
             (match_id,),
         )
         venue_row = cur.fetchone()
-        if venue_row and venue_row.get("is_indoor"):
-            return {"weather_indoor": 1.0}
-        return {}
+        out = _empty_weather()
+        if venue_row and venue_row.get("is_indoor") is not None:
+            out["weather_indoor"] = 1.0 if venue_row.get("is_indoor") else 0.0
+        return out
 
+    out = _empty_weather()
     if row.get("is_indoor"):
-        return {"weather_indoor": 1.0}
+        # Venue says indoor — authoritative even if a stale numeric
+        # snapshot exists. Indoor games have no meaningful temp/wind/
+        # precip, leave those NaN so the model can learn the indoor
+        # signal in isolation.
+        out["weather_indoor"] = 1.0
+        return out
 
-    out: dict[str, float] = {"weather_indoor": 0.0}
+    out["weather_indoor"] = 0.0
     temp = row.get("temperature_c")
     wind = row.get("wind_kmh")
     precip = row.get("precipitation_mm")

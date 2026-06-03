@@ -225,13 +225,65 @@ class TestWeatherThresholds:
         assert fnfl.FREEZING_TEMP_C == 0.0
 
 
-class TestFetchWeatherOutdoor:
-    """Outdoor venue with a weather row — emits all features incl.
-    categorical flags + indoor=0."""
+class TestCanonicalWeatherKeySet:
+    """Every fetch_weather return MUST contain every key in
+    NFL_WEATHER_KEYS. This is the v4b invariant that fixes the v4a
+    inference shape mismatch — train and predict DataFrames now have
+    identical columns regardless of weather data availability.
 
-    def test_mild_outdoor_match_emits_all_features(self):
+    Missing values are None (pandas reads as NaN); GBDTs handle NaN
+    as missing-direction in split learning, semantically distinct
+    from any literal default value, so the v3 default-bias problem
+    (commit 17b3eb6) cannot recur."""
+
+    def test_outdoor_with_weather_emits_all_keys(self):
+        cur = _FakeCursor(
+            [
+                {
+                    "temperature_c": 15.0,
+                    "wind_kmh": 12.0,
+                    "precipitation_mm": 0.0,
+                    "humidity_pct": 50.0,
+                    "is_indoor": False,
+                }
+            ]
+        )
+        out = fnfl.fetch_weather(cur, "match-1")
+        assert set(out.keys()) == set(fnfl.NFL_WEATHER_KEYS)
+
+    def test_indoor_with_weather_row_emits_all_keys(self):
+        cur = _FakeCursor(
+            [{"temperature_c": 22.0, "wind_kmh": 0.0, "precipitation_mm": 0.0, "humidity_pct": 40.0, "is_indoor": True}]
+        )
+        out = fnfl.fetch_weather(cur, "match-1")
+        assert set(out.keys()) == set(fnfl.NFL_WEATHER_KEYS)
+
+    def test_no_weather_known_indoor_venue_emits_all_keys(self):
+        cur = _FakeCursor([None, {"is_indoor": True}])
+        out = fnfl.fetch_weather(cur, "match-1")
+        assert set(out.keys()) == set(fnfl.NFL_WEATHER_KEYS)
+
+    def test_no_weather_outdoor_venue_emits_all_keys(self):
+        # v4a returned {} here; v4b emits every key so inference
+        # shape matches training shape unconditionally.
+        cur = _FakeCursor([None, {"is_indoor": False}])
+        out = fnfl.fetch_weather(cur, "match-1")
+        assert set(out.keys()) == set(fnfl.NFL_WEATHER_KEYS)
+
+    def test_no_weather_unknown_venue_emits_all_keys(self):
+        # Same v4a → v4b shape fix for the unknown-venue case.
+        cur = _FakeCursor([None, None])
+        out = fnfl.fetch_weather(cur, "match-1")
+        assert set(out.keys()) == set(fnfl.NFL_WEATHER_KEYS)
+
+
+class TestFetchWeatherOutdoor:
+    """Outdoor venue with a weather row — every numeric + flag has a
+    real value, weather_indoor=0."""
+
+    def test_mild_outdoor_match_values_populated(self):
         # 15°C / 12 km/h wind / 0mm precip / 50% humidity — fair fall
-        # game. All numerics present, all flags 0.
+        # game. All numerics populated, all flags 0.
         cur = _FakeCursor(
             [
                 {
@@ -293,55 +345,62 @@ class TestFetchWeatherOutdoor:
 
 
 class TestFetchWeatherIndoor:
-    """Indoor games — dome / closed roof. Numeric weather features
-    are omitted (don't apply); only weather_indoor=1.0 lands."""
+    """Indoor games — every key emitted, only weather_indoor=1.0
+    populated, all numerics + dependent flags stay None."""
 
-    def test_indoor_with_weather_row_emits_only_indoor_flag(self):
-        # The fetcher SHOULD skip indoor venues but a stale row from
-        # before is_indoor was flagged could exist. Treat the venue
-        # signal as authoritative — drop the stale numerics.
+    def test_indoor_with_weather_row_numerics_are_none(self):
+        # Stale snapshot from before is_indoor was flagged is dropped
+        # — venue signal is authoritative.
         cur = _FakeCursor(
             [{"temperature_c": 22.0, "wind_kmh": 0.0, "precipitation_mm": 0.0, "humidity_pct": 40.0, "is_indoor": True}]
         )
         out = fnfl.fetch_weather(cur, "match-1")
-        assert out == {"weather_indoor": 1.0}
+        assert out["weather_indoor"] == 1.0
+        assert out["weather_temp_c"] is None
+        assert out["weather_wind_kmh"] is None
+        assert out["weather_freezing"] is None
 
-    def test_indoor_venue_without_weather_row_emits_only_indoor_flag(self):
-        # First query (match_weather_latest) → None.
-        # Second query (venue_coords lookup) → is_indoor=True.
+    def test_no_weather_indoor_venue_numerics_are_none(self):
         cur = _FakeCursor([None, {"is_indoor": True}])
         out = fnfl.fetch_weather(cur, "match-1")
-        assert out == {"weather_indoor": 1.0}
+        assert out["weather_indoor"] == 1.0
+        assert out["weather_temp_c"] is None
 
 
 class TestFetchWeatherMissing:
-    """No weather row + venue isn't (or can't be) confirmed indoor:
-    OMIT all weather features — do NOT fall back to defaults. This
-    is the load-bearing invariant for no default-bias leakage."""
+    """No weather row, no actionable venue info: every numeric stays
+    None. weather_indoor reflects what we KNOW (0 for known-outdoor,
+    None for unknown-venue) — never invented."""
 
-    def test_no_weather_and_outdoor_venue_returns_empty_dict(self):
+    def test_no_weather_known_outdoor_venue(self):
+        # We know it's outdoor (venue seeded with is_indoor=false)
+        # but lack measurements — weather_indoor=0, numerics NaN.
         cur = _FakeCursor([None, {"is_indoor": False}])
-        assert fnfl.fetch_weather(cur, "match-1") == {}
+        out = fnfl.fetch_weather(cur, "match-1")
+        assert out["weather_indoor"] == 0.0
+        assert out["weather_temp_c"] is None
+        assert out["weather_wind_kmh"] is None
 
-    def test_no_weather_and_unknown_venue_returns_empty_dict(self):
-        # venue_coords lookup also returned nothing — match's venue
-        # text doesn't match any seeded row.
+    def test_no_weather_unknown_venue(self):
+        # We don't even know if it's indoor or outdoor — every key
+        # None including weather_indoor.
         cur = _FakeCursor([None, None])
-        assert fnfl.fetch_weather(cur, "match-1") == {}
+        out = fnfl.fetch_weather(cur, "match-1")
+        assert out["weather_indoor"] is None
+        assert out["weather_temp_c"] is None
 
-    def test_partial_nulls_emit_only_present_subfeatures(self):
-        # Open-Meteo can return temp but NULL precipitation in some
-        # archives. Each numeric is conditionally emitted, so the
-        # presence of one shouldn't force defaults for the others.
+    def test_partial_nulls_keep_absent_numerics_as_none(self):
+        # Open-Meteo can return temp but NULL precipitation. Present
+        # numerics populate; absent ones stay None; dependent flags
+        # stay None too (no flag without a numeric to derive from).
         cur = _FakeCursor(
             [{"temperature_c": 5.0, "wind_kmh": None, "precipitation_mm": None, "humidity_pct": None, "is_indoor": False}]
         )
         out = fnfl.fetch_weather(cur, "match-1")
         assert out["weather_temp_c"] == 5.0
-        assert "weather_wind_kmh" not in out
-        assert "weather_precip_mm" not in out
-        assert "weather_humidity_pct" not in out
-        # Flags only fire for the present numeric.
-        assert "weather_freezing" in out
-        assert "weather_high_wind" not in out
-        assert "weather_wet" not in out
+        assert out["weather_freezing"] == 0.0  # derived from temp
+        assert out["weather_wind_kmh"] is None
+        assert out["weather_high_wind"] is None
+        assert out["weather_precip_mm"] is None
+        assert out["weather_wet"] is None
+        assert out["weather_humidity_pct"] is None
