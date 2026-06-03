@@ -175,3 +175,109 @@ class TestCli:
     def test_days_parses_as_int(self):
         args = ghr.parse_args(["--days", "7", "--database-url", "x"])
         assert args.days == 7
+
+    def test_no_notify_flag_defaults_off(self):
+        # Default behaviour: enqueue alerts. The flag is opt-OUT so
+        # the DAG path (which doesn't pass --no-notify) keeps the
+        # Telegram digest fed.
+        args = ghr.parse_args(["--database-url", "x"])
+        assert args.no_notify is False
+
+    def test_no_notify_flag_parses(self):
+        args = ghr.parse_args(["--no-notify", "--database-url", "x"])
+        assert args.no_notify is True
+
+
+# ── Alert factory: shape + value-bet trigger ────────────────────────
+
+
+class TestHorseRacingAlert:
+    """horse_racing_alert is what bridges a value-bet rec row into
+    the shared Alert dataclass that send_pipeline_digest renders.
+    Because the dataclass was built for 2-team sports, the mapping
+    isn't 1:1 — these tests lock the specific shape choices so a
+    future refactor (e.g., adding a horse_name field to Alert) can
+    update the digest renderer in lockstep."""
+
+    def _alert(self, **overrides):
+        from datetime import datetime
+
+        kwargs = dict(
+            track_name="Newton Abbot",
+            race_date=datetime(2026, 6, 3, 15, 0),
+            race_number=3,
+            horse_name="Jena d'Oudairies",
+            odds_decimal=3.75,
+            bookmaker="Betfair Exchange",
+            confidence=0.31,
+            expected_value=0.16,
+            recommended_stake=14.0,
+        )
+        kwargs.update(overrides)
+        return ghr.horse_racing_alert(**kwargs)
+
+    def test_sport_is_horse_racing(self):
+        # Drives the 🐎 emoji in the digest. If this changes, also
+        # update _SPORT_EMOJI in telegram_notify.py.
+        assert self._alert().sport == "horse_racing"
+
+    def test_home_team_carries_horse_name(self):
+        # The {home_team} vs {away_team} render needs the horse name
+        # to land in home so the digest reads "Jena d'Oudairies vs Field".
+        assert self._alert().home_team == "Jena d'Oudairies"
+
+    def test_away_team_is_field(self):
+        # Consensus prob is derived across the field, so the contrast
+        # is horse-vs-field, not horse-vs-horse. Locked here so a
+        # future "away_team = next-best horse" tweak surfaces in CI.
+        assert self._alert().away_team == "Field"
+
+    def test_league_name_includes_track_and_race_number(self):
+        # The digest shows league_name as the secondary label, so
+        # the track + race number need to land there for the user to
+        # know WHICH race the pick is on.
+        a = self._alert()
+        assert "Newton Abbot" in a.league_name
+        assert "R3" in a.league_name
+
+    def test_league_name_omits_race_number_when_none(self):
+        a = self._alert(race_number=None)
+        assert a.league_name == "Newton Abbot"
+        assert "R" not in a.league_name
+
+    def test_market_label_is_win(self):
+        # Single market in v1 (the consensus baseline only predicts
+        # the win market). Place / show would need separate models.
+        assert self._alert().market_label == "Win"
+
+    def test_value_bet_fields_populated(self):
+        # The presence of expected_value flips
+        # telegram_notify._format_alert_line into value-bet mode.
+        # All four optional Alert fields land together — partial
+        # populations break the formatter.
+        a = self._alert()
+        assert a.expected_value == 0.16
+        assert a.odds_decimal == 3.75
+        assert a.recommended_stake == 14.0
+        assert a.bookmaker == "Betfair Exchange"
+
+    def test_confidence_carries_consensus_prob(self):
+        # `confidence` is the consensus win prob, used by the
+        # formatter to render "model NN%" alongside the odds.
+        assert self._alert(confidence=0.42).confidence == 0.42
+
+    def test_probabilities_dict_has_win_entry(self):
+        # Even though horse racing has no second outcome, the Alert
+        # dataclass expects a dict; emit a single 'win' entry so any
+        # downstream that iterates probabilities (e.g. logging) gets
+        # something sensible.
+        a = self._alert(confidence=0.31)
+        assert a.probabilities == {"win": 0.31}
+
+    def test_floats_coerced_from_ints(self):
+        # Defensive: callers passing int (or numpy float) should
+        # still produce a clean Alert with Python floats.
+        a = self._alert(odds_decimal=4, recommended_stake=20, confidence=1)
+        assert a.odds_decimal == 4.0
+        assert a.recommended_stake == 20.0
+        assert a.confidence == 1.0

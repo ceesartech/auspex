@@ -78,6 +78,11 @@ class Alert:
 _SPORT_EMOJI: Dict[str, str] = {
     "soccer": "⚽",
     "nhl": "🏒",
+    "nba": "🏀",
+    "nfl": "🏈",
+    "tennis": "🎾",
+    "mma": "🥊",
+    "horse_racing": "🐎",
 }
 
 

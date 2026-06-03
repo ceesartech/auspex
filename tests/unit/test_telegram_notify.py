@@ -62,6 +62,45 @@ class TestRenderDigest:
         assert "Canadiens vs Rangers" in out
         assert "Puck Line" in out
 
+    def test_each_sport_has_emoji_entry(self):
+        # Every sport the system queues picks for must have an emoji
+        # in _SPORT_EMOJI — otherwise the digest line falls back to
+        # the • placeholder, which looks broken next to sibling sports.
+        # If you add a new sport's recs script and don't update the
+        # emoji map, this test catches it.
+        for sport in ("soccer", "nhl", "nba", "nfl", "tennis", "mma", "horse_racing"):
+            assert sport in tn._SPORT_EMOJI, f"_SPORT_EMOJI missing {sport!r}"
+            assert tn._SPORT_EMOJI[sport], f"_SPORT_EMOJI[{sport!r}] is empty"
+
+    def test_horse_racing_emoji_renders(self):
+        # Horse racing value-bet alert: home_team=horse, away_team='Field',
+        # league_name=track. The 🐎 emoji must appear in the rendered
+        # output and the horse vs Field framing must survive into HTML.
+        rec = tn.Alert(
+            sport="horse_racing",
+            league_name="Newton Abbot R3",
+            home_team="Jena d'Oudairies",
+            away_team="Field",
+            match_date=datetime(2026, 6, 3, 15, 0),
+            market_label="Win",
+            predicted_outcome="Jena d'Oudairies",
+            confidence=0.31,
+            probabilities={"win": 0.31},
+            odds_decimal=3.75,
+            expected_value=0.16,
+            recommended_stake=14.0,
+            bookmaker="Betfair Exchange",
+        )
+        out = tn.render_digest([rec])
+        assert "🐎" in out
+        assert "Jena d'Oudairies vs Field" in out
+        assert "Newton Abbot R3" in out
+        assert "Win" in out
+        # Value-bet mode triggers because expected_value is set.
+        assert "EV +16%" in out
+        assert "@ 3.75" in out
+        assert "Betfair Exchange" in out
+
     def test_default_header_uses_count(self):
         out = tn.render_digest([_alert(), _alert()])
         # Header includes the count so the user sees at-a-glance how

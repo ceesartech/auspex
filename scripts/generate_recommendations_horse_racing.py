@@ -61,6 +61,7 @@ from generate_recommendations import (  # noqa: E402
     get_bankroll,
     kelly_fraction,
 )
+from telegram_notify import Alert, enqueue_alerts  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("generate_recommendations_horse_racing")
@@ -105,23 +106,28 @@ def best_decimal(bookmaker_odds: list[dict]) -> Optional[dict]:
 # ── DB I/O ─────────────────────────────────────────────────────────
 
 
-def list_upcoming_races(cur, days: int) -> list[str]:
+def list_upcoming_races(cur, days: int) -> list[dict]:
     """Scheduled races in the next N days that have at least one
-    market_consensus_v1 prediction. Skip races without predictions
-    so we don't waste cycles."""
+    market_consensus_v1 prediction. Returns the race_id alongside
+    the track + race_date the Telegram alert needs to identify the
+    race — skips races without predictions so we don't waste cycles."""
     cur.execute(
         """
-        SELECT DISTINCT r.id::text AS race_id
+        SELECT DISTINCT
+            r.id::text   AS race_id,
+            r.track_name,
+            r.race_date,
+            r.race_number
         FROM races r
         JOIN race_predictions rp ON rp.race_id = r.id
         WHERE r.status = 'scheduled'
           AND r.race_date BETWEEN NOW() AND NOW() + (%s || ' days')::interval
           AND rp.model_name = %s
-        ORDER BY r.id::text
+        ORDER BY r.race_date ASC, r.id::text
         """,
         (str(days), MODEL_NAME),
     )
-    return [r["race_id"] for r in cur.fetchall()]
+    return list(cur.fetchall())
 
 
 def load_race_candidates(cur, race_id: str) -> list[dict]:
@@ -199,22 +205,73 @@ def _risk_factors(prob: float, odds_decimal: float, field_size: int) -> list[str
     return risks
 
 
+# ── Alert factory ───────────────────────────────────────────────────
+
+
+def horse_racing_alert(
+    *,
+    track_name: str,
+    race_date,
+    race_number: Optional[int],
+    horse_name: str,
+    odds_decimal: float,
+    bookmaker: Optional[str],
+    confidence: float,
+    expected_value: float,
+    recommended_stake: float,
+) -> Alert:
+    """Translate a horse racing value bet into the shared Alert shape.
+    The Alert dataclass was designed for 2-team / 1v1 sports, so the
+    fit isn't 1:1:
+      * `home_team` carries the horse name (the actual selection).
+      * `away_team` is "Field" — the consensus implied prob is
+        derived ACROSS the field, so the contrast is horse-vs-field
+        not horse-vs-horse.
+      * `league_name` carries the track name (Newton Abbot, Curragh,
+        ...) plus race number when known.
+      * Setting `expected_value` flips the digest formatter into
+        value-bet mode (odds + EV + stake instead of probability
+        breakdown). See telegram_notify._format_alert_line."""
+    race_label = f"{track_name}"
+    if race_number is not None:
+        race_label += f" R{race_number}"
+    return Alert(
+        sport="horse_racing",
+        league_name=race_label,
+        home_team=horse_name,
+        away_team="Field",
+        match_date=race_date,
+        market_label="Win",
+        predicted_outcome=horse_name,
+        confidence=float(confidence),
+        probabilities={"win": float(confidence)},
+        odds_decimal=float(odds_decimal),
+        expected_value=float(expected_value),
+        recommended_stake=float(recommended_stake),
+        bookmaker=bookmaker,
+    )
+
+
 # ── Recommendation orchestration ────────────────────────────────────
 
 
 def recommend_for_race(
     cur,
-    race_id: str,
+    race: dict,
     bankroll: float,
     ev_threshold: float,
     prob_floor: float,
-) -> int:
+) -> list[Alert]:
+    """Generate (and DB-insert) value-bet recs for one race; return
+    the matching Alert objects ready for Redis. Returns [] when the
+    race has no qualifying picks."""
+    race_id = race["race_id"]
     candidates = load_race_candidates(cur, race_id)
     if not candidates:
-        return 0
+        return []
     delete_pending(cur, race_id)
     field_size = len(candidates)
-    inserted = 0
+    alerts: list[Alert] = []
 
     for cand in candidates:
         prob = float(cand["confidence"])
@@ -236,7 +293,7 @@ def recommend_for_race(
         if ev < ev_threshold:
             continue
         k = kelly_fraction(prob, odds_decimal)
-        stake = bankroll * k * KELLY_FRACTION
+        stake = round(bankroll * k * KELLY_FRACTION, 2)
 
         reasoning = (
             f"Win: {cand['horse_name']} — consensus {prob:.0%}, "
@@ -254,18 +311,37 @@ def recommend_for_race(
             "conf": confidence_rating(ev, prob),
             "ev": ev,
             "kelly_stake": k,
-            "rec_stake": round(stake, 2),
+            "rec_stake": stake,
             "reasoning": reasoning,
             "risk": json.dumps(_risk_factors(prob, odds_decimal, field_size)),
         }
         insert_recommendation(cur, rec)
-        inserted += 1
+        alerts.append(
+            horse_racing_alert(
+                track_name=race["track_name"],
+                race_date=race["race_date"],
+                race_number=race.get("race_number"),
+                horse_name=cand["horse_name"],
+                odds_decimal=odds_decimal,
+                bookmaker=best["bookmaker"],
+                confidence=prob,
+                expected_value=ev,
+                recommended_stake=stake,
+            )
+        )
 
-    return inserted
+    return alerts
 
 
-def run(database_url: str, days: int, ev_threshold: float, prob_floor: float) -> dict:
-    counts = {"races_processed": 0, "recommendations": 0}
+def run(
+    database_url: str,
+    days: int,
+    ev_threshold: float,
+    prob_floor: float,
+    notify: bool,
+) -> dict:
+    counts = {"races_processed": 0, "recommendations": 0, "alerts_queued": 0, "queue_depth": 0}
+    all_alerts: list[Alert] = []
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             bankroll = get_bankroll(cur)
@@ -275,15 +351,23 @@ def run(database_url: str, days: int, ev_threshold: float, prob_floor: float) ->
                 logger.info("No upcoming races with predictions in next %d days", days)
                 return counts
             logger.info("Generating horse racing recommendations for %d races", len(races))
-            for race_id in races:
-                inserted = recommend_for_race(cur, race_id, bankroll, ev_threshold, prob_floor)
+            for race in races:
+                alerts = recommend_for_race(cur, race, bankroll, ev_threshold, prob_floor)
                 counts["races_processed"] += 1
-                counts["recommendations"] += inserted
+                counts["recommendations"] += len(alerts)
+                all_alerts.extend(alerts)
             conn.commit()
+
+    queue_depth = enqueue_alerts(all_alerts) if (notify and all_alerts) else 0
+    counts["alerts_queued"] = len(all_alerts) if notify else 0
+    counts["queue_depth"] = queue_depth
     logger.info(
-        "Wrote %d horse racing value-bet recommendations across %d races",
+        "Wrote %d horse racing value-bet recommendations across %d races; "
+        "queued %d alerts (queue depth now %d)",
         counts["recommendations"],
         counts["races_processed"],
+        counts["alerts_queued"],
+        queue_depth,
     )
     return counts
 
@@ -303,6 +387,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=0.10,
         help="Minimum consensus probability (default 0.10).",
     )
+    p.add_argument(
+        "--no-notify",
+        action="store_true",
+        help="Skip the Telegram-queue enqueue (DB writes still happen).",
+    )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
 
@@ -312,7 +401,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not args.database_url:
         logger.error("DATABASE_URL not set")
         return 2
-    run(args.database_url, args.days, args.ev_threshold, args.prob_floor)
+    run(args.database_url, args.days, args.ev_threshold, args.prob_floor, not args.no_notify)
     return 0
 
 
