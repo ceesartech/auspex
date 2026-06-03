@@ -1457,6 +1457,121 @@ def get_nfl_total_feature_columns(frame: pd.DataFrame, target: str = NFL_TOTAL_T
     return [column for column in numeric if column not in excluded]
 
 
+# ── Tennis (Phase 11) ─────────────────────────────────────────────────
+# Tennis is the first 1v1 sport. Single market in v1: moneyline (match
+# winner). Total games + set-betting need linescore parsing — defer
+# to v2. Ties don't exist in tennis (a match always produces a winner),
+# so the WHERE clause doesn't need a tie-exclusion filter like NFL.
+
+TENNIS_MONEYLINE_TARGET = "tennis_moneyline"
+
+TENNIS_MONEYLINE_TRAINING_QUERY = """
+    SELECT
+        m.id::text AS match_id,
+        m.match_date,
+        m.season,
+        m.league_id::text AS league_id,
+        m.home_team_id::text AS home_team_id,
+        m.away_team_id::text AS away_team_id,
+        ht.name AS home_team,
+        at.name AS away_team,
+        m.home_score,
+        m.away_score,
+        CASE WHEN m.home_score > m.away_score THEN 0 ELSE 1 END AS tennis_moneyline,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'moneyline'
+              AND o.selection = 'home' AND NOT o.is_live) AS odds_home_ml,
+        (SELECT AVG(o.odds_decimal) FROM odds o
+            WHERE o.match_id = m.id AND o.market_type = 'moneyline'
+              AND o.selection = 'away' AND NOT o.is_live) AS odds_away_ml,
+        fc.features
+    FROM matches m
+    JOIN leagues l ON l.id = m.league_id
+    JOIN teams ht ON m.home_team_id = ht.id
+    JOIN teams at ON m.away_team_id = at.id
+    LEFT JOIN LATERAL (
+        SELECT features
+        FROM features_cache
+        WHERE match_id = m.id AND feature_set = 'tennis_baseline'
+        ORDER BY computed_at DESC
+        LIMIT 1
+    ) fc ON true
+    WHERE l.sport = 'tennis'
+      AND m.status = 'finished'
+      AND m.home_score IS NOT NULL
+      AND m.away_score IS NOT NULL
+      AND m.home_score <> m.away_score
+    ORDER BY m.match_date ASC
+"""
+
+TENNIS_MONEYLINE_NON_FEATURE_COLUMNS = {
+    "match_id",
+    "match_date",
+    "season",
+    "league_id",
+    "home_team_id",
+    "away_team_id",
+    "home_team",
+    "away_team",
+    "home_score",
+    "away_score",
+    TENNIS_MONEYLINE_TARGET,
+    "features",
+}
+
+
+def _flatten_tennis_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    """Flatten features_cache JSON + parse match_date. Mirror of the
+    NFL equivalent — compute_features_tennis.py already produced the
+    canonical pre-match values predict-time will use."""
+    if raw.empty:
+        return raw.copy()
+    frame = raw.copy()
+    if "features" in frame.columns:
+        feature_rows = [_flatten_features(value) for value in frame["features"]]
+        flattened = pd.DataFrame(feature_rows, index=frame.index)
+        frame = pd.concat([frame.drop(columns=["features"]), flattened], axis=1)
+    if "match_date" in frame.columns:
+        frame["match_date"] = pd.to_datetime(frame["match_date"], errors="coerce")
+    return frame
+
+
+def _load_tennis(
+    query: str, prepare, database_url: Optional[str] = None, input_csv: Optional[str] = None
+) -> pd.DataFrame:
+    if input_csv:
+        raw = pd.read_csv(input_csv)
+    elif database_url:
+        from sqlalchemy import create_engine
+
+        engine = create_engine(database_url)
+        try:
+            raw = pd.read_sql(query, engine)
+        finally:
+            engine.dispose()
+    else:
+        raise ValueError("Provide input_csv or database_url")
+    return prepare(raw)
+
+
+def prepare_tennis_moneyline_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    frame = _flatten_tennis_frame(raw)
+    if TENNIS_MONEYLINE_TARGET not in frame.columns and {"home_score", "away_score"}.issubset(frame.columns):
+        frame[TENNIS_MONEYLINE_TARGET] = np.where(frame["home_score"] > frame["away_score"], 0, 1)
+    return frame
+
+
+def load_tennis_moneyline_frame(*, database_url: Optional[str] = None, input_csv: Optional[str] = None) -> pd.DataFrame:
+    return _load_tennis(TENNIS_MONEYLINE_TRAINING_QUERY, prepare_tennis_moneyline_frame, database_url, input_csv)
+
+
+def get_tennis_moneyline_feature_columns(frame: pd.DataFrame, target: str = TENNIS_MONEYLINE_TARGET) -> List[str]:
+    excluded = set(TENNIS_MONEYLINE_NON_FEATURE_COLUMNS)
+    excluded.add(target)
+    numeric = frame.select_dtypes(include=[np.number, bool]).columns.tolist()
+    return [column for column in numeric if column not in excluded]
+
+
 def _flatten_features(value: Any, prefix: str = "feature") -> Dict[str, float]:
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return {}

@@ -29,6 +29,7 @@ from predictors.model_config import (
     ENSEMBLE_NHL_PUCK_LINE,
     ENSEMBLE_NHL_REGULATION,
     ENSEMBLE_NHL_TOTAL,
+    ENSEMBLE_TENNIS_MONEYLINE,
     HOCKEY_POISSON_NHL_MONEYLINE,
     HOCKEY_POISSON_NHL_PUCK_LINE,
     HOCKEY_POISSON_NHL_REGULATION,
@@ -44,6 +45,7 @@ from predictors.model_config import (
     LIGHTGBM_NHL_PUCK_LINE,
     LIGHTGBM_NHL_REGULATION,
     LIGHTGBM_NHL_TOTAL,
+    LIGHTGBM_TENNIS_MONEYLINE,
     NEURAL_NETWORK_CONFIG,
     NEURAL_NETWORK_NBA_MONEYLINE,
     NEURAL_NETWORK_NBA_SPREAD,
@@ -55,6 +57,7 @@ from predictors.model_config import (
     NEURAL_NETWORK_NHL_PUCK_LINE,
     NEURAL_NETWORK_NHL_REGULATION,
     NEURAL_NETWORK_NHL_TOTAL,
+    NEURAL_NETWORK_TENNIS_MONEYLINE,
     POISSON_CONFIG,
     XGBOOST_MATCH_OUTCOME,
     XGBOOST_NBA_MONEYLINE,
@@ -67,6 +70,7 @@ from predictors.model_config import (
     XGBOOST_NHL_PUCK_LINE,
     XGBOOST_NHL_REGULATION,
     XGBOOST_NHL_TOTAL,
+    XGBOOST_TENNIS_MONEYLINE,
     ModelConfig,
 )
 from predictors.model_registry import ModelRegistry
@@ -86,6 +90,7 @@ from utils.training_data import (
     NHL_REGULATION_TARGET,
     NHL_TOTAL_TARGET,
     TARGET_COLUMN,
+    TENNIS_MONEYLINE_TARGET,
     get_feature_columns,
     get_nba_moneyline_feature_columns,
     get_nba_spread_feature_columns,
@@ -97,6 +102,7 @@ from utils.training_data import (
     get_nhl_puck_line_feature_columns,
     get_nhl_regulation_feature_columns,
     get_nhl_total_feature_columns,
+    get_tennis_moneyline_feature_columns,
     load_nba_moneyline_frame,
     load_nba_spread_frame,
     load_nba_total_frame,
@@ -107,6 +113,7 @@ from utils.training_data import (
     load_nhl_puck_line_frame,
     load_nhl_regulation_frame,
     load_nhl_total_frame,
+    load_tennis_moneyline_frame,
     load_training_frame,
     validate_training_frame,
 )
@@ -381,6 +388,25 @@ NFL_TOTAL_BUNDLE = SportBundle(
 )
 
 
+# Tennis bundles — first 1v1 sport. One market in v1 (moneyline);
+# total games + set-betting come in v2 once we parse linescores.
+# Reuses NBA hyperparameter shape since the tennis training corpus
+# (~12-15k ATP+WTA matches across 3 seasons) is comparable to NBA.
+TENNIS_MONEYLINE_BUNDLE = SportBundle(
+    sport="tennis_moneyline",
+    target_column=TENNIS_MONEYLINE_TARGET,
+    load_frame=load_tennis_moneyline_frame,
+    feature_columns=get_tennis_moneyline_feature_columns,
+    base_models=[
+        ModelSpec("xgboost_tennis_ml", XGBoostMatchPredictor, XGBOOST_TENNIS_MONEYLINE),
+        ModelSpec("lightgbm_tennis_ml", LightGBMMatchPredictor, LIGHTGBM_TENNIS_MONEYLINE),
+        ModelSpec("neural_network_tennis_ml", NeuralNetworkMatchPredictor, NEURAL_NETWORK_TENNIS_MONEYLINE),
+    ],
+    ensemble_config=ENSEMBLE_TENNIS_MONEYLINE,
+    ensemble_name="ensemble_tennis_ml",
+)
+
+
 # --sport value → SportBundle. Every key follows the
 # <sport>_<market> convention.
 SPORT_BUNDLES: Dict[str, SportBundle] = {
@@ -395,6 +421,7 @@ SPORT_BUNDLES: Dict[str, SportBundle] = {
     "nfl_moneyline": NFL_MONEYLINE_BUNDLE,
     "nfl_spread": NFL_SPREAD_BUNDLE,
     "nfl_total": NFL_TOTAL_BUNDLE,
+    "tennis_moneyline": TENNIS_MONEYLINE_BUNDLE,
 }
 
 

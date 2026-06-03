@@ -76,6 +76,14 @@ SPORT_BUNDLE_GROUPS: dict[str, list[str]] = {
     # come from scripts/compute_features_nfl.py (feature_set =
     # nfl_baseline).
     "nfl": ["nfl_moneyline", "nfl_spread", "nfl_total"],
+    # Tennis: first 1v1 sport. One market in v1 (moneyline). ATP +
+    # WTA combined gives a ~12-15k training corpus across 3 seasons,
+    # so the bundle reuses NBA hyperparameter shape (no NFL-style
+    # shallowing). Features come from
+    # scripts/compute_features_tennis.py (feature_set =
+    # tennis_baseline). Total games + set-betting are v2 — they
+    # need linescore parsing which the ESPN backfill doesn't carry.
+    "tennis": ["tennis_moneyline"],
 }
 
 default_args = {

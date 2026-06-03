@@ -43,6 +43,11 @@ class PredictionTask(Enum):
     NFL_MONEYLINE = "nfl_moneyline"  # 2-class: home/away (non-tie games)
     NFL_SPREAD = "nfl_spread"  # 2-class: home covers closing line / not
     NFL_TOTAL = "nfl_total"  # 2-class: over closing line / under
+    # Tennis tasks. First 1v1 sport — no draw possible (matches always
+    # produce a winner), so moneyline is cleanly 2-class without a
+    # tie-exclusion filter. Total games + set-betting are v2 (need
+    # linescore parsing).
+    TENNIS_MONEYLINE = "tennis_moneyline"  # 2-class: player1 / player2
 
 
 @dataclass
@@ -969,3 +974,24 @@ XGBOOST_NFL_TOTAL = _nfl_xgb_config("xgboost_nfl_tot", PredictionTask.NFL_TOTAL,
 LIGHTGBM_NFL_TOTAL = _nfl_lgb_config("lightgbm_nfl_tot", PredictionTask.NFL_TOTAL, "nfl_total")
 NEURAL_NETWORK_NFL_TOTAL = _nfl_nn_config("neural_network_nfl_tot", PredictionTask.NFL_TOTAL, "nfl_total")
 ENSEMBLE_NFL_TOTAL = _nba_ensemble_config("ensemble_nfl_tot", PredictionTask.NFL_TOTAL, "nfl_total")
+
+
+# ─────────────────────── TENNIS MODEL CONFIGS ────────────────────────
+#
+# One market (moneyline), three base models (XGBoost, LightGBM, NN)
+# + ensemble = 4 configs total. Tennis training corpus is ~12-15k
+# matches across 3 seasons (ATP + WTA combined) — comparable to NBA
+# and much larger than NFL, so we reuse the NBA hyperparameter shape
+# without the NFL-style shallowing.
+#
+# No Poisson / Dixon-Coles — tennis scoring is set-level (binary
+# game outcomes) with no Poisson assumption that helps.
+
+XGBOOST_TENNIS_MONEYLINE = _nba_xgb_config("xgboost_tennis_ml", PredictionTask.TENNIS_MONEYLINE, "tennis_moneyline")
+LIGHTGBM_TENNIS_MONEYLINE = _nba_lgb_config("lightgbm_tennis_ml", PredictionTask.TENNIS_MONEYLINE, "tennis_moneyline")
+NEURAL_NETWORK_TENNIS_MONEYLINE = _nba_nn_config(
+    "neural_network_tennis_ml", PredictionTask.TENNIS_MONEYLINE, "tennis_moneyline"
+)
+ENSEMBLE_TENNIS_MONEYLINE = _nba_ensemble_config(
+    "ensemble_tennis_ml", PredictionTask.TENNIS_MONEYLINE, "tennis_moneyline"
+)
