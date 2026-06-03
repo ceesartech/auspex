@@ -215,7 +215,7 @@ def fetch_closing_odds(cur, match_id: str) -> dict:
                market_type, selection, line, odds_decimal
         FROM odds
         WHERE match_id = %s AND is_live = false
-          AND market_type IN ('moneyline',)
+          AND market_type = 'moneyline'
         ORDER BY market_type, selection, timestamp DESC NULLS LAST
         """,
         (match_id,),
