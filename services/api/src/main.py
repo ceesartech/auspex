@@ -15,7 +15,7 @@ from middleware.rate_limiter import RateLimitMiddleware
 from prometheus_client import make_asgi_app
 from routes import accuracy, lottery, matches
 from routes import models as model_routes
-from routes import odds, predictions, recommendations, user, websocket
+from routes import odds, predictions, races, recommendations, user, websocket
 
 # Configure logging
 logging.basicConfig(
@@ -76,6 +76,7 @@ app.middleware("http")(metrics_middleware)
 app.include_router(predictions.router, prefix="/api/v1/predictions", tags=["Predictions"])
 app.include_router(recommendations.router, prefix="/api/v1/recommendations", tags=["Recommendations"])
 app.include_router(matches.router, prefix="/api/v1/matches", tags=["Matches"])
+app.include_router(races.router, prefix="/api/v1/races", tags=["Horse Racing"])
 app.include_router(odds.router, prefix="/api/v1/odds", tags=["Odds"])
 app.include_router(user.router, prefix="/api/v1/user", tags=["User"])
 app.include_router(model_routes.router, prefix="/api/v1/models", tags=["Models"])

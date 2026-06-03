@@ -14,6 +14,7 @@ const navItems = [
   { href: '/', label: 'Dashboard' },
   { href: '/predictions', label: 'Predictions' },
   { href: '/recommendations', label: 'Recommendations' },
+  { href: '/races', label: 'Race cards' },
   { href: '/accumulator', label: 'Accumulator' },
   { href: '/analytics', label: 'Analytics' },
 ];

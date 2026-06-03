@@ -10,6 +10,7 @@ import {
   BarChart3,
   Settings,
   Ticket,
+  Award,
 } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
 
@@ -17,6 +18,10 @@ const sidebarItems = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/predictions', label: 'Predictions', icon: TrendingUp },
   { href: '/recommendations', label: 'Recommendations', icon: Star },
+  // Horse racing uses its own schema (migration 013) — separate
+  // page rather than shoehorning multi-runner shapes into the
+  // matches-based predictions/recommendations pages.
+  { href: '/races', label: 'Race cards', icon: Award },
   { href: '/accumulator', label: 'Accumulator', icon: Layers },
   { href: '/analytics', label: 'Analytics', icon: BarChart3 },
   { href: '/lottery', label: 'Lottery', icon: Ticket },
