@@ -165,3 +165,181 @@ class TestCli:
     def test_match_ids_parses(self):
         args = fnfl.parse_args(["--match-ids", "a,b,c", "--database-url", "x"])
         assert args.match_ids == "a,b,c"
+
+
+# ── Cross-book TOTAL features ──────────────────────────────────────
+#
+# Landed 2026-06-03 after scripts/ab_nfl_cross_book.py verdict
+# (ΔBrier -0.0110, ΔECE -0.0189 on 2024-2025 walk-forward).
+# SPREAD was tested in the same A/B and DROPPED — these tests
+# guard the total-only landing.
+
+
+class _FakeCursor:
+    """Minimal fake cursor for fetch_total_crossbook. The function
+    runs one query whose rows have shape {bookmaker, p_line, p_odds,
+    c_odds}. Tests seed `rows` and assert on the function's return."""
+
+    def __init__(self, rows):
+        self._rows = list(rows)
+        self.execute_calls = []
+
+    def execute(self, sql, params=None):
+        self.execute_calls.append((sql, params))
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class TestFetchTotalCrossbookEmpty:
+    def test_no_rows_returns_empty_dict(self):
+        # Missing market or unrecorded game → empty dict. The defaults
+        # path in compute_for_match handles the actual feature values.
+        cur = _FakeCursor([])
+        out = fnfl.fetch_total_crossbook(cur, "match-1")
+        assert out == {}
+
+
+class TestFetchTotalCrossbookSingleBook:
+    def test_single_book_zero_disagreement(self):
+        # One book → max-min = 0, std = 0, consensus_mean = the only
+        # line, book_count = 1.
+        cur = _FakeCursor([
+            {"bookmaker": "DraftKings", "p_line": 47.5,
+             "p_odds": 1.91, "c_odds": 1.91},
+        ])
+        out = fnfl.fetch_total_crossbook(cur, "match-1")
+        assert out["total_book_count"] == 1.0
+        assert out["total_consensus_mean"] == 47.5
+        assert out["total_max_minus_min"] == 0.0
+        assert out["total_std"] == 0.0
+        # Devigged over prob with symmetric -110/-110: 0.5.
+        assert abs(out["total_consensus_implied_prob"] - 0.5) < 1e-9
+
+
+class TestFetchTotalCrossbookMultiBook:
+    def test_book_count_and_consensus_mean(self):
+        rows = [
+            {"bookmaker": "DraftKings", "p_line": 47.5,
+             "p_odds": 1.91, "c_odds": 1.91},
+            {"bookmaker": "FanDuel", "p_line": 48.0,
+             "p_odds": 1.91, "c_odds": 1.91},
+            {"bookmaker": "BetMGM", "p_line": 47.0,
+             "p_odds": 1.91, "c_odds": 1.91},
+        ]
+        cur = _FakeCursor(rows)
+        out = fnfl.fetch_total_crossbook(cur, "match-1")
+        assert out["total_book_count"] == 3.0
+        # Mean of 47.5, 48.0, 47.0 = 47.5.
+        assert abs(out["total_consensus_mean"] - 47.5) < 1e-9
+        assert out["total_max_minus_min"] == 1.0
+
+    def test_population_std_matches_ab_harness(self):
+        # ddof=0 (population std) to match the A/B script's
+        # np.std(..., ddof=0) — this is load-bearing for the
+        # validated metrics to translate to production.
+        rows = [
+            {"bookmaker": "DK", "p_line": 47.0, "p_odds": 2.0, "c_odds": 2.0},
+            {"bookmaker": "FD", "p_line": 48.0, "p_odds": 2.0, "c_odds": 2.0},
+            {"bookmaker": "MGM", "p_line": 49.0, "p_odds": 2.0, "c_odds": 2.0},
+        ]
+        cur = _FakeCursor(rows)
+        out = fnfl.fetch_total_crossbook(cur, "match-1")
+        # mean=48, sq diffs = 1+0+1 = 2, ddof=0 var=2/3, std≈0.8165.
+        assert abs(out["total_std"] - 0.81649658) < 1e-6
+
+    def test_devigged_consensus_prob_handles_asymmetric_odds(self):
+        # Over -120 / Under -100 → over implied 0.5455 / 0.5000 raw,
+        # devigged ≈ 0.522. Two books at the same prices.
+        rows = [
+            {"bookmaker": "DK", "p_line": 47.5,
+             "p_odds": 1.833, "c_odds": 2.0},
+            {"bookmaker": "FD", "p_line": 47.5,
+             "p_odds": 1.833, "c_odds": 2.0},
+        ]
+        cur = _FakeCursor(rows)
+        out = fnfl.fetch_total_crossbook(cur, "match-1")
+        raw_over = 1.0 / 1.833
+        raw_under = 1.0 / 2.0
+        expected = raw_over / (raw_over + raw_under)
+        assert abs(out["total_consensus_implied_prob"] - expected) < 1e-6
+
+
+class TestFetchTotalCrossbookDegenerateOdds:
+    def test_missing_under_odds_falls_back(self):
+        # If c_odds is None, that book's devigged prob is dropped
+        # but its LINE still counts toward consensus_mean / std.
+        # Critical: don't let a one-sided missing odds null out
+        # the whole feature row.
+        rows = [
+            {"bookmaker": "DK", "p_line": 47.5,
+             "p_odds": 1.91, "c_odds": 1.91},
+            {"bookmaker": "OnlyOver", "p_line": 48.5,
+             "p_odds": 1.91, "c_odds": None},
+        ]
+        cur = _FakeCursor(rows)
+        out = fnfl.fetch_total_crossbook(cur, "match-1")
+        assert out["total_book_count"] == 2.0
+        assert out["total_consensus_mean"] == 48.0
+        # Only DK contributes a devigged prob (OnlyOver dropped).
+        assert abs(out["total_consensus_implied_prob"] - 0.5) < 1e-9
+
+    def test_zero_or_negative_odds_dropped_from_devig(self):
+        # Defensive: zero/negative odds are impossible from real
+        # bookmakers but defend against bad ingest data.
+        rows = [
+            {"bookmaker": "DK", "p_line": 47.5,
+             "p_odds": 1.91, "c_odds": 1.91},
+            {"bookmaker": "Bad", "p_line": 47.5,
+             "p_odds": 0.0, "c_odds": 1.91},
+        ]
+        cur = _FakeCursor(rows)
+        out = fnfl.fetch_total_crossbook(cur, "match-1")
+        # Devig should still produce a value from the one valid book.
+        assert "total_consensus_implied_prob" in out
+        assert abs(out["total_consensus_implied_prob"] - 0.5) < 1e-9
+
+
+class TestCrossbookDefaults:
+    """The 5 cross-book keys must have neutral defaults so
+    _with_defaults can fill them when fetch_total_crossbook
+    returned empty (missing market data)."""
+
+    CROSSBOOK_KEYS = (
+        "total_book_count",
+        "total_consensus_mean",
+        "total_max_minus_min",
+        "total_std",
+        "total_consensus_implied_prob",
+    )
+
+    def test_all_crossbook_keys_in_neutral_defaults(self):
+        for k in self.CROSSBOOK_KEYS:
+            assert k in fnfl.NEUTRAL_DEFAULTS, f"{k} missing from NEUTRAL_DEFAULTS"
+
+    def test_neutral_consensus_mean_matches_closing_total_default(self):
+        # Both default to the same modern modal value (45) so a
+        # match with no odds at all gets consistent total signals.
+        assert fnfl.NEUTRAL_DEFAULTS["total_consensus_mean"] == fnfl.NEUTRAL_DEFAULTS["closing_total_line"]
+
+    def test_neutral_disagreement_is_zero(self):
+        # Zero disagreement is the "we have one book" neutral —
+        # the model should not see fake disagreement signal when
+        # the data is missing.
+        assert fnfl.NEUTRAL_DEFAULTS["total_max_minus_min"] == 0.0
+        assert fnfl.NEUTRAL_DEFAULTS["total_std"] == 0.0
+
+    def test_neutral_implied_prob_is_half(self):
+        # 0.5 = "no information" prior on a binary over/under.
+        assert fnfl.NEUTRAL_DEFAULTS["total_consensus_implied_prob"] == 0.5
+
+    def test_empty_fetch_filled_by_with_defaults(self):
+        # End-to-end: empty cross-book result + _with_defaults fills
+        # every cross-book key with its neutral. Guards the contract
+        # that compute_for_match always emits all 5 keys.
+        cur = _FakeCursor([])
+        empty = fnfl.fetch_total_crossbook(cur, "match-1")
+        assert empty == {}
+        filled = fnfl._with_defaults(empty)
+        for k in self.CROSSBOOK_KEYS:
+            assert filled[k] == fnfl.NEUTRAL_DEFAULTS[k]

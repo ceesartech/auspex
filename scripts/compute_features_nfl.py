@@ -126,6 +126,18 @@ NEUTRAL_DEFAULTS: dict[str, float] = {
     "margin_diff": 0.0,
     "wins_diff": 0.0,
     "rest_diff": 0.0,
+    # Cross-book TOTAL features (landed 2026-06-03 after A/B in
+    # scripts/ab_nfl_cross_book.py — ΔBrier -0.0110, ΔECE -0.0189
+    # on 2024-2025 walk-forward). Captures market consensus +
+    # book-disagreement signal that `closing_total_line` alone misses.
+    # SPREAD did NOT benefit from the equivalent features and was NOT
+    # landed. Neutral defaults: 1 book (degenerate market), 45 mean
+    # (modal NFL total), zero disagreement, 0.5 over-prob.
+    "total_book_count": 1.0,
+    "total_consensus_mean": 45.0,
+    "total_max_minus_min": 0.0,
+    "total_std": 0.0,
+    "total_consensus_implied_prob": 0.5,
 }
 
 
@@ -370,6 +382,84 @@ def _diff(features: dict, h_key: str, a_key: str, out_key: str) -> None:
 # not reproduce on the current methodology).
 
 
+def fetch_total_crossbook(cur, match_id: str) -> dict:
+    """Cross-book TOTAL features. Reads every (book, over) odds row for
+    this match, computes consensus + disagreement statistics.
+
+    Validated by scripts/ab_nfl_cross_book.py on 2026-06-03: walk-forward
+    on 2024-2025 showed ΔBrier -0.0110 (vs 0.005 threshold) and ΔECE
+    -0.0189 — clean KEEP signal. Spread cross-book features were tested
+    in the same A/B and did NOT help, so this fetcher is total-only.
+
+    All 5 keys are emitted unconditionally (None → default at the end of
+    compute_for_match) so the model input shape is stable whether or not
+    the cross-book data is present for this match."""
+    cur.execute(
+        """
+        WITH per_book AS (
+            SELECT DISTINCT ON (o.bookmaker)
+                o.bookmaker,
+                o.line AS p_line,
+                o.odds_decimal AS p_odds,
+                (
+                    SELECT od2.odds_decimal FROM odds od2
+                    WHERE od2.match_id = o.match_id
+                      AND od2.bookmaker = o.bookmaker
+                      AND od2.market_type = 'total'
+                      AND od2.selection = 'under'
+                      AND od2.is_live = false
+                    ORDER BY od2.timestamp DESC LIMIT 1
+                ) AS c_odds
+            FROM odds o
+            WHERE o.match_id = %s
+              AND o.market_type = 'total'
+              AND o.selection = 'over'
+              AND o.is_live = false
+              AND o.line IS NOT NULL
+              AND o.odds_decimal IS NOT NULL
+            ORDER BY o.bookmaker, o.timestamp DESC
+        )
+        SELECT bookmaker, p_line, p_odds, c_odds FROM per_book
+        """,
+        (match_id,),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return {}
+
+    lines = [float(r["p_line"]) for r in rows]
+    devigged = []
+    for r in rows:
+        p_odds = float(r["p_odds"])
+        c_odds = r["c_odds"]
+        if p_odds <= 0 or c_odds is None:
+            continue
+        c_odds = float(c_odds)
+        if c_odds <= 0:
+            continue
+        raw_over = 1.0 / p_odds
+        raw_under = 1.0 / c_odds
+        denom = raw_over + raw_under
+        if denom <= 0:
+            continue
+        devigged.append(raw_over / denom)
+
+    out: dict = {
+        "total_book_count": float(len(rows)),
+        "total_consensus_mean": float(sum(lines) / len(lines)),
+        "total_max_minus_min": float(max(lines) - min(lines)),
+    }
+    # Population std (ddof=0) for consistency with the A/B harness.
+    if len(lines) > 1:
+        mean = out["total_consensus_mean"]
+        out["total_std"] = float((sum((x - mean) ** 2 for x in lines) / len(lines)) ** 0.5)
+    else:
+        out["total_std"] = 0.0
+    if devigged:
+        out["total_consensus_implied_prob"] = float(sum(devigged) / len(devigged))
+    return out
+
+
 def compute_for_match(cur, match_id: str) -> Optional[dict]:
     """End-to-end feature computation for one match. Returns None
     if the match itself can't be found."""
@@ -380,6 +470,7 @@ def compute_for_match(cur, match_id: str) -> Optional[dict]:
 
     features: dict = {}
     features.update(fetch_closing_odds(cur, match_id))
+    features.update(fetch_total_crossbook(cur, match_id))
     for side, team_id in (("home", meta["home_team_id"]), ("away", meta["away_team_id"])):
         roll = fetch_team_rolling(cur, team_id, when)
         for k, v in roll.items():
