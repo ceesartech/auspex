@@ -353,135 +353,21 @@ def _diff(features: dict, h_key: str, a_key: str, out_key: str) -> None:
         features[out_key] = float(h) - float(a)
 
 
-# Sport-tuned weather thresholds. NFL-specific (versus tennis):
-#   * HIGH_WIND_KMH=25 (~15 mph) — degrades passing accuracy + kicking.
-#   * WET_PRECIP_MM=5 — measurable rain/snow across the 4h kickoff window.
-#   * FREEZING_TEMP_C=0 — affects ball grip + kicker leg strength;
-#     also a class boundary for cold-weather games (Lambeau in January).
-HIGH_WIND_KMH = 25.0
-WET_PRECIP_MM = 5.0
-FREEZING_TEMP_C = 0.0
-
-# Canonical NFL weather feature key set — every match's feature dict
-# emits exactly these keys, with None for any unknown values. The
-# Phase-14 v4a EXISTS-gate retry shipped at 5e699f5 / a72a3b4 used
-# OMIT-on-missing, which caused two distinct downstream failures:
-#   1. Walk-forward inference errored on test matches without weather
-#      because their feature DataFrames lacked columns the trained
-#      model expected (XGB/LGBM treat absent columns as a hard error,
-#      not as missing values).
-#   2. The corpus shrinkage from gating to weather-present rows
-#      (587 of 955 NFL matches) crashed NFL ML accuracy to 58.1%,
-#      below v1 (71.3%) and even below v3 with default-bias (64.3%).
-# The fix here: emit every key, with Python None (→ pandas NaN) for
-# missing values. GBDTs handle NaN natively as "missing direction"
-# during split learning — semantically distinct from a literal 10.0
-# default value, so no leakage. Inference shape now matches training
-# shape unconditionally. Tracked: see `weather-features-attempted`
-# memory + the v4b walk-forward result.
-NFL_WEATHER_KEYS: tuple[str, ...] = (
-    "weather_indoor",
-    "weather_temp_c",
-    "weather_wind_kmh",
-    "weather_precip_mm",
-    "weather_humidity_pct",
-    "weather_high_wind",
-    "weather_wet",
-    "weather_freezing",
-)
-
-
-def _empty_weather() -> dict:
-    """Canonical weather dict shape, every key present, all values None.
-    Subroutines override specific keys when data lets them."""
-    return {k: None for k in NFL_WEATHER_KEYS}
-
-
-def fetch_weather(cur, match_id: str) -> dict:
-    """Project the freshest weather snapshot for this match into a
-    dict of weather_* features.
-
-    Always returns a dict containing every key in NFL_WEATHER_KEYS.
-    Unknown values are None (which pandas reads as NaN); GBDTs handle
-    NaN as a "missing direction" in split learning, semantically
-    distinct from any literal value, so the v3 default-bias issue
-    (commit 61d1d84) cannot recur.
-
-    Branches:
-      * Weather row + outdoor venue: numerics populated from
-        match_weather_latest; categorical flags derived from
-        thresholds; weather_indoor=0.0.
-      * Weather row + indoor venue (stale snapshot from before the
-        venue was flagged): venue authoritative, weather_indoor=1.0,
-        numerics left None.
-      * No weather row + venue known indoor: weather_indoor=1.0,
-        rest None.
-      * No weather row + venue known outdoor: weather_indoor=0.0,
-        rest None (we know it's outdoor but lack measurements).
-      * No weather row + unknown venue: every key None.
-    """
-    cur.execute(
-        """
-        SELECT
-            mwl.temperature_c, mwl.wind_kmh, mwl.precipitation_mm,
-            mwl.humidity_pct, vc.is_indoor
-        FROM match_weather_latest mwl
-        LEFT JOIN venue_coords vc ON vc.id = mwl.venue_coords_id
-        WHERE mwl.match_id = %s
-        """,
-        (match_id,),
-    )
-    row = cur.fetchone()
-
-    if not row:
-        # No weather row. Check the venue_coords table directly so
-        # we can flag indoor games (a hard ground-truth fact) and
-        # also distinguish "outdoor-known-but-no-measurements" from
-        # "venue entirely unknown" — both populate weather_indoor
-        # with the right value, leaving numerics as NaN.
-        cur.execute(
-            """
-            SELECT vc.is_indoor
-            FROM matches m
-            LEFT JOIN venue_coords vc
-              ON LOWER(TRIM(m.venue)) = vc.normalized_venue_name
-            WHERE m.id = %s
-            """,
-            (match_id,),
-        )
-        venue_row = cur.fetchone()
-        out = _empty_weather()
-        if venue_row and venue_row.get("is_indoor") is not None:
-            out["weather_indoor"] = 1.0 if venue_row.get("is_indoor") else 0.0
-        return out
-
-    out = _empty_weather()
-    if row.get("is_indoor"):
-        # Venue says indoor — authoritative even if a stale numeric
-        # snapshot exists. Indoor games have no meaningful temp/wind/
-        # precip, leave those NaN so the model can learn the indoor
-        # signal in isolation.
-        out["weather_indoor"] = 1.0
-        return out
-
-    out["weather_indoor"] = 0.0
-    temp = row.get("temperature_c")
-    wind = row.get("wind_kmh")
-    precip = row.get("precipitation_mm")
-    humidity = row.get("humidity_pct")
-
-    if temp is not None:
-        out["weather_temp_c"] = float(temp)
-        out["weather_freezing"] = 1.0 if float(temp) < FREEZING_TEMP_C else 0.0
-    if wind is not None:
-        out["weather_wind_kmh"] = float(wind)
-        out["weather_high_wind"] = 1.0 if float(wind) > HIGH_WIND_KMH else 0.0
-    if precip is not None:
-        out["weather_precip_mm"] = float(precip)
-        out["weather_wet"] = 1.0 if float(precip) > WET_PRECIP_MM else 0.0
-    if humidity is not None:
-        out["weather_humidity_pct"] = float(humidity)
-    return out
+# Note: weather feature integration was attempted three times for
+# NFL (v3 at commit 61d1d84 with NEUTRAL_DEFAULTS, v4a at 5e699f5 /
+# a72a3b4 with EXISTS-gate + OMIT-on-missing, v4b at 01d9c69 with
+# always-emit + NaN-safe). All three underperformed a v1-equivalent
+# control (no weather features) on a clean apples-to-apples
+# walk-forward — v4b ensemble at 62.7% vs control 65.2% on the
+# same 365-match 2024 test set. Consistent ~2.5pt drag across base
+# learners; the signal isn't there at the corpus size we have
+# (~620 pre-2024 rows + Open-Meteo 11km grid resolution). Removed
+# on 2026-06-03; weather infrastructure (migration 012, fetch_weather,
+# seed_venue_coords, geocode_soccer_venues) left in place for any
+# future retry with a higher-resolution paid API. See
+# `weather-features-attempted` memory for the full history + the
+# correct ~65% NFL ML baseline (the 71.3% in earlier records does
+# not reproduce on the current methodology).
 
 
 def compute_for_match(cur, match_id: str) -> Optional[dict]:
@@ -501,7 +387,6 @@ def compute_for_match(cur, match_id: str) -> Optional[dict]:
         sched = fetch_schedule_context(cur, team_id, when)
         for k, v in sched.items():
             features[f"{side}_{k}"] = v
-    features.update(fetch_weather(cur, match_id))
     _diff(features, "home_roll_pts_scored", "away_roll_pts_scored", "pts_scored_diff")
     _diff(features, "home_roll_pts_allowed", "away_roll_pts_allowed", "pts_allowed_diff")
     _diff(features, "home_roll_margin", "away_roll_margin", "margin_diff")
