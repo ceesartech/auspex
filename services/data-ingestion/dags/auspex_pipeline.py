@@ -222,14 +222,20 @@ with DAG(
 
     # ── Horse racing branch ───────────────────────────────────────
     # Pipeline shape per cron tick:
-    #   1. upcoming racecards (next 7 days) from The Racing API
-    #   2. yesterday's results (catch-up — only fires on Standard+ plan)
-    #   3. compute_features_horse_racing — race-level + per-entrant
+    #   1. upcoming racecards (next 7 days) from The Racing API.
+    #      Captures the full bookmaker_odds[] array per runner
+    #      (not just the morning_line_odds first-bookmaker decimal)
+    #      so the recommendation step can do best-of-N pricing.
+    #   2. yesterday's results (catch-up — only fires on Standard+ plan).
+    #   3. compute_features_horse_racing — race-level + per-entrant.
     #   4. precompute_predictions_horse_racing — market-consensus
-    #      baseline (devigged morning lines). Trained ML model replaces
-    #      this once we have results data accumulating.
-    # No recommendations branch yet (H5 pending — needs odds vs.
-    # devigged-implied edge calculation per entrant).
+    #      baseline (devigged morning lines). Trained ML model
+    #      replaces this once enough results data has accumulated.
+    #   5. generate_recommendations_horse_racing — value bets via
+    #      best-of-N bookmaker pricing vs the consensus probability.
+    #      Without step 5 a consensus prediction yields zero EV
+    #      against its own morning-line decimal by construction;
+    #      the recs step is what unlocks any actionable signal.
     fetch_horse_racing_upcoming = BashOperator(
         task_id="fetch_horse_racing_upcoming",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/load_racing_api.py --upcoming 7",
@@ -249,11 +255,16 @@ with DAG(
         task_id="precompute_predictions_horse_racing",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/precompute_predictions_horse_racing.py --days 7",
     )
+    generate_recommendations_horse_racing = BashOperator(
+        task_id="generate_recommendations_horse_racing",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/generate_recommendations_horse_racing.py --days 2",
+    )
     (
         fetch_horse_racing_upcoming
         >> fetch_horse_racing_results
         >> compute_features_horse_racing
         >> precompute_predictions_horse_racing
+        >> generate_recommendations_horse_racing
     )
 
     # ── Phase 5: grade finished matches ───────────────────────────
@@ -297,6 +308,7 @@ with DAG(
         generate_recommendations_nfl,
         generate_recommendations_tennis,
         generate_recommendations_mma,
+        generate_recommendations_horse_racing,
     ] >> send_pipeline_digest
 
     # ── Model monitoring (Phase 9) ────────────────────────────────

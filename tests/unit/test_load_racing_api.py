@@ -183,6 +183,76 @@ class TestStripOddsPrefix:
         assert lra._strip_odds_prefix({}) is None
 
 
+# ── _normalize_bookmaker_odds: multi-book pricing capture ──────────
+
+
+class TestNormalizeBookmakerOdds:
+    """We keep the full per-bookmaker odds array (not just the first
+    decimal) so generate_recommendations can do best-of-N pricing.
+    Without it the consensus baseline can't generate value bets
+    because the prediction equals the only known price."""
+
+    def test_returns_empty_for_non_list(self):
+        # Caller passes whatever the API gave; defensive against
+        # None / dict / string.
+        assert lra._normalize_bookmaker_odds(None) == []
+        assert lra._normalize_bookmaker_odds({"bookmaker": "x"}) == []
+        assert lra._normalize_bookmaker_odds("1.5") == []
+
+    def test_returns_empty_for_empty_list(self):
+        assert lra._normalize_bookmaker_odds([]) == []
+
+    def test_keeps_bookmaker_and_decimal(self):
+        payload = [{"bookmaker": "Bet365", "decimal": "2.5", "fractional": "3/2"}]
+        out = lra._normalize_bookmaker_odds(payload)
+        assert len(out) == 1
+        assert out[0]["bookmaker"] == "Bet365"
+        assert out[0]["decimal"] == 2.5  # coerced to float
+        assert out[0]["fractional"] == "3/2"
+
+    def test_drops_entries_with_no_decimal(self):
+        # Stub bookmaker entries that haven't priced yet sometimes
+        # come back with null/missing decimal — drop them rather
+        # than write NULLs that confuse downstream EV math.
+        payload = [
+            {"bookmaker": "Bet365", "decimal": "3.0"},
+            {"bookmaker": "WilliamHill"},  # missing decimal entirely
+            {"bookmaker": "Skybet", "decimal": None},
+        ]
+        out = lra._normalize_bookmaker_odds(payload)
+        assert [x["bookmaker"] for x in out] == ["Bet365"]
+
+    def test_drops_decimals_at_or_below_one(self):
+        # Decimal odds <= 1.0 imply >=100% probability — nonsensical,
+        # treat as stub/error.
+        payload = [
+            {"bookmaker": "A", "decimal": "1.0"},
+            {"bookmaker": "B", "decimal": "0.5"},
+            {"bookmaker": "C", "decimal": "1.01"},  # just over → kept
+        ]
+        out = lra._normalize_bookmaker_odds(payload)
+        assert [x["bookmaker"] for x in out] == ["C"]
+
+    def test_falls_back_to_price_key(self):
+        # Older endpoints used `price` instead of `decimal`. Accept
+        # either; same as _strip_odds_prefix.
+        payload = [{"bookmaker": "X", "price": 4.0}]
+        out = lra._normalize_bookmaker_odds(payload)
+        assert out[0]["decimal"] == 4.0
+
+    def test_preserves_each_in_a_long_list(self):
+        # 8 bookmakers per horse is typical at race time. The
+        # recommendation script picks max(decimal); the rest must
+        # survive the normaliser so we have the audit trail.
+        payload = [
+            {"bookmaker": f"book_{i}", "decimal": str(2.0 + 0.25 * i)}
+            for i in range(8)
+        ]
+        out = lra._normalize_bookmaker_odds(payload)
+        assert len(out) == 8
+        assert max(o["decimal"] for o in out) == 2.0 + 0.25 * 7
+
+
 # ── _looks_uk ──────────────────────────────────────────────────────
 
 

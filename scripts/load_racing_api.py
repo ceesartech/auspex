@@ -382,6 +382,17 @@ def upsert_entrant(
                     "age": runner.get("age"),
                     "sex": runner.get("sex"),
                     "or_rating": runner.get("or") or runner.get("official_rating"),
+                    # Full bookmaker odds array from /racecards/standard
+                    # (or /pro) — kept so generate_recommendations can do
+                    # best-of-N pricing for value-bet selection. Lossy if
+                    # we only kept the first decimal in morning_line_odds
+                    # because that defeats the whole point of having a
+                    # market-consensus baseline — the prediction would
+                    # equal the only bookmaker's implied prob and EV
+                    # against it is zero by construction. Format mirrors
+                    # the API response: a list of {bookmaker, fractional,
+                    # decimal, ew_places, ew_denom, updated} dicts.
+                    "bookmaker_odds": _normalize_bookmaker_odds(runner.get("odds")),
                 }
             ),
         ),
@@ -546,6 +557,42 @@ def _strip_odds_prefix(odds_payload) -> Optional[float]:
     if isinstance(odds_payload, (int, float, str)):
         return odds_payload
     return None
+
+
+def _normalize_bookmaker_odds(odds_payload) -> list[dict]:
+    """Normalise the racecards `odds` array into a clean list of
+    {bookmaker, decimal} dicts. Drops entries without a usable
+    decimal price; keeps fractional + ew_places when present for
+    audit. Returns [] for empty / malformed input so downstream code
+    can iterate unconditionally.
+
+    The list is what generate_recommendations needs to do best-of-N
+    pricing — for a given horse, the longest decimal across
+    bookmakers becomes the bettor's best available price and the
+    basis for EV vs the devigged consensus."""
+    if not isinstance(odds_payload, list):
+        return []
+    out: list[dict] = []
+    for item in odds_payload:
+        if not isinstance(item, dict):
+            continue
+        decimal = _safe_float(item.get("decimal") or item.get("price"))
+        if decimal is None or decimal <= 1.0:
+            # decimal odds <= 1.0 are nonsensical (implied prob >=
+            # 100%); typically a stub from a bookmaker that hasn't
+            # priced yet. Drop them.
+            continue
+        out.append(
+            {
+                "bookmaker": item.get("bookmaker"),
+                "decimal": decimal,
+                "fractional": item.get("fractional"),
+                "ew_places": item.get("ew_places"),
+                "ew_denom": item.get("ew_denom"),
+                "updated": item.get("updated"),
+            }
+        )
+    return out
 
 
 # ── Orchestration ──────────────────────────────────────────────────
