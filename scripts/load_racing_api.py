@@ -1,35 +1,29 @@
 """Ingest UK + Irish horse racing data from theracingapi.com.
 
-Two pass shapes:
-  --upcoming N      Fetch racecards for the next N days (forecast).
-                    Writes to races + race_entrants with morning-line
-                    odds and field-size info, status='scheduled'.
-  --results A B     Fetch historical results between dates A and B.
-                    Writes finished races with starting prices,
-                    finish positions, status='finished'.
+Plan-aware endpoint dispatch:
+  Basic ($30/mo)   → /racecards/basic (TODAY only, no date param)
+                     /results is Standard+ only.
+  Standard         → /racecards/standard + /results (date-rangeable)
+  Pro              → /racecards/pro + /results + deeper per-horse data
 
-The Racing API (theracingapi.com) uses HTTP Basic Auth — set
-THE_RACING_API_USER and THE_RACING_API_PASS in the environment.
-Free tier covers ~5 years of UK+Irish racing data; pro tier adds
-real-time + deeper stats. This script speaks both.
+The script tries pro → standard → basic in order and falls back on
+403/422 ("Plan required"). On Basic, --upcoming N is silently
+capped to today's racecards; --results returns "plan required" and
+no historical backfill is possible (accumulate forward instead).
 
-Lazy entity creation: horses, jockeys, and trainers each get one
-DB row per unique normalized_name. Multiple races referencing the
-same horse all resolve to the same horses.id. This lets rolling
-form features (last N races for a horse / jockey / trainer) be
-cheap JOINs at training time.
+Auth: HTTP Basic with THE_RACING_API_USER + THE_RACING_API_PASS.
 
-Volume estimate: UK + Ireland combined run ~13k races/year. A
-3-year backfill = ~40k races × ~10 runners/race = ~400k entrant
-rows. The script throttles at 0.20s/request and processes one
-day at a time, so a 3-year run takes ~30-60 min.
+Lazy entity creation: horses / jockeys / trainers get one DB row
+per unique normalized_name. Same horse appearing in many races
+resolves to one horses.id, letting rolling-form features be cheap
+JOINs at training time.
 
 Usage:
-    # Daily ingest of upcoming racecards (DAG runs this)
+    # Daily upcoming-racecards ingest (DAG runs this)
     python scripts/load_racing_api.py --upcoming 7
 
-    # Historical backfill (one-shot)
-    python scripts/load_racing_api.py --results --start 2022-01-01 --end 2024-12-31
+    # Historical backfill (Standard+ plan only)
+    python scripts/load_racing_api.py --results --start 2024-01-01 --end 2024-12-31
 
     # Single-day diagnostic
     python scripts/load_racing_api.py --results --start 2024-09-08 --end 2024-09-08 --verbose
@@ -124,30 +118,71 @@ def parse_offdt(raw: Optional[str]) -> Optional[datetime]:
 # ── HTTP fetchers ──────────────────────────────────────────────────
 
 
-def fetch_racecards(day: date, auth: HTTPBasicAuth) -> list[dict]:
-    """Pull racecards for one day. Returns the raw racecards list
-    (or [] on network error so the caller can press on)."""
-    url = f"{BASE_URL}/racecards/pro"
-    params = {"date": day.isoformat()}
+# Plan-aware fetcher caches the highest-tier endpoint that works on
+# the current credentials. Saves a probe call on every request once
+# the tier is known.
+_CACHED_RACECARDS_PATH: Optional[str] = None
+
+
+def _try_racecards_endpoint(path: str, day: date, auth: HTTPBasicAuth, send_date: bool) -> tuple[int, list[dict]]:
+    """Returns (status_code, racecards). status_code lets the caller
+    decide whether to fall back to a lower-tier endpoint."""
+    url = f"{BASE_URL}{path}"
+    params: dict = {}
+    if send_date:
+        params["date"] = day.isoformat()
     try:
         r = requests.get(url, params=params, auth=auth, timeout=DEFAULT_TIMEOUT_SEC)
-        r.raise_for_status()
     except requests.RequestException as e:
-        logger.warning("Racing API racecards failed for %s: %s", day, e)
-        return []
-    return r.json().get("racecards", []) or []
+        logger.warning("Racing API %s failed for %s: %s", path, day, e)
+        return 0, []
+    if r.status_code >= 400:
+        return r.status_code, []
+    return r.status_code, r.json().get("racecards", []) or []
+
+
+def fetch_racecards(day: date, auth: HTTPBasicAuth) -> list[dict]:
+    """Pull racecards. Tries /racecards/pro → /standard → /basic and
+    caches the first tier that succeeds. Basic doesn't accept the
+    date param — when the cached tier is Basic, the day argument is
+    ignored (the endpoint returns today's racecards regardless)."""
+    global _CACHED_RACECARDS_PATH
+    if _CACHED_RACECARDS_PATH:
+        send_date = _CACHED_RACECARDS_PATH != "/racecards/basic"
+        _, cards = _try_racecards_endpoint(_CACHED_RACECARDS_PATH, day, auth, send_date)
+        return cards
+
+    for path, send_date in (
+        ("/racecards/pro", True),
+        ("/racecards/standard", True),
+        ("/racecards/basic", False),
+    ):
+        status, cards = _try_racecards_endpoint(path, day, auth, send_date)
+        if status == 200:
+            _CACHED_RACECARDS_PATH = path
+            logger.info("Racing API tier detected: %s", path)
+            return cards
+        if status not in (401, 402, 403, 422):
+            # Network error / unexpected — log and keep probing.
+            logger.warning("Racing API %s returned %s", path, status)
+    logger.error("Racing API: none of pro/standard/basic worked. " "Check THE_RACING_API_USER + THE_RACING_API_PASS.")
+    return []
 
 
 def fetch_results(day: date, auth: HTTPBasicAuth) -> list[dict]:
-    """Pull finished-race results for one day. Same shape as racecards
-    but with finish positions + starting prices populated."""
+    """Pull finished-race results for one day. Requires Standard+
+    plan — Basic returns 403 'Standard Plan required'. The caller
+    logs the plan limitation and falls back to forward-accumulation."""
     url = f"{BASE_URL}/results"
     params = {"start_date": day.isoformat(), "end_date": day.isoformat()}
     try:
         r = requests.get(url, params=params, auth=auth, timeout=DEFAULT_TIMEOUT_SEC)
-        r.raise_for_status()
     except requests.RequestException as e:
         logger.warning("Racing API results failed for %s: %s", day, e)
+        return []
+    if r.status_code >= 400:
+        body_snippet = r.text[:200] if r.text else ""
+        logger.warning("Racing API results %s → %d: %s", day, r.status_code, body_snippet)
         return []
     return r.json().get("results", []) or []
 
@@ -572,6 +607,18 @@ def run(database_url: str, kind: str, start: date, end: date) -> dict:
                     totals[k] += counts.get(k, 0)
                 conn.commit()
                 time.sleep(REQUEST_DELAY_SEC)
+                # Basic plan: /racecards/basic returns today's data
+                # regardless of the day param. After the first call
+                # the rest of the date range is wasted work — break
+                # out and log the cap.
+                if kind == "upcoming" and _CACHED_RACECARDS_PATH == "/racecards/basic":
+                    logger.info(
+                        "Basic plan: /racecards/basic returns today only — "
+                        "stopping after pass 1 (date range %s..%s ignored)",
+                        start,
+                        end,
+                    )
+                    break
                 if totals["days_processed"] % 30 == 0:
                     logger.info(
                         "Progress: %d days, %d races, %d entrants",
