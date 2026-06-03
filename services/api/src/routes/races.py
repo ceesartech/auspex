@@ -64,13 +64,9 @@ async def list_races(
     # 'finished' uses a lookback; 'scheduled' / 'live' use a lookahead.
     # Default (no filter) → scheduled future races.
     if status_filter == "finished":
-        time_clause = (
-            "r.race_date BETWEEN NOW() - make_interval(days => :window) AND NOW()"
-        )
+        time_clause = "r.race_date BETWEEN NOW() - make_interval(days => :window) AND NOW()"
     else:
-        time_clause = (
-            "r.race_date BETWEEN NOW() AND NOW() + make_interval(days => :window)"
-        )
+        time_clause = "r.race_date BETWEEN NOW() AND NOW() + make_interval(days => :window)"
 
     status_clause = "r.status = :status_filter" if status_filter else "r.status = 'scheduled'"
 
@@ -245,49 +241,31 @@ async def get_race_detail(
         if row.recommendation_id is not None:
             recommendation = {
                 "recommendation_id": row.recommendation_id,
-                "odds": float(row.odds_at_recommendation)
-                if row.odds_at_recommendation is not None
-                else None,
+                "odds": float(row.odds_at_recommendation) if row.odds_at_recommendation is not None else None,
                 "bookmaker": row.bookmaker,
-                "expected_value": float(row.expected_value)
-                if row.expected_value is not None
-                else None,
-                "recommended_stake": float(row.recommended_stake)
-                if row.recommended_stake is not None
-                else None,
+                "expected_value": float(row.expected_value) if row.expected_value is not None else None,
+                "recommended_stake": float(row.recommended_stake) if row.recommended_stake is not None else None,
                 "confidence_rating": row.confidence_rating,
                 "status": row.rec_status,
-                "profit_loss": float(row.profit_loss)
-                if row.profit_loss is not None
-                else None,
+                "profit_loss": float(row.profit_loss) if row.profit_loss is not None else None,
             }
         entrants.append(
             {
                 "entrant_id": row.entrant_id,
                 "program_number": row.program_number,
                 "post_position": row.post_position,
-                "weight_carried_lbs": float(row.weight_carried_lbs)
-                if row.weight_carried_lbs is not None
-                else None,
-                "morning_line_odds": float(row.morning_line_odds)
-                if row.morning_line_odds is not None
-                else None,
-                "starting_price": float(row.starting_price)
-                if row.starting_price is not None
-                else None,
+                "weight_carried_lbs": float(row.weight_carried_lbs) if row.weight_carried_lbs is not None else None,
+                "morning_line_odds": float(row.morning_line_odds) if row.morning_line_odds is not None else None,
+                "starting_price": float(row.starting_price) if row.starting_price is not None else None,
                 "finish_position": row.finish_position,
                 "disqualified": row.disqualified,
                 "scratched": row.scratched,
                 "horse_name": row.horse_name,
                 "jockey_name": row.jockey_name,
                 "trainer_name": row.trainer_name,
-                "consensus_prob": float(row.consensus_prob)
-                if row.consensus_prob is not None
-                else None,
+                "consensus_prob": float(row.consensus_prob) if row.consensus_prob is not None else None,
                 "consensus_field_probs": row.consensus_field_probs,
-                "actual_outcome": float(row.actual_outcome)
-                if row.actual_outcome is not None
-                else None,
+                "actual_outcome": float(row.actual_outcome) if row.actual_outcome is not None else None,
                 "is_correct": row.is_correct,
                 "recommendation": recommendation,
             }
@@ -304,12 +282,8 @@ async def get_race_detail(
             "track_condition": race_row.track_condition,
             "race_class": race_row.race_class,
             "purse_currency": race_row.purse_currency,
-            "purse_amount": float(race_row.purse_amount)
-            if race_row.purse_amount is not None
-            else None,
-            "field_size": int(race_row.field_size)
-            if race_row.field_size is not None
-            else len(entrants),
+            "purse_amount": float(race_row.purse_amount) if race_row.purse_amount is not None else None,
+            "field_size": int(race_row.field_size) if race_row.field_size is not None else len(entrants),
             "status": race_row.status,
         },
         "entrants": entrants,
