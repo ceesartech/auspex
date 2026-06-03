@@ -195,6 +195,10 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - ENABLE_TELEGRAM_NOTIFICATIONS=${ENABLE_TELEGRAM_NOTIFICATIONS:-false}
+      # The Racing API (theracingapi.com) — UK + Irish horse racing.
+      # HTTP Basic auth; both env vars required for any racing ingest.
+      - THE_RACING_API_USER=${THE_RACING_API_USER:-}
+      - THE_RACING_API_PASS=${THE_RACING_API_PASS:-}
     volumes:
       - ./models:/app/models
       - ./services/api:/app/services/api
