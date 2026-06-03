@@ -130,6 +130,33 @@ class TestLineAsFeatureFiltering:
         assert "total.line AS closing_total_line" in NFL_TOTAL_TRAINING_QUERY
 
 
+class TestWeatherGate:
+    """All three NFL queries must filter the corpus to matches with
+    real weather observations (match_weather.data_kind='actual'). The
+    previous integration trained on the full corpus where 39% of rows
+    used NEUTRAL_DEFAULTS for missing weather; the GBDT overfit those
+    defaults as a leakage sentinel (commit 17b3eb6). The gate makes
+    the leakage impossible by construction — the model never sees a
+    default value during training. Drop the gate only when EVERY
+    finished NFL match has actual weather; until then keep the
+    invariant locked in tests."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [NFL_MONEYLINE_TRAINING_QUERY, NFL_SPREAD_TRAINING_QUERY, NFL_TOTAL_TRAINING_QUERY],
+    )
+    def test_query_gates_on_actual_weather(self, query):
+        # EXISTS subquery references match_weather.data_kind='actual'.
+        # We assert the substrings independently so the test still
+        # catches accidental loosening (e.g., dropping the data_kind
+        # filter would leave only forecast rows in training — same
+        # leakage risk as defaults).
+        assert "EXISTS" in query
+        assert "match_weather" in query
+        assert "mw.data_kind = 'actual'" in query
+        assert "mw.match_id = m.id" in query
+
+
 # ── Target derivation: pure pandas fallback ─────────────────────────
 
 

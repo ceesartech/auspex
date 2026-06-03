@@ -1208,6 +1208,21 @@ NFL_TOTAL_TARGET = "nfl_total"
 # extremely rare (~1 per season) and create an edge case — we
 # exclude them (home_score <> away_score) so the model trains on a
 # clean 2-class target.
+#
+# Weather gate (applies to all NFL + tennis queries below): we require
+# EXISTS (match_weather mw WHERE mw.data_kind='actual') so the
+# corpus contains ONLY matches with real weather observations. The
+# previous integration attempt (commit 61d1d84, reverted at 17b3eb6)
+# trained on the full 955-match NFL corpus but only 61% had real
+# weather; the other 39% used NEUTRAL_DEFAULTS, which the GBDT
+# overfit as a "missing-data sentinel" predicting indoor/older games
+# rather than learning real weather effects. Walk-forward showed
+# NFL moneyline -7pts OOS. Gating the corpus to weather-present rows
+# (587 NFL / 1189 tennis) eliminates that leakage by construction —
+# the model never sees defaults during training, so it can't learn
+# them as signal. Soccer query stays ungated until the venue
+# geocoder lands (currently 0 actual-weather rows would make the
+# gate empty out the corpus).
 NFL_MONEYLINE_TRAINING_QUERY = """
     SELECT
         m.id::text AS match_id,
@@ -1244,6 +1259,10 @@ NFL_MONEYLINE_TRAINING_QUERY = """
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
       AND m.home_score <> m.away_score
+      AND EXISTS (
+          SELECT 1 FROM match_weather mw
+          WHERE mw.match_id = m.id AND mw.data_kind = 'actual'
+      )
     ORDER BY m.match_date ASC
 """
 
@@ -1294,6 +1313,10 @@ NFL_SPREAD_TRAINING_QUERY = """
       AND m.status = 'finished'
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
+      AND EXISTS (
+          SELECT 1 FROM match_weather mw
+          WHERE mw.match_id = m.id AND mw.data_kind = 'actual'
+      )
     ORDER BY m.match_date ASC
 """
 
@@ -1341,6 +1364,10 @@ NFL_TOTAL_TRAINING_QUERY = """
       AND m.status = 'finished'
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
+      AND EXISTS (
+          SELECT 1 FROM match_weather mw
+          WHERE mw.match_id = m.id AND mw.data_kind = 'actual'
+      )
     ORDER BY m.match_date ASC
 """
 
@@ -1501,6 +1528,10 @@ TENNIS_MONEYLINE_TRAINING_QUERY = """
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
       AND m.home_score <> m.away_score
+      AND EXISTS (
+          SELECT 1 FROM match_weather mw
+          WHERE mw.match_id = m.id AND mw.data_kind = 'actual'
+      )
     ORDER BY m.match_date ASC
 """
 
