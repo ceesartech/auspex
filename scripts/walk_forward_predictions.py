@@ -13,7 +13,7 @@ non-overfit way:
   1. For each --bundle (one of soccer_match_result, nhl_moneyline,
      nhl_regulation, nhl_puck_line, nhl_total, nba_moneyline,
      nba_spread, nba_total, nfl_moneyline, nfl_spread, nfl_total,
-     tennis_moneyline):
+     tennis_moneyline, mma_moneyline):
        a. Load the bundle's training frame from the live DB.
        b. Filter to matches with match_date < --split-date.
        c. Persist the filtered frame to CSV.
@@ -108,6 +108,7 @@ ALL_BUNDLES = (
     "nfl_spread",
     "nfl_total",
     "tennis_moneyline",
+    "mma_moneyline",
 )
 
 # Each bundle's ensemble registry name — needed for prediction-side
@@ -126,6 +127,7 @@ BUNDLE_TO_ENSEMBLE: dict[str, str] = {
     "nfl_spread": "ensemble_nfl_sp",
     "nfl_total": "ensemble_nfl_tot",
     "tennis_moneyline": "ensemble_tennis_ml",
+    "mma_moneyline": "ensemble_mma_ml",
 }
 
 # Each bundle's prediction_type value (what gets written to
@@ -145,6 +147,7 @@ BUNDLE_TO_PREDICTION_TYPE: dict[str, str] = {
     "nfl_spread": "spread",
     "nfl_total": "total",
     "tennis_moneyline": "moneyline",
+    "mma_moneyline": "moneyline",
 }
 
 # Each bundle's feature_set (matches compute_features_*.py).
@@ -161,21 +164,23 @@ BUNDLE_TO_FEATURE_SET: dict[str, str] = {
     "nfl_spread": "nfl_baseline",
     "nfl_total": "nfl_baseline",
     "tennis_moneyline": "tennis_baseline",
+    "mma_moneyline": "mma_baseline",
 }
 
 
 def resolve_bundles(arg: str) -> list[str]:
     """'all' → every bundle. 'soccer' / 'nhl' / 'nba' / 'nfl' / 'tennis'
-    → all bundles for that sport. Otherwise treated as a single bundle
-    key."""
+    / 'mma' → all bundles for that sport. Otherwise treated as a single
+    bundle key."""
     if arg == "all":
         return list(ALL_BUNDLES)
-    if arg in {"soccer", "nhl", "nba", "nfl", "tennis"}:
+    if arg in {"soccer", "nhl", "nba", "nfl", "tennis", "mma"}:
         return [b for b in ALL_BUNDLES if b.startswith(arg + "_") or b == f"{arg}_match_result"]
     if arg in ALL_BUNDLES:
         return [arg]
     raise ValueError(
-        f"Unknown bundle {arg!r}. Use 'all', a sport " f"('soccer'/'nhl'/'nba'/'nfl'/'tennis'), or one of {ALL_BUNDLES}"
+        f"Unknown bundle {arg!r}. Use 'all', a sport "
+        f"('soccer'/'nhl'/'nba'/'nfl'/'tennis'/'mma'), or one of {ALL_BUNDLES}"
     )
 
 

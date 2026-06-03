@@ -650,6 +650,48 @@ class TestTennisMoneylineGrading:
         assert result is None
 
 
+class TestMmaMoneylineGrading:
+    """MMA moneyline reuses the shared 2-way grading path. No
+    schema or dispatch changes were needed — the existing
+    `prediction_type='moneyline'` branch handles MMA correctly via
+    nhl_moneyline_outcome. MMA draws (~1% of decisions) are dropped
+    at ingest, so the None-on-tie fallback is belt-and-suspenders
+    against data quality issues."""
+
+    def test_fighter1_wins(self):
+        # home_score=1, away_score=0 → fighter1 (home) won.
+        result = go.actual_outcome(
+            prediction_type="moneyline",
+            model_name="ensemble_mma_ml",
+            predicted_outcome="home",
+            home_score=1,
+            away_score=0,
+        )
+        assert result == "home"
+
+    def test_fighter2_wins(self):
+        result = go.actual_outcome(
+            prediction_type="moneyline",
+            model_name="ensemble_mma_ml",
+            predicted_outcome="away",
+            home_score=0,
+            away_score=1,
+        )
+        assert result == "away"
+
+    def test_draw_or_data_quality_tie_leaves_ungraded(self):
+        # MMA draws are dropped at ingest, but if one slipped through
+        # the grader returns None (no false win/loss).
+        result = go.actual_outcome(
+            prediction_type="moneyline",
+            model_name="ensemble_mma_ml",
+            predicted_outcome="home",
+            home_score=0,
+            away_score=0,
+        )
+        assert result is None
+
+
 # ── Model-name dispatch helpers ──────────────────────────────────────
 
 

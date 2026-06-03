@@ -34,13 +34,15 @@ wfp = _load("walk_forward_predictions", "walk_forward_predictions.py")
 class TestResolveBundles:
     def test_all_expands(self):
         bundles = wfp.resolve_bundles("all")
-        # 12 known bundles (soccer + 4×NHL + 3×NBA + 3×NFL + 1×tennis).
-        assert len(bundles) == 12
+        # 13 known bundles (soccer + 4×NHL + 3×NBA + 3×NFL + 1×tennis
+        # + 1×mma).
+        assert len(bundles) == 13
         # Order matches ALL_BUNDLES — locked for reproducibility.
         assert bundles[0] == "soccer_match_result"
         assert "nba_total" in bundles
         assert "nfl_moneyline" in bundles
         assert "tennis_moneyline" in bundles
+        assert "mma_moneyline" in bundles
 
     def test_sport_filter(self):
         assert set(wfp.resolve_bundles("nba")) == {"nba_moneyline", "nba_spread", "nba_total"}
@@ -52,6 +54,7 @@ class TestResolveBundles:
         }
         assert set(wfp.resolve_bundles("nfl")) == {"nfl_moneyline", "nfl_spread", "nfl_total"}
         assert set(wfp.resolve_bundles("tennis")) == {"tennis_moneyline"}
+        assert set(wfp.resolve_bundles("mma")) == {"mma_moneyline"}
         # Soccer has only the match_result bundle (derived markets
         # are predict-time only, no separate training).
         assert wfp.resolve_bundles("soccer") == ["soccer_match_result"]
@@ -59,12 +62,13 @@ class TestResolveBundles:
     def test_specific_bundle(self):
         assert wfp.resolve_bundles("nba_spread") == ["nba_spread"]
         assert wfp.resolve_bundles("tennis_moneyline") == ["tennis_moneyline"]
+        assert wfp.resolve_bundles("mma_moneyline") == ["mma_moneyline"]
 
     def test_unknown_raises(self):
         # Defensive: a typo'd arg should fail fast, not run the wrong
         # bundle.
         with pytest.raises(ValueError, match="Unknown bundle"):
-            wfp.resolve_bundles("mma_moneyline")
+            wfp.resolve_bundles("boxing_moneyline")
 
 
 class TestFilterFrameBefore:

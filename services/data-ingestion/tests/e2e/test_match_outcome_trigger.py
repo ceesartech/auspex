@@ -486,6 +486,44 @@ class TestTennisGrading:
         assert row["is_correct"] is False
 
 
+class TestMmaGrading:
+    """MMA moneyline shares the prediction_type='moneyline' trigger
+    branch with NHL/NBA/NFL/tennis. No schema changes were needed —
+    grade_moneyline_2way handles 1v1 final-score winners identically
+    across all sports. This test locks that integration."""
+
+    def test_fighter1_wins(self, trigger_tables, engine):
+        with engine.begin() as conn:
+            ids = _seed_match(conn, sport="mma")
+            pred = _seed_prediction(
+                conn,
+                match_id=ids["match_id"],
+                model_name="ensemble_mma_ml",
+                prediction_type="moneyline",
+                predicted_outcome="home",
+            )
+            # home=1, away=0 → fighter1 wins.
+            _finish_match(conn, match_id=ids["match_id"], home_score=1, away_score=0)
+            row = _read_prediction(conn, pred)
+        assert row["actual_outcome"] == "home"
+        assert row["is_correct"] is True
+
+    def test_fighter2_wins(self, trigger_tables, engine):
+        with engine.begin() as conn:
+            ids = _seed_match(conn, sport="mma")
+            pred = _seed_prediction(
+                conn,
+                match_id=ids["match_id"],
+                model_name="ensemble_mma_ml",
+                prediction_type="moneyline",
+                predicted_outcome="home",
+            )
+            _finish_match(conn, match_id=ids["match_id"], home_score=0, away_score=1)
+            row = _read_prediction(conn, pred)
+        assert row["actual_outcome"] == "away"
+        assert row["is_correct"] is False
+
+
 class TestNflGrading:
     def test_moneyline_tie_leaves_ungraded(self, trigger_tables, engine):
         # NFL ties happen rarely (~1-2/year). 2-class model can't
