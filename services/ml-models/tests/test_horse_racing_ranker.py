@@ -510,3 +510,35 @@ class TestIsotonicCalibrator:
         loaded = HorseRacingRanker.load(out_dir)
         assert loaded.calibrator_x is None
         assert loaded.calibrator_y is None
+
+    def test_calibrator_helpers_detect_brier_regression(self):
+        # Defence against the empirical 13k-race overfit: if isotonic
+        # would INCREASE val Brier after the per-race renorm step, the
+        # fit() guard drops it. This test exercises the underlying
+        # helpers _apply_calibrator_with_renorm + _per_entrant_brier_
+        # from_probs so the guard's math is independently verified.
+        from predictors.horse_racing_ranker import _apply_calibrator_with_renorm, _per_entrant_brier_from_probs
+
+        groups = np.array([4, 4], dtype=np.int64)
+        # Two races, each with a clear winner at index 0.
+        probs_pre = np.array([0.8, 0.1, 0.05, 0.05, 0.8, 0.1, 0.05, 0.05], dtype=np.float64)
+        y = np.array([1, 0, 0, 0, 1, 0, 0, 0], dtype=np.int64)
+        baseline = _per_entrant_brier_from_probs(probs_pre, groups, y)
+
+        # A pathological calibrator: maps any prob to 0.5 constant.
+        # Renorm then turns the race into [0.25, 0.25, 0.25, 0.25] —
+        # uniform, far from the true [1, 0, 0, 0] target. Brier MUST
+        # increase.
+        cal_x = np.array([0.0, 1.0], dtype=np.float64)
+        cal_y = np.array([0.5, 0.5], dtype=np.float64)
+        bad = _apply_calibrator_with_renorm(probs_pre, groups, cal_x, cal_y)
+        bad_brier = _per_entrant_brier_from_probs(bad, groups, y)
+        assert bad_brier > baseline
+
+        # An identity calibrator preserves Brier exactly (after the
+        # no-op renorm that follows for already-summing-to-1 inputs).
+        identity_x = np.array([0.0, 1.0], dtype=np.float64)
+        identity_y = np.array([0.0, 1.0], dtype=np.float64)
+        identity_probs = _apply_calibrator_with_renorm(probs_pre, groups, identity_x, identity_y)
+        identity_brier = _per_entrant_brier_from_probs(identity_probs, groups, y)
+        assert identity_brier == pytest.approx(baseline, abs=1e-9)

@@ -342,18 +342,41 @@ class HorseRacingRanker:
 
         iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
         iso.fit(probs_pre, y_val.astype(np.float64))
-        # Store the piecewise-linear knot points. sklearn exposes them
-        # as IsotonicRegression's X_thresholds_ / y_thresholds_ after fit.
-        self.calibrator_x = np.asarray(iso.X_thresholds_, dtype=np.float64)
-        self.calibrator_y = np.asarray(iso.y_thresholds_, dtype=np.float64)
-        logger.info(
-            "Fit isotonic calibrator: %d knots, X∈[%.3f,%.3f], Y∈[%.3f,%.3f]",
-            len(self.calibrator_x),
-            float(self.calibrator_x.min()),
-            float(self.calibrator_x.max()),
-            float(self.calibrator_y.min()),
-            float(self.calibrator_y.max()),
-        )
+        candidate_x = np.asarray(iso.X_thresholds_, dtype=np.float64)
+        candidate_y = np.asarray(iso.y_thresholds_, dtype=np.float64)
+
+        # Safety check: only accept the calibrator if it improves
+        # val Brier after the per-race renormalisation that predict_
+        # probabilities does. Without this guard, a calibrator that
+        # OVERFITS the val set can SHIP and degrade test-time
+        # calibration (verified empirically: 13k-race corpus, 94-knot
+        # isotonic, pre-cal val Brier 0.0898 vs post-cal+renorm test
+        # Brier 0.1046 — the calibrator memorised val noise + the
+        # renorm step amplified it).
+        baseline_brier = _per_entrant_brier_from_probs(probs_pre, groups_val, y_val)
+        calibrated_probs = _apply_calibrator_with_renorm(probs_pre, groups_val, candidate_x, candidate_y)
+        cal_brier = _per_entrant_brier_from_probs(calibrated_probs, groups_val, y_val)
+
+        if cal_brier < baseline_brier:
+            self.calibrator_x = candidate_x
+            self.calibrator_y = candidate_y
+            logger.info(
+                "Isotonic calibrator KEPT: %d knots, val Brier %.4f → %.4f (Δ%+.4f)",
+                len(candidate_x),
+                baseline_brier,
+                cal_brier,
+                cal_brier - baseline_brier,
+            )
+        else:
+            self.calibrator_x = None
+            self.calibrator_y = None
+            logger.info(
+                "Isotonic calibrator DROPPED: would increase val Brier "
+                "%.4f → %.4f (Δ%+.4f). Shipping uncalibrated softmax.",
+                baseline_brier,
+                cal_brier,
+                cal_brier - baseline_brier,
+            )
 
     # ── Score / probability ────────────────────────────────────────
 
@@ -585,5 +608,56 @@ def _race_brier(
         actual = np.zeros(int(size), dtype=np.float64)
         actual[winner] = 1.0
         total += float(np.mean((probs - actual) ** 2))
+        n += 1
+    return total / n if n else float("inf")
+
+
+def _apply_calibrator_with_renorm(
+    probs_pre: np.ndarray,
+    groups: np.ndarray,
+    calibrator_x: np.ndarray,
+    calibrator_y: np.ndarray,
+) -> np.ndarray:
+    """Apply isotonic via np.interp + renormalise per race. Mirrors
+    the exact path predict_probabilities takes, so the calibrator-
+    keep-or-drop guard at fit time uses the same math the inference
+    path will see."""
+    out = np.empty_like(probs_pre, dtype=np.float64)
+    cursor = 0
+    for size in groups:
+        race_probs = probs_pre[cursor : cursor + int(size)]
+        calibrated = np.interp(race_probs, calibrator_x, calibrator_y)
+        s = calibrated.sum()
+        if s > 0:
+            calibrated = calibrated / s
+        else:
+            calibrated = np.full(len(calibrated), 1.0 / len(calibrated))
+        out[cursor : cursor + int(size)] = calibrated
+        cursor += int(size)
+    return out
+
+
+def _per_entrant_brier_from_probs(
+    probs: np.ndarray,
+    groups: np.ndarray,
+    y_true: np.ndarray,
+) -> float:
+    """Per-entrant Brier on already-computed probabilities. Used by
+    the calibrator-keep-or-drop guard so the fit-time comparison
+    uses the same metric the trainer logs at test time."""
+    total = 0.0
+    n = 0
+    cursor = 0
+    y_true_f = y_true.astype(np.float64)
+    for size in groups:
+        size_i = int(size)
+        race_probs = probs[cursor : cursor + size_i]
+        actual = y_true_f[cursor : cursor + size_i]
+        cursor += size_i
+        if actual.sum() == 0:
+            # No winner row — skip; matches the trainer's
+            # _per_entrant_brier handling.
+            continue
+        total += float(np.mean((race_probs - actual) ** 2))
         n += 1
     return total / n if n else float("inf")
