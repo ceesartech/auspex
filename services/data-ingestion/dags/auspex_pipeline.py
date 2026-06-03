@@ -169,10 +169,9 @@ with DAG(
 
     fetch_upcoming_nfl >> compute_features_nfl >> precompute_predictions_nfl >> generate_recommendations_nfl
 
-    # ── Tennis branch (T2: ingestion + features) ──────────────────
-    # Predictions + recommendations land in subsequent commits once
-    # the historical backfill (T2.5) + training corpus (T3) are in
-    # place. Same incremental rollout pattern as NFL.
+    # ── Tennis branch (T4: end-to-end pipeline) ───────────────────
+    # First 1v1 sport. Single market in v1 (moneyline) — total games
+    # + set-betting land in v2 once linescore parsing is in place.
     fetch_upcoming_tennis = BashOperator(
         task_id="fetch_upcoming_tennis",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport tennis --days 14",
@@ -183,7 +182,17 @@ with DAG(
         bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_tennis.py --days 14",
     )
 
-    fetch_upcoming_tennis >> compute_features_tennis
+    precompute_predictions_tennis = BashOperator(
+        task_id="precompute_predictions_tennis",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/precompute_predictions_tennis.py --days 14",
+    )
+
+    generate_recommendations_tennis = BashOperator(
+        task_id="generate_recommendations_tennis",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/generate_recommendations_tennis.py --days 14",
+    )
+
+    fetch_upcoming_tennis >> compute_features_tennis >> precompute_predictions_tennis >> generate_recommendations_tennis
 
     # ── Phase 5: grade finished matches ───────────────────────────
     # Walks matches whose status flipped to 'finished' in the last
@@ -224,6 +233,7 @@ with DAG(
         generate_recommendations_nhl,
         generate_recommendations_nba,
         generate_recommendations_nfl,
+        generate_recommendations_tennis,
     ] >> send_pipeline_digest
 
     # ── Model monitoring (Phase 9) ────────────────────────────────
