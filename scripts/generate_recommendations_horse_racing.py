@@ -63,24 +63,40 @@ logger = logging.getLogger("generate_recommendations_horse_racing")
 
 KELLY_FRACTION = 0.25
 
-# Model precedence: consensus-only for EV math right now. The
-# LambdaMART ranker has BETTER top-1 accuracy (+2.7pts on the 13k-
-# race corpus) but WORSE Brier (0.0898 vs 0.0831), and the recs
-# engine consumes probabilities directly (EV = prob × odds). A
-# worse-calibrated model inflates the value-bet count by 17x —
+# Model precedence (prob source): consensus-only for EV math. The
+# LambdaMART ranker has BETTER top-1 accuracy (+2.0pts on the 13k-
+# race corpus) but WORSE test Brier (0.1050 vs 0.0831), and the
+# recs engine consumes probabilities directly (EV = prob × odds).
+# A worse-calibrated model inflates the value-bet count by 17x —
 # verified empirically (memory: horse-racing-ml-ranker-v1).
 #
 # Listing the ranker even as a FALLBACK is wrong: every race the
 # ranker scores but consensus hasn't yet (e.g., races added between
 # the two precompute tasks' runs) silently picks up the ranker's
 # probabilities and the ~30-picks/day budget blows out again. Keep
-# this list consensus-only until we close the calibration gap
-# (isotonic regression on (ranker_prob, actual_win_rate) is the
-# obvious next try). The ranker keeps writing to race_predictions
-# via the precompute task in the DAG — analysis path stays intact.
+# this list consensus-only for PROBABILITIES.
 MODEL_PRECEDENCE: list[tuple[str, str]] = [
     ("market_consensus_v1", "1.0.0"),
 ]
+
+# HYBRID mode: while consensus owns the PROBABILITY side of the EV
+# math, the ranker's RANK is genuinely better (+2.0pts top-1 on the
+# 13k-race held-out test). The hybrid filter uses the ranker to
+# narrow each race down to its top-RANKER_TOP_N entrants, then
+# evaluates EV on those using consensus probs. This combines what
+# each model is good at:
+#   - ranker: WHICH horses are likely to win (rank order)
+#   - consensus: HOW LIKELY each is (calibrated probability)
+#
+# When RANKER_TOP_N is None, the filter is disabled and the recs
+# engine considers every entrant — the prior consensus-only
+# behaviour. When the ranker hasn't scored a race (e.g., because
+# its precompute task ran AFTER the race-card list), the filter
+# falls back to "consider all entrants" for that race so consensus-
+# only races still get full coverage.
+RANKER_MODEL_NAME = "lightgbm_ranker_v1"
+RANKER_MODEL_VERSION = "1.0.0"
+RANKER_TOP_N: Optional[int] = 3
 
 
 # ── Best-of-N pricing across bookmakers ────────────────────────────
@@ -146,12 +162,15 @@ def list_upcoming_races(cur, days: int) -> list[dict]:
 def load_race_candidates(cur, race_id: str) -> list[dict]:
     """Per-entrant pricing + prediction context for one race. Returns
     list of {entrant_id, prediction_id, confidence, bookmaker_odds,
-    horse_name, model_name}.
+    horse_name, model_name, ranker_confidence}.
 
     The DISTINCT ON + ORDER BY (entrant_id, precedence) picks the
-    highest-precedence available model per entrant. The CASE WHEN
-    ladder is built from MODEL_PRECEDENCE so adding / removing a
-    model from the list is a one-place change."""
+    highest-precedence available model per entrant for the
+    consensus-driven probability. Separately we join in the LATEST
+    ranker prediction per entrant (when one exists) so the hybrid
+    filter can rank candidates by the LambdaMART score while still
+    using consensus_prob for EV — see the RANKER_TOP_N block in
+    recommend_for_race for how the two are combined."""
     eligible: list[str] = [m for m, _ in MODEL_PRECEDENCE]
     # Build the CASE WHEN ladder dynamically so this works with any
     # number of models. The ELSE branch puts unknown models at the
@@ -166,7 +185,8 @@ def load_race_candidates(cur, race_id: str) -> list[dict]:
             confidence,
             bookmaker_odds,
             horse_name,
-            model_name
+            model_name,
+            ranker_confidence
         FROM (
             SELECT
                 e.id::text          AS entrant_id,
@@ -175,10 +195,16 @@ def load_race_candidates(cur, race_id: str) -> list[dict]:
                 e.metadata->'bookmaker_odds' AS bookmaker_odds,
                 h.name              AS horse_name,
                 rp.model_name       AS model_name,
+                rrk.confidence      AS ranker_confidence,
                 {case_sql}          AS precedence
             FROM race_entrants e
             JOIN race_predictions rp ON rp.entrant_id = e.id
             JOIN horses h ON h.id = e.horse_id
+            LEFT JOIN race_predictions rrk
+                ON rrk.entrant_id = e.id
+               AND rrk.model_name = %s
+               AND rrk.model_version = %s
+               AND rrk.prediction_type = 'win'
             WHERE e.race_id = %s
               AND NOT e.scratched
               AND rp.model_name = ANY(%s)
@@ -186,7 +212,7 @@ def load_race_candidates(cur, race_id: str) -> list[dict]:
         ) ranked
         ORDER BY entrant_id, precedence ASC
         """,
-        (*eligible, race_id, eligible),
+        (*eligible, RANKER_MODEL_NAME, RANKER_MODEL_VERSION, race_id, eligible),
     )
     return list(cur.fetchall())
 
@@ -307,13 +333,35 @@ def recommend_for_race(
 ) -> list[Alert]:
     """Generate (and DB-insert) value-bet recs for one race; return
     the matching Alert objects ready for Redis. Returns [] when the
-    race has no qualifying picks."""
+    race has no qualifying picks.
+
+    Hybrid filter (RANKER_TOP_N): when the LambdaMART ranker has
+    scored this race, narrow the candidate set to the top-N entrants
+    by ranker confidence before evaluating EV. Consensus probability
+    still drives the math; the ranker just picks which horses to
+    consider. For races without ranker scores, every entrant is
+    evaluated as before."""
     race_id = race["race_id"]
     candidates = load_race_candidates(cur, race_id)
     if not candidates:
         return []
     delete_pending(cur, race_id)
     field_size = len(candidates)
+
+    # Hybrid filter: if RANKER_TOP_N is set AND every candidate has a
+    # ranker_confidence, narrow to the top-N by ranker rank. The
+    # "every candidate has a ranker_confidence" guard handles the
+    # transient state where the ranker precompute hasn't run yet for
+    # this race — fall back to "consider all entrants" so consensus-
+    # only races still get full coverage.
+    if RANKER_TOP_N is not None and RANKER_TOP_N > 0:
+        if all(c.get("ranker_confidence") is not None for c in candidates):
+            candidates = sorted(
+                candidates,
+                key=lambda c: float(c["ranker_confidence"]),
+                reverse=True,
+            )[:RANKER_TOP_N]
+
     alerts: list[Alert] = []
 
     for cand in candidates:
@@ -338,13 +386,14 @@ def recommend_for_race(
         k = kelly_fraction(prob, odds_decimal)
         stake = round(bankroll * k * KELLY_FRACTION, 2)
 
-        # Display label per model so the user sees WHICH model fired.
-        # The ranker is sharper than consensus on the held-out test
-        # (+2.2pts top-1) so showing the source matters for trust +
-        # post-hoc analysis.
-        model_label = "ranker" if cand.get("model_name") == "lightgbm_ranker_v1" else "consensus"
+        # Display label: "consensus" when this came through the
+        # consensus-only path; "hybrid" when the ranker also scored
+        # the race and filtered this pick into the top-N. Useful for
+        # post-hoc analysis (does ranker filtering improve win rate?).
+        had_ranker_score = cand.get("ranker_confidence") is not None
+        label = "hybrid" if (had_ranker_score and RANKER_TOP_N) else "consensus"
         reasoning = (
-            f"Win: {cand['horse_name']} — {model_label} {prob:.0%}, "
+            f"Win: {cand['horse_name']} — {label} {prob:.0%}, "
             f"book {1/odds_decimal:.0%} (@ {odds_decimal:.2f} on "
             f"{best['bookmaker']}) → EV {ev:+.1%}, quarter-Kelly "
             f"stake ${stake:.2f}."

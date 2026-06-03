@@ -296,3 +296,158 @@ class TestHorseRacingAlert:
         assert a.odds_decimal == 4.0
         assert a.recommended_stake == 20.0
         assert a.confidence == 1.0
+
+
+# ── Hybrid filter: ranker rank + consensus prob ────────────────────
+
+
+class _FakeCursor:
+    """Captures execute() args + lets tests seed fetchall responses
+    for recommend_for_race. The race-recommendations DELETE in
+    delete_pending and the INSERT in insert_recommendation use
+    execute() with no fetch, so seeding only fetchall is sufficient
+    for the smoke shape we need here."""
+
+    def __init__(self, fetchall_responses):
+        self._fetchall = list(fetchall_responses)
+        self.executions = []
+
+    def execute(self, sql, params=None):
+        self.executions.append((sql, params or ()))
+
+    def fetchall(self):
+        return self._fetchall.pop(0) if self._fetchall else []
+
+    def fetchone(self):
+        return None
+
+
+def _cand(entrant_id, horse_name, confidence, ranker_confidence=None, bookmaker_odds=None):
+    """Build one candidate row the way load_race_candidates returns it."""
+    return {
+        "entrant_id": entrant_id,
+        "prediction_id": f"pred-{entrant_id}",
+        "confidence": confidence,
+        "bookmaker_odds": bookmaker_odds
+        or [
+            {"bookmaker": "Test Book", "decimal": 5.0},
+        ],
+        "horse_name": horse_name,
+        "model_name": "market_consensus_v1",
+        "ranker_confidence": ranker_confidence,
+    }
+
+
+class TestHybridFilter:
+    """RANKER_TOP_N narrows each race to the top-N entrants by
+    ranker confidence before EV evaluation, when the ranker has
+    scored every entrant in the race. When the ranker hasn't scored
+    (any candidate lacks ranker_confidence) the filter falls back
+    to considering every entrant — the prior consensus-only
+    behaviour."""
+
+    def _patch_top_n(self, n, monkeypatch):
+        monkeypatch.setattr(ghr, "RANKER_TOP_N", n)
+
+    def test_top_n_filters_to_ranker_choices(self, monkeypatch):
+        # 5-runner race with ranker rankings [A=0.4, B=0.3, C=0.2, D=0.05, E=0.05].
+        # RANKER_TOP_N=3 should narrow to A, B, C — D and E never see EV math.
+        self._patch_top_n(3, monkeypatch)
+        candidates = [
+            _cand("A", "Horse A", confidence=0.3, ranker_confidence=0.4),
+            _cand("B", "Horse B", confidence=0.2, ranker_confidence=0.3),
+            _cand("C", "Horse C", confidence=0.15, ranker_confidence=0.2),
+            _cand("D", "Horse D", confidence=0.1, ranker_confidence=0.05),
+            _cand("E", "Horse E", confidence=0.25, ranker_confidence=0.05),
+        ]
+        cur = _FakeCursor([candidates])
+        race = {
+            "race_id": "race-1",
+            "track_name": "Newton Abbot",
+            "race_date": __import__("datetime").datetime(2026, 6, 4, 15, 0),
+            "race_number": 1,
+        }
+        alerts = ghr.recommend_for_race(cur, race, bankroll=1000.0, ev_threshold=0.0, prob_floor=0.0)
+        # Up to 3 alerts; whichever passed EV/prob thresholds. The key
+        # invariant: NONE of the alerts can be Horse D or E because
+        # the ranker filter dropped them before EV evaluation.
+        alert_horses = {a.home_team for a in alerts}
+        assert "Horse D" not in alert_horses
+        assert "Horse E" not in alert_horses
+
+    def test_top_n_falls_back_when_ranker_missing(self, monkeypatch):
+        # Ranker hasn't scored this race (None on every candidate).
+        # Filter must fall back to considering every entrant rather
+        # than silently dropping the race.
+        self._patch_top_n(3, monkeypatch)
+        candidates = [
+            _cand("A", "Horse A", confidence=0.4, ranker_confidence=None),
+            _cand("B", "Horse B", confidence=0.3, ranker_confidence=None),
+            _cand("C", "Horse C", confidence=0.2, ranker_confidence=None),
+            _cand("D", "Horse D", confidence=0.1, ranker_confidence=None),
+        ]
+        cur = _FakeCursor([candidates])
+        race = {
+            "race_id": "race-1",
+            "track_name": "Curragh",
+            "race_date": __import__("datetime").datetime(2026, 6, 4, 15, 0),
+            "race_number": 2,
+        }
+        # Every candidate's EV vs 5.0 odds: prob × 5 − 1. Horse A
+        # (0.4 × 5 - 1 = 1.0) and Horse B (0.5) clear any threshold.
+        # If the filter mis-fired and dropped the race, alerts would
+        # be empty.
+        alerts = ghr.recommend_for_race(cur, race, bankroll=1000.0, ev_threshold=0.0, prob_floor=0.0)
+        assert len(alerts) > 0  # Race was evaluated, not silently dropped.
+
+    def test_top_n_falls_back_when_partial_ranker_coverage(self, monkeypatch):
+        # Mixed coverage: 3 of 4 candidates have ranker_confidence,
+        # one doesn't. The "every candidate has ranker_confidence"
+        # guard fails, fallback fires — all 4 evaluated. Without
+        # this guard, we'd silently dock the unscored entrant from
+        # consideration even though we DON'T know whether the
+        # ranker would have liked it.
+        self._patch_top_n(2, monkeypatch)
+        candidates = [
+            _cand("A", "Horse A", confidence=0.4, ranker_confidence=0.5),
+            _cand("B", "Horse B", confidence=0.3, ranker_confidence=0.3),
+            _cand("C", "Horse C", confidence=0.2, ranker_confidence=0.1),
+            _cand("D", "Horse D", confidence=0.4, ranker_confidence=None),  # unscored
+        ]
+        cur = _FakeCursor([candidates])
+        race = {
+            "race_id": "race-1",
+            "track_name": "Ripon",
+            "race_date": __import__("datetime").datetime(2026, 6, 4, 15, 0),
+            "race_number": 3,
+        }
+        alerts = ghr.recommend_for_race(cur, race, bankroll=1000.0, ev_threshold=0.0, prob_floor=0.0)
+        # Without the partial-coverage fallback the filter would have
+        # taken top-2 (A, B) and dropped both C and D. With the
+        # fallback all 4 are evaluated, so D's high-prob row CAN
+        # produce an alert.
+        alert_horses = {a.home_team for a in alerts}
+        assert "Horse D" in alert_horses
+
+    def test_filter_disabled_when_top_n_none(self, monkeypatch):
+        # RANKER_TOP_N=None disables the hybrid filter entirely.
+        # Every candidate evaluated regardless of ranker_confidence.
+        self._patch_top_n(None, monkeypatch)
+        candidates = [
+            _cand("A", "Horse A", confidence=0.4, ranker_confidence=0.5),
+            _cand("B", "Horse B", confidence=0.3, ranker_confidence=0.3),
+            _cand("C", "Horse C", confidence=0.2, ranker_confidence=0.1),
+            _cand("D", "Horse D", confidence=0.4, ranker_confidence=0.05),
+        ]
+        cur = _FakeCursor([candidates])
+        race = {
+            "race_id": "race-1",
+            "track_name": "Warwick",
+            "race_date": __import__("datetime").datetime(2026, 6, 4, 15, 0),
+            "race_number": 4,
+        }
+        alerts = ghr.recommend_for_race(cur, race, bankroll=1000.0, ev_threshold=0.0, prob_floor=0.0)
+        # Without the filter, Horse D (consensus 40%, ranker 5%) can
+        # still fire an alert based on its consensus probability.
+        alert_horses = {a.home_team for a in alerts}
+        assert "Horse D" in alert_horses
