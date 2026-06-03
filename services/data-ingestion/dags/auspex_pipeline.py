@@ -194,10 +194,10 @@ with DAG(
 
     fetch_upcoming_tennis >> compute_features_tennis >> precompute_predictions_tennis >> generate_recommendations_tennis
 
-    # ── MMA branch (M2: ingestion + features) ─────────────────────
-    # Predictions + recommendations land in subsequent commits once
-    # the historical backfill (M2.5) + training corpus (M3) are in
-    # place. Same incremental rollout pattern as NFL/tennis.
+    # ── MMA branch (M4: end-to-end pipeline) ──────────────────────
+    # Second 1v1 sport (UFC). Single market in v1 (moneyline) —
+    # method-of-victory / round-group are MMA specialty markets
+    # deferred to v2 (separate models).
     fetch_upcoming_mma = BashOperator(
         task_id="fetch_upcoming_mma",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport mma --days 14",
@@ -208,7 +208,17 @@ with DAG(
         bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_mma.py --days 14",
     )
 
-    fetch_upcoming_mma >> compute_features_mma
+    precompute_predictions_mma = BashOperator(
+        task_id="precompute_predictions_mma",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/precompute_predictions_mma.py --days 14",
+    )
+
+    generate_recommendations_mma = BashOperator(
+        task_id="generate_recommendations_mma",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/generate_recommendations_mma.py --days 14",
+    )
+
+    fetch_upcoming_mma >> compute_features_mma >> precompute_predictions_mma >> generate_recommendations_mma
 
     # ── Phase 5: grade finished matches ───────────────────────────
     # Walks matches whose status flipped to 'finished' in the last
@@ -250,6 +260,7 @@ with DAG(
         generate_recommendations_nba,
         generate_recommendations_nfl,
         generate_recommendations_tennis,
+        generate_recommendations_mma,
     ] >> send_pipeline_digest
 
     # ── Model monitoring (Phase 9) ────────────────────────────────

@@ -49,6 +49,11 @@ _NFL_NOTIFY_THRESHOLDS: Dict[str, float] = {
 _TENNIS_NOTIFY_THRESHOLDS: Dict[str, float] = {
     "moneyline": 0.65,
 }
+# MMA threshold matches the UFC modal favorite at -160 (62%). Single
+# market in v1 — method-of-victory / round-group come later.
+_MMA_NOTIFY_THRESHOLDS: Dict[str, float] = {
+    "moneyline": 0.62,
+}
 _SOCCER_NOTIFY_THRESHOLD = 0.65
 
 # Friendly market labels keyed by (sport, market) so the few overloaded
@@ -72,6 +77,7 @@ _MARKET_DISPLAY_LABELS: Dict[tuple, str] = {
     ("nfl", "spread"): "Spread",
     ("nfl", "total"): "Total Points",
     ("tennis", "moneyline"): "Match Winner",
+    ("mma", "moneyline"): "Fight Winner",
 }
 
 
@@ -310,6 +316,18 @@ TASKS: Dict[str, TaskSpec] = {
         base_models=["xgboost_tennis_ml", "lightgbm_tennis_ml", "neural_network_tennis_ml"],
         feature_set="tennis_baseline",
     ),
+    # MMA: second 1v1 sport. labels=["home", "away"] map to
+    # fighter1/fighter2 — positional convention from process_event
+    # when is_individual=True (MMA payloads lack homeAway).
+    "mma:moneyline": TaskSpec(
+        sport="mma",
+        market="moneyline",
+        ensemble_name="ensemble_mma_ml",
+        labels=["home", "away"],
+        prediction_type="moneyline",
+        base_models=["xgboost_mma_ml", "lightgbm_mma_ml", "neural_network_mma_ml"],
+        feature_set="mma_baseline",
+    ),
 }
 
 
@@ -420,6 +438,7 @@ def _klass_registry():
         HOCKEY_POISSON_NHL_REGULATION,
         HOCKEY_POISSON_NHL_TOTAL,
         LIGHTGBM_MATCH_OUTCOME,
+        LIGHTGBM_MMA_MONEYLINE,
         LIGHTGBM_NBA_MONEYLINE,
         LIGHTGBM_NBA_SPREAD,
         LIGHTGBM_NBA_TOTAL,
@@ -432,6 +451,7 @@ def _klass_registry():
         LIGHTGBM_NHL_TOTAL,
         LIGHTGBM_TENNIS_MONEYLINE,
         NEURAL_NETWORK_CONFIG,
+        NEURAL_NETWORK_MMA_MONEYLINE,
         NEURAL_NETWORK_NBA_MONEYLINE,
         NEURAL_NETWORK_NBA_SPREAD,
         NEURAL_NETWORK_NBA_TOTAL,
@@ -445,6 +465,7 @@ def _klass_registry():
         NEURAL_NETWORK_TENNIS_MONEYLINE,
         POISSON_CONFIG,
         XGBOOST_MATCH_OUTCOME,
+        XGBOOST_MMA_MONEYLINE,
         XGBOOST_NBA_MONEYLINE,
         XGBOOST_NBA_SPREAD,
         XGBOOST_NBA_TOTAL,
@@ -517,6 +538,10 @@ def _klass_registry():
         "xgboost_tennis_ml": (XGBoostMatchPredictor, XGBOOST_TENNIS_MONEYLINE),
         "lightgbm_tennis_ml": (LightGBMMatchPredictor, LIGHTGBM_TENNIS_MONEYLINE),
         "neural_network_tennis_ml": (NeuralNetworkMatchPredictor, NEURAL_NETWORK_TENNIS_MONEYLINE),
+        # MMA moneyline (second 1v1 sport)
+        "xgboost_mma_ml": (XGBoostMatchPredictor, XGBOOST_MMA_MONEYLINE),
+        "lightgbm_mma_ml": (LightGBMMatchPredictor, LIGHTGBM_MMA_MONEYLINE),
+        "neural_network_mma_ml": (NeuralNetworkMatchPredictor, NEURAL_NETWORK_MMA_MONEYLINE),
     }
 
 
@@ -550,6 +575,7 @@ def _build_ensemble_for_task(
     from predictors.ensemble import EnsemblePredictor
     from predictors.model_config import (
         ENSEMBLE_CONFIG,
+        ENSEMBLE_MMA_MONEYLINE,
         ENSEMBLE_NBA_MONEYLINE,
         ENSEMBLE_NBA_SPREAD,
         ENSEMBLE_NBA_TOTAL,
@@ -580,6 +606,7 @@ def _build_ensemble_for_task(
         "ensemble_nfl_sp": ENSEMBLE_NFL_SPREAD,
         "ensemble_nfl_tot": ENSEMBLE_NFL_TOTAL,
         "ensemble_tennis_ml": ENSEMBLE_TENNIS_MONEYLINE,
+        "ensemble_mma_ml": ENSEMBLE_MMA_MONEYLINE,
     }
     ensemble_cfg = ensemble_cfg_for.get(task.ensemble_name, ENSEMBLE_CONFIG)
 
@@ -1223,6 +1250,8 @@ class PredictionService:
                 threshold = _NFL_NOTIFY_THRESHOLDS.get(task.market, 0.65)
             elif task.sport == "tennis":
                 threshold = _TENNIS_NOTIFY_THRESHOLDS.get(task.market, 0.65)
+            elif task.sport == "mma":
+                threshold = _MMA_NOTIFY_THRESHOLDS.get(task.market, 0.62)
             else:
                 threshold = _SOCCER_NOTIFY_THRESHOLD
             if confidence < threshold:
