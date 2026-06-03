@@ -340,42 +340,100 @@ class HorseRacingRanker:
             probs_pre[cursor : cursor + int(size)] = race_probs
             cursor += int(size)
 
-        iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-        iso.fit(probs_pre, y_val.astype(np.float64))
-        candidate_x = np.asarray(iso.X_thresholds_, dtype=np.float64)
-        candidate_y = np.asarray(iso.y_thresholds_, dtype=np.float64)
+        # Two-fold cross-validation of the calibrator. The earlier
+        # naive guard (fit + eval on the same val set) shipped
+        # calibrators that marginally improved val Brier but degraded
+        # test Brier — the val improvement was just memorising val
+        # noise. The two-fold guard fits on half the val races,
+        # measures on the other half, and only ships when the
+        # measurement is honest cross-fold.
+        n_races = len(groups_val)
+        if n_races < 4:
+            # Too few races for a meaningful split — fall back to
+            # the naive single-set comparison.
+            fold_a_races = np.ones(n_races, dtype=bool)
+            fold_b_races = np.zeros(n_races, dtype=bool)
+        else:
+            # Race-level (not row-level) split so a race is never
+            # partially in train and partially in eval; LambdaMART's
+            # group_array invariant requires it.
+            fold_a_races = np.arange(n_races) % 2 == 0
+            fold_b_races = ~fold_a_races
 
-        # Safety check: only accept the calibrator if it improves
-        # val Brier after the per-race renormalisation that predict_
-        # probabilities does. Without this guard, a calibrator that
-        # OVERFITS the val set can SHIP and degrade test-time
-        # calibration (verified empirically: 13k-race corpus, 94-knot
-        # isotonic, pre-cal val Brier 0.0898 vs post-cal+renorm test
-        # Brier 0.1046 — the calibrator memorised val noise + the
-        # renorm step amplified it).
-        baseline_brier = _per_entrant_brier_from_probs(probs_pre, groups_val, y_val)
-        calibrated_probs = _apply_calibrator_with_renorm(probs_pre, groups_val, candidate_x, candidate_y)
-        cal_brier = _per_entrant_brier_from_probs(calibrated_probs, groups_val, y_val)
+        def _fold_rows(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            row_mask = np.zeros(len(probs_pre), dtype=bool)
+            cur = 0
+            for race_idx, size in enumerate(groups_val):
+                size_i = int(size)
+                if mask[race_idx]:
+                    row_mask[cur : cur + size_i] = True
+                cur += size_i
+            return probs_pre[row_mask], groups_val[mask], y_val[row_mask]
 
-        if cal_brier < baseline_brier:
-            self.calibrator_x = candidate_x
-            self.calibrator_y = candidate_y
+        probs_a, groups_a, y_a = _fold_rows(fold_a_races)
+        probs_b, groups_b, y_b = _fold_rows(fold_b_races)
+
+        # Fit on fold A, evaluate on fold B (and vice versa) — average
+        # gives an honest cross-fold estimate of the calibrator's
+        # generalisation Brier.
+        def _fit_and_eval(
+            probs_train: np.ndarray,
+            y_train: np.ndarray,
+            probs_eval: np.ndarray,
+            groups_eval: np.ndarray,
+            y_eval: np.ndarray,
+        ) -> tuple[float, float]:
+            if len(probs_train) == 0 or len(probs_eval) == 0:
+                return float("inf"), float("inf")
+            iso_cv = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+            iso_cv.fit(probs_train, y_train.astype(np.float64))
+            cal_x = np.asarray(iso_cv.X_thresholds_, dtype=np.float64)
+            cal_y = np.asarray(iso_cv.y_thresholds_, dtype=np.float64)
+            baseline = _per_entrant_brier_from_probs(probs_eval, groups_eval, y_eval)
+            calibrated = _apply_calibrator_with_renorm(probs_eval, groups_eval, cal_x, cal_y)
+            calibrated_brier = _per_entrant_brier_from_probs(calibrated, groups_eval, y_eval)
+            return baseline, calibrated_brier
+
+        if len(probs_a) > 0 and len(probs_b) > 0:
+            bl_a, cal_a = _fit_and_eval(probs_b, y_b, probs_a, groups_a, y_a)
+            bl_b, cal_b = _fit_and_eval(probs_a, y_a, probs_b, groups_b, y_b)
+            cv_baseline = (bl_a + bl_b) / 2
+            cv_calibrated = (cal_a + cal_b) / 2
+        else:
+            # Single fold fallback for tiny corpora — fit + eval on
+            # the same set, accept the naive guard's outcome.
+            cv_baseline = _per_entrant_brier_from_probs(probs_pre, groups_val, y_val)
+            iso_one = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+            iso_one.fit(probs_pre, y_val.astype(np.float64))
+            cv_x = np.asarray(iso_one.X_thresholds_, dtype=np.float64)
+            cv_y = np.asarray(iso_one.y_thresholds_, dtype=np.float64)
+            calibrated_naive = _apply_calibrator_with_renorm(probs_pre, groups_val, cv_x, cv_y)
+            cv_calibrated = _per_entrant_brier_from_probs(calibrated_naive, groups_val, y_val)
+
+        if cv_calibrated < cv_baseline:
+            # Cross-fold says calibrator generalises. Refit on the
+            # FULL val set so the shipped calibrator uses all the
+            # data — the CV step is only for the keep/drop decision,
+            # not for the final knot points.
+            iso_full = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+            iso_full.fit(probs_pre, y_val.astype(np.float64))
+            self.calibrator_x = np.asarray(iso_full.X_thresholds_, dtype=np.float64)
+            self.calibrator_y = np.asarray(iso_full.y_thresholds_, dtype=np.float64)
             logger.info(
-                "Isotonic calibrator KEPT: %d knots, val Brier %.4f → %.4f (Δ%+.4f)",
-                len(candidate_x),
-                baseline_brier,
-                cal_brier,
-                cal_brier - baseline_brier,
+                "Isotonic calibrator KEPT: %d knots, cross-fold Brier %.4f → %.4f (Δ%+.4f)",
+                len(self.calibrator_x),
+                cv_baseline,
+                cv_calibrated,
+                cv_calibrated - cv_baseline,
             )
         else:
             self.calibrator_x = None
             self.calibrator_y = None
             logger.info(
-                "Isotonic calibrator DROPPED: would increase val Brier "
-                "%.4f → %.4f (Δ%+.4f). Shipping uncalibrated softmax.",
-                baseline_brier,
-                cal_brier,
-                cal_brier - baseline_brier,
+                "Isotonic calibrator DROPPED: cross-fold Brier %.4f → %.4f " "(Δ%+.4f). Shipping uncalibrated softmax.",
+                cv_baseline,
+                cv_calibrated,
+                cv_calibrated - cv_baseline,
             )
 
     # ── Score / probability ────────────────────────────────────────

@@ -387,7 +387,12 @@ class TestIsotonicCalibrator:
 
     def _train_with_calibrator(self):
         # Train on a synthetic corpus where the model can learn
-        # ranking but the raw scores produce mis-calibrated probs.
+        # ranking. On well-calibrated synthetic data the cross-fold
+        # guard (correctly) drops the isotonic calibrator since it
+        # has nothing to improve — so we manually force-set a known
+        # calibrator after fit() to exercise the save / load /
+        # apply paths. The CV guard itself is tested separately
+        # against fit-time data.
         df = _synthetic_dataset(n_races=200, runners_per_race=6, seed=3)
         feature_cols = ["signal", "noise_a", "noise_b", "noise_c"]
         ranker = HorseRacingRanker(
@@ -402,22 +407,50 @@ class TestIsotonicCalibrator:
             y_val=df["target"].to_numpy(dtype=np.int64),
             groups_val=groups,
         )
+        # Force a known non-identity calibrator so the save / load /
+        # apply tests have something to round-trip. Real calibrators
+        # found by the CV guard look like this (monotonic, non-trivial
+        # bend); tests that verify the CV BEHAVIOUR live separately.
+        ranker.calibrator_x = np.array([0.0, 0.1, 0.3, 0.5, 0.7, 1.0], dtype=np.float64)
+        ranker.calibrator_y = np.array([0.0, 0.05, 0.2, 0.4, 0.6, 1.0], dtype=np.float64)
         return ranker, df, groups, feature_cols
 
-    def test_calibrator_fit_writes_knot_arrays(self):
-        # The fit() call should populate calibrator_x / calibrator_y
-        # whenever a val set is provided. Without the calibrator the
-        # ranker ships uncalibrated softmax and the recs engine
-        # over-fires (verified empirically on prod).
-        ranker, *_ = self._train_with_calibrator()
-        assert ranker.calibrator_x is not None
-        assert ranker.calibrator_y is not None
-        assert ranker.calibrator_x.shape == ranker.calibrator_y.shape
-        # X monotonically non-decreasing (sklearn IsotonicRegression
-        # invariant); Y bounded in [0, 1].
-        assert np.all(np.diff(ranker.calibrator_x) >= 0)
-        assert ranker.calibrator_y.min() >= 0.0
-        assert ranker.calibrator_y.max() <= 1.0
+    def test_cv_guard_decides_calibrator_fate_consistently(self):
+        # The cross-fold guard either keeps or drops the calibrator
+        # based on whether isotonic improves Brier when fit on half
+        # the val races and measured on the other half. We can't
+        # predict the outcome on small synthetic data (depends on
+        # specific RNG draws), but we CAN verify the outcome is
+        # consistent: calibrator_x and calibrator_y are either both
+        # None (dropped) or both populated (kept). The half-state
+        # would mean the guard wrote one but not the other — a
+        # silent bug.
+        df = _synthetic_dataset(n_races=200, runners_per_race=6, seed=10)
+        feature_cols = ["signal", "noise_a", "noise_b", "noise_c"]
+        ranker = HorseRacingRanker(
+            HorseRacingRankerConfig(n_estimators=50, learning_rate=0.1, early_stopping_rounds=10)
+        )
+        groups = df["race_id"].value_counts(sort=False).values
+        ranker.fit(
+            X_train=df[feature_cols],
+            y_train=df["target"].to_numpy(dtype=np.int64),
+            groups_train=groups,
+            X_val=df[feature_cols],
+            y_val=df["target"].to_numpy(dtype=np.int64),
+            groups_val=groups,
+        )
+        # Either both None (dropped) or both populated (kept) — never half-state.
+        both_none = ranker.calibrator_x is None and ranker.calibrator_y is None
+        both_set = ranker.calibrator_x is not None and ranker.calibrator_y is not None
+        assert both_none or both_set
+        if both_set:
+            # When populated, the shape invariants must hold so the
+            # np.interp path can actually run.
+            assert ranker.calibrator_x.shape == ranker.calibrator_y.shape
+            assert np.all(np.diff(ranker.calibrator_x) >= 0)
+            assert ranker.calibrator_y.min() >= 0.0
+            assert ranker.calibrator_y.max() <= 1.0
+        assert ranker.is_fitted is True  # Training itself always succeeds.
 
     def test_no_calibrator_when_no_val_set(self):
         # Without a val set we can't fit a calibrator. fit() should
