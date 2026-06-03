@@ -23,7 +23,6 @@ sys.path.insert(0, str(SRC))
 
 from utils import horse_racing_data as hrd  # noqa: E402
 
-
 # ── _extract_entrant_features: JSONB → per-entrant features ─────────
 
 

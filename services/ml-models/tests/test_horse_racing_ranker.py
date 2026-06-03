@@ -21,13 +21,7 @@ import pytest
 SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
 
-from predictors.horse_racing_ranker import (  # noqa: E402
-    HorseRacingRanker,
-    HorseRacingRankerConfig,
-    _race_nll,
-    _softmax,
-)
-
+from predictors.horse_racing_ranker import HorseRacingRanker, HorseRacingRankerConfig, _race_nll, _softmax  # noqa: E402
 
 # ── _softmax ───────────────────────────────────────────────────────
 
