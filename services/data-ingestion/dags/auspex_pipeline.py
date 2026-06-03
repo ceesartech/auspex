@@ -194,14 +194,21 @@ with DAG(
 
     fetch_upcoming_tennis >> compute_features_tennis >> precompute_predictions_tennis >> generate_recommendations_tennis
 
-    # ── MMA branch (M1: ingestion + odds scaffolding only) ────────
-    # Predictions / features / recommendations land in subsequent
-    # commits once the historical backfill + training corpus are in
-    # place. Standalone for now — no downstream chain yet.
+    # ── MMA branch (M2: ingestion + features) ─────────────────────
+    # Predictions + recommendations land in subsequent commits once
+    # the historical backfill (M2.5) + training corpus (M3) are in
+    # place. Same incremental rollout pattern as NFL/tennis.
     fetch_upcoming_mma = BashOperator(
         task_id="fetch_upcoming_mma",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport mma --days 14",
     )
+
+    compute_features_mma = BashOperator(
+        task_id="compute_features_mma",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_mma.py --days 14",
+    )
+
+    fetch_upcoming_mma >> compute_features_mma
 
     # ── Phase 5: grade finished matches ───────────────────────────
     # Walks matches whose status flipped to 'finished' in the last
