@@ -353,6 +353,91 @@ def _diff(features: dict, h_key: str, a_key: str, out_key: str) -> None:
         features[out_key] = float(h) - float(a)
 
 
+# Sport-tuned weather thresholds. NFL-specific (versus tennis):
+#   * HIGH_WIND_KMH=25 (~15 mph) — degrades passing accuracy + kicking.
+#   * WET_PRECIP_MM=5 — measurable rain/snow across the 4h kickoff window.
+#   * FREEZING_TEMP_C=0 — affects ball grip + kicker leg strength;
+#     also a class boundary for cold-weather games (Lambeau in January).
+HIGH_WIND_KMH = 25.0
+WET_PRECIP_MM = 5.0
+FREEZING_TEMP_C = 0.0
+
+
+def fetch_weather(cur, match_id: str) -> dict:
+    """Pull the freshest weather snapshot for this match and project it
+    into a dict of weather_* features.
+
+    Returns an EMPTY dict when no weather row exists and the venue
+    isn't known to be indoor — by design, weather features are then
+    omitted from the feature dict entirely (not defaulted), because
+    Phase 14's EXISTS-gate on the training query means the model is
+    only trained on rows with real weather. The reverted v3 attempt
+    (commit 17b3eb6) defaulted missing rows to NEUTRAL_DEFAULTS values,
+    which created a "value 10.0 = missing-data sentinel" pattern the
+    GBDT overfit. With OMIT-on-missing here, the model never sees a
+    fake value at training time, and at predict-time GBDTs route
+    missing features through their learned default branches —
+    no spurious signal.
+
+    Indoor venues are special-cased: we emit only weather_indoor=1.0
+    (a hard ground-truth fact about the venue, not a fill-in for
+    missing data). Numeric weather features are omitted for indoor
+    matches because temperature/wind/precip don't apply.
+    """
+    cur.execute(
+        """
+        SELECT
+            mwl.temperature_c, mwl.wind_kmh, mwl.precipitation_mm,
+            mwl.humidity_pct, vc.is_indoor
+        FROM match_weather_latest mwl
+        LEFT JOIN venue_coords vc ON vc.id = mwl.venue_coords_id
+        WHERE mwl.match_id = %s
+        """,
+        (match_id,),
+    )
+    row = cur.fetchone()
+
+    if not row:
+        # No weather row. Fall back to venue_coords lookup so we can
+        # still flag indoor games (a hard fact, not a default fill).
+        cur.execute(
+            """
+            SELECT vc.is_indoor
+            FROM matches m
+            LEFT JOIN venue_coords vc
+              ON LOWER(TRIM(m.venue)) = vc.normalized_venue_name
+            WHERE m.id = %s
+            """,
+            (match_id,),
+        )
+        venue_row = cur.fetchone()
+        if venue_row and venue_row.get("is_indoor"):
+            return {"weather_indoor": 1.0}
+        return {}
+
+    if row.get("is_indoor"):
+        return {"weather_indoor": 1.0}
+
+    out: dict[str, float] = {"weather_indoor": 0.0}
+    temp = row.get("temperature_c")
+    wind = row.get("wind_kmh")
+    precip = row.get("precipitation_mm")
+    humidity = row.get("humidity_pct")
+
+    if temp is not None:
+        out["weather_temp_c"] = float(temp)
+        out["weather_freezing"] = 1.0 if float(temp) < FREEZING_TEMP_C else 0.0
+    if wind is not None:
+        out["weather_wind_kmh"] = float(wind)
+        out["weather_high_wind"] = 1.0 if float(wind) > HIGH_WIND_KMH else 0.0
+    if precip is not None:
+        out["weather_precip_mm"] = float(precip)
+        out["weather_wet"] = 1.0 if float(precip) > WET_PRECIP_MM else 0.0
+    if humidity is not None:
+        out["weather_humidity_pct"] = float(humidity)
+    return out
+
+
 def compute_for_match(cur, match_id: str) -> Optional[dict]:
     """End-to-end feature computation for one match. Returns None
     if the match itself can't be found."""
@@ -370,6 +455,7 @@ def compute_for_match(cur, match_id: str) -> Optional[dict]:
         sched = fetch_schedule_context(cur, team_id, when)
         for k, v in sched.items():
             features[f"{side}_{k}"] = v
+    features.update(fetch_weather(cur, match_id))
     _diff(features, "home_roll_pts_scored", "away_roll_pts_scored", "pts_scored_diff")
     _diff(features, "home_roll_pts_allowed", "away_roll_pts_allowed", "pts_allowed_diff")
     _diff(features, "home_roll_margin", "away_roll_margin", "margin_diff")

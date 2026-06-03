@@ -388,6 +388,84 @@ def _diff(features: dict, h_key: str, a_key: str, out_key: str) -> None:
         features[out_key] = float(h) - float(a)
 
 
+# Sport-tuned weather thresholds. Tennis-specific (vs NFL):
+#   * HIGH_WIND_KMH=25 — disrupts ball toss + drift on service.
+#   * WET_PRECIP_MM=5 — rain delays start at ~5mm in the 4h window
+#     (tour-stop covers roof / suspends play).
+#   * HOT_TEMP_C=32 — Australian Open extreme-heat policy threshold;
+#     players get extra rest + extreme-heat protocols above this.
+#   * No freezing threshold — tour avoids outdoor winter matches.
+HIGH_WIND_KMH = 25.0
+WET_PRECIP_MM = 5.0
+HOT_TEMP_C = 32.0
+
+
+def fetch_weather(cur, match_id: str) -> dict:
+    """Pull the freshest weather snapshot for this match and project
+    it into a dict of weather_* features.
+
+    OMIT-on-missing: returns an empty dict when no weather row exists
+    (and the venue isn't known to be indoor). Phase 14's EXISTS-gate
+    on TENNIS_MONEYLINE_TRAINING_QUERY means the training corpus
+    contains only matches with actual weather, so the model never
+    learns the "missing-data sentinel" pattern that the reverted v3
+    attempt (commit 17b3eb6) suffered from. At predict-time, GBDTs
+    route missing features through their learned default branches.
+    """
+    cur.execute(
+        """
+        SELECT
+            mwl.temperature_c, mwl.wind_kmh, mwl.precipitation_mm,
+            mwl.humidity_pct, vc.is_indoor
+        FROM match_weather_latest mwl
+        LEFT JOIN venue_coords vc ON vc.id = mwl.venue_coords_id
+        WHERE mwl.match_id = %s
+        """,
+        (match_id,),
+    )
+    row = cur.fetchone()
+
+    if not row:
+        # No weather row at all. Still try the venue lookup so we
+        # can flag indoor tournament play (Paris Bercy, ATP Finals).
+        cur.execute(
+            """
+            SELECT vc.is_indoor
+            FROM matches m
+            LEFT JOIN venue_coords vc
+              ON LOWER(TRIM(m.venue)) = vc.normalized_venue_name
+            WHERE m.id = %s
+            """,
+            (match_id,),
+        )
+        venue_row = cur.fetchone()
+        if venue_row and venue_row.get("is_indoor"):
+            return {"weather_indoor": 1.0}
+        return {}
+
+    if row.get("is_indoor"):
+        return {"weather_indoor": 1.0}
+
+    out: dict[str, float] = {"weather_indoor": 0.0}
+    temp = row.get("temperature_c")
+    wind = row.get("wind_kmh")
+    precip = row.get("precipitation_mm")
+    humidity = row.get("humidity_pct")
+
+    if temp is not None:
+        out["weather_temp_c"] = float(temp)
+        out["weather_hot"] = 1.0 if float(temp) > HOT_TEMP_C else 0.0
+    if wind is not None:
+        out["weather_wind_kmh"] = float(wind)
+        out["weather_high_wind"] = 1.0 if float(wind) > HIGH_WIND_KMH else 0.0
+    if precip is not None:
+        out["weather_precip_mm"] = float(precip)
+        out["weather_wet"] = 1.0 if float(precip) > WET_PRECIP_MM else 0.0
+    if humidity is not None:
+        out["weather_humidity_pct"] = float(humidity)
+    return out
+
+
 def compute_for_match(cur, match_id: str) -> Optional[dict]:
     """End-to-end feature computation for one match. Returns None
     if the match itself can't be found."""
@@ -406,6 +484,7 @@ def compute_for_match(cur, match_id: str) -> Optional[dict]:
         for k, v in sched.items():
             features[f"{side}_{k}"] = v
     features.update(fetch_head_to_head(cur, meta["home_team_id"], meta["away_team_id"], when))
+    features.update(fetch_weather(cur, match_id))
 
     _diff(features, "home_roll_win_pct", "away_roll_win_pct", "roll_win_pct_diff")
     _diff(features, "home_days_rest", "away_days_rest", "days_rest_diff")

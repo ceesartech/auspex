@@ -165,3 +165,183 @@ class TestCli:
     def test_match_ids_parses(self):
         args = fnfl.parse_args(["--match-ids", "a,b,c", "--database-url", "x"])
         assert args.match_ids == "a,b,c"
+
+
+# ── Weather integration (Phase 14 — Open-Meteo retry) ───────────────
+
+
+class _FakeCursor:
+    """Minimal cursor stub for fetch_weather tests. The function makes
+    one query against match_weather_latest, optionally a second against
+    venue_coords when no weather row is found. We seed fetchone() with
+    a queue of return values."""
+
+    def __init__(self, responses: list):
+        self._responses = list(responses)
+
+    def execute(self, *_args, **_kwargs):
+        return None
+
+    def fetchone(self):
+        return self._responses.pop(0) if self._responses else None
+
+
+class TestNoWeatherFeaturesInDefaults:
+    """The whole point of the Phase 14 retry: NEUTRAL_DEFAULTS must
+    contain NO weather keys. The reverted v3 attempt (commit 17b3eb6)
+    added weather_temp_c=10.0 etc. as defaults, which the GBDT
+    overfit as a "missing-data sentinel" when 39% of training rows
+    used the defaults. With OMIT-on-missing + the EXISTS-gate on
+    NFL training queries, weather features either come from real
+    data or are simply absent from the dict — never defaulted."""
+
+    def test_no_weather_keys_in_defaults(self):
+        weather_keys = [k for k in fnfl.NEUTRAL_DEFAULTS if k.startswith("weather_")]
+        assert weather_keys == [], (
+            f"weather_* keys in NEUTRAL_DEFAULTS reintroduce the default-bias "
+            f"leakage from commit 17b3eb6: {weather_keys}"
+        )
+
+
+class TestWeatherThresholds:
+    """Sport-tuned thresholds locked here. Editing one of these is a
+    real modelling change — the test is what makes that explicit."""
+
+    def test_high_wind_kmh_is_25(self):
+        # ~15 mph — degrades passing accuracy + kicking. Tests fail
+        # loudly if someone bumps this without updating the model
+        # commentary in the recent-form retro.
+        assert fnfl.HIGH_WIND_KMH == 25.0
+
+    def test_wet_precip_mm_is_5(self):
+        # 5mm of rain/snow accumulated over a 4-hour kickoff window
+        # is the "measurable precipitation during the game" threshold.
+        assert fnfl.WET_PRECIP_MM == 5.0
+
+    def test_freezing_temp_c_is_zero(self):
+        # NFL-specific (tennis omits it). 0°C affects ball grip +
+        # kicker leg strength; iconic cold-weather games (Lambeau in
+        # January) cross this threshold.
+        assert fnfl.FREEZING_TEMP_C == 0.0
+
+
+class TestFetchWeatherOutdoor:
+    """Outdoor venue with a weather row — emits all features incl.
+    categorical flags + indoor=0."""
+
+    def test_mild_outdoor_match_emits_all_features(self):
+        # 15°C / 12 km/h wind / 0mm precip / 50% humidity — fair fall
+        # game. All numerics present, all flags 0.
+        cur = _FakeCursor(
+            [
+                {
+                    "temperature_c": 15.0,
+                    "wind_kmh": 12.0,
+                    "precipitation_mm": 0.0,
+                    "humidity_pct": 50.0,
+                    "is_indoor": False,
+                }
+            ]
+        )
+        out = fnfl.fetch_weather(cur, "match-1")
+        assert out["weather_temp_c"] == 15.0
+        assert out["weather_wind_kmh"] == 12.0
+        assert out["weather_precip_mm"] == 0.0
+        assert out["weather_humidity_pct"] == 50.0
+        assert out["weather_indoor"] == 0.0
+        assert out["weather_high_wind"] == 0.0
+        assert out["weather_wet"] == 0.0
+        assert out["weather_freezing"] == 0.0
+
+    def test_high_wind_flag_fires_above_25_kmh(self):
+        cur = _FakeCursor(
+            [{"temperature_c": 10.0, "wind_kmh": 30.0, "precipitation_mm": 0.0, "humidity_pct": 60.0, "is_indoor": False}]
+        )
+        out = fnfl.fetch_weather(cur, "match-1")
+        assert out["weather_high_wind"] == 1.0
+
+    def test_high_wind_flag_does_not_fire_at_25_kmh(self):
+        # Strict > threshold (not >=) — exactly 25 km/h is borderline,
+        # not "high wind".
+        cur = _FakeCursor(
+            [{"temperature_c": 10.0, "wind_kmh": 25.0, "precipitation_mm": 0.0, "humidity_pct": 60.0, "is_indoor": False}]
+        )
+        out = fnfl.fetch_weather(cur, "match-1")
+        assert out["weather_high_wind"] == 0.0
+
+    def test_freezing_flag_fires_below_zero(self):
+        cur = _FakeCursor(
+            [
+                {
+                    "temperature_c": -2.0,
+                    "wind_kmh": 10.0,
+                    "precipitation_mm": 0.0,
+                    "humidity_pct": 60.0,
+                    "is_indoor": False,
+                }
+            ]
+        )
+        out = fnfl.fetch_weather(cur, "match-1")
+        assert out["weather_freezing"] == 1.0
+
+    def test_wet_flag_fires_above_5_mm(self):
+        cur = _FakeCursor(
+            [{"temperature_c": 8.0, "wind_kmh": 15.0, "precipitation_mm": 8.0, "humidity_pct": 90.0, "is_indoor": False}]
+        )
+        out = fnfl.fetch_weather(cur, "match-1")
+        assert out["weather_wet"] == 1.0
+
+
+class TestFetchWeatherIndoor:
+    """Indoor games — dome / closed roof. Numeric weather features
+    are omitted (don't apply); only weather_indoor=1.0 lands."""
+
+    def test_indoor_with_weather_row_emits_only_indoor_flag(self):
+        # The fetcher SHOULD skip indoor venues but a stale row from
+        # before is_indoor was flagged could exist. Treat the venue
+        # signal as authoritative — drop the stale numerics.
+        cur = _FakeCursor(
+            [{"temperature_c": 22.0, "wind_kmh": 0.0, "precipitation_mm": 0.0, "humidity_pct": 40.0, "is_indoor": True}]
+        )
+        out = fnfl.fetch_weather(cur, "match-1")
+        assert out == {"weather_indoor": 1.0}
+
+    def test_indoor_venue_without_weather_row_emits_only_indoor_flag(self):
+        # First query (match_weather_latest) → None.
+        # Second query (venue_coords lookup) → is_indoor=True.
+        cur = _FakeCursor([None, {"is_indoor": True}])
+        out = fnfl.fetch_weather(cur, "match-1")
+        assert out == {"weather_indoor": 1.0}
+
+
+class TestFetchWeatherMissing:
+    """No weather row + venue isn't (or can't be) confirmed indoor:
+    OMIT all weather features — do NOT fall back to defaults. This
+    is the load-bearing invariant for no default-bias leakage."""
+
+    def test_no_weather_and_outdoor_venue_returns_empty_dict(self):
+        cur = _FakeCursor([None, {"is_indoor": False}])
+        assert fnfl.fetch_weather(cur, "match-1") == {}
+
+    def test_no_weather_and_unknown_venue_returns_empty_dict(self):
+        # venue_coords lookup also returned nothing — match's venue
+        # text doesn't match any seeded row.
+        cur = _FakeCursor([None, None])
+        assert fnfl.fetch_weather(cur, "match-1") == {}
+
+    def test_partial_nulls_emit_only_present_subfeatures(self):
+        # Open-Meteo can return temp but NULL precipitation in some
+        # archives. Each numeric is conditionally emitted, so the
+        # presence of one shouldn't force defaults for the others.
+        cur = _FakeCursor(
+            [{"temperature_c": 5.0, "wind_kmh": None, "precipitation_mm": None, "humidity_pct": None, "is_indoor": False}]
+        )
+        out = fnfl.fetch_weather(cur, "match-1")
+        assert out["weather_temp_c"] == 5.0
+        assert "weather_wind_kmh" not in out
+        assert "weather_precip_mm" not in out
+        assert "weather_humidity_pct" not in out
+        # Flags only fire for the present numeric.
+        assert "weather_freezing" in out
+        assert "weather_high_wind" not in out
+        assert "weather_wet" not in out

@@ -171,3 +171,146 @@ class TestCli:
     def test_all_finished_flag(self):
         args = ftennis.parse_args(["--all-finished", "--database-url", "x"])
         assert args.all_finished is True
+
+
+# ── Weather integration (Phase 14 — Open-Meteo retry) ───────────────
+
+
+class _FakeCursor:
+    """See test_nfl_features._FakeCursor — same queue-of-fetchones
+    stub. fetch_weather makes 1 or 2 execute() calls."""
+
+    def __init__(self, responses: list):
+        self._responses = list(responses)
+
+    def execute(self, *_args, **_kwargs):
+        return None
+
+    def fetchone(self):
+        return self._responses.pop(0) if self._responses else None
+
+
+class TestNoWeatherFeaturesInDefaults:
+    """Same load-bearing invariant as test_nfl_features: weather_*
+    keys must NOT appear in NEUTRAL_DEFAULTS. Combined with the
+    Phase A EXISTS-gate on TENNIS_MONEYLINE_TRAINING_QUERY, this
+    means the model never trains on default weather values — no
+    default-bias leakage like the reverted v3."""
+
+    def test_no_weather_keys_in_defaults(self):
+        weather_keys = [k for k in ftennis.NEUTRAL_DEFAULTS if k.startswith("weather_")]
+        assert weather_keys == [], (
+            f"weather_* keys in NEUTRAL_DEFAULTS reintroduce default-bias "
+            f"leakage: {weather_keys}"
+        )
+
+
+class TestWeatherThresholds:
+    def test_high_wind_kmh_is_25(self):
+        # Same as NFL — wind disrupts ball toss + service drift.
+        assert ftennis.HIGH_WIND_KMH == 25.0
+
+    def test_wet_precip_mm_is_5(self):
+        # Tour-stop covers roof / suspends play around 5mm/4h.
+        assert ftennis.WET_PRECIP_MM == 5.0
+
+    def test_hot_temp_c_is_32(self):
+        # Australian Open extreme-heat policy threshold — extra rest
+        # + roof closure protocols kick in above this.
+        assert ftennis.HOT_TEMP_C == 32.0
+
+    def test_no_freezing_threshold_exists(self):
+        # Tennis is a no-winter-outdoor sport. The absence of
+        # FREEZING_TEMP_C is intentional — adding one would imply
+        # we're modelling matches the tour doesn't actually play.
+        assert not hasattr(ftennis, "FREEZING_TEMP_C")
+
+
+class TestFetchWeatherOutdoor:
+    def test_mild_outdoor_match_emits_all_features(self):
+        # 22°C / 8 km/h wind / 0mm precip / 55% humidity — typical
+        # day match at a Slam. All numerics present, all flags 0.
+        cur = _FakeCursor(
+            [
+                {
+                    "temperature_c": 22.0,
+                    "wind_kmh": 8.0,
+                    "precipitation_mm": 0.0,
+                    "humidity_pct": 55.0,
+                    "is_indoor": False,
+                }
+            ]
+        )
+        out = ftennis.fetch_weather(cur, "match-1")
+        assert out["weather_temp_c"] == 22.0
+        assert out["weather_wind_kmh"] == 8.0
+        assert out["weather_precip_mm"] == 0.0
+        assert out["weather_humidity_pct"] == 55.0
+        assert out["weather_indoor"] == 0.0
+        assert out["weather_high_wind"] == 0.0
+        assert out["weather_wet"] == 0.0
+        assert out["weather_hot"] == 0.0
+
+    def test_hot_flag_fires_above_32_c(self):
+        # AO extreme-heat day.
+        cur = _FakeCursor(
+            [{"temperature_c": 35.0, "wind_kmh": 5.0, "precipitation_mm": 0.0, "humidity_pct": 30.0, "is_indoor": False}]
+        )
+        out = ftennis.fetch_weather(cur, "match-1")
+        assert out["weather_hot"] == 1.0
+
+    def test_hot_flag_does_not_fire_at_32_c(self):
+        # Strict > threshold.
+        cur = _FakeCursor(
+            [{"temperature_c": 32.0, "wind_kmh": 5.0, "precipitation_mm": 0.0, "humidity_pct": 30.0, "is_indoor": False}]
+        )
+        out = ftennis.fetch_weather(cur, "match-1")
+        assert out["weather_hot"] == 0.0
+
+    def test_emits_no_freezing_feature_key(self):
+        # Tennis omits freezing; NFL has it. Distinct invariants per
+        # sport.
+        cur = _FakeCursor(
+            [{"temperature_c": -3.0, "wind_kmh": 5.0, "precipitation_mm": 0.0, "humidity_pct": 70.0, "is_indoor": False}]
+        )
+        out = ftennis.fetch_weather(cur, "match-1")
+        assert "weather_freezing" not in out
+
+
+class TestFetchWeatherIndoor:
+    def test_indoor_venue_emits_only_indoor_flag(self):
+        # Paris Bercy / ATP Finals / occasional rain-suspended roof.
+        cur = _FakeCursor(
+            [{"temperature_c": 24.0, "wind_kmh": 0.0, "precipitation_mm": 0.0, "humidity_pct": 50.0, "is_indoor": True}]
+        )
+        out = ftennis.fetch_weather(cur, "match-1")
+        assert out == {"weather_indoor": 1.0}
+
+    def test_no_weather_row_but_indoor_venue(self):
+        cur = _FakeCursor([None, {"is_indoor": True}])
+        out = ftennis.fetch_weather(cur, "match-1")
+        assert out == {"weather_indoor": 1.0}
+
+
+class TestFetchWeatherMissing:
+    def test_no_weather_and_outdoor_venue_returns_empty_dict(self):
+        cur = _FakeCursor([None, {"is_indoor": False}])
+        assert ftennis.fetch_weather(cur, "match-1") == {}
+
+    def test_no_weather_and_unknown_venue_returns_empty_dict(self):
+        cur = _FakeCursor([None, None])
+        assert ftennis.fetch_weather(cur, "match-1") == {}
+
+    def test_partial_nulls_emit_only_present_subfeatures(self):
+        cur = _FakeCursor(
+            [{"temperature_c": 33.0, "wind_kmh": None, "precipitation_mm": None, "humidity_pct": None, "is_indoor": False}]
+        )
+        out = ftennis.fetch_weather(cur, "match-1")
+        assert out["weather_temp_c"] == 33.0
+        assert "weather_wind_kmh" not in out
+        assert "weather_precip_mm" not in out
+        assert "weather_humidity_pct" not in out
+        # Only the hot flag derives from temp; others stay absent.
+        assert out["weather_hot"] == 1.0
+        assert "weather_high_wind" not in out
+        assert "weather_wet" not in out
