@@ -284,6 +284,23 @@ with DAG(
         bash_command=f"{DOCKER_EXEC} python /app/scripts/grade_completed_matches.py --days 14",
     )
 
+    # Parallel grader for the horse-racing schema (races,
+    # race_entrants, race_predictions, race_recommendations). Same
+    # split-from-the-pipeline rationale as grade_completed_matches:
+    # operates on finished races independently of the upcoming-race
+    # branch, so it can run alongside without ordering constraints.
+    # Per-race semantics:
+    #   - race_predictions: actual_outcome=1/0 per entrant (won vs
+    #     lost), is_correct=TRUE iff the consensus favourite won
+    #     (applied uniformly to every row in the race).
+    #   - race_recommendations: status=won/lost/void with
+    #     profit_loss = stake × (odds − 1) on won, −stake on lost,
+    #     0 on void.
+    grade_completed_races = BashOperator(
+        task_id="grade_completed_races",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/grade_completed_races.py --days 14",
+    )
+
     # ── Combined digest (fan-in) ──────────────────────────────────
     # Drains the shared Redis queue both branches push into and sends
     # ONE Telegram message with every sport's picks. Runs after both
