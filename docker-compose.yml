@@ -247,7 +247,11 @@ services:
       # training/predictor code after a git pull.
       - ./services/ml-models:/app/services/ml-models
       - ./models:/app/models
-    command: celery -A services.api.celery_app worker --loglevel=info --concurrency=4
+    # WORKDIR + PYTHONPATH from docker/Dockerfile.api put us in
+    # /app/services/api/src, so celery_app.py is importable as a
+    # top-level module. The fully-qualified services.api.celery_app
+    # path fails because services/__init__.py doesn't exist.
+    command: celery -A celery_app worker --loglevel=info --concurrency=4
     depends_on:
       - redis
       - postgres
