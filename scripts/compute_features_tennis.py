@@ -388,104 +388,17 @@ def _diff(features: dict, h_key: str, a_key: str, out_key: str) -> None:
         features[out_key] = float(h) - float(a)
 
 
-# Sport-tuned weather thresholds. Tennis-specific (vs NFL):
-#   * HIGH_WIND_KMH=25 — disrupts ball toss + drift on service.
-#   * WET_PRECIP_MM=5 — rain delays start at ~5mm in the 4h window
-#     (tour-stop covers roof / suspends play).
-#   * HOT_TEMP_C=32 — Australian Open extreme-heat policy threshold;
-#     players get extra rest + extreme-heat protocols above this.
-#   * No freezing threshold — tour avoids outdoor winter matches.
-HIGH_WIND_KMH = 25.0
-WET_PRECIP_MM = 5.0
-HOT_TEMP_C = 32.0
-
-# Canonical tennis weather feature key set — mirrors the NFL design
-# (see compute_features_nfl.NFL_WEATHER_KEYS). Tennis omits the
-# freezing flag and adds a hot flag; otherwise identical. Always-emit
-# + None-for-missing keeps train/predict shapes aligned and dodges
-# both the v3 default-bias trap and the v4a corpus-shrinkage trap.
-TENNIS_WEATHER_KEYS: tuple[str, ...] = (
-    "weather_indoor",
-    "weather_temp_c",
-    "weather_wind_kmh",
-    "weather_precip_mm",
-    "weather_humidity_pct",
-    "weather_high_wind",
-    "weather_wet",
-    "weather_hot",
-)
-
-
-def _empty_weather() -> dict:
-    return {k: None for k in TENNIS_WEATHER_KEYS}
-
-
-def fetch_weather(cur, match_id: str) -> dict:
-    """Project the freshest weather snapshot for this match into a
-    dict of weather_* features.
-
-    Always returns a dict with every key in TENNIS_WEATHER_KEYS, using
-    None (→ pandas NaN) for unknown values. See the matching docstring
-    in compute_features_nfl.fetch_weather for the rationale behind
-    the always-emit invariant — same reasoning applies.
-    """
-    cur.execute(
-        """
-        SELECT
-            mwl.temperature_c, mwl.wind_kmh, mwl.precipitation_mm,
-            mwl.humidity_pct, vc.is_indoor
-        FROM match_weather_latest mwl
-        LEFT JOIN venue_coords vc ON vc.id = mwl.venue_coords_id
-        WHERE mwl.match_id = %s
-        """,
-        (match_id,),
-    )
-    row = cur.fetchone()
-
-    if not row:
-        # No weather row — still flag indoor tournament play (Paris
-        # Bercy, ATP Finals) from venue_coords directly. Outdoor
-        # known venues get weather_indoor=0 with numerics NaN;
-        # unknown venues stay all-NaN.
-        cur.execute(
-            """
-            SELECT vc.is_indoor
-            FROM matches m
-            LEFT JOIN venue_coords vc
-              ON LOWER(TRIM(m.venue)) = vc.normalized_venue_name
-            WHERE m.id = %s
-            """,
-            (match_id,),
-        )
-        venue_row = cur.fetchone()
-        out = _empty_weather()
-        if venue_row and venue_row.get("is_indoor") is not None:
-            out["weather_indoor"] = 1.0 if venue_row.get("is_indoor") else 0.0
-        return out
-
-    out = _empty_weather()
-    if row.get("is_indoor"):
-        out["weather_indoor"] = 1.0
-        return out
-
-    out["weather_indoor"] = 0.0
-    temp = row.get("temperature_c")
-    wind = row.get("wind_kmh")
-    precip = row.get("precipitation_mm")
-    humidity = row.get("humidity_pct")
-
-    if temp is not None:
-        out["weather_temp_c"] = float(temp)
-        out["weather_hot"] = 1.0 if float(temp) > HOT_TEMP_C else 0.0
-    if wind is not None:
-        out["weather_wind_kmh"] = float(wind)
-        out["weather_high_wind"] = 1.0 if float(wind) > HIGH_WIND_KMH else 0.0
-    if precip is not None:
-        out["weather_precip_mm"] = float(precip)
-        out["weather_wet"] = 1.0 if float(precip) > WET_PRECIP_MM else 0.0
-    if humidity is not None:
-        out["weather_humidity_pct"] = float(humidity)
-    return out
+# Note: weather feature integration was removed for tennis on
+# 2026-06-03 alongside the NFL revert (see compute_features_nfl.py
+# comment block + `weather-features-attempted` memory). NFL ran the
+# full v1-vs-v4b walk-forward control and weather features were a
+# clean -2.5pt drag; tennis was not separately validated, so the
+# decision here is precautionary — drop the dependency on a feature
+# class that demonstrably hurt the sibling sport with the same
+# Open-Meteo data source + ensemble shape. The weather
+# infrastructure (migration 012, fetch_weather.py, seed_venue_coords,
+# match_weather_latest view) stays in place for any future retry
+# with a higher-resolution paid API.
 
 
 def compute_for_match(cur, match_id: str) -> Optional[dict]:
@@ -506,7 +419,6 @@ def compute_for_match(cur, match_id: str) -> Optional[dict]:
         for k, v in sched.items():
             features[f"{side}_{k}"] = v
     features.update(fetch_head_to_head(cur, meta["home_team_id"], meta["away_team_id"], when))
-    features.update(fetch_weather(cur, match_id))
 
     _diff(features, "home_roll_win_pct", "away_roll_win_pct", "roll_win_pct_diff")
     _diff(features, "home_days_rest", "away_days_rest", "days_rest_diff")
