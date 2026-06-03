@@ -21,7 +21,13 @@ import pytest
 SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
 
-from predictors.horse_racing_ranker import HorseRacingRanker, HorseRacingRankerConfig, _race_nll, _softmax  # noqa: E402
+from predictors.horse_racing_ranker import (  # noqa: E402
+    HorseRacingRanker,
+    HorseRacingRankerConfig,
+    _race_brier,
+    _race_nll,
+    _softmax,
+)
 
 # ── _softmax ───────────────────────────────────────────────────────
 
@@ -90,6 +96,59 @@ class TestRaceNll:
         groups = np.array([2], dtype=np.int64)
         winners = [None]
         assert _race_nll(scores, groups, winners, temperature=1.0) == float("inf")
+
+
+# ── _race_brier ────────────────────────────────────────────────────
+
+
+class TestRaceBrier:
+    """Brier is the temperature-tuning objective (NOT NLL). The recs
+    engine consumes probabilities directly for EV math, so the
+    calibration quality matters more than confidence on the winner.
+    These tests pin both the directional invariant (sharper tail =
+    worse Brier on close races) and the boundary cases."""
+
+    def test_lower_when_winner_has_higher_prob_at_calibrated_temp(self):
+        # Same setup as TestRaceNll: 2 races, model picks winner in
+        # both. Brier should be small (probs close to actual).
+        scores = np.array([5.0, 1.0, 1.0, 5.0])
+        groups = np.array([2, 2], dtype=np.int64)
+        winners = [0, 1]
+        brier = _race_brier(scores, groups, winners, temperature=1.0)
+        # Mean of (winner_prob - 1)^2 + (loser_prob - 0)^2 / 2 entries
+        # per race. With softmax(5,1) ≈ (0.982, 0.018), Brier
+        # ≈ mean((0.982-1)^2, (0.018-0)^2) ≈ 0.00034.
+        assert brier < 0.01
+
+    def test_higher_when_winner_has_lower_score(self):
+        # Same shape but the model picked the wrong horse.
+        scores = np.array([1.0, 5.0, 5.0, 1.0])
+        groups = np.array([2, 2], dtype=np.int64)
+        winners = [0, 1]
+        brier = _race_brier(scores, groups, winners, temperature=1.0)
+        # Now the winner has prob ≈ 0.018 and loser has 0.982.
+        # Brier ≈ mean((0.018-1)^2, (0.982-0)^2) ≈ 0.965.
+        assert brier > 0.5
+
+    def test_uniform_predictions_baseline(self):
+        # Uniform distribution: every entrant gets 1/N. Brier should
+        # be (1 - 1/N)^2/N + (N-1) × (1/N)^2/N = (N-1)/N^2.
+        # For N=8: 7/64 = 0.109375.
+        # We test that result by using equal scores so softmax →
+        # uniform regardless of temperature.
+        scores = np.zeros(8)
+        groups = np.array([8], dtype=np.int64)
+        winners = [3]
+        brier = _race_brier(scores, groups, winners, temperature=1.0)
+        # 7/64 = 0.109375 exactly.
+        assert brier == pytest.approx(7 / 64, abs=1e-9)
+
+    def test_skips_races_without_winner(self):
+        # Race with winner=None contributes nothing; result = inf.
+        scores = np.array([1.0, 1.0])
+        groups = np.array([2], dtype=np.int64)
+        winners = [None]
+        assert _race_brier(scores, groups, winners, temperature=1.0) == float("inf")
 
 
 # ── End-to-end fit + predict ───────────────────────────────────────

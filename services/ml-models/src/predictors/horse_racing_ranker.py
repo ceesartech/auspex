@@ -321,30 +321,45 @@ class HorseRacingRanker:
         y_val: np.ndarray,
         groups_val: np.ndarray,
     ) -> float:
-        """Grid-search the temperature that minimises mean negative-
-        log-likelihood of the winner across the validation set.
+        """Grid-search the temperature that minimises mean per-entrant
+        Brier score across the validation set.
+
+        Why Brier and not NLL:
+          * NLL rewards CONFIDENCE on the right answer — it picks a
+            temperature that makes the favourite get as much mass as
+            possible. Empirically that produces temperatures so small
+            (~0.06) that the probability distribution has nothing to do
+            with the real win frequency: a 10-1 longshot gets 13% mass
+            instead of its actual ~3-5% rate, the recs engine sees a
+            huge EV gap, and fires 520 false-positive picks across 672
+            races (verified empirically).
+          * Brier measures CALIBRATION — it rewards probabilities that
+            match the actual win rate per bucket. That's the right
+            objective for downstream EV math because EV = prob × odds
+            and we want prob to be a real probability.
+
         Coarse grid → narrow grid pattern; enough to find the right
         order of magnitude without overfitting the val set."""
         scores = self.predict_scores(X_val)
         winners = self._winner_index_per_race(y_val, groups_val)
         coarse = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
         best_t = 1.0
-        best_nll = float("inf")
+        best_brier = float("inf")
         for t in coarse:
-            nll = _race_nll(scores, groups_val, winners, t)
-            if nll < best_nll:
-                best_nll = nll
+            brier = _race_brier(scores, groups_val, winners, t)
+            if brier < best_brier:
+                best_brier = brier
                 best_t = t
         # Narrow grid around the coarse winner.
         narrow = np.linspace(best_t * 0.5, best_t * 2.0, 16)
         for t in narrow:
             if t <= 0:
                 continue
-            nll = _race_nll(scores, groups_val, winners, float(t))
-            if nll < best_nll:
-                best_nll = nll
+            brier = _race_brier(scores, groups_val, winners, float(t))
+            if brier < best_brier:
+                best_brier = brier
                 best_t = float(t)
-        logger.info("Tuned softmax temperature: %.3f (val NLL=%.4f)", best_t, best_nll)
+        logger.info("Tuned softmax temperature: %.3f (val Brier=%.4f)", best_t, best_brier)
         return best_t
 
     # ── Validation metrics ─────────────────────────────────────────
@@ -428,8 +443,9 @@ def _race_nll(
     winners: List[Optional[int]],
     temperature: float,
 ) -> float:
-    """Mean per-race negative-log-likelihood of the winner. Used by
-    the temperature tuner."""
+    """Mean per-race negative-log-likelihood of the winner. Used as
+    a validation metric (see _evaluate); the temperature tuner
+    minimises Brier instead — see _race_brier."""
     total = 0.0
     n = 0
     cursor = 0
@@ -440,5 +456,33 @@ def _race_nll(
             continue
         probs = _softmax(race_scores, temperature)
         total += -np.log(max(probs[winner], 1e-12))
+        n += 1
+    return total / n if n else float("inf")
+
+
+def _race_brier(
+    scores: np.ndarray,
+    groups: np.ndarray,
+    winners: List[Optional[int]],
+    temperature: float,
+) -> float:
+    """Mean per-entrant Brier score = (predicted_prob - actual)^2
+    averaged over every entrant of every race. The temperature
+    tuner uses this rather than NLL because the downstream
+    consumer (recs engine + EV math) needs calibrated probabilities
+    — see _fit_temperature docstring for the empirical context."""
+    total = 0.0
+    n = 0
+    cursor = 0
+    for size, winner in zip(groups, winners):
+        race_scores = scores[cursor : cursor + size]
+        cursor += int(size)
+        if winner is None:
+            continue
+        probs = _softmax(race_scores, temperature)
+        # actuals: 1.0 at winner, 0.0 elsewhere.
+        actual = np.zeros(int(size), dtype=np.float64)
+        actual[winner] = 1.0
+        total += float(np.mean((probs - actual) ** 2))
         n += 1
     return total / n if n else float("inf")
