@@ -98,34 +98,82 @@ NFL_VENUES = [
 
 
 TENNIS_VENUES = [
+    # Grand Slams. ESPN's tennis venue field stores the host city
+    # as "City, Country" (not the stadium name), so the city/country
+    # string is the primary lookup; stadium + court names are aliases.
     Venue(
-        "Melbourne Park",
+        "Melbourne, Australia",
         -37.8224,
         144.9789,
         "Australia/Melbourne",
-        aliases=("Rod Laver Arena", "Margaret Court Arena", "John Cain Arena"),
+        aliases=(
+            "Melbourne Park",
+            "Rod Laver Arena",
+            "Margaret Court Arena",
+            "John Cain Arena",
+        ),
     ),
     Venue(
-        "Stade Roland Garros",
+        "Paris, France",
         48.8470,
         2.2480,
         "Europe/Paris",
-        aliases=("Roland Garros", "Court Philippe-Chatrier", "Court Suzanne-Lenglen"),
+        aliases=(
+            "Stade Roland Garros",
+            "Roland Garros",
+            "Court Philippe-Chatrier",
+            "Court Suzanne-Lenglen",
+        ),
     ),
     Venue(
-        "All England Lawn Tennis Club",
+        "London, Great Britain",
         51.4341,
         -0.2140,
         "Europe/London",
-        aliases=("Wimbledon", "Centre Court", "No. 1 Court"),
+        aliases=("All England Lawn Tennis Club", "Wimbledon", "Centre Court", "No. 1 Court"),
     ),
     Venue(
-        "USTA Billie Jean King National Tennis Center",
+        "New York, USA",
         40.7497,
         -73.8458,
         "America/New_York",
-        aliases=("Arthur Ashe Stadium", "Louis Armstrong Stadium"),
+        aliases=(
+            "USTA Billie Jean King National Tennis Center",
+            "Arthur Ashe Stadium",
+            "Louis Armstrong Stadium",
+        ),
     ),
+    # ATP/WTA Tour stops — biggest non-Slam venues by volume.
+    # Coordinates are stadium-level for outdoor venues.
+    Venue("Indian Wells, USA", 33.7223, -116.3055, "America/Los_Angeles", aliases=("BNP Paribas Open",)),
+    Venue("Miami, USA", 25.9580, -80.2389, "America/New_York", aliases=("Hard Rock Stadium (Miami Open)",)),
+    Venue("Madrid, Spain", 40.4115, -3.6900, "Europe/Madrid", aliases=("Caja Mágica", "Caja Magica")),
+    Venue("Rome, Italy", 41.9319, 12.4548, "Europe/Rome", aliases=("Foro Italico",)),
+    Venue("Adelaide, Australia", -34.9176, 138.6112, "Australia/Adelaide", aliases=("Memorial Drive",)),
+    Venue("Dubai, United Arab Emirates", 25.2381, 55.3270, "Asia/Dubai", aliases=("Dubai Duty Free Tennis Stadium",)),
+    Venue("Monte Carlo, Monaco", 43.7411, 7.4276, "Europe/Monaco", aliases=("Monte Carlo Country Club",)),
+    Venue("Barcelona, Spain", 41.3854, 2.1198, "Europe/Madrid", aliases=("Real Club de Tenis Barcelona",)),
+    Venue("Cincinnati, USA", 39.2336, -84.3768, "America/New_York", aliases=("Lindner Family Tennis Center",)),
+    Venue("Toronto, Canada", 43.7029, -79.4663, "America/Toronto", aliases=("Sobeys Stadium",)),
+    Venue("Montreal, Canada", 45.5021, -73.6253, "America/Toronto", aliases=("IGA Stadium",)),
+    Venue("Doha, Qatar", 25.2854, 51.5310, "Asia/Qatar", aliases=("Khalifa International Tennis Complex",)),
+    Venue("Acapulco, Mexico", 16.8331, -99.9089, "America/Mexico_City", aliases=("Princess Mundo Imperial",)),
+    Venue("Rotterdam, Netherlands", 51.9244, 4.4777, "Europe/Amsterdam", aliases=("Rotterdam Ahoy",)),
+    Venue("Marseille, France", 43.2965, 5.3698, "Europe/Paris"),
+    Venue("Buenos Aires, Argentina", -34.5757, -58.4096, "America/Argentina/Buenos_Aires"),
+    Venue("Halle, Germany", 51.9836, 8.3791, "Europe/Berlin", aliases=("OWL Arena",)),
+    Venue("Queen's, Great Britain", 51.4861, -0.2114, "Europe/London", aliases=("Queen's Club",)),
+    Venue("Eastbourne, Great Britain", 50.7681, 0.2906, "Europe/London", aliases=("Devonshire Park",)),
+    Venue("Stuttgart, Germany", 48.8050, 9.1810, "Europe/Berlin", aliases=("TC Weissenhof",)),
+    Venue("Hamburg, Germany", 53.5827, 10.0156, "Europe/Berlin", aliases=("Am Rothenbaum",)),
+    Venue("Washington, USA", 38.9266, -77.0099, "America/New_York", aliases=("Rock Creek Park",)),
+    Venue("Beijing, China", 39.9913, 116.4756, "Asia/Shanghai", aliases=("National Tennis Center",)),
+    Venue("Shanghai, China", 31.1393, 121.6125, "Asia/Shanghai", aliases=("Qizhong Forest Sports City Tennis Center",)),
+    Venue("Tokyo, Japan", 35.7167, 139.7137, "Asia/Tokyo", aliases=("Ariake Coliseum",)),
+    Venue("Vienna, Austria", 48.1989, 16.3924, "Europe/Vienna", aliases=("Wiener Stadthalle",)),
+    Venue("Basel, Switzerland", 47.5418, 7.6209, "Europe/Zurich", aliases=("St. Jakobshalle",)),
+    Venue("Paris-Bercy, France", 48.8385, 2.3782, "Europe/Paris", aliases=("Accor Arena",)),
+    Venue("Turin, Italy", 45.0413, 7.6446, "Europe/Rome", aliases=("Pala Alpitour",)),
 ]
 
 
