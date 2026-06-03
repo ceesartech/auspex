@@ -165,9 +165,7 @@ class TestFitAndPredict:
         assert ranker.is_fitted
         assert ranker.validation_metrics["top1_accuracy"] >= 0.8
         # The signal feature should dominate gain-based importance.
-        top_feature = max(
-            ranker.feature_importance.items(), key=lambda kv: kv[1]
-        )[0]
+        top_feature = max(ranker.feature_importance.items(), key=lambda kv: kv[1])[0]
         assert top_feature == "signal"
 
     def test_predict_probabilities_sums_to_one_per_race(self):
@@ -193,9 +191,7 @@ class TestFitAndPredict:
             y_val=test["target"].to_numpy(dtype=np.int64),
             groups_val=self._groups(test),
         )
-        probs = ranker.predict_probabilities(
-            test[feature_cols], self._groups(test)
-        )
+        probs = ranker.predict_probabilities(test[feature_cols], self._groups(test))
         for race_probs in probs:
             assert race_probs.sum() == pytest.approx(1.0, abs=1e-6)
 

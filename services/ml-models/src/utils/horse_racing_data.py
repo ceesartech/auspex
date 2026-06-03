@@ -212,8 +212,7 @@ def prepare_training_frame(raw: pd.DataFrame) -> pd.DataFrame:
     # Derived columns the trainer relies on.
     frame["target"] = (frame["finish_position"] == 1).astype(int)
     frame["consensus_implied_prob"] = [
-        _consensus_implied_from_odds(ml, sp)
-        for ml, sp in zip(frame["morning_line_odds"], frame["starting_price"])
+        _consensus_implied_from_odds(ml, sp) for ml, sp in zip(frame["morning_line_odds"], frame["starting_price"])
     ]
 
     if "race_date" in frame.columns:
@@ -253,9 +252,7 @@ def get_feature_columns(frame: pd.DataFrame) -> list[str]:
     return [c for c in numeric if c not in NON_FEATURE_COLUMNS]
 
 
-def split_by_date(
-    frame: pd.DataFrame, split_date: str
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+def split_by_date(frame: pd.DataFrame, split_date: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Walk-forward split: every row whose race_date < split_date
     goes to train; >= split_date to test. Race-group integrity is
     preserved because the query ordering keeps all entrants of a
@@ -266,9 +263,7 @@ def split_by_date(
     split_ts = pd.to_datetime(split_date, utc=True)
     train_mask = frame["race_date"] < split_ts
     test_mask = ~train_mask
-    return frame.loc[train_mask].reset_index(drop=True), frame.loc[
-        test_mask
-    ].reset_index(drop=True)
+    return frame.loc[train_mask].reset_index(drop=True), frame.loc[test_mask].reset_index(drop=True)
 
 
 def group_array(frame: pd.DataFrame) -> np.ndarray:
@@ -307,16 +302,13 @@ def validate_training_frame(
     feature_columns = get_feature_columns(frame)
     if len(feature_columns) < min_feature_count:
         raise ValueError(
-            f"Training data has {len(feature_columns)} numeric features; "
-            f"at least {min_feature_count} required"
+            f"Training data has {len(feature_columns)} numeric features; " f"at least {min_feature_count} required"
         )
 
     # Spot-check group integrity: every race should have at least one
     # winner. If the EXISTS guard slipped (e.g., manual CSV input),
     # we want to catch it before the trainer silently learns garbage.
-    winners_per_race = (
-        frame.groupby("race_id")["target"].sum()
-    )
+    winners_per_race = frame.groupby("race_id")["target"].sum()
     if (winners_per_race == 0).any():
         bad = int((winners_per_race == 0).sum())
         raise ValueError(f"{bad} races have no winner row; check the input")
@@ -330,11 +322,15 @@ def validate_training_frame(
         races=races,
         feature_count=len(feature_columns),
         win_rate=win_rate,
-        date_min=frame["race_date"].min().isoformat()
-        if "race_date" in frame.columns and pd.notna(frame["race_date"].min())
-        else None,
-        date_max=frame["race_date"].max().isoformat()
-        if "race_date" in frame.columns and pd.notna(frame["race_date"].max())
-        else None,
+        date_min=(
+            frame["race_date"].min().isoformat()
+            if "race_date" in frame.columns and pd.notna(frame["race_date"].min())
+            else None
+        ),
+        date_max=(
+            frame["race_date"].max().isoformat()
+            if "race_date" in frame.columns and pd.notna(frame["race_date"].max())
+            else None
+        ),
         missing_feature_rate=missing_rate,
     )

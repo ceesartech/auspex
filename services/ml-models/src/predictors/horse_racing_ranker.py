@@ -124,9 +124,7 @@ class HorseRacingRanker:
         import lightgbm as lgb
 
         if int(np.sum(groups_train)) != len(X_train):
-            raise ValueError(
-                f"groups_train sum ({int(np.sum(groups_train))}) != X_train rows ({len(X_train)})"
-            )
+            raise ValueError(f"groups_train sum ({int(np.sum(groups_train))}) != X_train rows ({len(X_train)})")
 
         # Defensive median fill — LightGBM handles NaN natively but
         # downstream calibration code wants finite inputs.
@@ -159,16 +157,12 @@ class HorseRacingRanker:
 
         if X_val is not None and y_val is not None and groups_val is not None:
             if int(np.sum(groups_val)) != len(X_val):
-                raise ValueError(
-                    f"groups_val sum ({int(np.sum(groups_val))}) != X_val rows ({len(X_val)})"
-                )
+                raise ValueError(f"groups_val sum ({int(np.sum(groups_val))}) != X_val rows ({len(X_val)})")
             X_val_filled = X_val[self.feature_names].fillna(median)
             eval_set = [(X_val_filled, y_val)]
             eval_group = [groups_val]
             eval_names = ["val"]
-            callbacks.append(
-                lgb.early_stopping(stopping_rounds=self.config.early_stopping_rounds)
-            )
+            callbacks.append(lgb.early_stopping(stopping_rounds=self.config.early_stopping_rounds))
 
         logger.info(
             "Training LGBMRanker on %d rows / %d races, %d features",
@@ -234,9 +228,7 @@ class HorseRacingRanker:
         if not self.is_fitted:
             raise ValueError("Model not fitted")
         if int(np.sum(groups)) != len(X):
-            raise ValueError(
-                f"groups sum ({int(np.sum(groups))}) != X rows ({len(X)})"
-            )
+            raise ValueError(f"groups sum ({int(np.sum(groups))}) != X rows ({len(X)})")
         t = temperature if temperature is not None else self.temperature
         if t <= 0:
             raise ValueError(f"Temperature must be positive, got {t}")
@@ -326,9 +318,7 @@ class HorseRacingRanker:
         }
 
     @staticmethod
-    def _winner_index_per_race(
-        y: np.ndarray, groups: np.ndarray
-    ) -> List[Optional[int]]:
+    def _winner_index_per_race(y: np.ndarray, groups: np.ndarray) -> List[Optional[int]]:
         """Local winner index per race (relative to the group start),
         or None for races without a recorded winner. The
         load_training_frame query filters those out but we still

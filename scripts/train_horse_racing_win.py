@@ -65,9 +65,7 @@ logger = logging.getLogger("train_horse_racing_win")
 # ── Helpers ────────────────────────────────────────────────────────
 
 
-def _split_train_val(
-    train_frame: pd.DataFrame, val_fraction: float
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _split_train_val(train_frame: pd.DataFrame, val_fraction: float) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Reserve the LAST val_fraction of train_frame's races as the
     early-stopping / temperature-calibration validation set. Tail
     split (not random) preserves the temporal causality LambdaMART

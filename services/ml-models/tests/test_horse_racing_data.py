@@ -293,8 +293,7 @@ class TestValidateTrainingFrame:
                 rows.append(
                     {
                         "race_id": f"r{i}",
-                        "race_date": pd.Timestamp("2026-04-01", tz="UTC")
-                        + pd.Timedelta(days=i),
+                        "race_date": pd.Timestamp("2026-04-01", tz="UTC") + pd.Timedelta(days=i),
                         "entrant_id": f"r{i}_e{j}",
                         "target": 1 if pos == 1 else 0,
                         "feat_a": j * 1.0,
