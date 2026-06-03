@@ -220,6 +220,26 @@ with DAG(
 
     fetch_upcoming_mma >> compute_features_mma >> precompute_predictions_mma >> generate_recommendations_mma
 
+    # ── Horse racing branch (H2: ingest only) ─────────────────────
+    # Two ingest passes per cron tick:
+    #   * upcoming racecards (next 7 days) from The Racing API
+    #   * yesterday's results (catch-up for whatever finished
+    #     overnight). Backfill is a one-shot from the CLI.
+    # Predictions / recommendations land in subsequent commits once
+    # the feature-engineering + training pipeline is in place.
+    fetch_horse_racing_upcoming = BashOperator(
+        task_id="fetch_horse_racing_upcoming",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/load_racing_api.py --upcoming 7",
+    )
+    fetch_horse_racing_results = BashOperator(
+        task_id="fetch_horse_racing_results",
+        bash_command=(
+            f"{DOCKER_EXEC} python /app/scripts/load_racing_api.py "
+            "--results --start $(date -u -d 'yesterday' +%Y-%m-%d) --end $(date -u -d 'yesterday' +%Y-%m-%d)"
+        ),
+    )
+    fetch_horse_racing_upcoming >> fetch_horse_racing_results
+
     # ── Phase 5: grade finished matches ───────────────────────────
     # Walks matches whose status flipped to 'finished' in the last
     # 14 days, computes actual_outcome per market, and:
