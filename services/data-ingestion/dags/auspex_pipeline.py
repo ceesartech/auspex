@@ -220,13 +220,16 @@ with DAG(
 
     fetch_upcoming_mma >> compute_features_mma >> precompute_predictions_mma >> generate_recommendations_mma
 
-    # ── Horse racing branch (H2: ingest only) ─────────────────────
-    # Two ingest passes per cron tick:
-    #   * upcoming racecards (next 7 days) from The Racing API
-    #   * yesterday's results (catch-up for whatever finished
-    #     overnight). Backfill is a one-shot from the CLI.
-    # Predictions / recommendations land in subsequent commits once
-    # the feature-engineering + training pipeline is in place.
+    # ── Horse racing branch ───────────────────────────────────────
+    # Pipeline shape per cron tick:
+    #   1. upcoming racecards (next 7 days) from The Racing API
+    #   2. yesterday's results (catch-up — only fires on Standard+ plan)
+    #   3. compute_features_horse_racing — race-level + per-entrant
+    #   4. precompute_predictions_horse_racing — market-consensus
+    #      baseline (devigged morning lines). Trained ML model replaces
+    #      this once we have results data accumulating.
+    # No recommendations branch yet (H5 pending — needs odds vs.
+    # devigged-implied edge calculation per entrant).
     fetch_horse_racing_upcoming = BashOperator(
         task_id="fetch_horse_racing_upcoming",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/load_racing_api.py --upcoming 7",
@@ -238,7 +241,20 @@ with DAG(
             "--results --start $(date -u -d 'yesterday' +%Y-%m-%d) --end $(date -u -d 'yesterday' +%Y-%m-%d)"
         ),
     )
-    fetch_horse_racing_upcoming >> fetch_horse_racing_results
+    compute_features_horse_racing = BashOperator(
+        task_id="compute_features_horse_racing",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_horse_racing.py --days 7",
+    )
+    precompute_predictions_horse_racing = BashOperator(
+        task_id="precompute_predictions_horse_racing",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/precompute_predictions_horse_racing.py --days 7",
+    )
+    (
+        fetch_horse_racing_upcoming
+        >> fetch_horse_racing_results
+        >> compute_features_horse_racing
+        >> precompute_predictions_horse_racing
+    )
 
     # ── Phase 5: grade finished matches ───────────────────────────
     # Walks matches whose status flipped to 'finished' in the last
