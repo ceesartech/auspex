@@ -63,17 +63,28 @@ logger = logging.getLogger("generate_recommendations_horse_racing")
 
 KELLY_FRACTION = 0.25
 
-# Model precedence: the recs engine prefers the LambdaMART ranker
-# when it has scored a race (it beats the consensus baseline by
-# +2.2pts top-1 on the held-out test; memory:
-# horse-racing-ml-ranker-v1). Falls back to the consensus baseline
-# for races the ranker didn't reach — typically the freshest races
-# whose features_cache row hasn't been written yet. The DB query
-# walks this list in order per-race and uses the first available
-# row, so a ranker-prediction-when-present invariant comes for free.
+# Model precedence: the consensus baseline comes FIRST for EV math
+# even though the ranker has better top-1 accuracy. The reason is
+# strict — the recs engine consumes probabilities (EV = prob × odds)
+# and the ranker is BETTER at RANKING but WORSE at CALIBRATION on the
+# current corpus:
+#
+#   variant                            top-1 acc   Brier
+#   market_consensus_v1                19.9%       0.0831
+#   lightgbm_ranker_v1 (13k corpus)    22.7%       0.0898
+#
+# A model with worse Brier produces probabilities that don't match
+# real win frequencies (verified empirically: ranker-prob-driven EV
+# fired 520 picks across 672 races, a 17x false-positive rate vs the
+# consensus-only run which sat around 30/day). Keeping the consensus
+# at the top of the precedence list means the recs engine uses the
+# more honest probabilities for EV; the ranker stays in the predictions
+# table for analysis + future-work iteration on its own probability
+# calibration (memory: horse-racing-ml-ranker-v1 has the full
+# breakdown + the open paths to closing the gap).
 MODEL_PRECEDENCE: list[tuple[str, str]] = [
-    ("lightgbm_ranker_v1", "1.0.0"),
     ("market_consensus_v1", "1.0.0"),
+    ("lightgbm_ranker_v1", "1.0.0"),
 ]
 
 

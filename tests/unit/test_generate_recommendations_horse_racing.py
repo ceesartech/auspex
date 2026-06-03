@@ -43,20 +43,22 @@ class TestConstants:
     def test_model_precedence_lock(self):
         # race_recommendations.race_prediction_id FKs into
         # race_predictions; that lookup is keyed on (model_name,
-        # model_version). Renaming the consensus model without
-        # updating this drops every rec to zero hits.
+        # model_version). Renaming either model without updating
+        # this drops every rec to zero hits.
         #
-        # Precedence rule (load-bearing): the LambdaMART ranker
-        # comes FIRST, the consensus baseline SECOND. The recs
-        # engine picks per-entrant via the highest-precedence
-        # available model, so a flip here would silently
-        # downgrade every recommendation to consensus quality even
-        # when ranker scores exist. v1 corpus result: ranker
-        # +2.2pts top-1 vs consensus (memory: horse-racing-ml-
-        # ranker-v1).
+        # Precedence rule (load-bearing for rec QUALITY):
+        # consensus baseline comes FIRST even though the ranker
+        # has better top-1 accuracy, because the recs engine
+        # consumes probabilities (EV = prob × odds) and the
+        # ranker's Brier score on the current corpus (0.0898) is
+        # WORSE than consensus's (0.0831). Better ranking is not
+        # better calibration. Flipping this list silently re-
+        # introduces the 520-false-positive-recs-per-day
+        # regression that motivated the demotion (memory:
+        # horse-racing-ml-ranker-v1 has the full breakdown).
         assert ghr.MODEL_PRECEDENCE == [
-            ("lightgbm_ranker_v1", "1.0.0"),
             ("market_consensus_v1", "1.0.0"),
+            ("lightgbm_ranker_v1", "1.0.0"),
         ]
 
 
