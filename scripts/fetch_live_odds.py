@@ -100,11 +100,14 @@ DEFAULT_SPORTS = [
     "basketball_nba",
     # NFL (in season Sep-Feb, Super Bowl early Feb)
     "americanfootball_nfl",
-    # Tennis — the-odds-api keys are EVENT-specific (Grand Slam +
-    # major tour events). Out-of-tournament keys 422 silently so
-    # the off-season cost is one round-trip per dormant key.
-    # If we need broader coverage later, a /sports auto-discovery
-    # pass can replace these hard-coded keys.
+    # Tennis — the-odds-api keys are EVENT-specific. Coverage
+    # expanded 2026-06-04 from 4 Grand Slams to include the
+    # ATP/WTA 1000 (Masters/Premier) tier so we have year-round
+    # tennis odds rather than just the 4 majors. Out-of-tournament
+    # keys 422 silently so off-season cost is one round-trip per
+    # dormant key — adds ~14 dormant-day round trips across the
+    # whole list (negligible quota at 0 units each).
+    # Grand Slams
     "tennis_atp_australian_open",
     "tennis_atp_french_open",
     "tennis_atp_wimbledon",
@@ -113,6 +116,27 @@ DEFAULT_SPORTS = [
     "tennis_wta_french_open",
     "tennis_wta_wimbledon",
     "tennis_wta_us_open",
+    # ATP Masters 1000 + year-end finals
+    "tennis_atp_indian_wells",
+    "tennis_atp_miami",
+    "tennis_atp_monte_carlo",
+    "tennis_atp_madrid_open",
+    "tennis_atp_italian_open",
+    "tennis_atp_canadian_open",
+    "tennis_atp_cincinnati_open",
+    "tennis_atp_shanghai_masters",
+    "tennis_atp_paris_masters",
+    "tennis_atp_finals",
+    # WTA 1000 + year-end finals
+    "tennis_wta_indian_wells",
+    "tennis_wta_miami",
+    "tennis_wta_madrid_open",
+    "tennis_wta_italian_open",
+    "tennis_wta_canadian_open",
+    "tennis_wta_cincinnati_open",
+    "tennis_wta_china_open",
+    "tennis_wta_wuhan_open",
+    "tennis_wta_finals",
     # MMA — UFC + Bellator. the-odds-api key is a single global
     # 'mma_mixed_martial_arts' that returns every active card across
     # promotions, so no per-promotion fanout needed.
