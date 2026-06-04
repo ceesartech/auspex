@@ -105,11 +105,16 @@ def fetch_wikidata() -> list[dict]:
 
 
 def _normalize(name: str) -> str:
-    """Lowercase, drop punctuation + common boilerplate suffixes so
-    "Manchester United F.C." and "Man United" can match."""
-    s = name.lower()
-    # Strip suffixes Wikidata appends.
-    for suffix in (
+    """Lowercase, drop punctuation + iteratively strip common
+    boilerplate suffixes so "Manchester United F.C." and "Man United"
+    match, and so "Bologna F.C. 1909" → "bologna" rather than getting
+    stuck mid-strip on a year-of-founding."""
+    s = name.lower().strip()
+    # Iteratively strip suffixes so "Bologna F.C. 1909" peels both
+    # " 1909" and " f.c." in turn. Loop terminates when nothing
+    # matched in a full pass.
+    suffixes = (
+        # English club-type abbreviations.
         " f.c.",
         " fc",
         " a.f.c.",
@@ -118,11 +123,47 @@ def _normalize(name: str) -> str:
         " sc",
         " c.f.",
         " cf",
+        # Italian.
+        " b.c.",
+        " bc",
+        " a.c.",
+        " ac",
+        " s.s.",
+        " ss",
+        " s.s.c.",
+        " ssc",
+        " a.s.",
+        " as",
+        " calcio",
+        # Spanish / Portuguese.
+        " u.d.",
+        " ud",
+        " r.c.",
+        " rc",
+        " c.d.",
+        " cd",
+        " s.a.d.",
+        " sad",
         " sociedad anónima deportiva",
-    ):
-        if s.endswith(suffix):
-            s = s[: -len(suffix)]
-    # Drop punctuation, collapse whitespace.
+        # German.
+        " e.v.",
+        " ev",
+        # Year-of-founding tail (covers Como 1907, Bologna 1909, etc.).
+        " 1907",
+        " 1908",
+        " 1909",
+        " 1910",
+    )
+    changed = True
+    while changed:
+        changed = False
+        for suffix in suffixes:
+            if s.endswith(suffix):
+                s = s[: -len(suffix)].rstrip()
+                changed = True
+                break
+    # Drop punctuation (including apostrophes — "Nott'm" → "nott m"),
+    # collapse whitespace.
     s = re.sub(r"[^\w\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
@@ -133,7 +174,7 @@ def _normalize(name: str) -> str:
 # match script logs "no match for ...". The KEY is the normalised
 # DB team name; the VALUE is the normalised Wikidata club label.
 TEAM_ALIASES: dict[str, str] = {
-    # English shorthand.
+    # English Premier shorthand.
     "man united": "manchester united",
     "man city": "manchester city",
     "spurs": "tottenham hotspur",
@@ -143,14 +184,50 @@ TEAM_ALIASES: dict[str, str] = {
     "leeds": "leeds united",
     "newcastle": "newcastle united",
     "west ham": "west ham united",
-    # Continental.
+    # Premier — football-data.co.uk's idiosyncratic apostrophe gets
+    # mangled to a space by the normaliser, so handle the after-
+    # normalisation form too.
+    "nott m forest": "nottingham forest",
+    "nottm forest": "nottingham forest",
+    # English Championship — football-data.co.uk drops the suffix
+    # ("Derby" instead of "Derby County", "Norwich" instead of
+    # "Norwich City"). Each maps to its Wikidata canonical name.
+    "derby": "derby county",
+    "ipswich": "ipswich town",
+    "sheffield weds": "sheffield wednesday",
+    "blackburn": "blackburn rovers",
+    "coventry": "coventry city",
+    "charlton": "charlton athletic",
+    "oxford": "oxford united",
+    "qpr": "queens park rangers",
+    "swansea": "swansea city",
+    "norwich": "norwich city",
+    "west brom": "west bromwich albion",
+    "birmingham": "birmingham city",
+    "stoke": "stoke city",
+    "preston": "preston north end",
+    "hull": "hull city",
+    # German.
     "bayern": "bayern munich",
+    # French.
     "psg": "paris saint germain",
+    # Spanish / La Liga — covers both the abbreviated and the
+    # accented-vs-unaccented forms our DB uses vs Wikidata.
     "atletico": "atlético madrid",
     "atletico madrid": "atlético madrid",
+    "ath madrid": "atlético madrid",
+    "mallorca": "mallorca",  # post-normalise drops "RCD"
+    "levante": "levante",  # post-normalise drops "UD"
+    "espanol": "espanyol",  # football-data.co.uk drops the ñ
+    "betis": "real betis",
+    # Italian Serie A — most match directly after the iterative
+    # suffix-strip handles " B.C." / " 1909" / " 1907" / " Calcio".
+    # Aliases below cover the few that don't.
     "ac milan": "milan",
     "inter milan": "inter milan",
     "internazionale": "inter milan",
+    "napoli": "napoli",
+    "cagliari": "cagliari",
 }
 
 
