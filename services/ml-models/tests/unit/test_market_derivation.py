@@ -14,10 +14,12 @@ import pytest
 from predictors.market_derivation import (
     AH_LINES,
     HT_OU_LINES,
+    NHL_TOTAL_LINES,
     OU_LINES,
     _fmt_line,
     build_dc_matrix,
     derive_from_lambdas,
+    derive_hockey_markets,
     derive_markets,
     derive_soccer_halftime_markets,
     derive_soccer_htft_markets,
@@ -525,3 +527,107 @@ class TestQuarterAsianHandicap:
         P = build_dc_matrix(1.5, 1.5, rho=-0.1, max_goals=10)
         m = derive_soccer_markets(P)["asian_handicap"]
         assert abs(m["0.25_home"] - m["-0.25_away"]) < 1e-12
+
+
+@pytest.mark.unit
+class TestHockeyMarkets:
+    """Hockey deriver uses the same scoreline-matrix machinery as
+    soccer but with NHL-appropriate markets: no draw at game end
+    (OT/SO redistributes), puck line at ±1.5, totals 4.5/5.5/6.5,
+    exact-total buckets, plus a regulation_1x2 view that preserves
+    the draw mass for users who want the in-regulation market."""
+
+    @pytest.fixture
+    def markets(self):
+        # NHL-realistic lambdas: ~3.1 home / ~2.9 away.
+        return derive_hockey_markets(build_dc_matrix(3.1, 2.9, rho=-0.05, max_goals=10))
+
+    def test_moneyline_two_outcomes_sum_to_one(self, markets):
+        m = markets["moneyline"]
+        assert set(m.keys()) == {"home", "away"}
+        assert abs(m["home"] + m["away"] - 1.0) < 1e-9
+
+    def test_moneyline_splits_draw_mass_evenly(self):
+        # Build a matrix where draws have known mass.
+        P = build_dc_matrix(3.0, 3.0, rho=-0.05)
+        m = derive_hockey_markets(P)
+        reg_home = m["regulation_1x2"]["home"]
+        reg_draw = m["regulation_1x2"]["draw"]
+        # moneyline home = reg_home + 0.5 * reg_draw exactly.
+        assert abs(m["moneyline"]["home"] - (reg_home + 0.5 * reg_draw)) < 1e-12
+        # equal lambdas → moneyline 50/50.
+        assert abs(m["moneyline"]["home"] - 0.5) < 1e-9
+
+    def test_regulation_1x2_sums_to_one(self, markets):
+        r = markets["regulation_1x2"]
+        assert set(r.keys()) == {"home", "draw", "away"}
+        assert abs(sum(r.values()) - 1.0) < 1e-9
+
+    def test_puck_line_pairs_sum_to_one(self, markets):
+        pl = markets["puck_line"]
+        assert abs(pl["-1.5_home"] + pl["-1.5_away"] - 1.0) < 1e-9
+        assert abs(pl["1.5_home"] + pl["1.5_away"] - 1.0) < 1e-9
+
+    def test_puck_line_home_minus_strictly_less_than_plus(self, markets):
+        # Home -1.5 (wins by 2+) is strictly harder than home +1.5
+        # (wins OR loses by 1) for any non-degenerate scoreline.
+        pl = markets["puck_line"]
+        assert pl["-1.5_home"] < pl["1.5_home"]
+
+    def test_over_under_pairs_sum_to_one_per_line(self, markets):
+        ou = markets["over_under"]
+        for line in NHL_TOTAL_LINES:
+            lbl = _fmt_line(line)
+            assert abs(ou[f"over_{lbl}"] + ou[f"under_{lbl}"] - 1.0) < 1e-9
+
+    def test_over_under_monotonic(self, markets):
+        ou = markets["over_under"]
+        overs = [ou[f"over_{_fmt_line(line)}"] for line in NHL_TOTAL_LINES]
+        # Strictly decreasing as line rises.
+        assert all(overs[i] >= overs[i + 1] for i in range(len(overs) - 1))
+
+    def test_total_goals_buckets_sum_to_one(self, markets):
+        tg = markets["total_goals"]
+        assert abs(sum(tg.values()) - 1.0) < 1e-9
+
+    def test_double_chance_sums(self, markets):
+        # Double chance pairs ARE NOT independent — each pair sums
+        # over the 3-way mass and equals (1 - the excluded outcome).
+        dc = markets["double_chance"]
+        r = markets["regulation_1x2"]
+        assert abs(dc["1X"] - (1 - r["away"])) < 1e-9
+        assert abs(dc["12"] - (1 - r["draw"])) < 1e-9
+        assert abs(dc["X2"] - (1 - r["home"])) < 1e-9
+
+    def test_clean_sheet_pair_sums(self, markets):
+        cs = markets["clean_sheet"]
+        assert abs(cs["home_yes"] + cs["home_no"] - 1.0) < 1e-9
+        assert abs(cs["away_yes"] + cs["away_no"] - 1.0) < 1e-9
+
+    def test_win_to_nil_pair_sums(self, markets):
+        wtn = markets["win_to_nil"]
+        assert abs(wtn["home_yes"] + wtn["home_no"] - 1.0) < 1e-9
+        assert abs(wtn["away_yes"] + wtn["away_no"] - 1.0) < 1e-9
+
+    def test_correct_score_sums_to_one(self, markets):
+        cs = markets["correct_score"]
+        assert abs(sum(cs.values()) - 1.0) < 1e-9
+
+    def test_registered_via_dispatch(self):
+        # The MARKET_DERIVERS dispatch table must include "nhl" so
+        # derive_markets(sport="nhl", P) works downstream.
+        P = build_dc_matrix(3.0, 2.8, rho=-0.05)
+        m = derive_markets("nhl", P)
+        # Soccer-specific markets must NOT appear in the hockey
+        # output — guards against accidental fallthrough.
+        assert "asian_handicap" not in m
+        assert "btts" not in m
+        assert "moneyline" in m
+        assert "puck_line" in m
+
+    def test_zero_lambda_difference_means_50_50_moneyline(self):
+        # Symmetric strengths → moneyline exactly 50/50.
+        P = build_dc_matrix(2.5, 2.5, rho=-0.05)
+        m = derive_hockey_markets(P)
+        assert abs(m["moneyline"]["home"] - 0.5) < 1e-9
+        assert abs(m["moneyline"]["away"] - 0.5) < 1e-9
