@@ -334,9 +334,15 @@ class TestHalftimeFulltimeJoint:
     def test_nine_selections_present(self, markets):
         m = markets["ht_ft_double_result"]
         expected = {
-            "home_home", "home_draw", "home_away",
-            "draw_home", "draw_draw", "draw_away",
-            "away_home", "away_draw", "away_away",
+            "home_home",
+            "home_draw",
+            "home_away",
+            "draw_home",
+            "draw_draw",
+            "draw_away",
+            "away_home",
+            "away_draw",
+            "away_away",
         }
         assert set(m.keys()) == expected
 
@@ -366,14 +372,14 @@ class TestHalftimeFulltimeJoint:
         m = markets["ht_ft_double_result"]
         ht_only = derive_soccer_halftime_markets(ht_matrix)["match_result_ht"]
         for ht_outcome in ("home", "draw", "away"):
-            joint_marginal = sum(
-                m[f"{ht_outcome}_{ft_outcome}"]
-                for ft_outcome in ("home", "draw", "away")
-            )
+            joint_marginal = sum(m[f"{ht_outcome}_{ft_outcome}"] for ft_outcome in ("home", "draw", "away"))
             assert abs(joint_marginal - ht_only[ht_outcome]) < 1e-9
 
     def test_marginal_ft_outcome_matches_independent_convolution(
-        self, ht_matrix, h2_matrix, markets,
+        self,
+        ht_matrix,
+        h2_matrix,
+        markets,
     ):
         # Summing the joint over HT outcomes should recover the
         # marginal FT outcomes — derivable directly by convolving
@@ -400,10 +406,7 @@ class TestHalftimeFulltimeJoint:
             "away": float(ft_matrix[ft_i < ft_j].sum()),
         }
         for ft_outcome, expected in expected_marginals.items():
-            joint_marginal = sum(
-                m[f"{ht_outcome}_{ft_outcome}"]
-                for ht_outcome in ("home", "draw", "away")
-            )
+            joint_marginal = sum(m[f"{ht_outcome}_{ft_outcome}"] for ht_outcome in ("home", "draw", "away"))
             assert abs(joint_marginal - expected) < 1e-9
 
     def test_renormalises_drifted_inputs(self):

@@ -347,7 +347,8 @@ def derive_soccer_halftime_markets(P: np.ndarray) -> Dict[str, Dict[str, float]]
 
 
 def derive_soccer_htft_markets(
-    P_HT: np.ndarray, P_2H: np.ndarray,
+    P_HT: np.ndarray,
+    P_2H: np.ndarray,
 ) -> Dict[str, Dict[str, float]]:
     """Derive the halftime/fulltime joint double-result market.
 
@@ -383,9 +384,15 @@ def derive_soccer_htft_markets(
     N_2h = P_2H.shape[0]
 
     out: Dict[str, float] = {
-        "home_home": 0.0, "home_draw": 0.0, "home_away": 0.0,
-        "draw_home": 0.0, "draw_draw": 0.0, "draw_away": 0.0,
-        "away_home": 0.0, "away_draw": 0.0, "away_away": 0.0,
+        "home_home": 0.0,
+        "home_draw": 0.0,
+        "home_away": 0.0,
+        "draw_home": 0.0,
+        "draw_draw": 0.0,
+        "draw_away": 0.0,
+        "away_home": 0.0,
+        "away_draw": 0.0,
+        "away_away": 0.0,
     }
 
     # Per-HT-cell: distribute P_HT[i,j] across each (i+a, j+b) in
