@@ -46,7 +46,32 @@ MAX_GOALS_DERIVE = 10
 
 # Line sets offered per market.
 OU_LINES: Tuple[float, ...] = (0.5, 1.5, 2.5, 3.5, 4.5, 5.5)
-AH_LINES: Tuple[float, ...] = (-2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0)
+# Asian handicap lines — full + half + QUARTER (added 2026-06-04).
+# Quarter lines (.25 / .75) split the bettor's stake equally across
+# two adjacent half/integer sub-lines, so a single integer margin can
+# produce a "half win" or "half loss" outcome. The derivation emits
+# EFFECTIVE home / away / push masses so the existing recs engine's
+# EV formula (`win * odds + push - 1`) keeps working unchanged — the
+# half-stake outcomes get folded into the effective push.
+AH_LINES: Tuple[float, ...] = (
+    -2.0,
+    -1.75,
+    -1.5,
+    -1.25,
+    -1.0,
+    -0.75,
+    -0.5,
+    -0.25,
+    0.0,
+    0.25,
+    0.5,
+    0.75,
+    1.0,
+    1.25,
+    1.5,
+    1.75,
+    2.0,
+)
 TEAM_TOTAL_LINES: Tuple[float, ...] = (0.5, 1.5, 2.5)
 # Halftime totals top out lower than FT — typical HT line is 0.5 or
 # 1.5 goals at most. 2.5 included for the rare high-scoring case.
@@ -211,15 +236,43 @@ def derive_soccer_markets(P: np.ndarray, top_n_scores: int = 12) -> Dict[str, Di
     cs["other"] = max(0.0, 1.0 - acc)
     markets["correct_score"] = cs
 
-    # Asian / goal handicap — RAW masses per home-perspective line. Home covers
-    # line h when (margin + h) > 0, pushes when == 0 (integer lines only).
+    # Asian / goal handicap — EFFECTIVE masses per home-perspective
+    # line. For full + half-integer lines, "home" = P(margin + h > 0),
+    # "away" = P(margin + h < 0), "push" = P(margin + h == 0).
+    # Quarter lines (.25, .75) split the bettor's stake across two
+    # adjacent sub-lines; a single integer margin can land "half win"
+    # or "half loss". We fold those into the existing schema by
+    # emitting EFFECTIVE values:
+    #   effective_home_win  = full_win + 0.5 * half_win
+    #   effective_push      = push     + 0.5 * (half_win + half_loss)
+    #   effective_away_win  = full_loss + 0.5 * half_loss
+    # so the existing recs engine's `win * odds + push - 1` formula
+    # keeps working unchanged.
     ah: Dict[str, float] = {}
     for line in AH_LINES:
         lbl = _fmt_line(line)
-        adj = margin + line
-        ah[f"{lbl}_home"] = float(P[adj > 0].sum())
-        ah[f"{lbl}_away"] = float(P[adj < 0].sum())
-        ah[f"{lbl}_push"] = float(P[adj == 0].sum())
+        is_quarter = (float(line) * 4) % 2 != 0  # h * 4 odd → quarter line
+        if is_quarter:
+            # Split stake into two halves at sub-lines (h - 0.25) and
+            # (h + 0.25). Exactly one of these is integer (margin-push
+            # possible), the other is half-integer. The "half" outcome
+            # fires at the integer sub-line's push margin.
+            h_lower = line - 0.25
+            h_upper = line + 0.25
+            adj_lower = margin + h_lower
+            adj_upper = margin + h_upper
+            full_win = float(P[(adj_lower > 0) & (adj_upper > 0)].sum())
+            full_loss = float(P[(adj_lower < 0) & (adj_upper < 0)].sum())
+            half_win = float(P[((adj_lower == 0) & (adj_upper > 0)) | ((adj_lower > 0) & (adj_upper == 0))].sum())
+            half_loss = float(P[((adj_lower == 0) & (adj_upper < 0)) | ((adj_lower < 0) & (adj_upper == 0))].sum())
+            ah[f"{lbl}_home"] = full_win + 0.5 * half_win
+            ah[f"{lbl}_away"] = full_loss + 0.5 * half_loss
+            ah[f"{lbl}_push"] = 0.5 * (half_win + half_loss)
+        else:
+            adj = margin + line
+            ah[f"{lbl}_home"] = float(P[adj > 0].sum())
+            ah[f"{lbl}_away"] = float(P[adj < 0].sum())
+            ah[f"{lbl}_push"] = float(P[adj == 0].sum())
     markets["asian_handicap"] = ah
 
     # Team totals — per side, per line (each pair sums to 1).

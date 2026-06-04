@@ -425,3 +425,103 @@ class TestHalftimeFulltimeJoint:
         h2_P = build_dc_matrix(0.4, 0.3, rho=-0.08)
         m = derive_soccer_htft_markets(ht_P, h2_P)["ht_ft_double_result"]
         assert m["draw_draw"] == max(m.values())
+
+
+@pytest.mark.unit
+class TestQuarterAsianHandicap:
+    """Quarter Asian handicap lines (.25 / .75) split the bet across
+    two adjacent sub-lines, producing a half-win / half-loss outcome
+    at the integer-sub-line's push margin. The deriver emits
+    EFFECTIVE home / away / push masses so the existing recs engine
+    formula (`win * odds + push - 1`) keeps working without code
+    changes — half-stake refund mass is folded into `push`."""
+
+    @pytest.fixture
+    def markets(self):
+        return derive_soccer_markets(build_dc_matrix(1.7, 1.2, rho=-0.12, max_goals=10))
+
+    def test_quarter_lines_present(self, markets):
+        # Quarter lines must be in the output. Without them this
+        # whole feature is dead.
+        ah = markets["asian_handicap"]
+        for line in (-0.25, -0.75, 0.25, 0.75, -1.25, 1.25):
+            lbl = _fmt_line(line)
+            assert f"{lbl}_home" in ah
+            assert f"{lbl}_away" in ah
+            assert f"{lbl}_push" in ah
+
+    def test_effective_masses_sum_to_one_per_line(self, markets):
+        ah = markets["asian_handicap"]
+        for line in AH_LINES:
+            lbl = _fmt_line(line)
+            total = ah[f"{lbl}_home"] + ah[f"{lbl}_away"] + ah[f"{lbl}_push"]
+            assert abs(total - 1.0) < 1e-9, f"line {line}: {total}"
+
+    def test_neg_0_25_home_matches_neg_0_5_home_on_strict_wins(self, markets):
+        # For line -0.25 home: full_win region = margin > 0 = exactly
+        # the same as -0.5 home's full_win region. The EFFECTIVE home
+        # value at -0.25 = full_win = P(margin > 0) since half_win = 0.
+        # So effective_home(-0.25) == home(-0.5).
+        ah = markets["asian_handicap"]
+        assert abs(ah["-0.25_home"] - ah["-0.5_home"]) < 1e-12
+
+    def test_neg_0_75_home_full_win_matches_neg_1_home_full_win(self, markets):
+        # For -0.75 home: full_win at margin >= 2 (same as -1 home's
+        # margin > 1). Plus a half_win at margin == 1.
+        # EFFECTIVE home(-0.75) = full_win + 0.5 * half_win
+        #                      = home(-1) + 0.5 * push(-1)
+        ah = markets["asian_handicap"]
+        expected = ah["-1_home"] + 0.5 * ah["-1_push"]
+        assert abs(ah["-0.75_home"] - expected) < 1e-12
+
+    def test_quarter_push_is_half_of_adjacent_integer_push(self, markets):
+        # For line -0.25: push mass = 0.5 * (half_win + half_loss).
+        # half_win comes from the lower sub-line being integer (here
+        # h_lower = -0.5 is NOT integer, so half_win = 0), so the
+        # full push mass comes from half_loss only:
+        #   push(-0.25) = 0.5 * P(margin == 0) = 0.5 * push(0)
+        # since the upper sub-line h_upper = 0 is integer.
+        ah = markets["asian_handicap"]
+        assert abs(ah["-0.25_push"] - 0.5 * ah["0_push"]) < 1e-12
+
+    def test_neg_0_75_push_is_half_of_neg_1_push(self, markets):
+        # For -0.75: h_lower = -1.0 is integer, h_upper = -0.5 isn't.
+        # push(-0.75) = 0.5 * P(margin == 1) = 0.5 * push(-1).
+        ah = markets["asian_handicap"]
+        assert abs(ah["-0.75_push"] - 0.5 * ah["-1_push"]) < 1e-12
+
+    def test_existing_half_integer_lines_unchanged(self, markets):
+        # Defensive: integer + half-integer lines must keep their
+        # pre-quarter values exactly. Compares against a hand-built
+        # reference on the same matrix.
+        P = build_dc_matrix(1.7, 1.2, rho=-0.12, max_goals=10)
+        N = P.shape[0]
+        i_idx, j_idx = np.indices((N, N))
+        margin = i_idx - j_idx
+        ah = markets["asian_handicap"]
+        for line in (-2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0):
+            lbl = _fmt_line(line)
+            adj = margin + line
+            expected_home = float(P[adj > 0].sum())
+            expected_away = float(P[adj < 0].sum())
+            expected_push = float(P[adj == 0].sum())
+            assert abs(ah[f"{lbl}_home"] - expected_home) < 1e-12, lbl
+            assert abs(ah[f"{lbl}_away"] - expected_away) < 1e-12, lbl
+            assert abs(ah[f"{lbl}_push"] - expected_push) < 1e-12, lbl
+
+    def test_quarter_home_plus_away_plus_push_in_0_1(self, markets):
+        # All three components stay in [0, 1] for every quarter line.
+        ah = markets["asian_handicap"]
+        for line in (-1.75, -1.25, -0.75, -0.25, 0.25, 0.75, 1.25, 1.75):
+            lbl = _fmt_line(line)
+            for key in (f"{lbl}_home", f"{lbl}_away", f"{lbl}_push"):
+                assert 0.0 <= ah[key] <= 1.0, f"{key}={ah[key]}"
+
+    def test_symmetric_zero_lambda_difference(self):
+        # When lambdas are equal, line 0.25 home should equal line
+        # 0.25 away (symmetry). Quarter line at 0.25 means home
+        # gets +0.25 head start; with equal teams, away with -0.25
+        # has the mirror mass.
+        P = build_dc_matrix(1.5, 1.5, rho=-0.1, max_goals=10)
+        m = derive_soccer_markets(P)["asian_handicap"]
+        assert abs(m["0.25_home"] - m["-0.25_away"]) < 1e-12
