@@ -56,13 +56,20 @@ WIKIDATA_ENDPOINT = "https://query.wikidata.org/sparql"
 # label; ?coord is "Point(lon lat)" WKT we parse below. The query
 # completes in ~5s and returns ~3000 rows.
 SPARQL_QUERY = """
-SELECT DISTINCT ?club ?clubLabel ?stadium ?stadiumLabel ?coord ?countryLabel WHERE {
+SELECT DISTINCT ?club ?clubLabel ?stadium ?stadiumLabel ?coord ?countryLabel
+       (GROUP_CONCAT(DISTINCT ?altLabel; separator="||") AS ?altLabels)
+WHERE {
   ?club wdt:P31/wdt:P279* wd:Q476028 .
   ?club wdt:P115 ?stadium .
   ?stadium wdt:P625 ?coord .
+  OPTIONAL {
+    ?club skos:altLabel ?altLabel .
+    FILTER(LANG(?altLabel) IN ("en", "de", "es", "it", "fr", "pt"))
+  }
   OPTIONAL { ?club wdt:P17 ?country . }
   SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
 }
+GROUP BY ?club ?clubLabel ?stadium ?stadiumLabel ?coord ?countryLabel
 """
 
 
@@ -86,6 +93,14 @@ def fetch_wikidata() -> list[dict]:
         stadium_label = r_.get("stadiumLabel", {}).get("value")
         coord = r_.get("coord", {}).get("value")  # "Point(lon lat)"
         country = r_.get("countryLabel", {}).get("value")
+        alt_labels_str = (r_.get("altLabels", {}) or {}).get("value") or ""
+        # Alt-labels come in "Bayern Munich||FC Bayern München||..." form
+        # because we GROUP_CONCAT with "||" separator above. Wikidata's
+        # alt-labels are how clubs surface their common short / English
+        # name (e.g. "Bayern Munich" is an alt-label of "FC Bayern
+        # München"), so indexing on them too dramatically widens the
+        # match rate vs the primary clubLabel alone.
+        alt_labels = [a.strip() for a in alt_labels_str.split("||") if a.strip()]
         if not (club_label and stadium_label and coord):
             continue
         m = re.match(r"Point\(([-0-9.]+) ([-0-9.]+)\)", coord)
@@ -95,6 +110,7 @@ def fetch_wikidata() -> list[dict]:
         out.append(
             {
                 "club_name": club_label,
+                "alt_labels": alt_labels,
                 "stadium": stadium_label,
                 "latitude": lat,
                 "longitude": lon,
@@ -105,11 +121,24 @@ def fetch_wikidata() -> list[dict]:
 
 
 def _normalize(name: str) -> str:
-    """Lowercase, drop punctuation + iteratively strip common
-    boilerplate suffixes so "Manchester United F.C." and "Man United"
-    match, and so "Bologna F.C. 1909" → "bologna" rather than getting
-    stuck mid-strip on a year-of-founding."""
+    """Lowercase, strip iteratively-applied prefix + suffix boilerplate,
+    drop punctuation, normalise diacritics. Produces a canonical key
+    that makes "Manchester United F.C." == "Man United" and
+    "AC Milan" == "Milan" == "A.C. Milan" all index to the same slot.
+
+    Diacritic strip is for cross-source matching (e.g. our DB stores
+    "Atletico Madrid" without the accent; Wikidata stores
+    "Atlético Madrid" with). Lossy on a few non-English names but
+    safe at the scale we're operating on."""
+    import unicodedata
+
     s = name.lower().strip()
+    # Strip diacritics so "Atlético" → "atletico", "Köln" → "koln",
+    # "Mönchengladbach" → "monchengladbach". DB and Wikidata diverge
+    # on accents constantly; without this we'd need an alias per
+    # accent-variant.
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+
     # Iteratively strip suffixes so "Bologna F.C. 1909" peels both
     # " 1909" and " f.c." in turn. Loop terminates when nothing
     # matched in a full pass.
@@ -134,7 +163,10 @@ def _normalize(name: str) -> str:
         " ssc",
         " a.s.",
         " as",
+        " u.s.",
+        " us",
         " calcio",
+        " 1913",
         # Spanish / Portuguese.
         " u.d.",
         " ud",
@@ -142,26 +174,108 @@ def _normalize(name: str) -> str:
         " rc",
         " c.d.",
         " cd",
+        " c.a.",
+        " ca",
         " s.a.d.",
         " sad",
-        " sociedad anónima deportiva",
+        " 05",
+        " sociedad anonima deportiva",
+        " alsace",
+        # French.
+        " sco",
+        " osc",
+        " 29",
         # German.
         " e.v.",
         " ev",
-        # Year-of-founding tail (covers Como 1907, Bologna 1909, etc.).
+        " sv",
+        " 1846",
+        " 1899",
+        # Year-of-founding tail.
         " 1907",
         " 1908",
         " 1909",
         " 1910",
     )
-    changed = True
-    while changed:
-        changed = False
-        for suffix in suffixes:
-            if s.endswith(suffix):
-                s = s[: -len(suffix)].rstrip()
-                changed = True
-                break
+    # Prefixes — same pattern but at the START. Lots of clubs prepend
+    # their club-type (FC Bayern, AC Milan, Real Madrid, etc.). Strip
+    # these too so the short DB name matches.
+    prefixes = (
+        # English / generic.
+        "fc ",
+        "afc ",
+        "a.f.c. ",
+        "f.c. ",
+        # Italian.
+        "ac ",
+        "a.c. ",
+        "as ",
+        "a.s. ",
+        "ss ",
+        "s.s. ",
+        "ssc ",
+        "s.s.c. ",
+        "us ",
+        "u.s. ",
+        "acf ",
+        # Spanish — "Real" is heavily used (Real Madrid, Real Betis,
+        # Real Sociedad). RCD / CD / CA / UD likewise.
+        "real ",
+        "rcd ",
+        "r.c.d. ",
+        "cd ",
+        "c.d. ",
+        "ca ",
+        "c.a. ",
+        "ud ",
+        "u.d. ",
+        "athletic ",
+        "deportivo ",
+        "club atletico ",
+        "rc ",
+        "r.c. ",
+        # German.
+        "1 fc ",
+        "1. fc ",
+        "1 fsv ",
+        "1. fsv ",
+        "fc ",
+        "vfl ",
+        "vfb ",
+        "sv ",
+        "tsv ",
+        "tsg 1899 ",
+        "bayer 04 ",
+        "borussia ",
+        "hamburger ",
+        "hellas ",
+        # French.
+        "olympique ",
+        "stade ",
+        "aj ",
+        "rc ",
+        # Italian / Portuguese / generic clubs.
+        "ssc ",
+        "ac ",
+    )
+
+    def _peel(s: str) -> str:
+        changed = True
+        while changed:
+            changed = False
+            for suffix in suffixes:
+                if s.endswith(suffix):
+                    s = s[: -len(suffix)].rstrip()
+                    changed = True
+                    break
+            for prefix in prefixes:
+                if s.startswith(prefix):
+                    s = s[len(prefix) :].lstrip()
+                    changed = True
+                    break
+        return s
+
+    s = _peel(s)
     # Drop punctuation (including apostrophes — "Nott'm" → "nott m"),
     # collapse whitespace.
     s = re.sub(r"[^\w\s]", " ", s)
@@ -235,14 +349,32 @@ def match_team_to_stadium(
     db_team_name: str,
     wiki_index: dict[str, dict],
 ) -> Optional[dict]:
-    """Look up a DB team's stadium info via normalised name + alias
-    fallback. Returns None if no match (caller logs the miss)."""
+    """Look up a DB team's stadium info via three-tier match:
+
+      1. Direct normalised lookup — covers ~90% of cases.
+      2. TEAM_ALIASES dict override — covers known mismatches that
+         survive normalisation (e.g. "M'gladbach" → "monchengladbach").
+      3. Containment fallback — if the DB norm is at least 4 chars,
+         find any wiki_index key that CONTAINS it (or vice versa).
+         Catches club-name variants we haven't aliased, e.g. DB
+         "Inter" matches Wikidata "inter milan" by containment.
+
+    Returns None if all three tiers fail."""
     norm = _normalize(db_team_name)
     if norm in wiki_index:
         return wiki_index[norm]
     aliased = TEAM_ALIASES.get(norm)
     if aliased and aliased in wiki_index:
         return wiki_index[aliased]
+    # Containment fallback — DB-name (after normalisation) as a
+    # substring of a wiki key. Min 4 chars to avoid spurious matches
+    # on short keys ("ac", "fc", etc. would over-match wildly).
+    if len(norm) >= 4:
+        # Prefer LONGEST match (most specific) to avoid e.g. "athletic"
+        # picking the first club whose name starts with "athletic".
+        candidates = [k for k in wiki_index if norm in k or k in norm]
+        if candidates:
+            return wiki_index[max(candidates, key=len)]
     return None
 
 
@@ -298,9 +430,18 @@ def main() -> int:
     # popular clubs, but they all point at the same stadium).
     wiki_index: dict[str, dict] = {}
     for row in wiki_rows:
+        # Index by primary label.
         norm = _normalize(row["club_name"])
         if norm and norm not in wiki_index:
             wiki_index[norm] = row
+        # ALSO index by every alt-label so DB "Bayern Munich" matches
+        # Wikidata "FC Bayern München" via its English alt-label.
+        # First-wins on collisions (rare; only happens when two clubs
+        # legitimately share a colloquial alt-label).
+        for alt in row.get("alt_labels", []) or []:
+            alt_norm = _normalize(alt)
+            if alt_norm and alt_norm not in wiki_index:
+                wiki_index[alt_norm] = row
 
     with psycopg2.connect(args.database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
