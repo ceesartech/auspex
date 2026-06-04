@@ -230,3 +230,118 @@ class TestApiKeyHelper:
     def test_returns_none_when_missing(self, monkeypatch):
         monkeypatch.delenv("VISUAL_CROSSING_API_KEY", raising=False)
         assert vc._api_key() is None
+
+
+@pytest.mark.unit
+class TestStadiumMapLoader:
+    """The team → home-stadium fallback fires when matches.venue is
+    NULL (the 99.6% case for soccer). Tests cover the loader's
+    defensive shape: missing file, malformed JSON, missing team_id."""
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        out = vc.load_stadium_map(str(tmp_path / "does_not_exist.json"))
+        assert out == {}
+
+    def test_malformed_json_returns_empty(self, tmp_path):
+        # Defensive: a half-written JSON file shouldn't crash the
+        # whole fetcher — just disable the soccer fallback for the run.
+        bad = tmp_path / "bad.json"
+        bad.write_text("{ this is not json")
+        out = vc.load_stadium_map(str(bad))
+        assert out == {}
+
+    def test_loads_well_formed_json(self, tmp_path):
+        import json as _json
+
+        good = tmp_path / "good.json"
+        payload = {
+            "team-uuid-1": {
+                "team_name": "Test FC",
+                "stadium": "Test Stadium",
+                "latitude": 51.5,
+                "longitude": -0.12,
+                "timezone": "Europe/London",
+                "is_indoor": False,
+            }
+        }
+        good.write_text(_json.dumps(payload))
+        out = vc.load_stadium_map(str(good))
+        assert out == payload
+
+    def test_lookup_via_team_returns_none_for_missing_id(self):
+        out = vc.lookup_venue_via_team(
+            cur=None,
+            stadium_map={},
+            home_team_id="any-id",
+        )
+        assert out is None
+
+    def test_lookup_via_team_returns_none_for_empty_map(self):
+        out = vc.lookup_venue_via_team(
+            cur=None,
+            stadium_map={},
+            home_team_id="team-1",
+        )
+        assert out is None
+
+    def test_lookup_via_team_hit_shape_matches_venue_coords(self):
+        stadium_map = {
+            "team-1": {
+                "team_name": "Chelsea FC",
+                "stadium": "Stamford Bridge",
+                "latitude": 51.4817,
+                "longitude": -0.1910,
+                "timezone": "Europe/London",
+                "is_indoor": False,
+            }
+        }
+        out = vc.lookup_venue_via_team(
+            cur=None,
+            stadium_map=stadium_map,
+            home_team_id="team-1",
+        )
+        # Shape must match the SELECT in lookup_venue (id, latitude,
+        # longitude, timezone, is_indoor) so callers can use either
+        # interchangeably.
+        assert set(out.keys()) >= {
+            "id",
+            "latitude",
+            "longitude",
+            "timezone",
+            "is_indoor",
+        }
+        assert out["id"] is None  # fallback doesn't have a venue_coords row
+        assert out["latitude"] == 51.4817
+        assert out["longitude"] == -0.1910
+        assert out["timezone"] == "Europe/London"
+        assert out["is_indoor"] is False
+
+    def test_lookup_via_team_defaults_timezone_to_utc(self):
+        # Defensive: an entry with no timezone shouldn't crash —
+        # default to UTC.
+        stadium_map = {
+            "team-1": {
+                "team_name": "Some Club",
+                "stadium": "Some Stadium",
+                "latitude": 0.0,
+                "longitude": 0.0,
+                # no timezone key
+            }
+        }
+        out = vc.lookup_venue_via_team(
+            cur=None,
+            stadium_map=stadium_map,
+            home_team_id="team-1",
+        )
+        assert out["timezone"] == "UTC"
+
+    def test_lookup_via_team_handles_empty_home_team_id(self):
+        # Defensive: an empty home_team_id shouldn't crash; should
+        # behave like a miss.
+        stadium_map = {"team-1": {"latitude": 0, "longitude": 0}}
+        out = vc.lookup_venue_via_team(
+            cur=None,
+            stadium_map=stadium_map,
+            home_team_id="",
+        )
+        assert out is None
