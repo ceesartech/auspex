@@ -175,3 +175,92 @@ class TestCli:
 
 # Quiet import-unused lint on pytest.
 _ = pytest
+
+
+# ── Cross-book SPREAD features ────────────────────────────────────
+#
+# Landed 2026-06-04 after scripts/ab_nba_cross_book.py verdict
+# (ΔBrier -0.0061 on 2024-2025 walk-forward). NBA moneyline +
+# total were tested in the same A/B and DROPPED — these tests
+# guard the spread-only landing.
+
+
+class _FakeCursor:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def execute(self, sql, params=None):
+        pass
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class TestFetchSpreadCrossbookNBA:
+    CROSSBOOK_KEYS = (
+        "spread_book_count",
+        "spread_consensus_mean",
+        "spread_max_minus_min",
+        "spread_std",
+        "spread_consensus_implied_prob",
+    )
+
+    def test_no_rows_returns_empty_dict(self):
+        out = fnba.fetch_spread_crossbook(_FakeCursor([]), "match-1")
+        assert out == {}
+
+    def test_single_book_zero_disagreement(self):
+        cur = _FakeCursor([
+            {"bookmaker": "DK", "p_line": -3.5,
+             "p_odds": 1.91, "c_odds": 1.91},
+        ])
+        out = fnba.fetch_spread_crossbook(cur, "match-1")
+        assert out["spread_book_count"] == 1.0
+        assert out["spread_consensus_mean"] == -3.5
+        assert out["spread_max_minus_min"] == 0.0
+        assert out["spread_std"] == 0.0
+        assert abs(out["spread_consensus_implied_prob"] - 0.5) < 1e-9
+
+    def test_multi_book_max_min_and_std(self):
+        # NBA spread CAN vary across books even within a single line
+        # (some at -3.5, others at -4.0 / -4.5). Confirms the line-
+        # statistic features actually move on NBA data.
+        rows = [
+            {"bookmaker": "A", "p_line": -3.5, "p_odds": 1.91, "c_odds": 1.91},
+            {"bookmaker": "B", "p_line": -4.0, "p_odds": 1.95, "c_odds": 1.87},
+            {"bookmaker": "C", "p_line": -4.5, "p_odds": 2.00, "c_odds": 1.83},
+        ]
+        cur = _FakeCursor(rows)
+        out = fnba.fetch_spread_crossbook(cur, "match-1")
+        assert out["spread_book_count"] == 3.0
+        assert abs(out["spread_consensus_mean"] - (-4.0)) < 1e-9
+        assert out["spread_max_minus_min"] == 1.0
+        # ddof=0 std: lines [-3.5, -4.0, -4.5], mean -4.0,
+        # sq diffs 0.25 + 0 + 0.25 = 0.5, var 0.5/3 = 0.1667, std 0.4082
+        assert abs(out["spread_std"] - 0.40824829) < 1e-6
+
+    def test_missing_counter_odds_keeps_line(self):
+        # The line still counts toward consensus_mean even when
+        # one book lacks the away odds (devig drops only that book).
+        rows = [
+            {"bookmaker": "Full", "p_line": -3.5,
+             "p_odds": 1.91, "c_odds": 1.91},
+            {"bookmaker": "OnlyHome", "p_line": -4.5,
+             "p_odds": 1.91, "c_odds": None},
+        ]
+        cur = _FakeCursor(rows)
+        out = fnba.fetch_spread_crossbook(cur, "match-1")
+        assert out["spread_book_count"] == 2.0
+        assert out["spread_consensus_mean"] == -4.0
+        # Only Full contributes devigged prob.
+        assert abs(out["spread_consensus_implied_prob"] - 0.5) < 1e-9
+
+    def test_all_keys_in_neutral_defaults(self):
+        for k in self.CROSSBOOK_KEYS:
+            assert k in fnba.NEUTRAL_DEFAULTS
+
+    def test_empty_fetch_filled_by_with_defaults(self):
+        empty = fnba.fetch_spread_crossbook(_FakeCursor([]), "match-1")
+        filled = fnba._with_defaults(empty)
+        for k in self.CROSSBOOK_KEYS:
+            assert filled[k] == fnba.NEUTRAL_DEFAULTS[k]

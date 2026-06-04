@@ -127,6 +127,16 @@ NEUTRAL_DEFAULTS: dict[str, float] = {
     "margin_diff": 0.0,
     "wins_diff": 0.0,
     "rest_diff": 0.0,
+    # Cross-book SPREAD features (landed 2026-06-04 after A/B in
+    # scripts/ab_nba_cross_book.py — ΔBrier -0.0061 on 2024-2025
+    # walk-forward). NBA moneyline + total did NOT benefit and
+    # were NOT landed. Neutral defaults: 1 book, 0.0 mean (no
+    # favourite), zero disagreement, 0.5 home-cover prob.
+    "spread_book_count": 1.0,
+    "spread_consensus_mean": 0.0,
+    "spread_max_minus_min": 0.0,
+    "spread_std": 0.0,
+    "spread_consensus_implied_prob": 0.5,
 }
 
 
@@ -357,6 +367,82 @@ def _diff(features: dict, h_key: str, a_key: str, out_key: str) -> None:
         features[out_key] = float(h) - float(a)
 
 
+def fetch_spread_crossbook(cur, match_id: str) -> dict:
+    """Cross-book SPREAD features. Mirrors fetch_total_crossbook in
+    compute_features_nfl.py — same SQL shape, same 5 keys (just
+    with the 'spread' prefix).
+
+    Validated by scripts/ab_nba_cross_book.py on 2026-06-04:
+    ΔBrier -0.0061 on 2024-2025 walk-forward, clears the 0.005 KEEP
+    threshold. NBA moneyline + total were tested in the same A/B
+    and didn't help, so this fetcher is spread-only."""
+    cur.execute(
+        """
+        WITH per_book AS (
+            SELECT DISTINCT ON (o.bookmaker)
+                o.bookmaker,
+                o.line AS p_line,
+                o.odds_decimal AS p_odds,
+                (
+                    SELECT od2.odds_decimal FROM odds od2
+                    WHERE od2.match_id = o.match_id
+                      AND od2.bookmaker = o.bookmaker
+                      AND od2.market_type = 'spread'
+                      AND od2.selection = 'away'
+                      AND od2.is_live = false
+                    ORDER BY od2.timestamp DESC LIMIT 1
+                ) AS c_odds
+            FROM odds o
+            WHERE o.match_id = %s
+              AND o.market_type = 'spread'
+              AND o.selection = 'home'
+              AND o.is_live = false
+              AND o.line IS NOT NULL
+              AND o.odds_decimal IS NOT NULL
+            ORDER BY o.bookmaker, o.timestamp DESC
+        )
+        SELECT bookmaker, p_line, p_odds, c_odds FROM per_book
+        """,
+        (match_id,),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return {}
+
+    lines = [float(r["p_line"]) for r in rows]
+    devigged = []
+    for r in rows:
+        p_odds = float(r["p_odds"])
+        c_odds = r["c_odds"]
+        if p_odds <= 0 or c_odds is None:
+            continue
+        c_odds = float(c_odds)
+        if c_odds <= 0:
+            continue
+        raw_home = 1.0 / p_odds
+        raw_away = 1.0 / c_odds
+        denom = raw_home + raw_away
+        if denom <= 0:
+            continue
+        devigged.append(raw_home / denom)
+
+    out: dict = {
+        "spread_book_count": float(len(rows)),
+        "spread_consensus_mean": float(sum(lines) / len(lines)),
+        "spread_max_minus_min": float(max(lines) - min(lines)),
+    }
+    if len(lines) > 1:
+        mean = out["spread_consensus_mean"]
+        out["spread_std"] = float(
+            (sum((x - mean) ** 2 for x in lines) / len(lines)) ** 0.5
+        )
+    else:
+        out["spread_std"] = 0.0
+    if devigged:
+        out["spread_consensus_implied_prob"] = float(sum(devigged) / len(devigged))
+    return out
+
+
 def compute_for_match(cur, match_id: str) -> Optional[dict]:
     """End-to-end feature computation for one match. Returns None
     if the match itself can't be found."""
@@ -368,6 +454,7 @@ def compute_for_match(cur, match_id: str) -> Optional[dict]:
     features: dict = {}
     # Odds
     features.update(fetch_closing_odds(cur, match_id))
+    features.update(fetch_spread_crossbook(cur, match_id))
     # Per-team rolling form
     for side, team_id in (("home", meta["home_team_id"]), ("away", meta["away_team_id"])):
         roll = fetch_team_rolling(cur, team_id, when)
