@@ -138,6 +138,17 @@ NEUTRAL_DEFAULTS: dict[str, float] = {
     "total_max_minus_min": 0.0,
     "total_std": 0.0,
     "total_consensus_implied_prob": 0.5,
+    # Cross-book MONEYLINE features (landed 2026-06-04 after A/B in
+    # scripts/ab_nfl_moneyline_cross_book.py — ΔBrier -0.0154 (3x
+    # KEEP threshold), ΔECE -0.0366, +2.69pts accuracy on 2024-2025
+    # walk-forward). Same NFL TOTAL pattern but for the 2-way ML
+    # market. Neutral defaults: 1 book, 0.57 home prob (the modern
+    # home-advantage modal — matches implied_prob_home_ml default),
+    # zero disagreement.
+    "ml_book_count": 1.0,
+    "ml_consensus_home_prob": 0.57,
+    "ml_max_minus_min_home_prob": 0.0,
+    "ml_std_home_prob": 0.0,
 }
 
 
@@ -460,6 +471,82 @@ def fetch_total_crossbook(cur, match_id: str) -> dict:
     return out
 
 
+def fetch_moneyline_crossbook(cur, match_id: str) -> dict:
+    """Cross-book MONEYLINE features. Returns one row per match
+    aggregating across every (book, home) odds row paired with the
+    same book's (away) odds for devigged home prob.
+
+    Validated by scripts/ab_nfl_moneyline_cross_book.py on 2026-06-04:
+    ΔBrier -0.0154 (3x the 0.005 KEEP threshold), ΔECE -0.0366,
+    +2.69pts accuracy on 2024-2025 walk-forward. Same shape as
+    fetch_total_crossbook — emits 4 keys unconditionally so the
+    model input shape is stable whether or not cross-book data is
+    present."""
+    cur.execute(
+        """
+        WITH per_book AS (
+            SELECT DISTINCT ON (o.bookmaker)
+                o.bookmaker,
+                o.odds_decimal AS home_odds,
+                (
+                    SELECT od2.odds_decimal FROM odds od2
+                    WHERE od2.match_id = o.match_id
+                      AND od2.bookmaker = o.bookmaker
+                      AND od2.market_type = 'moneyline'
+                      AND od2.selection = 'away'
+                      AND od2.is_live = false
+                    ORDER BY od2.timestamp DESC LIMIT 1
+                ) AS away_odds
+            FROM odds o
+            WHERE o.match_id = %s
+              AND o.market_type = 'moneyline'
+              AND o.selection = 'home'
+              AND o.is_live = false
+              AND o.odds_decimal IS NOT NULL
+            ORDER BY o.bookmaker, o.timestamp DESC
+        )
+        SELECT bookmaker, home_odds, away_odds FROM per_book
+        """,
+        (match_id,),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return {}
+
+    home_probs: list[float] = []
+    for r in rows:
+        h_odds = float(r["home_odds"])
+        a_odds = r["away_odds"]
+        if a_odds is None or h_odds <= 0:
+            continue
+        a_odds = float(a_odds)
+        if a_odds <= 0:
+            continue
+        raw_h = 1.0 / h_odds
+        raw_a = 1.0 / a_odds
+        denom = raw_h + raw_a
+        if denom <= 0:
+            continue
+        home_probs.append(raw_h / denom)
+
+    if not home_probs:
+        return {}
+
+    out: dict = {
+        "ml_book_count": float(len(home_probs)),
+        "ml_consensus_home_prob": float(sum(home_probs) / len(home_probs)),
+        "ml_max_minus_min_home_prob": float(max(home_probs) - min(home_probs)),
+    }
+    if len(home_probs) > 1:
+        mean = out["ml_consensus_home_prob"]
+        out["ml_std_home_prob"] = float(
+            (sum((p - mean) ** 2 for p in home_probs) / len(home_probs)) ** 0.5
+        )
+    else:
+        out["ml_std_home_prob"] = 0.0
+    return out
+
+
 def compute_for_match(cur, match_id: str) -> Optional[dict]:
     """End-to-end feature computation for one match. Returns None
     if the match itself can't be found."""
@@ -471,6 +558,7 @@ def compute_for_match(cur, match_id: str) -> Optional[dict]:
     features: dict = {}
     features.update(fetch_closing_odds(cur, match_id))
     features.update(fetch_total_crossbook(cur, match_id))
+    features.update(fetch_moneyline_crossbook(cur, match_id))
     for side, team_id in (("home", meta["home_team_id"]), ("away", meta["away_team_id"])):
         roll = fetch_team_rolling(cur, team_id, when)
         for k, v in roll.items():

@@ -343,3 +343,146 @@ class TestCrossbookDefaults:
         filled = fnfl._with_defaults(empty)
         for k in self.CROSSBOOK_KEYS:
             assert filled[k] == fnfl.NEUTRAL_DEFAULTS[k]
+
+
+# ── Cross-book MONEYLINE features ──────────────────────────────────
+#
+# Landed 2026-06-04 after scripts/ab_nfl_moneyline_cross_book.py
+# verdict (ΔBrier -0.0154, 3x the KEEP threshold; ΔECE -0.0366;
+# +2.69pts accuracy on 2024-2025 walk-forward). Mirrors the TOTAL
+# cross-book test class structure but on the 2-way ML market.
+
+
+class TestFetchMoneylineCrossbookEmpty:
+    def test_no_rows_returns_empty_dict(self):
+        cur = _FakeCursor([])
+        out = fnfl.fetch_moneyline_crossbook(cur, "match-1")
+        assert out == {}
+
+
+class TestFetchMoneylineCrossbookSingleBook:
+    def test_single_book_zero_disagreement(self):
+        cur = _FakeCursor([
+            {"bookmaker": "DraftKings",
+             "home_odds": 2.10, "away_odds": 1.80},
+        ])
+        out = fnfl.fetch_moneyline_crossbook(cur, "match-1")
+        assert out["ml_book_count"] == 1.0
+        assert out["ml_max_minus_min_home_prob"] == 0.0
+        assert out["ml_std_home_prob"] == 0.0
+        raw_h = 1.0 / 2.10
+        raw_a = 1.0 / 1.80
+        expected = raw_h / (raw_h + raw_a)
+        assert abs(out["ml_consensus_home_prob"] - expected) < 1e-9
+
+
+class TestFetchMoneylineCrossbookMultiBook:
+    def test_book_count_and_consensus_mean(self):
+        rows = [
+            {"bookmaker": "DK", "home_odds": 2.10, "away_odds": 1.80},
+            {"bookmaker": "FD", "home_odds": 2.00, "away_odds": 1.85},
+            {"bookmaker": "MGM", "home_odds": 2.20, "away_odds": 1.75},
+        ]
+        cur = _FakeCursor(rows)
+        out = fnfl.fetch_moneyline_crossbook(cur, "match-1")
+        assert out["ml_book_count"] == 3.0
+        probs = []
+        for r in rows:
+            raw_h = 1.0 / r["home_odds"]
+            raw_a = 1.0 / r["away_odds"]
+            probs.append(raw_h / (raw_h + raw_a))
+        assert abs(out["ml_consensus_home_prob"] - sum(probs) / 3) < 1e-9
+        assert abs(out["ml_max_minus_min_home_prob"] - (max(probs) - min(probs))) < 1e-9
+
+    def test_population_std_matches_ab_harness(self):
+        # ddof=0 to match the A/B script's np.std(..., ddof=0) —
+        # load-bearing so validated A/B metrics translate to prod.
+        rows = [
+            {"bookmaker": "A", "home_odds": 2.00, "away_odds": 2.00},
+            {"bookmaker": "B", "home_odds": 2.00, "away_odds": 2.00},
+            {"bookmaker": "C", "home_odds": 2.00, "away_odds": 2.00},
+        ]
+        cur = _FakeCursor(rows)
+        out = fnfl.fetch_moneyline_crossbook(cur, "match-1")
+        # All three books at -100/-100 → home prob 0.5 each. std = 0.
+        assert out["ml_std_home_prob"] == 0.0
+        assert out["ml_consensus_home_prob"] == 0.5
+
+    def test_max_minus_min_captures_disagreement(self):
+        # Two books, one heavily favouring home, one balanced.
+        # max-min should equal the spread between their devigged
+        # home probs.
+        rows = [
+            {"bookmaker": "Sharp", "home_odds": 1.50, "away_odds": 2.80},
+            {"bookmaker": "Square", "home_odds": 2.00, "away_odds": 2.00},
+        ]
+        cur = _FakeCursor(rows)
+        out = fnfl.fetch_moneyline_crossbook(cur, "match-1")
+        sharp_p = (1.0 / 1.50) / (1.0 / 1.50 + 1.0 / 2.80)
+        square_p = 0.5
+        assert abs(out["ml_max_minus_min_home_prob"] - (sharp_p - square_p)) < 1e-9
+
+
+class TestFetchMoneylineCrossbookDegenerateOdds:
+    def test_missing_away_odds_drops_book(self):
+        # If a book has the home row but no matching away, drop it
+        # from the devigged-prob aggregation. The other book still
+        # contributes.
+        rows = [
+            {"bookmaker": "Full", "home_odds": 2.10, "away_odds": 1.80},
+            {"bookmaker": "OnlyHome", "home_odds": 2.00, "away_odds": None},
+        ]
+        cur = _FakeCursor(rows)
+        out = fnfl.fetch_moneyline_crossbook(cur, "match-1")
+        # Only Full contributed → book_count = 1.
+        assert out["ml_book_count"] == 1.0
+        raw_h = 1.0 / 2.10
+        raw_a = 1.0 / 1.80
+        expected = raw_h / (raw_h + raw_a)
+        assert abs(out["ml_consensus_home_prob"] - expected) < 1e-9
+
+    def test_zero_or_negative_odds_dropped(self):
+        rows = [
+            {"bookmaker": "Good", "home_odds": 2.0, "away_odds": 2.0},
+            {"bookmaker": "Bad", "home_odds": 0.0, "away_odds": 2.0},
+        ]
+        cur = _FakeCursor(rows)
+        out = fnfl.fetch_moneyline_crossbook(cur, "match-1")
+        assert out["ml_book_count"] == 1.0
+        assert out["ml_consensus_home_prob"] == 0.5
+
+
+class TestMoneylineCrossbookDefaults:
+    """Defaults contract: each ML cross-book key has a NEUTRAL_DEFAULT
+    so _with_defaults fills it cleanly when a match has no ML odds at
+    all. Mirrors the TOTAL defaults contract."""
+
+    ML_CROSSBOOK_KEYS = (
+        "ml_book_count",
+        "ml_consensus_home_prob",
+        "ml_max_minus_min_home_prob",
+        "ml_std_home_prob",
+    )
+
+    def test_all_keys_in_neutral_defaults(self):
+        for k in self.ML_CROSSBOOK_KEYS:
+            assert k in fnfl.NEUTRAL_DEFAULTS, f"{k} missing from NEUTRAL_DEFAULTS"
+
+    def test_neutral_consensus_home_prob_matches_existing_ml_implied(self):
+        # Both NEUTRAL_DEFAULTS["implied_prob_home_ml"] and the new
+        # ml_consensus_home_prob model "the modal home advantage in
+        # an NFL game". Keep them in sync so a missing-data match
+        # gets consistent home-advantage signal across both features.
+        assert fnfl.NEUTRAL_DEFAULTS["ml_consensus_home_prob"] == fnfl.NEUTRAL_DEFAULTS["implied_prob_home_ml"]
+
+    def test_neutral_disagreement_is_zero(self):
+        assert fnfl.NEUTRAL_DEFAULTS["ml_max_minus_min_home_prob"] == 0.0
+        assert fnfl.NEUTRAL_DEFAULTS["ml_std_home_prob"] == 0.0
+
+    def test_empty_fetch_filled_by_with_defaults(self):
+        cur = _FakeCursor([])
+        empty = fnfl.fetch_moneyline_crossbook(cur, "match-1")
+        assert empty == {}
+        filled = fnfl._with_defaults(empty)
+        for k in self.ML_CROSSBOOK_KEYS:
+            assert filled[k] == fnfl.NEUTRAL_DEFAULTS[k]
