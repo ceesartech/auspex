@@ -64,7 +64,7 @@ WHERE {
   ?stadium wdt:P625 ?coord .
   OPTIONAL {
     ?club skos:altLabel ?altLabel .
-    FILTER(LANG(?altLabel) IN ("en", "de", "es", "it", "fr", "pt"))
+    FILTER(LANG(?altLabel) = "en")
   }
   OPTIONAL { ?club wdt:P17 ?country . }
   SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
@@ -73,19 +73,56 @@ GROUP BY ?club ?clubLabel ?stadium ?stadiumLabel ?coord ?countryLabel
 """
 
 
-def fetch_wikidata() -> list[dict]:
+def fetch_wikidata(max_attempts: int = 4) -> list[dict]:
     """Run the SPARQL query, parse the result. Wikidata's response is
-    JSON-LD-ish with each row's columns nested under ``value``."""
-    logger.info("Querying Wikidata SPARQL (this takes ~5-10s)...")
-    r = requests.get(
-        WIKIDATA_ENDPOINT,
-        params={"query": SPARQL_QUERY, "format": "json"},
-        headers={"User-Agent": "auspex-soccer-stadium-builder/1.0 (chijiokekechi@gmail.com)"},
-        timeout=60,
-    )
-    r.raise_for_status()
-    rows = r.json()["results"]["bindings"]
-    logger.info("Wikidata returned %d club rows.", len(rows))
+    JSON-LD-ish with each row's columns nested under ``value``.
+
+    Wikidata's public endpoint truncates responses occasionally
+    (observed at ~3.6MB on the alt-labels query, gave
+    ``JSONDecodeError: Unterminated string``). Retry with exponential
+    backoff on JSON or HTTP errors so transient issues don't kill the
+    whole regen."""
+    import time as _time
+
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            logger.info(
+                "Querying Wikidata SPARQL (attempt %d/%d)...",
+                attempt,
+                max_attempts,
+            )
+            r = requests.get(
+                WIKIDATA_ENDPOINT,
+                params={"query": SPARQL_QUERY, "format": "json"},
+                headers={
+                    "User-Agent": "auspex-soccer-stadium-builder/1.0 (chijiokekechi@gmail.com)",
+                    "Accept": "application/sparql-results+json",
+                },
+                timeout=120,  # alt-labels query takes longer
+            )
+            r.raise_for_status()
+            rows = r.json()["results"]["bindings"]
+            logger.info("Wikidata returned %d club rows.", len(rows))
+            break
+        except (
+            requests.exceptions.JSONDecodeError,
+            requests.exceptions.HTTPError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        ) as e:
+            last_exc = e
+            if attempt == max_attempts:
+                raise
+            sleep_for = 2**attempt  # 2s, 4s, 8s
+            logger.warning(
+                "Wikidata SPARQL failed (%s); retrying in %ds...",
+                type(e).__name__,
+                sleep_for,
+            )
+            _time.sleep(sleep_for)
+    else:  # pragma: no cover — for-else after a clean break is fine
+        raise RuntimeError("Wikidata SPARQL exhausted retries") from last_exc
 
     out = []
     for r_ in rows:
