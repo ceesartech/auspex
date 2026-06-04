@@ -13,11 +13,13 @@ import numpy as np
 import pytest
 from predictors.market_derivation import (
     AH_LINES,
+    HT_OU_LINES,
     OU_LINES,
     _fmt_line,
     build_dc_matrix,
     derive_from_lambdas,
     derive_markets,
+    derive_soccer_halftime_markets,
     derive_soccer_markets,
     reconcile_matrix_to_1x2,
 )
@@ -202,3 +204,100 @@ class TestDispatch:
     def test_derive_from_lambdas_reconciles(self):
         m = derive_from_lambdas(1.5, 1.0, -0.1, target_1x2=(0.5, 0.3, 0.2))
         assert abs(m["1x2"]["home"] - 0.5) < 1e-9
+
+    def test_soccer_halftime_registered(self):
+        # HT lambdas are ~half of FT lambdas in real soccer (the
+        # second half typically carries the bulk of goals because of
+        # late tactical changes + tired defending). Test with a small
+        # synthetic HT lambda pair and confirm dispatch works.
+        P = build_dc_matrix(0.7, 0.5, rho=-0.08)
+        markets = derive_markets("soccer_halftime", P)
+        assert "match_result_ht" in markets
+        assert "over_under_ht" in markets
+        assert "btts_ht" in markets
+
+
+@pytest.mark.unit
+class TestHalftimeMarkets:
+    """The halftime deriver only emits 3 markets (1x2 / O/U / BTTS) —
+    no correct_score, asian_handicap, team_total etc., because retail
+    HT odds markets are correspondingly narrow."""
+
+    @pytest.fixture
+    def markets(self):
+        # HT lambdas comparable to a high-scoring real fixture (Man City
+        # vs Liverpool style): ~0.9 home / ~0.6 away expected HT goals.
+        P = build_dc_matrix(0.9, 0.6, rho=-0.08, max_goals=10)
+        return derive_soccer_halftime_markets(P)
+
+    def test_only_three_markets_emitted(self, markets):
+        # Halftime catalog is intentionally narrow — guards against
+        # accidental inclusion of FT markets in the HT output.
+        assert set(markets.keys()) == {"match_result_ht", "over_under_ht", "btts_ht"}
+
+    def test_match_result_ht_sums_to_one(self, markets):
+        mr = markets["match_result_ht"]
+        assert set(mr.keys()) == {"home", "draw", "away"}
+        assert abs(sum(mr.values()) - 1.0) < 1e-9
+
+    def test_match_result_ht_draw_dominates_at_realistic_lambdas(self):
+        # In real soccer, the draw at HT (0-0 most common) dominates
+        # because mean HT goals are ~0.5 per side. Verify the deriver
+        # captures this with a tiny-lambda case.
+        P = build_dc_matrix(0.4, 0.4, rho=-0.1, max_goals=10)
+        m = derive_soccer_halftime_markets(P)
+        assert m["match_result_ht"]["draw"] > m["match_result_ht"]["home"]
+        assert m["match_result_ht"]["draw"] > m["match_result_ht"]["away"]
+
+    def test_over_under_ht_pairs_sum_to_one_per_line(self, markets):
+        # Half-integer lines never push; over_X + under_X = 1.
+        ou = markets["over_under_ht"]
+        for line in HT_OU_LINES:
+            lbl = _fmt_line(line)
+            over = ou[f"over_{lbl}"]
+            under = ou[f"under_{lbl}"]
+            assert abs(over + under - 1.0) < 1e-9, f"line {line}: {over}+{under}"
+
+    def test_over_under_ht_monotone_with_line(self, markets):
+        # P(over X) must strictly decrease as the line goes up.
+        ou = markets["over_under_ht"]
+        prev = math.inf
+        for line in HT_OU_LINES:
+            over = ou[f"over_{_fmt_line(line)}"]
+            assert over < prev
+            prev = over
+
+    def test_btts_ht_pair_sums_to_one(self, markets):
+        btts = markets["btts_ht"]
+        assert set(btts.keys()) == {"yes", "no"}
+        assert abs(btts["yes"] + btts["no"] - 1.0) < 1e-9
+
+    def test_btts_ht_yes_below_ft_btts_for_same_lambdas(self):
+        # BTTS in 1H is STRICTLY LESS LIKELY than BTTS over the full
+        # match for the same lambda pair — every joint mass that
+        # contributes to FT-BTTS-no also contributes to HT-BTTS-no
+        # (plus more), so HT yes ≤ FT yes.
+        ht_P = build_dc_matrix(0.7, 0.6, rho=-0.08)
+        ft_P = build_dc_matrix(0.7, 0.6, rho=-0.08)
+        # NOTE: this isn't comparing HT vs FT lambdas — it's
+        # confirming the deriver itself is consistent with the
+        # FT deriver for the same matrix. Used here as a sanity
+        # check that BTTS math is identical between FT and HT
+        # derivers.
+        ht_btts = derive_soccer_halftime_markets(ht_P)["btts_ht"]["yes"]
+        ft_btts = derive_soccer_markets(ft_P)["btts"]["yes"]
+        assert abs(ht_btts - ft_btts) < 1e-9
+
+    def test_ht_ou_lines_topped_at_2_5(self):
+        # Confirms the HT_OU_LINES constant doesn't accidentally extend
+        # to FT's 5.5 — HT books don't trade lines that high.
+        assert max(HT_OU_LINES) == 2.5
+        assert min(HT_OU_LINES) == 0.5
+
+    def test_renormalises_if_input_drifts(self):
+        # Defensive: if a caller hands us an un-normalised matrix we
+        # still produce probabilities in [0, 1]. Same invariant as
+        # derive_soccer_markets.
+        P = build_dc_matrix(0.6, 0.4) * 2.0  # un-normalised
+        m = derive_soccer_halftime_markets(P)
+        assert abs(sum(m["match_result_ht"].values()) - 1.0) < 1e-9

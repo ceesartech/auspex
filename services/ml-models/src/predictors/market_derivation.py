@@ -48,6 +48,9 @@ MAX_GOALS_DERIVE = 10
 OU_LINES: Tuple[float, ...] = (0.5, 1.5, 2.5, 3.5, 4.5, 5.5)
 AH_LINES: Tuple[float, ...] = (-2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0)
 TEAM_TOTAL_LINES: Tuple[float, ...] = (0.5, 1.5, 2.5)
+# Halftime totals top out lower than FT — typical HT line is 0.5 or
+# 1.5 goals at most. 2.5 included for the rare high-scoring case.
+HT_OU_LINES: Tuple[float, ...] = (0.5, 1.5, 2.5)
 
 
 def _fmt_line(line: float) -> str:
@@ -296,10 +299,58 @@ def derive_soccer_markets(P: np.ndarray, top_n_scores: int = 12) -> Dict[str, Di
     return markets
 
 
+def derive_soccer_halftime_markets(P: np.ndarray) -> Dict[str, Dict[str, float]]:
+    """Derive halftime soccer markets from a HALFTIME scoreline matrix.
+
+    ``P`` is the halftime Dixon-Coles output (P[i,j] = P(HT home=i,
+    HT away=j)). Only three markets are derived because that's what
+    HT odds actually trade on retail books:
+
+      * ``match_result_ht`` — 3-way home/draw/away at the break.
+      * ``over_under_ht`` — HT total goals over/under 0.5 / 1.5 / 2.5.
+      * ``btts_ht`` — both teams to score before halftime.
+
+    The selection-key conventions mirror the FT equivalents so the
+    recs engine + store_market_predictions can treat them
+    identically — only the prediction_type label differs.
+    """
+    P = np.asarray(P, dtype=float)
+    s = P.sum()
+    if s > 0 and abs(s - 1.0) > 1e-9:
+        P = P / s
+    N = P.shape[0]
+    i_idx, j_idx = np.indices((N, N))
+    total = i_idx + j_idx
+    home_mask = i_idx > j_idx
+    draw_mask = i_idx == j_idx
+    away_mask = i_idx < j_idx
+
+    markets: Dict[str, Dict[str, float]] = {}
+
+    markets["match_result_ht"] = {
+        "home": float(P[home_mask].sum()),
+        "draw": float(P[draw_mask].sum()),
+        "away": float(P[away_mask].sum()),
+    }
+
+    ou: Dict[str, float] = {}
+    for line in HT_OU_LINES:
+        lbl = _fmt_line(line)
+        ou[f"over_{lbl}"] = float(P[total > line].sum())
+        ou[f"under_{lbl}"] = float(P[total < line].sum())
+    markets["over_under_ht"] = ou
+
+    btts_yes = float(P[(i_idx >= 1) & (j_idx >= 1)].sum())
+    markets["btts_ht"] = {"yes": btts_yes, "no": 1.0 - btts_yes}
+
+    return markets
+
+
 # Sport -> deriver. Only soccer is wired today; NHL would register a
 # derive_hockey_markets here (same matrix machinery, different line sets).
 MARKET_DERIVERS: Dict[str, Callable[..., Dict[str, Dict[str, float]]]] = {
     "soccer": derive_soccer_markets,
+    "soccer_halftime": derive_soccer_halftime_markets,
 }
 
 
