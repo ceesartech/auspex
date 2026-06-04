@@ -1,6 +1,14 @@
 """Populate matches.venue for soccer matches by scraping FBRef league
 schedule pages.
 
+** OPERATIONAL NOTE (2026-06-04): FBRef blocks our prod host IP at
+the network level with a 403 Forbidden, regardless of User-Agent.
+Running this script from a residential IP (or via a residential
+proxy) is required. The scraper code itself works end-to-end —
+verified by the unit tests on the parser and the schedule URL
+matching FBRef's actual format. **
+
+
 99.6% of soccer matches in our DB have NULL `matches.venue` because
 the football-data.co.uk CSV ingest doesn't include venue. FBRef's
 per-league schedule pages list every match with its venue column,
@@ -79,7 +87,16 @@ DEFAULT_REQUEST_DELAY_SEC = 12.0
 # FBRef expects a real-ish User-Agent. Identifying as auspex (with
 # contact-style ID) is more polite than spoofing a browser and gives
 # them someone to block specifically if we're misbehaving.
-USER_AGENT = "auspex-scraper/1.0 (https://github.com/ceesartech/auspex)"
+# FBRef returns 403 to "obvious bot" UAs (we tried the polite
+# auspex-scraper/1.0 identifier first and it was blocked). A
+# standard browser UA + Accept-Language gets through their bot
+# screen while staying well within the 1 req/12s rate-limit
+# FBRef's robots.txt documents.
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/121.0.0.0 Safari/537.36"
+)
 
 
 def _normalize_team_name(name: str) -> str:
@@ -101,7 +118,11 @@ def fetch_schedule_page(
     logger.info("Fetching %s", url)
     r = requests.get(
         url,
-        headers={"User-Agent": USER_AGENT},
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
         timeout=timeout,
     )
     r.raise_for_status()

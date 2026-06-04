@@ -486,11 +486,145 @@ def derive_soccer_htft_markets(
     return {"ht_ft_double_result": out}
 
 
-# Sport -> deriver. Only soccer is wired today; NHL would register a
-# derive_hockey_markets here (same matrix machinery, different line sets).
+# Line sets offered for hockey markets. Puck line is the
+# canonical ±1.5 only; totals are typically 5.5 with 4.5/6.5 as
+# alternates that some books offer.
+NHL_PUCK_LINES: Tuple[float, ...] = (-1.5, 1.5)
+NHL_TOTAL_LINES: Tuple[float, ...] = (4.5, 5.5, 6.5)
+
+
+def derive_hockey_markets(P: np.ndarray) -> Dict[str, Dict[str, float]]:
+    """Derive NHL markets from a Dixon-Coles scoreline matrix.
+
+    Unlike soccer there's no "draw" outcome at the end of the
+    game — NHL games go to overtime + shootout to produce a
+    winner. The Dixon-Coles model here is trained on FINAL scores
+    (including OT/SO) so the i==j cells represent "tied at the end
+    of regulation" mass that gets redistributed to home/away
+    50/50 in the final moneyline. We expose BOTH views:
+
+      moneyline      — home/away with draw mass split 50/50
+      regulation_1x2 — home/draw/away preserved (3-way reg market)
+      puck_line      — home covers -1.5 (wins by 2+) or
+                       away covers +1.5 (loses by 1 or wins)
+      over_under     — over/under at 4.5, 5.5, 6.5
+      total_goals    — exact total buckets 0..7+
+      double_chance  — 1X, 12, X2 over the regulation 3-way
+                       (useful for hedging in regulation markets)
+      clean_sheet    — home keeps clean sheet, away keeps it
+      win_to_nil     — win without conceding (each side)
+      correct_score  — top scorelines + "other"
+
+    Lines pulled from NHL_PUCK_LINES and NHL_TOTAL_LINES.
+    """
+    P = np.asarray(P, dtype=float)
+    s = P.sum()
+    if s > 0 and abs(s - 1.0) > 1e-9:
+        P = P / s
+    N = P.shape[0]
+    i_idx, j_idx = np.indices((N, N))
+    total = i_idx + j_idx
+    margin = i_idx - j_idx
+    home_mask = i_idx > j_idx
+    draw_mask = i_idx == j_idx
+    away_mask = i_idx < j_idx
+    ph = P.sum(axis=1)
+    pa = P.sum(axis=0)
+
+    p_home = float(P[home_mask].sum())
+    p_draw = float(P[draw_mask].sum())
+    p_away = float(P[away_mask].sum())
+
+    markets: Dict[str, Dict[str, float]] = {}
+
+    # Moneyline: draw mass split 50/50 (OT coin-flip approximation).
+    # Sharper than "no-draw" exclusion because most NHL OT games
+    # are decided by a single goal that can't be predicted from
+    # regulation scoring rates alone.
+    markets["moneyline"] = {
+        "home": p_home + 0.5 * p_draw,
+        "away": p_away + 0.5 * p_draw,
+    }
+
+    # Regulation 1x2 (3-way) — preserves the draw mass for users
+    # who want the reg-time market.
+    markets["regulation_1x2"] = {
+        "home": p_home,
+        "draw": p_draw,
+        "away": p_away,
+    }
+
+    # Puck line ±1.5: home covers when margin >= 2; away covers
+    # when margin <= 1 (i.e. away wins OR loses by exactly 1).
+    pl: Dict[str, float] = {}
+    pl["-1.5_home"] = float(P[margin >= 2].sum())
+    pl["-1.5_away"] = 1.0 - pl["-1.5_home"]
+    pl["1.5_home"] = float(P[margin >= -1].sum())
+    pl["1.5_away"] = 1.0 - pl["1.5_home"]
+    markets["puck_line"] = pl
+
+    # Over/Under totals.
+    ou: Dict[str, float] = {}
+    for line in NHL_TOTAL_LINES:
+        lbl = _fmt_line(line)
+        ou[f"over_{lbl}"] = float(P[total > line].sum())
+        ou[f"under_{lbl}"] = float(P[total < line].sum())
+    markets["over_under"] = ou
+
+    # Exact total goals buckets — modal NHL totals are 5-6.
+    tg: Dict[str, float] = {str(k): float(P[total == k].sum()) for k in range(8)}
+    tg["8+"] = float(P[total >= 8].sum())
+    markets["total_goals"] = tg
+
+    # Double chance over the regulation 3-way market.
+    markets["double_chance"] = {
+        "1X": p_home + p_draw,
+        "12": p_home + p_away,
+        "X2": p_draw + p_away,
+    }
+
+    # Clean sheets: home keeps it when away scores 0; vice versa.
+    home_cs = float(pa[0])
+    away_cs = float(ph[0])
+    markets["clean_sheet"] = {
+        "home_yes": home_cs,
+        "home_no": 1.0 - home_cs,
+        "away_yes": away_cs,
+        "away_no": 1.0 - away_cs,
+    }
+
+    # Win-to-nil: win AND keep the clean sheet.
+    home_wtn = float(P[(i_idx > j_idx) & (j_idx == 0)].sum())
+    away_wtn = float(P[(i_idx < j_idx) & (i_idx == 0)].sum())
+    markets["win_to_nil"] = {
+        "home_yes": home_wtn,
+        "home_no": 1.0 - home_wtn,
+        "away_yes": away_wtn,
+        "away_no": 1.0 - away_wtn,
+    }
+
+    # Correct score — top 12 + "other".
+    flat = P.ravel()
+    order = np.argsort(flat)[::-1][:12]
+    cs: Dict[str, float] = {}
+    acc = 0.0
+    for idx in order:
+        h, a = divmod(int(idx), N)
+        p = float(flat[idx])
+        cs[f"{h}-{a}"] = p
+        acc += p
+    cs["other"] = max(0.0, 1.0 - acc)
+    markets["correct_score"] = cs
+
+    return markets
+
+
+# Sport -> deriver. Soccer + hockey wired; the framework is
+# sport-agnostic, so additional sports register the same way.
 MARKET_DERIVERS: Dict[str, Callable[..., Dict[str, Dict[str, float]]]] = {
     "soccer": derive_soccer_markets,
     "soccer_halftime": derive_soccer_halftime_markets,
+    "nhl": derive_hockey_markets,
 }
 
 

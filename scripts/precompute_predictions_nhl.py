@@ -197,6 +197,86 @@ def store_prediction(
     )
 
 
+def _load_hockey_dixon_coles():
+    """Load the NHL Dixon-Coles artifact if present. Returns None when
+    the model hasn't been trained yet (so the trained ensemble path
+    keeps working unchanged). Path matches train_hockey_dixon_coles.py's
+    default --output-dir."""
+    from pathlib import Path
+
+    path = Path("/app/models/production/dixon_coles_nhl/1.0.0/model.bin")
+    if not path.exists():
+        logger.info(
+            "NHL Dixon-Coles artifact not found at %s; analytic markets disabled.",
+            path,
+        )
+        return None
+    try:
+        from predictors.model_config import DIXON_COLES_CONFIG  # type: ignore
+        from predictors.poisson_models import DixonColesPredictor  # type: ignore
+    except Exception as e:
+        logger.warning("Hockey model imports failed: %s", e)
+        return None
+    model = DixonColesPredictor(DIXON_COLES_CONFIG)
+    try:
+        model.load(str(path))
+    except Exception as e:
+        logger.warning("Hockey model load failed at %s: %s", path, e)
+        return None
+    return model
+
+
+# Hockey-DC analytic market_type → predictions.prediction_type.
+# Markets the trained ensemble doesn't cover; the analytic deriver
+# fills the gap. The intersection (moneyline, spread, total) is
+# excluded because the trained ensemble's prediction is sharper.
+HOCKEY_DERIVE_TO_PREDICTION: dict[str, str] = {
+    "regulation_1x2": "regulation_1x2",
+    "puck_line": "puck_line",
+    "over_under": "over_under",
+    "total_goals": "total_goals",
+    "double_chance": "double_chance",
+    "clean_sheet": "clean_sheet",
+    "win_to_nil": "win_to_nil",
+    "correct_score": "correct_score",
+}
+
+
+def _store_hockey_market(cur, match_id: str, model_version: str, market_type: str, probs: dict) -> int:
+    """Store one analytic-market row per match. Returns 1 on success."""
+    import json
+
+    ptype = HOCKEY_DERIVE_TO_PREDICTION.get(market_type)
+    if not ptype or not probs:
+        return 0
+    selectable = {k: v for k, v in probs.items() if not k.endswith("_push")}
+    if not selectable:
+        return 0
+    top_sel = max(selectable, key=selectable.get)
+    cur.execute(
+        """
+        INSERT INTO predictions
+        (match_id, model_name, model_version, prediction_type,
+         predicted_outcome, confidence, probabilities)
+        VALUES (%s, 'dixon_coles_nhl', %s, %s, %s, %s, %s::jsonb)
+        ON CONFLICT (match_id, model_name, model_version, prediction_type) DO UPDATE
+            SET predicted_outcome = EXCLUDED.predicted_outcome,
+                confidence = EXCLUDED.confidence,
+                probabilities = EXCLUDED.probabilities,
+                updated_at = NOW()
+        """,
+        (
+            match_id,
+            model_version,
+            ptype,
+            top_sel,
+            float(selectable[top_sel]),
+            json.dumps(probs, allow_nan=False),
+        ),
+    )
+    return 1
+
+
 def run(database_url: str, days: int, notify: bool = True) -> dict:
     """Walk upcoming NHL matches and write predictions for every
     registered NHL task. Returns a count summary suitable for log /
@@ -239,6 +319,25 @@ def run(database_url: str, days: int, notify: bool = True) -> dict:
         logger.info("No upcoming NHL matches with fresh features in the next %d days", days)
         return {"predicted": 0, "match_count": 0}
     logger.info("Found %d upcoming NHL matches to score", len(upcoming))
+
+    # ─── Hockey Dixon-Coles analytic markets (PR #20) ──────────
+    # Optional: loaded if the artifact exists; missing → no-op so
+    # the trained-model pipeline above keeps working unchanged.
+    hockey_dc_model = _load_hockey_dixon_coles()
+    if hockey_dc_model is not None:
+        try:
+            from predictors.market_derivation import (  # type: ignore
+                MAX_GOALS_DERIVE,
+                build_dc_matrix,
+                derive_markets,
+            )
+
+            hockey_derive_ready = True
+        except Exception as e:
+            logger.warning("Hockey derivation imports failed: %s", e)
+            hockey_derive_ready = False
+    else:
+        hockey_derive_ready = False
 
     predicted = 0
     skipped = 0
@@ -371,6 +470,38 @@ def run(database_url: str, days: int, notify: bool = True) -> dict:
                                     probabilities=probabilities,
                                 )
                             )
+
+                # ── Hockey analytic markets ─────────────────────
+                # Adds regulation_1x2, total_goals, clean_sheet,
+                # win_to_nil, correct_score (and a fallback puck_line
+                # + over_under that the trained ensemble normally
+                # supersedes; the recs path takes the higher-confidence
+                # row). Best-effort: failure leaves the trained-model
+                # rows intact.
+                if hockey_derive_ready and hockey_dc_model is not None:
+                    try:
+                        h_lam, a_lam = hockey_dc_model.lambdas_for_match(m["home_team"], m["away_team"])
+                        nhl_P = build_dc_matrix(
+                            h_lam,
+                            a_lam,
+                            float(getattr(hockey_dc_model, "rho", 0.0) or 0.0),
+                            max_goals=MAX_GOALS_DERIVE,
+                        )
+                        analytic = derive_markets("nhl", nhl_P)
+                        # 'moneyline' from the analytic deriver is
+                        # weaker than the trained ensemble's
+                        # moneyline; skip it explicitly. The other
+                        # analytic markets fill genuine gaps.
+                        analytic.pop("moneyline", None)
+                        dc_version = "1.0.0"
+                        for market_type, probs in analytic.items():
+                            predicted += _store_hockey_market(cur, m["match_id"], dc_version, market_type, probs)
+                    except Exception as e:
+                        logger.warning(
+                            "NHL analytic derivation failed for %s: %s",
+                            m["match_id"],
+                            e,
+                        )
             conn.commit()
 
     # Push NHL picks onto the same shared Redis queue the soccer
