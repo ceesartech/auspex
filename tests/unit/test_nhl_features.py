@@ -191,6 +191,17 @@ EMITTED_KEYS = {
     "cf_pct_diff_5v5",
     "xg_diff_5v5",
     "corsi_diff_5v5",
+    # ── Cross-book PUCK_LINE + TOTAL features (landed 2026-06-04)
+    "spread_book_count",
+    "spread_consensus_mean",
+    "spread_max_minus_min",
+    "spread_std",
+    "spread_consensus_implied_prob",
+    "total_book_count",
+    "total_consensus_mean",
+    "total_max_minus_min",
+    "total_std",
+    "total_consensus_implied_prob",
 }
 
 
@@ -207,3 +218,144 @@ class TestNeutralDefaultsCoverage:
         # longer emit. Not fatal (just dead config), but worth flagging.
         orphans = set(cfn.NEUTRAL_DEFAULTS.keys()) - EMITTED_KEYS
         assert not orphans, f"NEUTRAL_DEFAULTS keys with no matching emitted feature: {sorted(orphans)}"
+
+
+# ── Cross-book PUCK_LINE + TOTAL features ─────────────────────────
+#
+# Landed 2026-06-04 after scripts/ab_nhl_cross_book.py verdict:
+#   PUCK_LINE  ΔBrier -0.0186, ECE -0.0170, +4.08pts acc
+#   TOTAL      ΔBrier -0.0231, ECE -0.0131, +4.94pts acc
+# NHL moneyline did NOT benefit (DROP); regulation skipped
+# (3-class target outside the harness scope).
+
+
+class _FakeCursor:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def execute(self, sql, params=None):
+        pass
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class TestNHLCrossbookAggregate:
+    """Pure-math tests on the shared _crossbook_aggregate helper.
+    Same helper feeds both spread and total fetchers, so coverage
+    here gives us both."""
+
+    def test_empty_rows_returns_empty_dict(self):
+        assert cfn._crossbook_aggregate([], "spread") == {}
+
+    def test_single_book_zero_disagreement(self):
+        rows = [
+            {"bookmaker": "DK", "p_line": -1.5,
+             "p_odds": 2.30, "c_odds": 1.65},
+        ]
+        out = cfn._crossbook_aggregate(rows, "spread")
+        assert out["spread_book_count"] == 1.0
+        assert out["spread_consensus_mean"] == -1.5
+        assert out["spread_max_minus_min"] == 0.0
+        assert out["spread_std"] == 0.0
+        raw_h = 1.0 / 2.30
+        raw_a = 1.0 / 1.65
+        expected = raw_h / (raw_h + raw_a)
+        assert abs(out["spread_consensus_implied_prob"] - expected) < 1e-9
+
+    def test_multi_book_ddof0_std(self):
+        # Population std matches the A/B harness's np.std(..., ddof=0)
+        # — load-bearing for validated metrics to translate to prod.
+        rows = [
+            {"bookmaker": "A", "p_line": 5.0, "p_odds": 2.0, "c_odds": 2.0},
+            {"bookmaker": "B", "p_line": 5.5, "p_odds": 2.0, "c_odds": 2.0},
+            {"bookmaker": "C", "p_line": 6.0, "p_odds": 2.0, "c_odds": 2.0},
+        ]
+        out = cfn._crossbook_aggregate(rows, "total")
+        assert out["total_book_count"] == 3.0
+        assert abs(out["total_consensus_mean"] - 5.5) < 1e-9
+        assert out["total_max_minus_min"] == 1.0
+        # mean=5.5, sq diffs 0.25+0+0.25 = 0.5, var 0.5/3, std 0.4082...
+        assert abs(out["total_std"] - 0.40824829) < 1e-6
+
+    def test_missing_counter_odds_drops_only_devig(self):
+        # If c_odds is None, the BOOK still counts toward the line
+        # statistics (lines, mean, max-min, std) but is dropped from
+        # the devigged-prob aggregation.
+        rows = [
+            {"bookmaker": "Full", "p_line": 5.5,
+             "p_odds": 1.95, "c_odds": 1.95},
+            {"bookmaker": "OnlyOver", "p_line": 6.0,
+             "p_odds": 1.95, "c_odds": None},
+        ]
+        out = cfn._crossbook_aggregate(rows, "total")
+        # Both books contribute lines.
+        assert out["total_book_count"] == 2.0
+        assert abs(out["total_consensus_mean"] - 5.75) < 1e-9
+        # Only Full contributed devigged prob.
+        assert abs(out["total_consensus_implied_prob"] - 0.5) < 1e-9
+
+    def test_zero_or_negative_odds_dropped_from_devig(self):
+        # Defensive: zero/negative odds are unphysical but guard
+        # against ingest corruption.
+        rows = [
+            {"bookmaker": "Good", "p_line": 5.5,
+             "p_odds": 2.0, "c_odds": 2.0},
+            {"bookmaker": "Bad", "p_line": 5.5,
+             "p_odds": 0.0, "c_odds": 2.0},
+        ]
+        out = cfn._crossbook_aggregate(rows, "total")
+        # Both books contribute lines; only Good contributes devig.
+        assert out["total_book_count"] == 2.0
+        assert "total_consensus_implied_prob" in out
+        assert abs(out["total_consensus_implied_prob"] - 0.5) < 1e-9
+
+
+class TestNHLCrossbookDefaults:
+    """Both PUCK_LINE and TOTAL ship 5 cross-book features each
+    with sport-tuned neutrals. The puck-line default is -1.5
+    (NHL puck line is always ±1.5, home is the favourite by
+    convention). The total default is 5.5 (modern modal)."""
+
+    SPREAD_KEYS = (
+        "spread_book_count", "spread_consensus_mean",
+        "spread_max_minus_min", "spread_std",
+        "spread_consensus_implied_prob",
+    )
+    TOTAL_KEYS = (
+        "total_book_count", "total_consensus_mean",
+        "total_max_minus_min", "total_std",
+        "total_consensus_implied_prob",
+    )
+
+    def test_puck_line_default_is_neg_1_5(self):
+        # NHL canonical puck line is ±1.5; home favourite by
+        # convention. Default reflects that.
+        assert cfn.NEUTRAL_DEFAULTS["spread_consensus_mean"] == -1.5
+
+    def test_total_default_is_5_5(self):
+        # NHL canonical total. Matches the existing odds_over55 /
+        # odds_under55 defaults' line.
+        assert cfn.NEUTRAL_DEFAULTS["total_consensus_mean"] == 5.5
+
+    def test_implied_probs_match_existing_devig_defaults(self):
+        # New cross-book consensus_implied_prob defaults stay
+        # consistent with the existing devigged-pair defaults so a
+        # no-odds match gets consistent signal across both feature
+        # families.
+        spread_pl15 = cfn.NEUTRAL_DEFAULTS["implied_prob_home_cover_pl15"]
+        assert cfn.NEUTRAL_DEFAULTS["spread_consensus_implied_prob"] == spread_pl15
+        total_over55 = cfn.NEUTRAL_DEFAULTS["implied_prob_over55"]
+        assert cfn.NEUTRAL_DEFAULTS["total_consensus_implied_prob"] == total_over55
+
+    def test_all_keys_filled_on_empty_fetch(self):
+        cur = _FakeCursor([])
+        empty_spread = cfn.fetch_spread_crossbook(cur, "match-1")
+        empty_total = cfn.fetch_total_crossbook(cur, "match-1")
+        assert empty_spread == {}
+        assert empty_total == {}
+        merged = cfn._with_defaults({**empty_spread, **empty_total})
+        for k in self.SPREAD_KEYS:
+            assert merged[k] == cfn.NEUTRAL_DEFAULTS[k]
+        for k in self.TOTAL_KEYS:
+            assert merged[k] == cfn.NEUTRAL_DEFAULTS[k]

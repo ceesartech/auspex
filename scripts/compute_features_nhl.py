@@ -214,6 +214,25 @@ NEUTRAL_DEFAULTS: dict[str, float] = {
     "cf_pct_diff_5v5": 0.0,
     "xg_diff_5v5": 0.0,
     "corsi_diff_5v5": 0.0,
+    # Cross-book PUCK_LINE features (landed 2026-06-04 after A/B in
+    # scripts/ab_nhl_cross_book.py — ΔBrier -0.0186, ΔECE -0.0170,
+    # +4.08pts accuracy on 2024-2025 walk-forward). NHL puck line
+    # is FIXED at ±1.5 so spread_consensus_mean defaults to -1.5
+    # (home is favourite at -1.5 by NHL puck-line convention).
+    "spread_book_count": 1.0,
+    "spread_consensus_mean": -1.5,
+    "spread_max_minus_min": 0.0,
+    "spread_std": 0.0,
+    "spread_consensus_implied_prob": 0.42,
+    # Cross-book TOTAL features (same A/B — ΔBrier -0.0231,
+    # ΔECE -0.0131, +4.94pts accuracy on 2024-2025 walk-forward).
+    # Modern NHL canonical total is 5.5; over/under symmetric at
+    # implied 0.50.
+    "total_book_count": 1.0,
+    "total_consensus_mean": 5.5,
+    "total_max_minus_min": 0.0,
+    "total_std": 0.0,
+    "total_consensus_implied_prob": 0.50,
 }
 
 
@@ -699,6 +718,100 @@ def _goalie_rolling_form(cur, goalie_id: str | None, before_date, side: str) -> 
 # ── Per-match feature assembly ───────────────────────────────────────
 
 
+def _crossbook_per_book_query(
+    cur, match_id: str, market: str, primary: str, counter: str,
+):
+    """Shared helper for puck_line + total. Returns a list of
+    {bookmaker, p_line, p_odds, c_odds} rows."""
+    cur.execute(
+        """
+        WITH per_book AS (
+            SELECT DISTINCT ON (o.bookmaker)
+                o.bookmaker,
+                o.line AS p_line,
+                o.odds_decimal AS p_odds,
+                (
+                    SELECT od2.odds_decimal FROM odds od2
+                    WHERE od2.match_id = o.match_id
+                      AND od2.bookmaker = o.bookmaker
+                      AND od2.market_type = %s
+                      AND od2.selection = %s
+                      AND od2.is_live = false
+                    ORDER BY od2.timestamp DESC LIMIT 1
+                ) AS c_odds
+            FROM odds o
+            WHERE o.match_id = %s
+              AND o.market_type = %s
+              AND o.selection = %s
+              AND o.is_live = false
+              AND o.line IS NOT NULL
+              AND o.odds_decimal IS NOT NULL
+            ORDER BY o.bookmaker, o.timestamp DESC
+        )
+        SELECT bookmaker, p_line, p_odds, c_odds FROM per_book
+        """,
+        (market, counter, match_id, market, primary),
+    )
+    return cur.fetchall()
+
+
+def _crossbook_aggregate(rows: list, prefix: str) -> dict:
+    """Aggregate per-book (line, odds, counter_odds) rows into the
+    5-key cross-book feature set. Pure-math helper used by both
+    fetch_spread_crossbook and fetch_total_crossbook."""
+    if not rows:
+        return {}
+    lines = [float(r["p_line"]) for r in rows]
+    devigged = []
+    for r in rows:
+        p_odds = float(r["p_odds"])
+        c_odds = r["c_odds"]
+        if p_odds <= 0 or c_odds is None:
+            continue
+        c_odds = float(c_odds)
+        if c_odds <= 0:
+            continue
+        raw_primary = 1.0 / p_odds
+        raw_counter = 1.0 / c_odds
+        denom = raw_primary + raw_counter
+        if denom <= 0:
+            continue
+        devigged.append(raw_primary / denom)
+
+    out: dict = {
+        f"{prefix}_book_count": float(len(rows)),
+        f"{prefix}_consensus_mean": float(sum(lines) / len(lines)),
+        f"{prefix}_max_minus_min": float(max(lines) - min(lines)),
+    }
+    if len(lines) > 1:
+        mean = out[f"{prefix}_consensus_mean"]
+        out[f"{prefix}_std"] = float(
+            (sum((x - mean) ** 2 for x in lines) / len(lines)) ** 0.5
+        )
+    else:
+        out[f"{prefix}_std"] = 0.0
+    if devigged:
+        out[f"{prefix}_consensus_implied_prob"] = float(sum(devigged) / len(devigged))
+    return out
+
+
+def fetch_spread_crossbook(cur, match_id: str) -> dict:
+    """Cross-book PUCK_LINE features. NHL puck line is fixed at ±1.5
+    so the line statistics (consensus_mean, max-min, std) are largely
+    degenerate; the load-bearing signal is in spread_book_count and
+    spread_consensus_implied_prob (mean devigged home-cover prob)."""
+    rows = _crossbook_per_book_query(cur, match_id, "spread", "home", "away")
+    return _crossbook_aggregate(rows, "spread")
+
+
+def fetch_total_crossbook(cur, match_id: str) -> dict:
+    """Cross-book TOTAL features. NHL canonical line is 5.5 but books
+    do offer 5.0 / 6.0 alternatives, so the line statistics here
+    DO move (unlike puck_line). All 5 keys carry signal."""
+    rows = _crossbook_per_book_query(cur, match_id, "total", "over", "under")
+    return _crossbook_aggregate(rows, "total")
+
+
 def compute_match_features(cur, match_id: str):
     """Return the feature dict for one NHL match, or None if the match
     has no team ids."""
@@ -830,6 +943,15 @@ def compute_match_features(cur, match_id: str):
     features["corsi_diff_5v5"] = _safe_diff(
         home_5v5.get("home_roll_corsi_for_5v5"), away_5v5.get("away_roll_corsi_for_5v5")
     )
+
+    # Cross-book PUCK_LINE + TOTAL features. Validated by
+    # scripts/ab_nhl_cross_book.py 2026-06-04:
+    # PUCK_LINE ΔBrier -0.0186, ECE -0.0170, +4.08pts acc
+    # TOTAL     ΔBrier -0.0231, ECE -0.0131, +4.94pts acc
+    # NHL moneyline did NOT benefit (DROP). Regulation skipped
+    # (3-class target, harness was binary-only).
+    features.update(fetch_spread_crossbook(cur, match_id))
+    features.update(fetch_total_crossbook(cur, match_id))
 
     return features
 
