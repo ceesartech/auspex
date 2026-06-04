@@ -204,6 +204,9 @@ def _normalize(name: str) -> str:
         " us",
         " calcio",
         " 1913",
+        # Swedish ("fotboll" = "football" — same role as Italian
+        # "calcio" or English "FC"): AIK Fotboll → "aik".
+        " fotboll",
         # Spanish / Portuguese.
         " u.d.",
         " ud",
@@ -379,6 +382,15 @@ TEAM_ALIASES: dict[str, str] = {
     "internazionale": "inter milan",
     "napoli": "napoli",
     "cagliari": "cagliari",
+    # Trailing long-tail matches discovered in the post-regen audit.
+    # FIFA World Cup national teams (Germany, Spain, Canada, Norway,
+    # etc.) are intentionally NOT in this list — our SPARQL filters to
+    # football clubs (Q476028), and national teams have no fixed home
+    # stadium anyway. They stay as vc_unknown by design.
+    "aik": "aik fotboll",
+    "orgryte is": "orgryte",
+    "sp gijon": "sporting de gijon",
+    "st etienne": "as saint etienne",
 }
 
 
