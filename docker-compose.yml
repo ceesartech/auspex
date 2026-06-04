@@ -220,6 +220,11 @@ services:
       # rebuilding the image. The Dockerfile still COPYs them in for
       # production deploys where the image is rolled forward.
       - ./scripts:/app/scripts
+      # Bind-mount data/ — currently holds soccer_team_stadiums.json
+      # (the home-stadium fallback the VC weather fetcher uses when
+      # matches.venue is NULL). Editable without rebuild for the same
+      # reason as scripts/.
+      - ./data:/app/data
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
