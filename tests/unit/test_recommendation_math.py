@@ -87,6 +87,34 @@ class TestModelKeyForOdds:
     def test_unpriced_market(self):
         assert gr.model_key_for_odds("team_total", "home_over", 1.5) is None
 
+    def test_halftime_markets(self):
+        # HT markets share the FT key conventions; the recs engine
+        # routes them through the existing match-by-prediction-type
+        # path without special handling.
+        assert gr.model_key_for_odds("match_result_ht", "Home", None) == "home"
+        assert gr.model_key_for_odds("match_result_ht", "Draw", None) == "draw"
+        assert gr.model_key_for_odds("match_result_ht", "Away", None) == "away"
+        assert gr.model_key_for_odds("btts_ht", "Yes", None) == "yes"
+        assert gr.model_key_for_odds("btts_ht", "No", None) == "no"
+        # over_under_ht: the HT_OU_LINES set is (0.5, 1.5, 2.5).
+        assert gr.model_key_for_odds("over_under_ht", "Over", 0.5) == "over_0.5"
+        assert gr.model_key_for_odds("over_under_ht", "Under", 1.5) == "under_1.5"
+
+    def test_halftime_routes_via_odds_to_prediction_map(self):
+        # Verifies the HT entries are present in ODDS_TO_PREDICTION
+        # so the recs engine finds the right prediction_type row.
+        # Each HT odds market_type maps to its identically-named
+        # prediction_type.
+        assert gr.ODDS_TO_PREDICTION["match_result_ht"] == "match_result_ht"
+        assert gr.ODDS_TO_PREDICTION["over_under_ht"] == "over_under_ht"
+        assert gr.ODDS_TO_PREDICTION["btts_ht"] == "btts_ht"
+
+    def test_over_under_ht_in_lined_markets(self):
+        # The lined-markets set drives display-string formatting
+        # (selection_2.5 vs selection). Without the HT total here,
+        # over_under_ht display lines would lose their line tag.
+        assert "over_under_ht" in gr.LINED_MARKETS
+
 
 @pytest.mark.unit
 class TestSelectionValue:

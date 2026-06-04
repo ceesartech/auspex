@@ -169,14 +169,31 @@ SPORT_MARKETS: dict[str, str] = {
 # and quota-guarded. Coverage is region/bookmaker dependent (uk/eu books price
 # these far more than us), hence a separate region knob (--additional-regions).
 SPORT_ADDITIONAL_MARKETS: dict[str, str] = {
-    "soccer": "btts,double_chance,draw_no_bet",
+    # Soccer secondary + halftime markets. The HT trio (h2h_h1,
+    # totals_h1, btts_h1) lets the recs engine consume our existing
+    # HT predictions (PR #11, migration 014); without them the HT
+    # predictions just sit in the DB unused. They're included in
+    # `--additional-markets` so enabling that flag costs more quota
+    # than before but unlocks all soccer secondary + HT markets in
+    # one pass.
+    "soccer": "btts,double_chance,draw_no_bet,h2h_h1,totals_h1,btts_h1",
 }
 
 # Market keys we know how to map per sport. Anything else returned by the API
 # is skipped and logged once per run (so new opportunities surface without
 # crashing the job).
 KNOWN_MARKET_KEYS: dict[str, set[str]] = {
-    "soccer": {"h2h", "totals", "spreads", "btts", "double_chance", "draw_no_bet"},
+    "soccer": {
+        "h2h",
+        "totals",
+        "spreads",
+        "btts",
+        "double_chance",
+        "draw_no_bet",
+        "h2h_h1",
+        "totals_h1",
+        "btts_h1",
+    },
     "nhl": {"h2h", "spreads", "totals"},
     "nba": {"h2h", "spreads", "totals"},
     "nfl": {"h2h", "spreads", "totals"},
@@ -412,6 +429,29 @@ def map_outcome(
             if side is None:
                 return None, None, False
             return "draw_no_bet", side, False
+        # ── Halftime markets (per-event additional endpoint) ──
+        # h2h_h1 → match_result_ht (3-way: home/draw/away at HT)
+        if market_key == "h2h_h1":
+            if outcome_name == home_team_name:
+                return "match_result_ht", "home", False
+            if outcome_name == away_team_name:
+                return "match_result_ht", "away", False
+            if outcome_name.lower() == "draw":
+                return "match_result_ht", "draw", False
+            return None, None, False
+        # totals_h1 → over_under_ht (over/under, keep every line —
+        # books typically offer 0.5 and 1.5 at HT).
+        if market_key == "totals_h1":
+            n = outcome_name.lower()
+            if n not in ("over", "under") or point is None:
+                return None, None, False
+            return "over_under_ht", n, True
+        # btts_h1 → btts_ht (yes/no on both-teams-score-before-HT).
+        if market_key == "btts_h1":
+            n = outcome_name.strip().lower()
+            if n not in ("yes", "no"):
+                return None, None, False
+            return "btts_ht", n, False
         return None, None, False
 
     if sport == "nhl":

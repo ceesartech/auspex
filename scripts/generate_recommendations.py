@@ -53,10 +53,17 @@ ODDS_TO_PREDICTION: dict[str, str] = {
     "draw_no_bet": "draw_no_bet",
     "asian_handicap": "asian_handicap",
     "correct_score": "correct_score",
+    # Halftime markets (PR #11 predictions, migration 014 +
+    # migration 016 odds). HT odds + HT predictions share the same
+    # name so the existing match-by-prediction-type path needs no
+    # special handling.
+    "match_result_ht": "match_result_ht",
+    "over_under_ht": "over_under_ht",
+    "btts_ht": "btts_ht",
 }
 
 # Markets whose selection embeds a betting line (for the displayed selection).
-LINED_MARKETS = {"over_under", "asian_handicap", "team_total"}
+LINED_MARKETS = {"over_under", "asian_handicap", "team_total", "over_under_ht"}
 
 
 # ── Pure helpers (unit-tested in test_recommendation_math.py) ─────────────
@@ -123,6 +130,17 @@ def model_key_for_odds(market_type: str, selection: str, line) -> str | None:
         return f"{_fmt_line(home_line)}_{sel}"
     if market_type == "correct_score":
         return selection.strip() if selection else None
+    # Halftime markets — selection-key conventions mirror the FT
+    # equivalents so derive_soccer_halftime_markets and odds-fetch
+    # land the same keys without extra plumbing.
+    if market_type == "match_result_ht":
+        return sel if sel in ("home", "draw", "away") else None
+    if market_type == "btts_ht":
+        return sel if sel in ("yes", "no") else None
+    if market_type == "over_under_ht":
+        if sel not in ("over", "under") or line is None:
+            return None
+        return f"{sel}_{_fmt_line(line)}"
     return None
 
 
