@@ -119,6 +119,21 @@ def main():
         {k: v for k, v in result.items() if k not in ("team_attack", "team_defense")},
     )
 
+    # NHL goal scoring doesn't have soccer's low-score correlation
+    # pattern (the 0-0/1-1/0-1/1-0 cluster the DC `tau` correction
+    # is designed for), so leaving rho to the optimizer produces
+    # absurd values (~1e27 observed during initial training). Force
+    # rho=0 — reduces to pure Poisson, which IS the right baseline
+    # for hockey. The team strength fit + lambda machinery still
+    # benefits from the DC config; only the correlation correction
+    # is dropped.
+    LOGGER.info(
+        "Forcing rho=0 for hockey (optimizer produced %s, hockey doesn't "
+        "have soccer's low-score correlation pattern).",
+        model.rho,
+    )
+    model.rho = 0.0
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     model_path = args.output_dir / "model.bin"
     model.save(str(model_path))
