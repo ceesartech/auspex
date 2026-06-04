@@ -199,6 +199,13 @@ services:
       # HTTP Basic auth; both env vars required for any racing ingest.
       - THE_RACING_API_USER=${THE_RACING_API_USER:-}
       - THE_RACING_API_PASS=${THE_RACING_API_PASS:-}
+      # Visual Crossing paid weather API (chosen 2026-06-04 to retest
+      # the weather-features hypothesis at 1-4km resolution after
+      # Open-Meteo's 11km grid showed no signal). Used only when
+      # scripts/fetch_weather_visual_crossing.py runs; missing
+      # → that script SystemExits cleanly without affecting the
+      # Open-Meteo path.
+      - VISUAL_CROSSING_API_KEY=${VISUAL_CROSSING_API_KEY:-}
     volumes:
       - ./models:/app/models
       - ./services/api:/app/services/api
