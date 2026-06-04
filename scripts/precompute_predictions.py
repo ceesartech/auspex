@@ -148,6 +148,10 @@ MARKET_PREDICTION_TYPE: dict[str, str] = {
     "match_result_ht": "match_result_ht",
     "over_under_ht": "over_under_ht",
     "btts_ht": "btts_ht",
+    # Halftime/fulltime joint double-result market (migration 015,
+    # second-half model artifact dixon_coles_h2_soccer). Single
+    # market with 9 selections.
+    "ht_ft_double_result": "ht_ft_double_result",
 }
 
 
@@ -235,33 +239,51 @@ def compute_feature_medians(database_url: str) -> dict[str, float]:
     return medians
 
 
-def _load_halftime_dixon_coles():
-    """Load the halftime Dixon-Coles model artifact if present.
-
-    Returns the fitted DixonColesPredictor, or None when the
-    artifact hasn't been trained yet (so the FT pipeline keeps
-    working without HT markets). Path matches
-    train_halftime_dixon_coles.py's default --output-dir.
+def _load_dixon_coles_artifact(path_str: str, label: str):
+    """Shared helper used by HT + 2H loaders. Returns the fitted
+    DixonColesPredictor, or None when the artifact is missing.
+    Logging matches the previous _load_halftime_dixon_coles shape
+    so behaviour around missing artifacts is unchanged.
     """
     from pathlib import Path
 
-    path = Path("/app/models/production/dixon_coles_ht_soccer/1.0.0/model.bin")
+    path = Path(path_str)
     if not path.exists():
-        logger.info("HT Dixon-Coles artifact not found at %s; HT markets disabled.", path)
+        logger.info("%s Dixon-Coles artifact not found at %s; %s markets disabled.",
+                    label, path, label)
         return None
     try:
         from predictors.model_config import DIXON_COLES_CONFIG  # type: ignore
         from predictors.poisson_models import DixonColesPredictor  # type: ignore
     except Exception as e:
-        logger.warning("HT model imports failed; HT markets disabled: %s", e)
+        logger.warning("%s model imports failed; %s markets disabled: %s",
+                       label, label, e)
         return None
     model = DixonColesPredictor(DIXON_COLES_CONFIG)
     try:
         model.load(str(path))
     except Exception as e:
-        logger.warning("HT model load failed at %s: %s", path, e)
+        logger.warning("%s model load failed at %s: %s", label, path, e)
         return None
     return model
+
+
+def _load_halftime_dixon_coles():
+    """Load the halftime Dixon-Coles model artifact if present."""
+    return _load_dixon_coles_artifact(
+        "/app/models/production/dixon_coles_ht_soccer/1.0.0/model.bin",
+        "HT",
+    )
+
+
+def _load_second_half_dixon_coles():
+    """Load the second-half Dixon-Coles model artifact if present.
+    Together with the HT model this enables ht_ft_double_result
+    derivation."""
+    return _load_dixon_coles_artifact(
+        "/app/models/production/dixon_coles_h2_soccer/1.0.0/model.bin",
+        "2H",
+    )
 
 
 def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> dict:
@@ -290,19 +312,29 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
     # no-ops. Loaded once at startup so the per-match loop only does
     # arithmetic.
     ht_dc_model = _load_halftime_dixon_coles()
+    second_half_dc_model = _load_second_half_dixon_coles()
     if ht_dc_model is not None:
         try:
             from predictors.market_derivation import (  # type: ignore
                 MAX_GOALS_DERIVE,
                 build_dc_matrix,
                 derive_markets,
+                derive_soccer_htft_markets,
             )
             ht_derive_ready = True
         except Exception as ht_e:
             logger.warning("HT derivation imports failed; skipping HT markets: %s", ht_e)
             ht_derive_ready = False
+            derive_soccer_htft_markets = None
     else:
         ht_derive_ready = False
+        derive_soccer_htft_markets = None
+    # HT/FT joint requires BOTH models. Either missing → no-op.
+    htft_derive_ready = (
+        ht_derive_ready
+        and second_half_dc_model is not None
+        and derive_soccer_htft_markets is not None
+    )
 
     feature_medians = compute_feature_medians(database_url)
     logger.info("Loaded %d feature-medians for NaN fallback", len(feature_medians))
@@ -413,6 +445,7 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
 
                 # Halftime markets — separate model, separate scoreline
                 # matrix. Best-effort: failure leaves FT predictions intact.
+                ht_P = None  # captured for the HT/FT joint block below
                 if ht_derive_ready and ht_dc_model is not None:
                     try:
                         ht_h_lam, ht_a_lam = ht_dc_model.lambdas_for_match(
@@ -429,6 +462,33 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                         )
                     except Exception as e:
                         logger.warning("HT market derivation failed for %s: %s", m["match_id"], e)
+                        ht_P = None
+
+                # HT/FT joint double-result market — convolves the HT
+                # scoreline matrix with a SECOND-HALF (FT - HT) Dixon-
+                # Coles matrix and aggregates joint mass into the 9
+                # (HT outcome × FT outcome) buckets. Best-effort: any
+                # failure (incl. ht_P unavailable from the block above
+                # or 2H model missing) leaves the other markets intact.
+                if htft_derive_ready and ht_P is not None:
+                    try:
+                        h2_h_lam, h2_a_lam = second_half_dc_model.lambdas_for_match(
+                            m["home_team"], m["away_team"],
+                        )
+                        h2_P = build_dc_matrix(
+                            h2_h_lam, h2_a_lam,
+                            float(getattr(second_half_dc_model, "rho", 0.0) or 0.0),
+                            max_goals=MAX_GOALS_DERIVE,
+                        )
+                        htft_markets = derive_soccer_htft_markets(ht_P, h2_P)
+                        market_rows += store_market_predictions(
+                            cur, m["match_id"], htft_markets, model_version,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "HT/FT joint derivation failed for %s: %s",
+                            m["match_id"], e,
+                        )
 
                 # Accumulate for the end-of-run digest instead of
                 # firing one message per pick.

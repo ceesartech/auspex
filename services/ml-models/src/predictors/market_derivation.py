@@ -346,6 +346,93 @@ def derive_soccer_halftime_markets(P: np.ndarray) -> Dict[str, Dict[str, float]]
     return markets
 
 
+def derive_soccer_htft_markets(
+    P_HT: np.ndarray,
+    P_2H: np.ndarray,
+) -> Dict[str, Dict[str, float]]:
+    """Derive the halftime/fulltime joint double-result market.
+
+    Inputs:
+        P_HT: HT scoreline matrix from the halftime Dixon-Coles
+              model. ``P_HT[i, j] = P(HT home goals = i,
+              HT away goals = j)``.
+        P_2H: SECOND-HALF scoreline matrix from the 2H Dixon-Coles
+              model. ``P_2H[a, b] = P(2H home goals = a,
+              2H away goals = b)``.
+
+    The joint FT scoreline matrix is the 2D convolution
+    ``P_FT = P_HT * P_2H`` (each (k, l) entry is
+    ``sum_{i, j} P_HT[i, j] * P_2H[k - i, l - j]``). The HT/FT
+    double result aggregates joint (HT, FT) mass under the 9
+    (HT outcome) × (FT outcome) buckets.
+
+    Selection keys: ``{ht_outcome}_{ft_outcome}`` where outcome ∈
+    {home, draw, away}. Example: ``home_draw`` = home leading at
+    HT and the match ends drawn. The 9 selections sum to 1.
+    """
+    P_HT = np.asarray(P_HT, dtype=float)
+    P_2H = np.asarray(P_2H, dtype=float)
+    # Defensive renorm — callers may hand us drifted matrices.
+    s_ht = P_HT.sum()
+    s_2h = P_2H.sum()
+    if s_ht > 0 and abs(s_ht - 1.0) > 1e-9:
+        P_HT = P_HT / s_ht
+    if s_2h > 0 and abs(s_2h - 1.0) > 1e-9:
+        P_2H = P_2H / s_2h
+
+    N_ht = P_HT.shape[0]
+    N_2h = P_2H.shape[0]
+
+    out: Dict[str, float] = {
+        "home_home": 0.0,
+        "home_draw": 0.0,
+        "home_away": 0.0,
+        "draw_home": 0.0,
+        "draw_draw": 0.0,
+        "draw_away": 0.0,
+        "away_home": 0.0,
+        "away_draw": 0.0,
+        "away_away": 0.0,
+    }
+
+    # Per-HT-cell: distribute P_HT[i,j] across each (i+a, j+b) in
+    # the 2H grid, bucketing by both HT result and FT result. This
+    # is the convolution + joint-aggregate in one pass.
+    for i in range(N_ht):
+        for j in range(N_ht):
+            p_ht_cell = float(P_HT[i, j])
+            if p_ht_cell == 0.0:
+                continue
+            if i > j:
+                ht_outcome = "home"
+            elif i < j:
+                ht_outcome = "away"
+            else:
+                ht_outcome = "draw"
+            for a in range(N_2h):
+                for b in range(N_2h):
+                    p_2h_cell = float(P_2H[a, b])
+                    if p_2h_cell == 0.0:
+                        continue
+                    ft_home = i + a
+                    ft_away = j + b
+                    if ft_home > ft_away:
+                        ft_outcome = "home"
+                    elif ft_home < ft_away:
+                        ft_outcome = "away"
+                    else:
+                        ft_outcome = "draw"
+                    key = f"{ht_outcome}_{ft_outcome}"
+                    out[key] += p_ht_cell * p_2h_cell
+
+    # Final defensive renorm — shouldn't be needed if P_HT and P_2H
+    # were normalised but caps any rounding drift.
+    total = sum(out.values())
+    if total > 0 and abs(total - 1.0) > 1e-9:
+        out = {k: v / total for k, v in out.items()}
+    return {"ht_ft_double_result": out}
+
+
 # Sport -> deriver. Only soccer is wired today; NHL would register a
 # derive_hockey_markets here (same matrix machinery, different line sets).
 MARKET_DERIVERS: Dict[str, Callable[..., Dict[str, Dict[str, float]]]] = {

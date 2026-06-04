@@ -20,6 +20,7 @@ from predictors.market_derivation import (
     derive_from_lambdas,
     derive_markets,
     derive_soccer_halftime_markets,
+    derive_soccer_htft_markets,
     derive_soccer_markets,
     reconcile_matrix_to_1x2,
 )
@@ -301,3 +302,126 @@ class TestHalftimeMarkets:
         P = build_dc_matrix(0.6, 0.4) * 2.0  # un-normalised
         m = derive_soccer_halftime_markets(P)
         assert abs(sum(m["match_result_ht"].values()) - 1.0) < 1e-9
+
+
+@pytest.mark.unit
+class TestHalftimeFulltimeJoint:
+    """The HT/FT joint deriver convolves a HT scoreline matrix with
+    a SECOND-HALF (2H = FT - HT) scoreline matrix and aggregates
+    joint mass into the 9 (HT outcome × FT outcome) buckets."""
+
+    @pytest.fixture
+    def ht_matrix(self):
+        # Realistic HT lambdas: ~0.7 home / ~0.5 away (~half of FT).
+        return build_dc_matrix(0.7, 0.5, rho=-0.08, max_goals=10)
+
+    @pytest.fixture
+    def h2_matrix(self):
+        # Realistic 2H lambdas: ~0.9 home / ~0.7 away (slightly
+        # higher than HT — late tactical changes + tired defending).
+        return build_dc_matrix(0.9, 0.7, rho=-0.08, max_goals=10)
+
+    @pytest.fixture
+    def markets(self, ht_matrix, h2_matrix):
+        return derive_soccer_htft_markets(ht_matrix, h2_matrix)
+
+    def test_emits_only_double_result_market(self, markets):
+        # The deriver returns ONLY the ht_ft_double_result market.
+        # Other markets (1x2 at FT, total goals, etc.) come from the
+        # separate full-time deriver.
+        assert set(markets.keys()) == {"ht_ft_double_result"}
+
+    def test_nine_selections_present(self, markets):
+        m = markets["ht_ft_double_result"]
+        expected = {
+            "home_home",
+            "home_draw",
+            "home_away",
+            "draw_home",
+            "draw_draw",
+            "draw_away",
+            "away_home",
+            "away_draw",
+            "away_away",
+        }
+        assert set(m.keys()) == expected
+
+    def test_selections_sum_to_one(self, markets):
+        m = markets["ht_ft_double_result"]
+        assert abs(sum(m.values()) - 1.0) < 1e-9
+
+    def test_all_probabilities_in_unit_interval(self, markets):
+        m = markets["ht_ft_double_result"]
+        for sel, p in m.items():
+            assert 0.0 <= p <= 1.0, f"{sel}={p} outside [0,1]"
+
+    def test_away_to_home_comeback_rarer_than_home_to_home(self, markets):
+        # AWAY leading at HT and HOME winning at FT requires a
+        # late-game comeback (rare in real soccer) — should be
+        # significantly less likely than home-then-home (steady
+        # home win).
+        m = markets["ht_ft_double_result"]
+        assert m["away_home"] < m["home_home"]
+
+    def test_marginal_ht_outcome_matches_ht_deriver(self, ht_matrix, h2_matrix, markets):
+        # Summing the joint over FT outcomes should recover the
+        # marginal HT outcomes — i.e. P(HT=home) = P(HT=home, FT=home)
+        # + P(HT=home, FT=draw) + P(HT=home, FT=away). This is the
+        # load-bearing invariant that links the joint to the HT-only
+        # deriver.
+        m = markets["ht_ft_double_result"]
+        ht_only = derive_soccer_halftime_markets(ht_matrix)["match_result_ht"]
+        for ht_outcome in ("home", "draw", "away"):
+            joint_marginal = sum(m[f"{ht_outcome}_{ft_outcome}"] for ft_outcome in ("home", "draw", "away"))
+            assert abs(joint_marginal - ht_only[ht_outcome]) < 1e-9
+
+    def test_marginal_ft_outcome_matches_independent_convolution(
+        self,
+        ht_matrix,
+        h2_matrix,
+        markets,
+    ):
+        # Summing the joint over HT outcomes should recover the
+        # marginal FT outcomes — derivable directly by convolving
+        # the HT and 2H matrices. This is the other half of the
+        # marginal invariant. Use a coarse tolerance because the
+        # in-deriver convolution is computed element-by-element
+        # while the expected uses scipy/numpy.
+        m = markets["ht_ft_double_result"]
+        # Build FT matrix by manual convolution.
+        N_ht = ht_matrix.shape[0]
+        N_2h = h2_matrix.shape[0]
+        N_ft = N_ht + N_2h - 1
+        ft_matrix = np.zeros((N_ft, N_ft))
+        for i in range(N_ht):
+            for j in range(N_ht):
+                for a in range(N_2h):
+                    for b in range(N_2h):
+                        ft_matrix[i + a, j + b] += ht_matrix[i, j] * h2_matrix[a, b]
+        ft_matrix /= ft_matrix.sum()
+        ft_i, ft_j = np.indices(ft_matrix.shape)
+        expected_marginals = {
+            "home": float(ft_matrix[ft_i > ft_j].sum()),
+            "draw": float(ft_matrix[ft_i == ft_j].sum()),
+            "away": float(ft_matrix[ft_i < ft_j].sum()),
+        }
+        for ft_outcome, expected in expected_marginals.items():
+            joint_marginal = sum(m[f"{ht_outcome}_{ft_outcome}"] for ht_outcome in ("home", "draw", "away"))
+            assert abs(joint_marginal - expected) < 1e-9
+
+    def test_renormalises_drifted_inputs(self):
+        # Defensive: if a caller hands us un-normalised matrices we
+        # still produce a normalised joint.
+        ht_P = build_dc_matrix(0.7, 0.5) * 2.0
+        h2_P = build_dc_matrix(0.9, 0.7) * 1.5
+        m = derive_soccer_htft_markets(ht_P, h2_P)
+        assert abs(sum(m["ht_ft_double_result"].values()) - 1.0) < 1e-9
+
+    def test_draw_draw_dominates_at_low_lambdas(self):
+        # Low-scoring fixtures (0.4 / 0.3 each half) should have the
+        # joint draw_draw bucket as the modal outcome — both halves
+        # ending nil-nil drives this.
+        ht_P = build_dc_matrix(0.4, 0.3, rho=-0.08)
+        h2_P = build_dc_matrix(0.4, 0.3, rho=-0.08)
+        m = derive_soccer_htft_markets(ht_P, h2_P)["ht_ft_double_result"]
+        assert m["draw_draw"] == max(m.values())
