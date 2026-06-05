@@ -412,9 +412,16 @@ def match_team_to_stadium(
     norm = _normalize(db_team_name)
     if norm in wiki_index:
         return wiki_index[norm]
+    # Alias values may be the human-readable Wikidata label (e.g.
+    # "AS Saint-Étienne" or "saint etienne") rather than the
+    # post-normalised form. Run them through _normalize too so the
+    # alias dict can be maintained in either style and still resolve
+    # to the index key.
     aliased = TEAM_ALIASES.get(norm)
-    if aliased and aliased in wiki_index:
-        return wiki_index[aliased]
+    if aliased:
+        aliased_norm = _normalize(aliased)
+        if aliased_norm in wiki_index:
+            return wiki_index[aliased_norm]
     # Containment fallback — DB-name (after normalisation) as a
     # substring of a wiki key. Min 4 chars to avoid spurious matches
     # on short keys ("ac", "fc", etc. would over-match wildly).
