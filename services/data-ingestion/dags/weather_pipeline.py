@@ -116,17 +116,23 @@ with DAG(
     tags=["weather", "vc", "weekly"],
 ) as weekly_dag:
 
-    # Step 1: regenerate the JSON from Wikidata. Writes to /tmp inside
-    # the container (where appuser can write), then we copy out to the
-    # bind-mounted /opt/auspex/data/ on the host. Same dance the
-    # interactive run uses — see soccer-team-stadium-map memory.
+    # Step 1: regenerate the JSON from Wikidata. Writes DIRECTLY to
+    # /app/data/ inside the api container — that path is bind-mounted
+    # to /opt/auspex/data/ on the host, so the file appears on the host
+    # automatically. (Prior versions of this task tried `docker compose
+    # cp api:/tmp/... /opt/auspex/data/...` from inside the Airflow
+    # worker, which doesn't work because the airflow worker doesn't
+    # have /opt/auspex/data/ in its filesystem — the bind mount goes
+    # to the api container, not the airflow container.) The `-w /app`
+    # flag MUST come before the `api` service name; placing it after
+    # treats it as part of the command to run inside the container,
+    # which is what broke the previous version.
     regenerate_stadium_map = BashOperator(
         task_id="regenerate_stadium_map",
         bash_command=(
-            f"{DOCKER_EXEC} -w /app python /app/scripts/build_soccer_stadium_map.py "
-            "--output /tmp/soccer_team_stadiums.json && "
-            "docker compose -f /opt/auspex/docker-compose.yml cp "
-            "api:/tmp/soccer_team_stadiums.json /opt/auspex/data/soccer_team_stadiums.json"
+            "docker compose -f /opt/auspex/docker-compose.yml exec -T -w /app api "
+            "python /app/scripts/build_soccer_stadium_map.py "
+            "--output /app/data/soccer_team_stadiums.json"
         ),
     )
 
