@@ -294,7 +294,16 @@ def upsert_race(cur, *, league_id: str, payload: dict, status: str) -> Optional[
              distance_meters, surface, track_condition, race_class,
              purse_currency, purse_amount, field_size, status, metadata)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (track_name, race_date, race_number) DO UPDATE
+        -- Dedup on the STABLE racing-API race id, not
+        -- (track_name, race_date, race_number): the /racecards/standard
+        -- feed leaves race_number NULL, and NULLs are DISTINCT in a
+        -- unique index, so the old conflict target never fired and the
+        -- every-15-min ingest duplicated every race (migration 020 fixed
+        -- the historical mess + added idx_races_racing_api_id). Inference
+        -- here matches that partial expression index.
+        ON CONFLICT ((external_ids->>'racing_api_race_id'))
+            WHERE (external_ids->>'racing_api_race_id') IS NOT NULL
+        DO UPDATE
             SET status = EXCLUDED.status,
                 surface = COALESCE(EXCLUDED.surface, races.surface),
                 track_condition = COALESCE(EXCLUDED.track_condition, races.track_condition),
