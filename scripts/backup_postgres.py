@@ -6,12 +6,14 @@ Two-tier backup strategy:
     /opt/auspex/backups/ on the host. Keeps the last
     --local-retention-days files for quick restore (default 7).
   * Remote (optional): if BACKUP_S3_BUCKET env var is set, also
-    uploads the dump to S3 (or any S3-compatible storage like
-    Backblaze B2, Hetzner Object Storage — set
-    BACKUP_S3_ENDPOINT_URL for non-AWS providers). Long-term
-    retention is managed by S3 lifecycle rules on the bucket
-    side (transition to Glacier after 30 days, expire after 1
-    year — see OPERATIONS.md for the lifecycle JSON to apply).
+    uploads the dump to S3-compatible storage. Backblaze B2 is the
+    recommended target (set BACKUP_S3_ENDPOINT_URL to the B2 endpoint;
+    the SigV4 signing region is auto-derived from it). The upload is
+    HEAD-verified (size match) and a failed offsite upload exits the
+    process non-zero so the Airflow DAG turns red — a broken remote
+    backup never hides behind a green run. Long-term retention is a
+    B2/S3 lifecycle rule on the bucket side. See OPERATIONS.md for
+    the full B2 setup + DR restore procedure.
 
 Dump format: pg_dump custom format (-Fc), which is compressed by
 default and supports parallel restore via pg_restore -j. Single
@@ -26,11 +28,15 @@ Env vars consumed:
     DATABASE_URL              — postgres connection string
     BACKUP_LOCAL_DIR          — local dump directory (default /app/backups)
     BACKUP_LOCAL_RETENTION    — days of local backups to keep (default 7)
-    BACKUP_S3_BUCKET          — optional; enables S3 upload
+    BACKUP_S3_BUCKET          — optional; enables S3/B2 upload
     BACKUP_S3_PREFIX          — optional; key prefix (default "postgres/")
-    BACKUP_S3_ENDPOINT_URL    — optional; for non-AWS S3 (B2, Hetzner, etc.)
-    AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY — standard AWS creds
-    AWS_DEFAULT_REGION        — S3 region (default us-east-1)
+    BACKUP_S3_ENDPOINT_URL    — optional; B2/Hetzner/Wasabi endpoint
+                                (region auto-derived from the host)
+    AWS_ACCESS_KEY_ID         — B2 keyID (or AWS access key)
+    AWS_SECRET_ACCESS_KEY     — B2 applicationKey (or AWS secret)
+    AWS_DEFAULT_REGION        — only used as a fallback when the region
+                                can't be derived from the endpoint (i.e.
+                                real AWS S3); not needed for B2
 
 Run on prod via:
     docker compose exec api python /app/scripts/backup_postgres.py
@@ -44,6 +50,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -111,9 +118,30 @@ def run_pg_dump(database_url: str, output_path: Path) -> None:
     logger.info("pg_dump complete: %.1f MB", size_mb)
 
 
+def _derive_region(endpoint_url: Optional[str]) -> Optional[str]:
+    """Derive the SigV4 signing region from an S3-compatible endpoint
+    host when it embeds the region (Backblaze B2 + most providers do:
+    ``s3.<region>.backblazeb2.com``). This eliminates the #1 B2 setup
+    footgun: B2 requires the boto3 region to MATCH the region token in
+    the endpoint host, and a wrong/ambient region (e.g. the compose
+    default ``us-east-1``) yields ``SignatureDoesNotMatch``. By deriving
+    from the endpoint, the operator only has to set the endpoint URL
+    correctly (copied verbatim from the B2 bucket page) — the region
+    follows automatically. Returns None when the pattern doesn't match
+    (e.g. real AWS S3, where region comes from AWS_DEFAULT_REGION)."""
+    if not endpoint_url:
+        return None
+    # B2: s3.us-west-004.backblazeb2.com → us-west-004.
+    # Generic S3-compatible: s3.<region>.<provider>.com → <region>.
+    m = re.search(r"s3[.\-]([a-z]{2}-[a-z]+-\d+)\.", endpoint_url)
+    return m.group(1) if m else None
+
+
 def upload_to_s3(local_path: Path, bucket: str, key: str, endpoint_url: Optional[str]) -> None:
-    """Upload via boto3. Imports lazy so backups still run when
-    boto3 isn't installed (local-only mode)."""
+    """Upload via boto3, then HEAD the object to confirm it landed.
+    Imports lazy so backups still run when boto3 isn't installed
+    (local-only mode). Raises on any failure so the caller can flag a
+    broken offsite backup."""
     try:
         import boto3
     except ImportError:
@@ -123,15 +151,43 @@ def upload_to_s3(local_path: Path, bucket: str, key: str, endpoint_url: Optional
         )
         raise
 
-    client_kwargs = {}
+    client_kwargs: dict = {}
     if endpoint_url:
         client_kwargs["endpoint_url"] = endpoint_url
         logger.info("Using custom S3 endpoint: %s", endpoint_url)
 
+    # Region resolution order: derive from the endpoint host (most
+    # robust for B2 — guarantees signing region == endpoint region),
+    # else fall back to AWS_DEFAULT_REGION / AWS_REGION. Passing it
+    # explicitly avoids NoRegionError when ambient AWS config is absent.
+    region = _derive_region(endpoint_url) or os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("AWS_REGION")
+    if region:
+        client_kwargs["region_name"] = region
+        logger.info("S3 signing region: %s", region)
+
+    # boto3 >= 1.36 (botocore Jan 2025) defaults request checksums ON,
+    # which historically broke B2 with "Unsupported header
+    # 'x-amz-sdk-checksum-algorithm'". We pin boto3==1.35.50 which
+    # predates that change, but set the env-var safeguard too (read
+    # only by botocore >= 1.36; a harmless no-op on 1.35.x) so a
+    # future boto3 bump doesn't silently break B2 uploads. Done via
+    # env rather than botocore Config kwargs because those kwargs
+    # don't exist on 1.35.x and would raise TypeError.
+    os.environ.setdefault("AWS_REQUEST_CHECKSUM_CALCULATION", "when_required")
+    os.environ.setdefault("AWS_RESPONSE_CHECKSUM_VALIDATION", "when_required")
+
     s3 = boto3.client("s3", **client_kwargs)
     logger.info("Uploading → s3://%s/%s", bucket, key)
     s3.upload_file(str(local_path), bucket, key)
-    logger.info("Upload complete.")
+
+    # Verify the object actually landed (size match) before declaring
+    # success — turns a silently-partial upload into a loud failure.
+    head = s3.head_object(Bucket=bucket, Key=key)
+    remote_size = head.get("ContentLength")
+    local_size = local_path.stat().st_size
+    if remote_size != local_size:
+        raise RuntimeError(f"S3 object size mismatch: local={local_size} remote={remote_size}")
+    logger.info("Upload verified: %d bytes in s3://%s/%s", remote_size, bucket, key)
 
 
 def rotate_local_backups(local_dir: Path, retention_days: int) -> int:
@@ -212,19 +268,34 @@ def main() -> int:
             local_path.unlink()
         return 1
 
-    # Upload to S3 if configured.
+    # Upload to S3 if configured. Track failure so a broken OFFSITE
+    # backup surfaces as a non-zero exit — otherwise the Airflow DAG
+    # would show green while only the local copy exists, defeating the
+    # entire point of remote DR. The local backup + rotation still run
+    # regardless, so the must-have (local) is never lost, and the
+    # DAG's retry will re-dump + re-attempt the upload (good for
+    # transient B2 outages).
+    s3_failed = False
     if args.s3_bucket and not args.skip_upload:
         s3_key = f"{args.s3_prefix.rstrip('/')}/{filename}"
         try:
             upload_to_s3(local_path, args.s3_bucket, s3_key, args.s3_endpoint_url)
         except Exception as e:
-            logger.error("S3 upload failed (local backup retained): %s", e)
-            # Don't fail the whole run — local backup succeeded.
-            # The next run will retry the upload.
+            logger.error("S3 upload FAILED (local backup retained): %s", e)
+            s3_failed = True
 
-    # Rotate old local backups.
+    # Rotate old local backups (always — local retention is independent
+    # of the remote-upload outcome).
     deleted = rotate_local_backups(local_dir, args.local_retention_days)
     logger.info("Rotation: %d old backup(s) deleted.", deleted)
+
+    if s3_failed:
+        logger.error(
+            "Backup run completed with a FAILED offsite upload — local "
+            "copy is safe but the remote DR copy did not land. "
+            "Exiting non-zero so the failure is visible."
+        )
+        return 2
 
     logger.info("Backup run complete.")
     return 0

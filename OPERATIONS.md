@@ -25,45 +25,104 @@ at 02:00 UTC every day. The script:
 sudo mkdir -p /opt/auspex/backups
 sudo chown -R 1000:1000 /opt/auspex/backups
 
-# 2. (Optional) Configure S3 upload. Add to /opt/auspex/.env:
-#      BACKUP_S3_BUCKET=auspex-backups
-#      BACKUP_S3_PREFIX=postgres/                       # optional
-#      BACKUP_S3_ENDPOINT_URL=https://...               # for B2/Hetzner/Wasabi (omit for AWS)
-#      AWS_ACCESS_KEY_ID=...
-#      AWS_SECRET_ACCESS_KEY=...
-#      AWS_DEFAULT_REGION=us-east-1
+# 2. Rebuild the api image (adds postgresql-client for pg_dump + boto3):
+docker compose build api
 
-# 3. Restart the api container so it picks up the new env + bind mount:
+# 3. (Optional but recommended) Configure offsite upload — see the
+#    "Backblaze B2 setup" section below, then continue here.
+
+# 4. Restart the api container so it picks up the new env + bind mount:
 docker compose up -d --force-recreate api
 
-# 4. Trigger the DAG manually once to verify end-to-end:
+# 5. Trigger the DAG manually once to verify end-to-end:
 docker compose exec airflow-scheduler airflow dags trigger db_backup_daily
 
-# 5. Verify the dump landed:
+# 6. Verify the dump landed locally:
 ls -la /opt/auspex/backups/
+#    …and (if B2 configured) remotely — see the verify step in B2 setup.
 ```
 
-### S3 lifecycle policy (set on the bucket once)
+### Backblaze B2 setup (recommended offsite backup)
 
-Manage long-term retention server-side so the backup script stays
-simple. Example for AWS S3 — apply via console or `aws s3api
-put-bucket-lifecycle-configuration`:
+B2 is the chosen offsite target: ~$0.50/yr for our backup volume,
+true DR isolation (separate provider + geography from the Hetzner
+prod host, unlike a same-datacenter Hetzner Storage Box), and
+S3-compatible so `backup_postgres.py` works with zero code change.
 
-```json
-{
-  "Rules": [{
-    "ID": "auspex-backup-retention",
-    "Status": "Enabled",
-    "Filter": {"Prefix": "postgres/"},
-    "Transitions": [
-      {"Days": 30, "StorageClass": "GLACIER"}
-    ],
-    "Expiration": {"Days": 365}
-  }]
-}
+**One-time B2 account + bucket + key (≈10 min, in the B2 web UI):**
+
+1. Sign up at backblaze.com → B2 Cloud Storage (no card required to start).
+2. **Buckets → Create a Bucket.** Name it `auspex-backups` (globally
+   unique — pick your own if taken). Set **Files in Bucket: Private**.
+   Create it.
+3. On the bucket page, note the **Endpoint** value, e.g.
+   `s3.us-west-004.backblazeb2.com`. The middle token (`us-west-004`)
+   is your account region. **A B2 account is single-region** — every
+   bucket shares it.
+4. **Application Keys → Add a New Application Key.**
+   - Name: `pgbackup`
+   - Allow access to Bucket(s): select **only** `auspex-backups`
+     (least privilege — a leaked key can't touch anything else)
+   - Type of Access: **Read and Write**
+   - Create. The key is shown **once** — copy both values immediately:
+     - `keyID` → this is your `AWS_ACCESS_KEY_ID`
+     - `applicationKey` → this is your `AWS_SECRET_ACCESS_KEY`
+     (Do NOT use the account Master Key — create the scoped key above.)
+
+**Add to `/opt/auspex/.env` on prod:**
+
+```bash
+BACKUP_S3_BUCKET=auspex-backups
+BACKUP_S3_ENDPOINT_URL=https://s3.us-west-004.backblazeb2.com   # YOUR endpoint from step 3
+AWS_ACCESS_KEY_ID=<B2 keyID>
+AWS_SECRET_ACCESS_KEY=<B2 applicationKey>
+# AWS_DEFAULT_REGION: NOT needed for B2 — the script auto-derives the
+# signing region from the endpoint host. Only set it for real AWS S3.
 ```
 
-Costs ~$0.10/mo for 1GB Glacier storage + tiny PUT/GET costs.
+> **Region gotcha (handled automatically):** B2 uses SigV4, which
+> requires boto3's signing region to MATCH the region token in the
+> endpoint host, or every upload fails with `SignatureDoesNotMatch`.
+> `backup_postgres.py` derives the region from `BACKUP_S3_ENDPOINT_URL`
+> (`s3.<region>.backblazeb2.com`) so you only have to get the endpoint
+> URL right. If you ever see `SignatureDoesNotMatch`, double-check the
+> endpoint host matches your bucket's actual region.
+
+> **boto3 version gotcha (handled by pin):** `requirements.txt` pins
+> `boto3==1.35.50`, which predates the botocore 1.36 change that turned
+> on request checksums and broke B2 ("Unsupported header
+> 'x-amz-sdk-checksum-algorithm'"). The script also exports
+> `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` as a forward-compat
+> safeguard. If you bump boto3 to >=1.36, re-verify a B2 upload works.
+
+**Verify end-to-end after restarting the api container:**
+
+```bash
+# Run the backup once and watch for "Upload verified: N bytes":
+docker compose exec api python /app/scripts/backup_postgres.py
+
+# Confirm the object is in B2 (uses the same creds):
+docker compose exec api python -c "
+import boto3, os
+s3 = boto3.client('s3', endpoint_url=os.environ['BACKUP_S3_ENDPOINT_URL'])
+r = s3.list_objects_v2(Bucket=os.environ['BACKUP_S3_BUCKET'], Prefix='postgres/')
+for o in r.get('Contents', []):
+    print(o['Key'], o['Size'])
+"
+```
+
+If the offsite upload fails, the script exits non-zero (so the
+`db_backup_daily` DAG goes red and — once Telegram failure alerts are
+wired — pings you) while the local copy is still safely written.
+
+### B2 retention (expire old offsite backups)
+
+Set a **Lifecycle Rule** on the bucket in the B2 UI (Buckets →
+Lifecycle Settings) to keep, e.g., the last 30 days, then hide +
+delete. The local copy already rotates at 7 days
+(`BACKUP_LOCAL_RETENTION`). At our backup size, even keeping a full
+year on B2 costs well under $1/yr, so retention is about tidiness more
+than cost.
 
 ### Restore — full disaster recovery
 
@@ -73,9 +132,16 @@ The DB has been wiped or the host is gone. Recovery:
 # 1. Fetch the most recent backup. Either:
 #    a) From local disk if the host is intact:
 ls -t /opt/auspex/backups/auspex_prod-*.dump | head -1
-#    b) From S3 if the host is gone:
-aws s3 ls s3://auspex-backups/postgres/ | tail -5
-aws s3 cp s3://auspex-backups/postgres/auspex_prod-2026-06-07T020000Z.dump /tmp/
+#    b) From B2 if the host is gone (no aws CLI needed — use boto3 via
+#       any machine with the B2 creds in env; download newest object):
+python3 - <<'PY'
+import boto3, os
+s3 = boto3.client("s3", endpoint_url=os.environ["BACKUP_S3_ENDPOINT_URL"])
+objs = s3.list_objects_v2(Bucket=os.environ["BACKUP_S3_BUCKET"], Prefix="postgres/").get("Contents", [])
+newest = max(objs, key=lambda o: o["LastModified"])
+print("downloading", newest["Key"], newest["Size"], "bytes")
+s3.download_file(os.environ["BACKUP_S3_BUCKET"], newest["Key"], "/tmp/" + newest["Key"].split("/")[-1])
+PY
 
 # 2. If restoring to a NEW host, bring up just postgres first so we
 #    can restore into it before everything else starts using it:

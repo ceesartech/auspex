@@ -85,4 +85,10 @@ pytest-mock==3.14.0
 faker==33.1.0
 requests==2.32.3
 websocket-client==1.8.0
-boto3==1.35.50  # for backup_postgres.py S3 uploads (lazy-imported; missing → local-only backups)
+# boto3 for backup_postgres.py S3/B2 uploads (lazy-imported; missing → local-only backups).
+# PINNED <1.36 ON PURPOSE: botocore 1.36.0 (Jan 2025) turned on default request checksums,
+# which historically broke Backblaze B2 with "Unsupported header 'x-amz-sdk-checksum-algorithm'".
+# 1.35.50 predates that and is B2-safe with zero extra config. If you bump to >=1.36, the script
+# already sets AWS_REQUEST_CHECKSUM_CALCULATION=when_required as a safeguard, but verify B2 uploads
+# still work (B2 added server-side checksum support mid-2025). See OPERATIONS.md.
+boto3==1.35.50

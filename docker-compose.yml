@@ -210,9 +210,15 @@ services:
       # scripts/backup_postgres.py which writes a local dump and
       # optionally uploads to S3-compatible storage. All BACKUP_*
       # vars are optional; without BACKUP_S3_BUCKET the backup is
-      # local-only. Standard AWS_* credentials apply to S3 uploads;
-      # set BACKUP_S3_ENDPOINT_URL for non-AWS providers (B2,
-      # Hetzner Object Storage, Wasabi).
+      # local-only. RECOMMENDED remote: Backblaze B2 (~$0.50/yr at our
+      # scale, true off-Hetzner DR). For B2 set in .env:
+      #   BACKUP_S3_BUCKET=auspex-backups
+      #   BACKUP_S3_ENDPOINT_URL=https://s3.<region>.backblazeb2.com
+      #   AWS_ACCESS_KEY_ID=<B2 keyID>
+      #   AWS_SECRET_ACCESS_KEY=<B2 applicationKey>
+      # The signing region is AUTO-DERIVED from the B2 endpoint host by
+      # the script, so AWS_DEFAULT_REGION below does NOT need changing
+      # for B2 (it's only the fallback for real AWS S3). See OPERATIONS.md.
       - BACKUP_LOCAL_DIR=${BACKUP_LOCAL_DIR:-/app/backups}
       - BACKUP_LOCAL_RETENTION=${BACKUP_LOCAL_RETENTION:-7}
       - BACKUP_S3_BUCKET=${BACKUP_S3_BUCKET:-}
