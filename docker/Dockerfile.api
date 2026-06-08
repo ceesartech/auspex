@@ -3,9 +3,12 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies
+#   * postgresql-client gives us `pg_dump` for scripts/backup_postgres.py
+#     (daily db_backup_daily DAG). client-only (no server).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
+    postgresql-client \
     curl \
     && rm -rf /var/lib/apt/lists/*
 

@@ -206,6 +206,21 @@ services:
       # → that script SystemExits cleanly without affecting the
       # Open-Meteo path.
       - VISUAL_CROSSING_API_KEY=${VISUAL_CROSSING_API_KEY:-}
+      # PostgreSQL backup config — daily DAG (db_backup_daily) calls
+      # scripts/backup_postgres.py which writes a local dump and
+      # optionally uploads to S3-compatible storage. All BACKUP_*
+      # vars are optional; without BACKUP_S3_BUCKET the backup is
+      # local-only. Standard AWS_* credentials apply to S3 uploads;
+      # set BACKUP_S3_ENDPOINT_URL for non-AWS providers (B2,
+      # Hetzner Object Storage, Wasabi).
+      - BACKUP_LOCAL_DIR=${BACKUP_LOCAL_DIR:-/app/backups}
+      - BACKUP_LOCAL_RETENTION=${BACKUP_LOCAL_RETENTION:-7}
+      - BACKUP_S3_BUCKET=${BACKUP_S3_BUCKET:-}
+      - BACKUP_S3_PREFIX=${BACKUP_S3_PREFIX:-postgres/}
+      - BACKUP_S3_ENDPOINT_URL=${BACKUP_S3_ENDPOINT_URL:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
     volumes:
       - ./models:/app/models
       - ./services/api:/app/services/api
@@ -225,6 +240,11 @@ services:
       # matches.venue is NULL). Editable without rebuild for the same
       # reason as scripts/.
       - ./data:/app/data
+      # Bind-mount backups/ — daily pg_dump output lands here for
+      # quick local restore (last 7 days). Host directory must be
+      # owned by UID 1000 (appuser) so the in-container pg_dump
+      # can write to it: `sudo chown -R 1000:1000 /opt/auspex/backups`.
+      - ./backups:/app/backups
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
