@@ -304,7 +304,19 @@ def upsert_race(cur, *, league_id: str, payload: dict, status: str) -> Optional[
         ON CONFLICT ((external_ids->>'racing_api_race_id'))
             WHERE (external_ids->>'racing_api_race_id') IS NOT NULL
         DO UPDATE
-            SET status = EXCLUDED.status,
+            -- Status is FORWARD-ONLY: never downgrade a terminal state
+            -- back to 'scheduled'. The upcoming-cards ingest runs every
+            -- 15 min and marks today's races 'scheduled'; without this
+            -- guard it would revert a race the results ingest already
+            -- set to 'finished' (now that both passes upsert the SAME
+            -- row post-dedup), so finished races flapped back to
+            -- scheduled — invisible in Recent results + un-settling
+            -- their graded recs. Keep terminal states sticky.
+            SET status = CASE
+                    WHEN races.status IN ('finished', 'cancelled', 'abandoned')
+                        THEN races.status
+                    ELSE EXCLUDED.status
+                END,
                 surface = COALESCE(EXCLUDED.surface, races.surface),
                 track_condition = COALESCE(EXCLUDED.track_condition, races.track_condition),
                 race_class = COALESCE(EXCLUDED.race_class, races.race_class),
