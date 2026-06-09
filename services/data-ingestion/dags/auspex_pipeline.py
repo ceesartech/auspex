@@ -19,9 +19,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from airflow import DAG
-from alerting import notify_failure  # shared Telegram failure alerting
 from airflow.operators.bash import BashOperator
 from airflow.utils.trigger_rule import TriggerRule
+from alerting import notify_failure  # shared Telegram failure alerting
 
 default_args = {
     "owner": "auspex",

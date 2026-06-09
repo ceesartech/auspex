@@ -37,9 +37,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from airflow import DAG
-from alerting import notify_failure  # shared Telegram failure alerting
 from airflow.operators.bash import BashOperator
 from airflow.utils.trigger_rule import TriggerRule
+from alerting import notify_failure  # shared Telegram failure alerting
 
 DOCKER_EXEC = "docker compose -f /opt/auspex/docker-compose.yml exec -T api"
 POSTGRES_EXEC = "docker compose -f /opt/auspex/docker-compose.yml exec -T postgres"
