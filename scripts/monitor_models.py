@@ -16,9 +16,15 @@ Runs on a rolling window (default 30 days). For each
      message via telegram_notify.send_telegram_digest. Warnings
      stay in the markdown but don't page.
 
-Idempotent: the script doesn't write anything to the DB. Re-running
-on the same window produces the same numbers (modulo new
-graded rows landing between runs).
+Coverage: the matches-based sports (soccer / NHL / NBA / NFL / tennis
+/ MMA) come from `predictions`; horse racing comes from
+`race_predictions` (per-entrant consensus win prob vs actual win) so
+the consensus model's calibration is monitored too.
+
+Persistence: each run writes every slice's calibration report to
+`model_performance_logs` (JSONB `metrics`) so calibration is a
+trackable TIME SERIES, not just a per-run alert — you can chart ECE /
+Brier drift over weeks. The Telegram drift alerting is unchanged.
 
 Usage (inside the api container):
 
@@ -41,11 +47,12 @@ import argparse
 import logging
 import os
 import sys
+from dataclasses import asdict
 from datetime import datetime
 from typing import List, Optional
 
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import Json, RealDictCursor
 
 # Reuse the pure calibration math + the shared telegram digest.
 sys.path.insert(0, os.path.dirname(__file__))
@@ -144,6 +151,115 @@ def fetch_slice_pairs(
     return predicted, actual
 
 
+def fetch_horse_racing_slices(cur, days: int, min_samples: int) -> list[dict]:
+    """Horse-racing calibration slices from race_predictions. Sport is
+    always 'horse_racing'; the pairs are per-ENTRANT (consensus win
+    prob vs whether the horse actually won), which is a sharper
+    calibration signal than the race-level favourite-strike-rate the
+    accuracy widget shows."""
+    cur.execute(
+        """
+        SELECT 'horse_racing' AS sport,
+               rp.prediction_type,
+               rp.model_name,
+               COUNT(*) AS n
+        FROM race_predictions rp
+        JOIN races r ON r.id = rp.race_id
+        WHERE rp.actual_outcome IS NOT NULL
+          AND r.status = 'finished'
+          AND r.race_date >= NOW() - (%s || ' days')::interval
+        GROUP BY rp.prediction_type, rp.model_name
+        HAVING COUNT(*) >= %s
+        ORDER BY rp.prediction_type, rp.model_name
+        """,
+        (str(days), min_samples),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def fetch_horse_racing_pairs(
+    cur,
+    prediction_type: str,
+    model_name: str,
+    days: int,
+) -> tuple[list[float], list[int]]:
+    """(consensus_win_prob, did_win) pairs for one horse-racing slice.
+    rp.confidence is the devigged consensus win probability;
+    rp.actual_outcome is 1.0 if the entrant won, 0.0 otherwise."""
+    cur.execute(
+        """
+        SELECT rp.confidence AS picked_prob,
+               (rp.actual_outcome)::int AS correct
+        FROM race_predictions rp
+        JOIN races r ON r.id = rp.race_id
+        WHERE rp.model_name = %s
+          AND rp.prediction_type = %s
+          AND rp.actual_outcome IS NOT NULL
+          AND rp.confidence IS NOT NULL
+          AND r.status = 'finished'
+          AND r.race_date >= NOW() - (%s || ' days')::interval
+        """,
+        (model_name, prediction_type, str(days)),
+    )
+    predicted: list[float] = []
+    actual: list[int] = []
+    for r in cur.fetchall():
+        predicted.append(float(r["picked_prob"]))
+        actual.append(int(r["correct"]))
+    return predicted, actual
+
+
+def persist_reports(cur, summary: list[dict], days: int) -> int:
+    """Write each slice's calibration report to model_performance_logs
+    so ECE / Brier / accuracy become a queryable DAILY time series.
+
+    Idempotent per day: the monitor runs every 15 min, but we only want
+    one row per (model, sport, market) per day, so the INSERT is guarded
+    by a NOT EXISTS check on (model_name, sport, evaluation_date=today,
+    metrics->>'prediction_type'). The first run of the day writes the
+    row; later runs skip it. prediction_type is stored inside the JSONB
+    metrics because model_performance_logs has no such column.
+
+    Returns the number of rows actually written. Best-effort — callers
+    wrap this in try/except so a persistence failure can't break the
+    drift-alert path."""
+    written = 0
+    for s in summary:
+        report = s["report"]
+        metrics = asdict(report)
+        metrics["prediction_type"] = s["prediction_type"]
+        cur.execute(
+            """
+            INSERT INTO model_performance_logs
+                (model_name, model_version, sport, evaluation_date,
+                 metrics, sample_size, date_range_start, date_range_end, notes)
+            SELECT %s, %s, %s, CURRENT_DATE, %s, %s,
+                   (NOW() - (%s || ' days')::interval)::date, CURRENT_DATE, %s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM model_performance_logs
+                WHERE model_name = %s
+                  AND sport = %s
+                  AND evaluation_date = CURRENT_DATE
+                  AND metrics->>'prediction_type' = %s
+            )
+            """,
+            (
+                s["model_name"],
+                "monitor-rolling",
+                s["sport"],
+                Json(metrics),
+                report.n,
+                str(days),
+                f"calibration monitor: {s['sport']}/{s['prediction_type']} rolling {days}d",
+                s["model_name"],
+                s["sport"],
+                s["prediction_type"],
+            ),
+        )
+        written += cur.rowcount
+    return written
+
+
 # ── Reporting ────────────────────────────────────────────────────────
 
 
@@ -232,10 +348,18 @@ def run(database_url: str, days: int, min_samples: int, thresholds: DriftThresho
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             slices = fetch_slices(cur, days, min_samples)
+            slices += fetch_horse_racing_slices(cur, days, min_samples)
             logger.info("Found %d slices to monitor (window=%dd, min_samples=%d)", len(slices), days, min_samples)
 
             for s in slices:
-                predicted, actual = fetch_slice_pairs(cur, s["sport"], s["prediction_type"], s["model_name"], days)
+                if s["sport"] == "horse_racing":
+                    predicted, actual = fetch_horse_racing_pairs(
+                        cur, s["prediction_type"], s["model_name"], days
+                    )
+                else:
+                    predicted, actual = fetch_slice_pairs(
+                        cur, s["sport"], s["prediction_type"], s["model_name"], days
+                    )
                 if len(predicted) < min_samples:
                     continue
                 report = calibration_report(predicted, actual)
@@ -255,6 +379,16 @@ def run(database_url: str, days: int, min_samples: int, thresholds: DriftThresho
                     }
                 )
                 all_findings.extend(findings)
+
+            # Persist the calibration time series (best-effort — must not
+            # break the drift-alert path below).
+            try:
+                n_persisted = persist_reports(cur, summary, days)
+                conn.commit()
+                logger.info("Persisted %d calibration reports to model_performance_logs", n_persisted)
+            except Exception as exc:  # noqa: BLE001
+                conn.rollback()
+                logger.warning("Calibration persistence failed (alerting unaffected): %s", exc)
 
     md = render_report(summary)
     if all_findings:
