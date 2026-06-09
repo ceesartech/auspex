@@ -361,8 +361,19 @@ def upsert_entrant(
              post_position, weight_carried_lbs, morning_line_odds,
              starting_price, finish_position, scratched, metadata)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (race_id, program_number) DO UPDATE
-            SET jockey_id = COALESCE(EXCLUDED.jockey_id, race_entrants.jockey_id),
+        -- Dedup on the STABLE (race_id, horse_id) identity, not
+        -- (race_id, program_number): program_number is `_safe_int(...)
+        -- or 0` below, so a runner the feed omits a number for lands
+        -- under 0, and the SAME horse can appear under 0 in one pass
+        -- and its real number in another → duplicate entrants (migration
+        -- 021 fixed the existing dupes + swapped the unique key). The
+        -- program_number SET prefers a real (non-zero) number when a
+        -- later pass supplies one.
+        ON CONFLICT (race_id, horse_id) DO UPDATE
+            SET program_number = COALESCE(
+                    NULLIF(EXCLUDED.program_number, 0), race_entrants.program_number
+                ),
+                jockey_id = COALESCE(EXCLUDED.jockey_id, race_entrants.jockey_id),
                 trainer_id = COALESCE(EXCLUDED.trainer_id, race_entrants.trainer_id),
                 post_position = COALESCE(EXCLUDED.post_position, race_entrants.post_position),
                 weight_carried_lbs = COALESCE(EXCLUDED.weight_carried_lbs, race_entrants.weight_carried_lbs),
