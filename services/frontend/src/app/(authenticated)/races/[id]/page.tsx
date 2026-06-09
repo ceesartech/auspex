@@ -196,6 +196,11 @@ function EntrantRow({ entrant }: { entrant: RaceEntrant }) {
               : 0
             ).toFixed(0)}%
           </div>
+          {entrant.recommendation.confidence_rating && (
+            <div className="text-xs text-muted-foreground capitalize">
+              {entrant.recommendation.confidence_rating} confidence
+            </div>
+          )}
         </div>
       )}
 
