@@ -279,6 +279,20 @@ class TestDetectDrift:
         )
         assert not any(f.metric == "accuracy" for f in findings)
 
+    def test_horse_racing_skips_accuracy_floor(self):
+        # The 52.4% floor is a 2-way moneyline break-even; horse-racing
+        # calibration pairs are per-entrant win probs (~10% hit rate in
+        # a full field is normal), so the floor must NOT fire there even
+        # at a very low accuracy. ECE/MCE/Brier still apply.
+        report = self._report(accuracy=0.10, n=10000)
+        findings = cm.detect_drift(
+            sport="horse_racing",
+            market="win",
+            report=report,
+            thresholds=cm.DriftThresholds(),
+        )
+        assert not any(f.metric == "accuracy" for f in findings)
+
     def test_brier_drift_compared_to_baseline(self):
         # Brier of 0.26 with baseline 0.20 → drift 0.06 → alert
         # (alert threshold is 0.05). Using 0.06 not 0.05 to step

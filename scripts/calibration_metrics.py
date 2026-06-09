@@ -351,7 +351,13 @@ def detect_drift(
     # the rec engine has its own EV gate that prevents low-confidence
     # bets from being placed; the accuracy floor is mostly a signal
     # the model itself is worse than random.
-    if report.accuracy < thresholds.accuracy_floor and report.n >= 30:
+    # The 52.4% accuracy floor is a 2-way (-110 moneyline) break-even.
+    # It's meaningless for horse racing, where the calibration pairs are
+    # per-ENTRANT win probabilities — a ~10% hit rate in a ~10-runner
+    # field is normal, not "unprofitable" — so skip the floor there
+    # (ECE/MCE/Brier still apply). Profitability for racing is judged by
+    # realized recs ROI (the accuracy widget), not per-entrant hit rate.
+    if sport != "horse_racing" and report.accuracy < thresholds.accuracy_floor and report.n >= 30:
         # Require >= 30 samples to avoid tripping on a 0/5 fluke.
         findings.append(
             DriftFinding(
