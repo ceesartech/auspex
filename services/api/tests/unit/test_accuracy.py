@@ -70,15 +70,23 @@ class TestAccuracySummaryRoute:
             total_profit_loss=42.5,
         )
 
-        call_count = [0]
+        # Query-aware mock: accuracy_summary now also queries the
+        # horse-racing schema (race_predictions / race_recommendations)
+        # when the sport filter allows. Return empty/zero for those so
+        # this test stays focused on the team-sport aggregate.
+        zero_rec = _rec_row(settled=0, won=0, lost=0, void=0, total_staked=0.0, total_profit_loss=0.0)
 
         def side_effect(query, params=None):
-            call_count[0] += 1
+            q = str(query)
             result = MagicMock()
-            if call_count[0] == 1:  # predictions aggregate
-                result.fetchall.return_value = predictions_rows
-            else:  # recs P/L
+            if "race_predictions" in q:
+                result.fetchall.return_value = []
+            elif "race_recommendations" in q:
+                result.fetchone.return_value = zero_rec
+            elif "betting_recommendations" in q:
                 result.fetchone.return_value = rec_row
+            else:  # team predictions aggregate
+                result.fetchall.return_value = predictions_rows
             return result
 
         mock_db.execute.side_effect = side_effect

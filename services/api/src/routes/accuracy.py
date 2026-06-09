@@ -81,7 +81,10 @@ class AccuracySummary(BaseModel):
 
 @router.get("/summary", response_model=AccuracySummary)
 async def accuracy_summary(
-    sport: Optional[str] = Query(None, description="Filter by leagues.sport ('soccer' | 'nhl' | 'nba' | 'nfl')."),
+    sport: Optional[str] = Query(
+        None,
+        description="Filter by sport ('soccer' | 'nhl' | 'nba' | 'nfl' | 'tennis' | 'mma' | 'horse_racing').",
+    ),
     market: Optional[str] = Query(None, description="Filter by predictions.prediction_type."),
     days: int = Query(30, ge=1, le=365, description="Lookback window in days (default 30)."),
     db: Session = Depends(get_db),
@@ -136,6 +139,53 @@ async def accuracy_summary(
         graded_all += graded
         correct_all += correct
 
+    # Horse racing lives in its own schema (race_predictions / races),
+    # so the matches-based query above never covers it. Add it when the
+    # sport filter allows. NOTE: race_predictions.is_correct is the
+    # race-level "did the consensus favourite win" replicated to every
+    # entrant row, so this reports the favourite-strike-rate (the same
+    # number `horse-racing-baseline` memory tracks), not a per-entrant
+    # accuracy. The realized recs P/L below is the sharper "did the
+    # value bets make money" signal.
+    if sport in (None, "horse_racing") and market in (None, "win"):
+        hr_rows = db.execute(
+            text(
+                """
+                SELECT
+                    rp.prediction_type AS prediction_type,
+                    rp.model_name AS model_name,
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE rp.is_correct IS NOT NULL) AS graded,
+                    COUNT(*) FILTER (WHERE rp.is_correct = TRUE) AS correct
+                FROM race_predictions rp
+                JOIN races r ON r.id = rp.race_id
+                WHERE r.status = 'finished'
+                  AND r.race_date >= NOW() - (:days || ' days')::interval
+                GROUP BY rp.prediction_type, rp.model_name
+                ORDER BY rp.prediction_type, rp.model_name
+                """
+            ),
+            {"days": days},
+        ).fetchall()
+        for r in hr_rows:
+            total = int(r.total)
+            graded = int(r.graded)
+            correct = int(r.correct)
+            by_market.append(
+                MarketAccuracy(
+                    sport="horse_racing",
+                    prediction_type=r.prediction_type,
+                    model_name=r.model_name,
+                    total=total,
+                    graded=graded,
+                    correct=correct,
+                    accuracy=(correct / graded) if graded > 0 else 0.0,
+                )
+            )
+            total_all += total
+            graded_all += graded
+            correct_all += correct
+
     # Recommendations P/L. Same sport/market scoping so a sport-only
     # view doesn't include the other sport's settled bets.
     rec_row: Dict[str, Any] = (
@@ -169,11 +219,54 @@ async def accuracy_summary(
 
     staked = float(rec_row.get("total_staked") or 0)
     pnl = float(rec_row.get("total_profit_loss") or 0)
+    settled = int(rec_row.get("settled") or 0)
+    won = int(rec_row.get("won") or 0)
+    lost = int(rec_row.get("lost") or 0)
+    void = int(rec_row.get("void") or 0)
+
+    # Merge horse-racing settled recs (race_recommendations schema).
+    # These accrue as races finish and grade_completed_races settles
+    # them — so this is the realized "did the value bets make money"
+    # P/L for horse racing, surfaced in the same widget as every other
+    # sport (the "learning from experience" view).
+    if sport in (None, "horse_racing") and market in (None, "win"):
+        hr_rec = (
+            db.execute(
+                text(
+                    """
+                SELECT
+                    COUNT(*) FILTER (WHERE rec.status IN ('won','lost','void')) AS settled,
+                    COUNT(*) FILTER (WHERE rec.status = 'won')  AS won,
+                    COUNT(*) FILTER (WHERE rec.status = 'lost') AS lost,
+                    COUNT(*) FILTER (WHERE rec.status = 'void') AS void,
+                    COALESCE(SUM(rec.recommended_stake)
+                             FILTER (WHERE rec.status IN ('won','lost','void')), 0) AS total_staked,
+                    COALESCE(SUM(rec.profit_loss)
+                             FILTER (WHERE rec.status IN ('won','lost','void')), 0) AS total_profit_loss
+                FROM race_recommendations rec
+                JOIN races r ON r.id = rec.race_id
+                WHERE r.status = 'finished'
+                  AND r.race_date >= NOW() - (:days || ' days')::interval
+                  AND rec.bet_type = 'win'
+                """
+                ),
+                {"days": days},
+            )
+            .fetchone()
+            ._asdict()
+        )
+        staked += float(hr_rec.get("total_staked") or 0)
+        pnl += float(hr_rec.get("total_profit_loss") or 0)
+        settled += int(hr_rec.get("settled") or 0)
+        won += int(hr_rec.get("won") or 0)
+        lost += int(hr_rec.get("lost") or 0)
+        void += int(hr_rec.get("void") or 0)
+
     recs_summary = RecsPnL(
-        settled=int(rec_row.get("settled") or 0),
-        won=int(rec_row.get("won") or 0),
-        lost=int(rec_row.get("lost") or 0),
-        void=int(rec_row.get("void") or 0),
+        settled=settled,
+        won=won,
+        lost=lost,
+        void=void,
         total_staked=round(staked, 2),
         total_profit_loss=round(pnl, 2),
         roi_pct=round((100.0 * pnl / staked), 2) if staked > 0 else 0.0,
