@@ -31,10 +31,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from airflow import DAG
+from alerting import notify_failure  # shared Telegram failure alerting
 from airflow.operators.bash import BashOperator
 
 default_args = {
     "owner": "auspex",
+    "on_failure_callback": notify_failure,
     "depends_on_past": False,
     "email_on_failure": False,
     "email_on_retry": False,

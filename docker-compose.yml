@@ -153,6 +153,11 @@ services:
       # minutes and SIGTERMs the process mid-train. 1 hour is the SLA
       # we'd accept for any single task — anything slower needs profiling.
       - AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD=3600
+      # Telegram failure alerting — every DAG's on_failure_callback
+      # (dags/alerting.py) reads these to page on a broken task.
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - ENABLE_TELEGRAM_NOTIFICATIONS=${ENABLE_TELEGRAM_NOTIFICATIONS:-false}
     volumes:
       - ./services/data-ingestion/dags:/opt/airflow/dags
       - ./services/data-ingestion/logs:/opt/airflow/logs

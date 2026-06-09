@@ -21,6 +21,7 @@ is also testable in isolation.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -86,22 +87,35 @@ _SPORT_EMOJI: Dict[str, str] = {
 }
 
 
+def _esc(s: str) -> str:
+    """Escape &, <, > for Telegram's HTML parse_mode — but NOT quotes.
+    Quotes are valid in text content; escaping them mangles names like
+    O'Brien / "The Rock" into &#x27; / &quot;."""
+    return html.escape(s, quote=False)
+
+
 def _format_alert_line(alert: Alert) -> str:
     """One HTML-formatted line per pick. Switches to value-bet format
     when alert.expected_value is set."""
     emoji = _SPORT_EMOJI.get(alert.sport, "•")
     when = alert.match_date.strftime("%a %m/%d %H:%M")
-    header = f"{emoji} <b>{alert.home_team} vs {alert.away_team}</b> · {alert.league_name}"
+    # parse_mode=HTML means any '<', '>' or '&' in the DYNAMIC values
+    # (a team like "Brighton & Hove Albion", a drift message like
+    # "Accuracy 9% < 52%") is parsed as markup and Telegram rejects the
+    # send with 400. Escape every interpolated value; the structural
+    # <b>/<i> tags stay literal.
+    e = _esc
+    header = f"{emoji} <b>{e(alert.home_team)} vs {e(alert.away_team)}</b> · {e(alert.league_name)}"
     if alert.expected_value is not None:
         odds_str = f"@ {alert.odds_decimal:.2f}" if alert.odds_decimal is not None else ""
         stake_str = f"stake ${alert.recommended_stake:.0f}" if alert.recommended_stake else ""
-        book_str = f"({alert.bookmaker})" if alert.bookmaker else ""
+        book_str = f"({e(alert.bookmaker)})" if alert.bookmaker else ""
         meta_parts = [p for p in (stake_str, book_str, f"model {alert.confidence:.0%}") if p]
         return (
             f"{header}\n"
-            f"   💰 {alert.market_label}: <b>{alert.predicted_outcome}</b> {odds_str}"
+            f"   💰 {e(alert.market_label)}: <b>{e(alert.predicted_outcome)}</b> {odds_str}"
             f" <b>EV {alert.expected_value:+.0%}</b> · {when}\n"
-            f"   <i>{' · '.join(meta_parts)}</i>"
+            f"   <i>{e(' · '.join(meta_parts))}</i>"
         )
 
     # Some alert flavors (e.g. monitor_models drift alerts) stuff
@@ -115,9 +129,9 @@ def _format_alert_line(alert: Alert) -> str:
     probs = ", ".join(f"{k} {_fmt_prob(v)}" for k, v in alert.probabilities.items())
     return (
         f"{header}\n"
-        f"   {alert.market_label}: <b>{alert.predicted_outcome}</b> "
+        f"   {e(alert.market_label)}: <b>{e(alert.predicted_outcome)}</b> "
         f"({alert.confidence:.0%}) · {when}\n"
-        f"   <i>{probs}</i>"
+        f"   <i>{e(probs)}</i>"
     )
 
 
@@ -128,7 +142,7 @@ def render_digest(alerts: List[Alert], header: Optional[str] = None) -> str:
         return ""
     title = header or f"Auspex picks · {len(alerts)} high-confidence"
     body = "\n\n".join(_format_alert_line(a) for a in alerts)
-    return f"<b>{title}</b>\n\n{body}"
+    return f"<b>{_esc(title)}</b>\n\n{body}"
 
 
 def _chunk_text(text: str, limit: int = _SAFE_CHUNK_SIZE) -> List[str]:
