@@ -228,7 +228,14 @@ with DAG(
     #      Captures the full bookmaker_odds[] array per runner
     #      (not just the morning_line_odds first-bookmaker decimal)
     #      so the recommendation step can do best-of-N pricing.
-    #   2. yesterday's results (catch-up — only fires on Standard+ plan).
+    #   2. results for yesterday THROUGH today. Today is essential:
+    #      the API serves a race's result minutes after it runs, so
+    #      fetching today resolves today's races SAME DAY — they flip
+    #      scheduled->finished (same row, via the racing_api_race_id
+    #      upsert) and the grader settles their recs, so they show in
+    #      the /races "Recent results" tab the same evening instead of
+    #      sitting in limbo (run, but not finished) until tomorrow.
+    #      Yesterday stays in the window to catch late-posted results.
     #   3. compute_features_horse_racing — race-level + per-entrant.
     #   4. precompute_predictions_horse_racing — market-consensus
     #      baseline (devigged morning lines). Trained ML model
@@ -246,7 +253,7 @@ with DAG(
         task_id="fetch_horse_racing_results",
         bash_command=(
             f"{DOCKER_EXEC} python /app/scripts/load_racing_api.py "
-            "--results --start $(date -u -d 'yesterday' +%Y-%m-%d) --end $(date -u -d 'yesterday' +%Y-%m-%d)"
+            "--results --start $(date -u -d 'yesterday' +%Y-%m-%d) --end $(date -u +%Y-%m-%d)"
         ),
     )
     compute_features_horse_racing = BashOperator(

@@ -87,9 +87,14 @@ async def list_races(
             r.status,
             (SELECT COUNT(*) FROM race_entrants e
               WHERE e.race_id = r.id AND NOT e.scratched) AS runners,
+            -- Count picks regardless of OUTCOME ('lost' included) so a
+            -- finished race still shows its "N picks" badge in the
+            -- Recent results tab — a losing pick was still a pick, and
+            -- hiding lost recs made graded races look like no bets were
+            -- made. Only 'cancelled' (never actually placed) is excluded.
             (SELECT COUNT(*) FROM race_recommendations rec
               WHERE rec.race_id = r.id AND rec.bet_type = 'win'
-                AND rec.status IN ('pending', 'placed', 'won'))
+                AND rec.status IN ('pending', 'placed', 'won', 'lost', 'void'))
                                         AS recommendation_count
         FROM races r
         WHERE {status_clause}
