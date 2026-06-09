@@ -50,7 +50,16 @@ class TestRecommendationService:
             ),
         ]
 
-        mock_db.execute.return_value.fetchall.return_value = rows
+        # get_active_recommendations now also queries race_recommendations
+        # (horse racing merged into the unified feed). Return the team rows
+        # for the betting query and nothing for the horse-racing query so
+        # this test stays focused on the team-sport path.
+        def _exec(query, params=None):
+            result = MagicMock()
+            result.fetchall.return_value = [] if "race_recommendations" in str(query) else rows
+            return result
+
+        mock_db.execute.side_effect = _exec
 
         service = RecommendationService(mock_db)
         recs = service.get_active_recommendations(limit=10)
@@ -110,10 +119,18 @@ class TestRecommendationService:
                 expected_value=0.18,
                 recommended_stake=50.0,
                 reasoning="Both teams score a lot",
+                model_confidence=0.75,
             ),
         ]
 
-        mock_db.execute.return_value.fetchall.return_value = rows
+        # As with get_active, the high-value path now also merges
+        # horse-racing recs — return [] for that query.
+        def _exec(query, params=None):
+            result = MagicMock()
+            result.fetchall.return_value = [] if "race_recommendations" in str(query) else rows
+            return result
+
+        mock_db.execute.side_effect = _exec
 
         service = RecommendationService(mock_db)
         recs = service.get_high_value_recommendations(min_ev=0.10)

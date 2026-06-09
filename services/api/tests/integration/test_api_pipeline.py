@@ -89,10 +89,19 @@ class TestPredictionToRecommendationFlow:
                 expected_value=0.12,
                 recommended_stake=25.0,
                 reasoning="Model confidence 72%, positive EV",
+                model_confidence=0.72,
             ),
         ]
 
-        mock_db.execute.return_value.fetchall.return_value = recs
+        # get_high_value_recommendations now also merges horse-racing recs;
+        # return [] for the race_recommendations query so this flow test
+        # stays on the team-sport path.
+        def _exec(query, params=None):
+            result = MagicMock()
+            result.fetchall.return_value = [] if "race_recommendations" in str(query) else recs
+            return result
+
+        mock_db.execute.side_effect = _exec
 
         service = RecommendationService(mock_db)
         results = service.get_high_value_recommendations(min_ev=0.05)
