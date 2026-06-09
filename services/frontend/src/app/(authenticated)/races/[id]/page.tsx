@@ -1,6 +1,5 @@
 'use client';
 
-import { use } from 'react';
 import { useRaceDetail } from '@/lib/hooks/use-races';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -12,13 +11,18 @@ import { Trophy, AlertTriangle } from 'lucide-react';
 import { RaceEntrant } from '@/lib/types/race';
 
 interface PageProps {
-  params: Promise<{ id: string }>;
+  // Next 14 client components receive params as a PLAIN object (not a
+  // Promise — that's the Next 15 shape). The earlier version typed
+  // this as Promise + called React's use(params), which throws a
+  // client-side exception on React 18 because use() only accepts a
+  // Promise/Context, not a plain object — that was the "Application
+  // error" crash on race-tile clicks. The sibling predictions/[id]
+  // page reads params.id directly, which is the correct Next 14 form.
+  params: { id: string };
 }
 
 export default function RaceDetailPage({ params }: PageProps) {
-  // Next 15 made params async — `use()` unwraps the promise in
-  // client components.
-  const { id } = use(params);
+  const { id } = params;
   const { data, isLoading, error, refetch } = useRaceDetail(id);
 
   if (isLoading) return <LoadingPage message="Loading race detail..." />;
