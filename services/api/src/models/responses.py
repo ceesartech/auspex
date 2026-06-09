@@ -54,6 +54,14 @@ class RecommendationResponse(BaseModel):
     confidence_level: str
     reasoning: str
     expires_at: datetime
+    # Sport key so the UI can frame non-team sports (e.g. horse racing,
+    # where match_info.home_team is the horse and away_team is "Field").
+    # None/"" → a team or 1v1 match (the default rendering).
+    sport: Optional[str] = None
+    # The model's predicted probability for the recommended selection
+    # (devigged consensus win prob for horse racing; ensemble confidence
+    # for team sports). Lets the card show the prediction behind the bet.
+    model_probability: Optional[float] = None
 
 
 class AccumulatorResponse(BaseModel):

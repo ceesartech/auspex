@@ -11,6 +11,12 @@ export interface Recommendation {
   confidence_level: string;
   reasoning: string;
   expires_at: string;
+  // Sport key — "horse_racing" frames the card as a single runner vs the
+  // field; null/absent → a team or 1v1 match (default rendering).
+  sport?: string | null;
+  // Model's predicted probability for the selection (0–1). Shown as the
+  // "Model" stat so the prediction behind the bet is visible.
+  model_probability?: number | null;
 }
 
 export interface Accumulator {

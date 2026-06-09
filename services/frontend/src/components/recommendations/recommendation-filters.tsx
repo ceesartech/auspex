@@ -29,6 +29,7 @@ const confidenceOptions = [
 // listed here so the filter never yields an empty result set.
 const marketOptions = [
   { value: '', label: 'All Markets' },
+  // Soccer (1x2-derived) markets
   { value: '1x2', label: '1X2' },
   { value: 'double_chance', label: 'Double Chance' },
   { value: 'draw_no_bet', label: 'Draw No Bet' },
@@ -36,6 +37,13 @@ const marketOptions = [
   { value: 'btts', label: 'BTTS' },
   { value: 'asian_handicap', label: 'Asian Handicap' },
   { value: 'correct_score', label: 'Correct Score' },
+  // Team / 1v1 sports (NFL/NBA/NHL/tennis/MMA)
+  { value: 'moneyline', label: 'Moneyline' },
+  { value: 'spread', label: 'Spread' },
+  { value: 'total', label: 'Total' },
+  { value: 'puck_line', label: 'Puck Line' },
+  // Horse racing
+  { value: 'win', label: 'Win (Horse Racing)' },
 ];
 
 export function RecommendationFilters({ onFilterChange }: RecommendationFiltersProps) {

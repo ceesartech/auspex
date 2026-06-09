@@ -26,31 +26,53 @@ export function RecommendationCard({ recommendation, onAddToAccumulator }: Recom
     confidence_level,
     reasoning,
     expires_at,
+    sport,
+    model_probability,
   } = recommendation;
 
+  const isHorseRacing = sport === 'horse_racing';
+  // confidence_rating arrives lowercase for horse racing (high/medium)
+  // and uppercase for team sports (HIGH/MEDIUM) — normalise both so the
+  // badge colour + label are consistent across sports.
+  const conf = (confidence_level || '').toUpperCase();
   const confidenceVariant =
-    confidence_level === 'HIGH' ? 'success' : confidence_level === 'MEDIUM' ? 'warning' : 'secondary';
+    conf === 'HIGH' || conf === 'VERY_HIGH'
+      ? 'success'
+      : conf === 'MEDIUM'
+        ? 'warning'
+        : 'secondary';
 
   return (
     <Card className="transition-all hover:shadow-md">
       <CardHeader className="pb-2">
         <div className="flex items-center justify-between">
-          <Badge variant="outline">{match_info.league_name}</Badge>
-          <Badge variant={confidenceVariant}>{confidence_level}</Badge>
+          <Badge variant="outline">
+            {isHorseRacing ? `🏇 ${match_info.league_name}` : match_info.league_name}
+          </Badge>
+          <Badge variant={confidenceVariant}>{conf.replace('_', ' ') || 'N/A'}</Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
         <div>
           <p className="text-sm font-medium">
-            {match_info.home_team} vs {match_info.away_team}
+            {isHorseRacing
+              ? match_info.home_team
+              : `${match_info.home_team} vs ${match_info.away_team}`}
           </p>
           <p className="text-xs text-muted-foreground">{formatDateTime(match_info.match_date)}</p>
         </div>
 
         <div className="flex items-center justify-between rounded-lg bg-muted p-3">
           <div>
-            <p className="text-xs text-muted-foreground">{market_type}</p>
+            <p className="text-xs text-muted-foreground">
+              {isHorseRacing ? 'Win' : market_type}
+            </p>
             <p className="text-lg font-bold">{outcome}</p>
+            {model_probability != null && (
+              <p className="text-xs text-muted-foreground">
+                Model {formatPercentage(model_probability)}
+              </p>
+            )}
           </div>
           <div className="text-right">
             <p className="text-xs text-muted-foreground">Odds</p>

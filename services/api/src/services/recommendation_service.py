@@ -79,10 +79,116 @@ class RecommendationService:
                     confidence_level=row.confidence_rating or "medium",
                     reasoning=row.reasoning or "",
                     expires_at=row.match_date,
+                    sport=None,
+                    model_probability=(float(row.model_confidence) if row.model_confidence is not None else None),
                 )
             )
 
-        return recommendations
+        # Merge in horse-racing recs (separate schema: race_recommendations).
+        # They share the RecommendationResponse shape via _horse_racing_recs.
+        recommendations.extend(
+            self._horse_racing_recs(
+                confidence_level=confidence_level,
+                market_type=market_type,
+                min_odds=min_odds,
+                max_odds=max_odds,
+                limit=limit,
+            )
+        )
+        recommendations.sort(key=lambda r: r.expected_value, reverse=True)
+        return recommendations[:limit]
+
+    def _horse_racing_recs(
+        self,
+        *,
+        confidence_level: Optional[str] = None,
+        market_type: Optional[str] = None,
+        min_odds: Optional[float] = None,
+        max_odds: Optional[float] = None,
+        min_ev: Optional[float] = None,
+        limit: int = 20,
+    ) -> List[RecommendationResponse]:
+        """Active horse-racing win recommendations, mapped into the
+        unified RecommendationResponse shape so they appear in the
+        general /recommendations feed alongside team sports.
+
+        Horse racing lives in its own schema (race_recommendations +
+        race_predictions + races + race_entrants + horses). The 'win'
+        market is the only one generated today; a non-'win' market_type
+        filter therefore yields nothing.
+        """
+        # Horse racing only has the 'win' market. If the caller filters
+        # to a different market, there are no horse-racing matches.
+        if market_type is not None and market_type != "win":
+            return []
+
+        query = text(
+            """
+            SELECT rec.id            AS recommendation_id,
+                   r.race_date,
+                   r.track_name,
+                   r.race_number,
+                   h.name            AS horse_name,
+                   rec.odds_at_recommendation,
+                   rec.confidence_rating,
+                   rec.expected_value,
+                   rec.recommended_stake,
+                   rec.reasoning,
+                   rp.confidence     AS consensus_prob
+            FROM race_recommendations rec
+            JOIN races r          ON r.id = rec.race_id
+            JOIN race_entrants e  ON e.id = rec.entrant_id
+            JOIN horses h         ON h.id = e.horse_id
+            LEFT JOIN race_predictions rp ON rp.id = rec.race_prediction_id
+            WHERE rec.status IN ('pending', 'placed', 'won')
+              AND rec.bet_type = 'win'
+              AND r.race_date > NOW()
+              AND (:confidence_level IS NULL OR UPPER(rec.confidence_rating) = :confidence_level)
+              AND (:min_odds IS NULL OR rec.odds_at_recommendation >= :min_odds)
+              AND (:max_odds IS NULL OR rec.odds_at_recommendation <= :max_odds)
+              AND (:min_ev IS NULL OR rec.expected_value >= :min_ev)
+            ORDER BY rec.expected_value DESC
+            LIMIT :limit
+            """
+        )
+        rows = self.db.execute(
+            query,
+            {
+                "confidence_level": confidence_level.upper() if confidence_level else None,
+                "min_odds": min_odds,
+                "max_odds": max_odds,
+                "min_ev": min_ev,
+                "limit": limit,
+            },
+        ).fetchall()
+
+        out: List[RecommendationResponse] = []
+        for row in rows:
+            league = row.track_name + (f" R{row.race_number}" if row.race_number else "")
+            out.append(
+                RecommendationResponse(
+                    recommendation_id=str(row.recommendation_id),
+                    match_info=MatchInfo(
+                        match_id=str(row.recommendation_id),
+                        league_name=league,
+                        home_team=row.horse_name,
+                        away_team="Field",
+                        match_date=row.race_date,
+                        venue=None,
+                    ),
+                    market_type="win",
+                    outcome=row.horse_name,
+                    recommended_odds=float(row.odds_at_recommendation),
+                    recommended_stake=float(row.recommended_stake or 0),
+                    expected_value=float(row.expected_value or 0),
+                    confidence_level=row.confidence_rating or "medium",
+                    reasoning=row.reasoning or "",
+                    expires_at=row.race_date,
+                    sport="horse_racing",
+                    model_probability=(float(row.consensus_prob) if row.consensus_prob is not None else None),
+                )
+            )
+        return out
 
     def get_high_value_recommendations(
         self,
@@ -99,7 +205,8 @@ class RecommendationService:
                    at.name as away_team, br.bet_type, br.selection,
                    br.odds_at_recommendation, br.bookmaker,
                    br.confidence_rating, br.expected_value,
-                   br.recommended_stake, br.reasoning
+                   br.recommended_stake, br.reasoning,
+                   p.confidence as model_confidence
             FROM betting_recommendations br
             JOIN predictions p ON br.prediction_id = p.id
             JOIN matches m ON br.match_id = m.id
@@ -137,10 +244,16 @@ class RecommendationService:
                     confidence_level=row.confidence_rating or "medium",
                     reasoning=row.reasoning or "",
                     expires_at=row.match_date,
+                    sport=None,
+                    model_probability=(float(row.model_confidence) if row.model_confidence is not None else None),
                 )
             )
 
-        return recommendations
+        # Merge in high-EV horse-racing recs so the unified "High Value
+        # Bets" list spans every sport.
+        recommendations.extend(self._horse_racing_recs(min_ev=min_ev, limit=limit))
+        recommendations.sort(key=lambda r: r.expected_value, reverse=True)
+        return recommendations[:limit]
 
     def build_accumulator(
         self,
