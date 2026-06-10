@@ -609,6 +609,13 @@ class TrainingOrchestrator:
 
         try:
             result = ensemble.train(val_df=val_df, target=target)
+
+            # Fit the served calibrator on the BLENDED ensemble output
+            # (must happen before register_model so the saved artifact
+            # carries it). This is the lever that was previously dead.
+            if self.calibrate:
+                self._fit_ensemble_calibrator(ensemble, val_df, target, ensemble_name, result)
+
             self.trained_models[ensemble_name] = ensemble
             self.results[ensemble_name] = result
 
@@ -621,6 +628,45 @@ class TrainingOrchestrator:
         except Exception as e:
             logger.error(f"Ensemble training failed: {e}", exc_info=True)
             self.results[ensemble_name] = {"error": str(e)}
+
+    def _fit_ensemble_calibrator(
+        self,
+        ensemble: "EnsemblePredictor",
+        val_df: pd.DataFrame,
+        target: str,
+        ensemble_name: str,
+        result: Dict[str, Any],
+    ) -> None:
+        """Fit + attach the isotonic calibrator on raw ensemble val output.
+        Encoding mirrors EnsemblePredictor.train (LabelEncoder.fit_transform
+        on val labels) so calibrator class indices align with predict_proba
+        columns. Guarded + best-effort: a failure leaves the ensemble
+        serving raw (uncalibrated) probabilities, unchanged from before."""
+        from sklearn.preprocessing import LabelEncoder
+
+        try:
+            raw = ensemble.predict_proba(val_df, apply_calibration=False)
+            y_enc = LabelEncoder().fit_transform(val_df[target].values)
+            if raw.ndim != 2 or raw.shape[1] != len(np.unique(y_enc)):
+                logger.warning(
+                    "Skipping calibration for %s: %s proba cols vs %d classes",
+                    ensemble_name,
+                    raw.shape,
+                    len(np.unique(y_enc)),
+                )
+                return
+            ensemble.fit_calibrator(raw, y_enc)
+            pre = ensemble.calibrator.calibration_error(raw, y_enc)
+            post = ensemble.calibrator.calibration_error(ensemble.calibrator.calibrate(raw), y_enc)
+            result["calibration_val"] = {"raw_ece": pre["ece"], "calibrated_ece": post["ece"]}
+            logger.info(
+                "Ensemble %s val calibration: ECE %.4f -> %.4f",
+                ensemble_name,
+                pre["ece"],
+                post["ece"],
+            )
+        except Exception as e:
+            logger.warning("Ensemble calibrator fit failed for %s: %s", ensemble_name, e)
 
     def get_best_model(self, metric: str = "accuracy") -> Optional[str]:
         """Get the name of the best model by a metric."""
@@ -700,7 +746,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             min_samples=args.min_samples,
             min_feature_count=args.min_feature_count,
         )
-        train_df, val_df = _split_temporally(frame, args.train_ratio, args.val_ratio)
+        train_df, val_df, test_df = _split_temporally(frame, args.train_ratio, args.val_ratio)
         features = bundle.feature_columns(frame, target)
         orchestrator = TrainingOrchestrator(
             registry_dir=args.output_dir,
@@ -720,6 +766,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.error("Model training failed: %s", exc, exc_info=True)
         return 1
 
+    # Held-out test: honest raw-vs-calibrated ECE/Brier on the tail the
+    # models/weights/calibrator never saw. This is the gate for shipping
+    # calibration — we keep it only where it measurably helps.
+    holdout = _evaluate_holdout(orchestrator, bundle, test_df, target)
+    if holdout:
+        logger.info("HELD-OUT TEST (%s): %s", bundle.ensemble_name, json.dumps(holdout))
+
     onnx_paths: Dict[str, str] = {}
     if args.export_onnx:
         onnx_paths = _export_onnx(
@@ -734,6 +787,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "best_model": orchestrator.get_best_model(),
         "results": results,
         "onnx_models": onnx_paths,
+        "holdout_test": holdout,
     }
 
     output_dir = Path(args.output_dir)
@@ -790,15 +844,64 @@ def _export_onnx(
     return paths
 
 
-def _split_temporally(frame: pd.DataFrame, train_ratio: float, val_ratio: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _split_temporally(
+    frame: pd.DataFrame, train_ratio: float, val_ratio: float
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Temporal train / val / test split. The tail after
+    (train_ratio + val_ratio) is the HELD-OUT TEST set — previously
+    discarded — used for honest raw-vs-calibrated metrics on data that
+    neither the base models, the ensemble weights, nor the calibrator
+    ever saw. Empty when the ratios sum to 1.0 (caller tolerates that)."""
     ordered = frame.sort_values("match_date").reset_index(drop=True)
     train_end = int(len(ordered) * train_ratio)
     val_end = int(len(ordered) * (train_ratio + val_ratio))
     train_df = ordered.iloc[:train_end].copy()
     val_df = ordered.iloc[train_end:val_end].copy()
+    test_df = ordered.iloc[val_end:].copy()
     if train_df.empty or val_df.empty:
         raise ValueError("Training and validation splits must both contain rows")
-    return train_df, val_df
+    return train_df, val_df, test_df
+
+
+def _evaluate_holdout(
+    orchestrator: "TrainingOrchestrator",
+    bundle: SportBundle,
+    test_df: pd.DataFrame,
+    target: str,
+) -> Optional[Dict[str, Any]]:
+    """Raw-vs-calibrated ECE/MCE/Brier/accuracy for the ensemble on the
+    held-out test set. Returns None when there's no test data or no
+    calibrator (so the report key is simply absent)."""
+    if test_df is None or test_df.empty or target not in test_df.columns:
+        return None
+    ensemble = orchestrator.trained_models.get(bundle.ensemble_name)
+    if ensemble is None or getattr(ensemble, "calibrator", None) is None:
+        return None
+    try:
+        from sklearn.preprocessing import LabelEncoder
+
+        from training.calibration import brier_multiclass
+
+        y = LabelEncoder().fit_transform(test_df[target].values)
+        raw = ensemble.predict_proba(test_df, apply_calibration=False)
+        if raw.ndim != 2 or raw.shape[1] != len(np.unique(y)):
+            return None
+        cal = ensemble.calibrator.calibrate(raw)
+        cerr = ensemble.calibrator.calibration_error
+
+        def _metrics(p: np.ndarray) -> Dict[str, float]:
+            e = cerr(p, y)
+            return {
+                "ece": round(e["ece"], 5),
+                "mce": round(e["mce"], 5),
+                "brier": round(brier_multiclass(p, y), 5),
+                "accuracy": round(float((np.argmax(p, axis=1) == y).mean()), 5),
+            }
+
+        return {"n": int(len(test_df)), "raw": _metrics(raw), "calibrated": _metrics(cal)}
+    except Exception as e:
+        logger.warning("Held-out test eval failed: %s", e)
+        return None
 
 
 def _json_default(value: Any) -> Any:

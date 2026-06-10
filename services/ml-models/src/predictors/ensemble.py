@@ -21,6 +21,11 @@ class EnsemblePredictor(BaseModel):
         self.models: Dict[str, BaseModel] = {}
         self.weights: Dict[str, float] = {}
         self.calibrators: Dict[str, Any] = {}
+        # Isotonic calibrator fit on the BLENDED ensemble output (the
+        # served probability). None until fit_calibrator() runs at the
+        # end of training; applied automatically in predict_proba and
+        # round-tripped through save()/load() via the metadata JSON.
+        self.calibrator: Optional[Any] = None
 
     def add_model(self, name: str, model: BaseModel, weight: float = 1.0) -> None:
         """Add a model to the ensemble."""
@@ -147,7 +152,17 @@ class EnsemblePredictor(BaseModel):
         proba = self.predict_proba(X)
         return np.argmax(proba, axis=1)
 
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+    def fit_calibrator(self, y_proba: np.ndarray, y_true: np.ndarray, method: str = "isotonic") -> None:
+        """Fit the post-blend calibrator on validation ensemble output.
+        Pass the RAW blended probabilities (predict_proba(..., apply_calibration=False))
+        and the encoded validation labels."""
+        from training.calibration import ProbabilityCalibrator
+
+        cal = ProbabilityCalibrator(method=method)
+        cal.fit(y_proba, y_true)
+        self.calibrator = cal
+
+    def predict_proba(self, X: pd.DataFrame, apply_calibration: bool = True) -> np.ndarray:
         if not self.models:
             raise ValueError("No models in ensemble")
 
@@ -172,6 +187,15 @@ class EnsemblePredictor(BaseModel):
 
         if total_weight > 0:
             blended /= total_weight
+
+        # Apply the served calibration map. apply_calibration=False is used
+        # at training time to fit the calibrator on RAW blended output and
+        # to report raw-vs-calibrated metrics on the held-out test set.
+        if apply_calibration and self.calibrator is not None and self.calibrator.is_fitted:
+            try:
+                blended = self.calibrator.calibrate(blended)
+            except Exception as e:
+                logger.error("Ensemble calibration failed, serving raw proba: %s", e)
 
         return blended
 
@@ -210,6 +234,10 @@ class EnsemblePredictor(BaseModel):
             "weights": self.weights,
             "model_names": list(self.models.keys()),
             "config": self.config.to_dict(),
+            # Embed the calibrator IN the metadata (not a sidecar) so it
+            # survives the registry -> promotion -> serve copy of model.bin
+            # as a single file. None when training ran --no-calibration.
+            "calibrator": self.calibrator.to_dict() if self.calibrator is not None else None,
         }
         with open(path, "w") as f:
             json.dump(metadata, f, indent=2)
@@ -224,5 +252,10 @@ class EnsemblePredictor(BaseModel):
             metadata = json.load(f)
 
         self.weights = metadata["weights"]
+        cal_meta = metadata.get("calibrator")
+        if cal_meta:
+            from training.calibration import ProbabilityCalibrator
+
+            self.calibrator = ProbabilityCalibrator.from_dict(cal_meta)
         self.is_fitted = True
         logger.info(f"Ensemble metadata loaded from {path}")
