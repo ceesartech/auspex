@@ -693,20 +693,26 @@ class TrainingOrchestrator:
 
             ensemble.fit_calibrator(raw, y_enc)
 
+            # Gate: keep the calibrator only with (a) enough held-out test
+            # rows to trust the comparison and (b) a real Brier improvement.
+            # MIN_GATE_N guards against a coin-flip "win" on a tiny test set
+            # (e.g. NFL n=143, where isotonic's Brier edge is within noise
+            # and its MCE blows up) — below it we default to serving raw.
+            MIN_GATE_N = 500
             decision: Dict[str, Any] = {"kept": True, "reason": "no held-out test set to gate on"}
             if test_df is not None and not test_df.empty and target in test_df.columns:
                 metrics = self._holdout_metrics(ensemble, test_df, target)
                 if metrics is not None:
+                    enough = metrics["n"] >= MIN_GATE_N
                     improves = metrics["calibrated"]["brier"] < metrics["raw"]["brier"] - 1e-4
-                    decision = {
-                        "kept": improves,
-                        "reason": (
-                            "calibration lowers held-out Brier"
-                            if improves
-                            else "calibration does NOT improve held-out Brier — serving raw"
-                        ),
-                        **metrics,
-                    }
+                    keep = enough and improves
+                    if not enough:
+                        reason = f"held-out test too small (n={metrics['n']} < {MIN_GATE_N}) — serving raw"
+                    elif improves:
+                        reason = "calibration lowers held-out Brier"
+                    else:
+                        reason = "calibration does NOT improve held-out Brier — serving raw"
+                    decision = {"kept": keep, "reason": reason, **metrics}
 
             if not decision["kept"]:
                 ensemble.calibrator = None  # serve raw
