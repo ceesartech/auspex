@@ -47,6 +47,13 @@ FEATURE_SET = "baseline"
 FEATURE_VERSION = "v1"
 # Rolling window (last N team matches counted toward form features).
 WINDOW = 5
+
+# Rolling match_stats form (validated: scripts/ab_soccer_matchstats.py,
+# held-out ΔBrier -0.0029, +0.91pts acc). xG is intentionally excluded —
+# expected_goals is NULL for 100% of match_stats rows. Multi-window
+# (3/5/10) stacking is what made the signal clear in the A/B.
+MS_STATS = ["shots", "shots_on_target", "corners", "possession", "fouls", "shots_against", "sot_against"]
+MS_WINDOWS = [3, 5, 10]
 # How long a computed feature row stays valid before recompute.
 CACHE_TTL_SECONDS = 3600
 
@@ -83,6 +90,9 @@ NEUTRAL_DEFAULTS: dict[str, float] = {
     "form_diff_points": 0.0,
     "form_diff_goals": 0.0,
 }
+# Rolling match_stats diffs (home minus away) default to 0 = teams equal,
+# the neutral prior — same rationale as form_diff_* above.
+NEUTRAL_DEFAULTS.update({f"ms_diff_{s}_w{w}": 0.0 for s in MS_STATS for w in MS_WINDOWS})
 
 
 def _with_defaults(features: dict) -> dict:
@@ -188,6 +198,39 @@ def _rolling_team_form(cur, team_id: str, before_date, side: str) -> dict:
     }
 
 
+def _rolling_team_stats(cur, team_id: str, before_date) -> dict:
+    """Per-window means of the team's own match_stats (and the opponent's
+    shots/SoT, for the 'against' metrics) over its last max(MS_WINDOWS)
+    FINISHED matches before `before_date`. Leakage-safe: the current
+    match is excluded by `match_date < before_date`. Returns
+    {f'{stat}_w{w}': mean} (None when the team has no prior history)."""
+    cur.execute(
+        """
+        SELECT
+            ms.shots, ms.shots_on_target, ms.corners, ms.possession, ms.fouls,
+            opp.shots            AS shots_against,
+            opp.shots_on_target  AS sot_against
+        FROM matches m
+        JOIN match_stats ms ON ms.match_id = m.id AND ms.team_id = %(tid)s
+        LEFT JOIN match_stats opp ON opp.match_id = m.id AND opp.team_id <> %(tid)s
+        WHERE (m.home_team_id = %(tid)s OR m.away_team_id = %(tid)s)
+          AND m.status = 'finished'
+          AND m.match_date < %(before)s
+        ORDER BY m.match_date DESC
+        LIMIT %(n)s
+        """,
+        {"tid": team_id, "before": before_date, "n": max(MS_WINDOWS)},
+    )
+    rows = cur.fetchall()
+    out: dict = {}
+    for w in MS_WINDOWS:
+        sub = rows[:w]
+        for c in MS_STATS:
+            vals = [float(r[c]) for r in sub if r.get(c) is not None]
+            out[f"{c}_w{w}"] = (sum(vals) / len(vals)) if vals else None
+    return out
+
+
 def _odds_avg(cur, match_id: str, market_type: str, selection: str, line=None):
     if line is None:
         cur.execute(
@@ -256,6 +299,15 @@ def compute_match_features(cur, match_id: str):
     features["form_diff_points"] = _safe_diff(home_form.get("home_roll_points"), away_form.get("away_roll_points"))
     features["form_diff_goals"] = _safe_diff(home_form.get("home_roll_goals_for"), away_form.get("away_roll_goals_for"))
 
+    # Rolling match_stats diffs (home minus away) per stat per window —
+    # the validated signal. Raw per-side values are computed internally
+    # but only the diffs are written (matches the A/B feature set).
+    home_ms = _rolling_team_stats(cur, m["h"], m["d"])
+    away_ms = _rolling_team_stats(cur, m["a"], m["d"])
+    for c in MS_STATS:
+        for w in MS_WINDOWS:
+            features[f"ms_diff_{c}_w{w}"] = _safe_diff(home_ms.get(f"{c}_w{w}"), away_ms.get(f"{c}_w{w}"))
+
     return features
 
 
@@ -299,10 +351,37 @@ def compute_all(database_url: str, match_ids: list[str]) -> dict:
     return {"ok": ok, "fail": fail}
 
 
+def list_finished_matches(conn, sport: str) -> list[str]:
+    """All FINISHED matches (with a score) for a sport — for the
+    historical features_cache backfill so the model TRAINS on the same
+    feature set it serves with."""
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT m.id::text AS id
+            FROM matches m
+            JOIN leagues l ON l.id = m.league_id
+            WHERE l.sport = %s
+              AND m.status = 'finished'
+              AND m.home_score IS NOT NULL
+              AND m.away_score IS NOT NULL
+            ORDER BY m.match_date ASC
+            """,
+            (sport,),
+        )
+        return [r["id"] for r in cur.fetchall()]
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--match-ids", help="Comma-separated UUIDs (overrides --days).")
+    p.add_argument(
+        "--backfill-finished",
+        metavar="SPORT",
+        help="Recompute features_cache for ALL finished matches of SPORT "
+        "(historical backfill; overrides --days).",
+    )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
 
@@ -315,12 +394,16 @@ def main(argv=None):
 
     if args.match_ids:
         match_ids = [s.strip() for s in args.match_ids.split(",") if s.strip()]
+    elif args.backfill_finished:
+        with psycopg2.connect(args.database_url) as conn:
+            match_ids = list_finished_matches(conn, args.backfill_finished)
+        logger.info("Backfill: %d finished %s matches", len(match_ids), args.backfill_finished)
     else:
         with psycopg2.connect(args.database_url) as conn:
             match_ids = list_target_matches(conn, args.days)
 
     if not match_ids:
-        logger.info("No matches needing features in the next %d days", args.days)
+        logger.info("No matches to compute features for")
         return 0
 
     logger.info("Computing features for %d match(es)...", len(match_ids))
