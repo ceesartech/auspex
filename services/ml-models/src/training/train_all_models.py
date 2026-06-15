@@ -641,7 +641,6 @@ class TrainingOrchestrator:
         """Raw-vs-calibrated ECE/MCE/Brier/accuracy on `df`. Requires a
         FITTED calibrator on the ensemble. Returns None on shape mismatch."""
         from sklearn.preprocessing import LabelEncoder
-
         from training.calibration import brier_multiclass
 
         y = LabelEncoder().fit_transform(df[target].values)
