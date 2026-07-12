@@ -452,6 +452,7 @@ betting-system/
 
 | Document | Contents |
 |---|---|
+| [`docs/SYSTEM_AUDIT_AND_ROADMAP.md`](docs/SYSTEM_AUDIT_AND_ROADMAP.md) | **Start here for current state**: July-2026 audit — active incidents, tested-levers registry, remove list, cost savings, prioritized roadmap |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System design, data flow, technology choices |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Step-by-step local and cloud deployment |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Dev workflow, adding scrapers/models, code style |
