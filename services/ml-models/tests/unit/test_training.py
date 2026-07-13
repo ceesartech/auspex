@@ -76,7 +76,10 @@ class TestProbabilityCalibrator:
         cal.fit(y_proba, y_true)
 
         assert cal.is_fitted is True
-        assert len(cal.calibrators) == 3
+        # June-2026 rewrite: fitted maps are stored as serializable
+        # isotonic knots in .params (JSON round-trip for the ensemble
+        # metadata), not sklearn objects in .calibrators.
+        assert len(cal.params) == 3
 
         calibrated = cal.calibrate(y_proba)
         assert calibrated.shape == (n, 3)
