@@ -21,9 +21,12 @@ at 02:00 UTC every day. The script:
 ### Initial setup on a fresh host
 
 ```bash
-# 1. Create the host backups dir owned by UID 1000 (appuser).
+# 1. Create the host backups dir owned by the api container's appuser.
+#    NOTE: Dockerfile.api uses `useradd -r`, which allocates a SYSTEM uid
+#    (999 today, NOT 1000). Hardcoding 1000 broke the first-ever backup
+#    run (2026-07-13, "Permission denied") — always resolve it live:
 sudo mkdir -p /opt/auspex/backups
-sudo chown -R 1000:1000 /opt/auspex/backups
+sudo chown -R "$(docker compose exec -T api id -u | tr -d '[:space:]'):$(docker compose exec -T api id -g | tr -d '[:space:]')" /opt/auspex/backups
 
 # 2. Rebuild the api image (adds postgresql-client for pg_dump + boto3):
 docker compose build api
