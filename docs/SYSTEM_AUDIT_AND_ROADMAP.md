@@ -362,7 +362,15 @@ with the growth-rate driver (WAL) eliminated.
 > change-only capture + vw_rec_clv / vw_clv_summary; gating readout after 60-90d),
 > cost downgrades DONE (user confirmed both; weather DAGs paused — full −$95/mo), healthchecks + log caps + weekly prune cron + `VACUUM FULL
 > race_predictions` (1.5GB→123MB) + CI root-tests all shipped (`45dc9ce`).
-> Next up: §2.2 CLV capture, then §2.1 results ingestion (month-1).
+> §2.1 RESULTS INGESTION SHIPPED (433b3bd..6c7e963, 2026-07-13): fetch_upcoming
+> --results mode (same endpoints/identity as fixtures; NHL regulation_winner
+> metadata; tennis/MMA winner-flag convention), fetch_results DAG task before the
+> grader, + two grader fixes (trigger-settled recs get P&L filled). VERIFIED: first
+> team-sport settlements ever (12 recs, real P&L), 180 predictions graded, WC/
+> Wimbledon/UFC results flowing. Known follow-ups: asian_handicap grading is a
+> documented gap (grading_outcomes dispatch — AH recs won't settle until added);
+> soccer ET/pens cup ties grade on post-ET score (metadata.result_detail stored
+> for refinement); NBA/NHL/NFL validate at their season openers (2026-09/10).
 
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
