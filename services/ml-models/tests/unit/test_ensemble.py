@@ -233,6 +233,31 @@ class TestEnsemblePredictor:
         assert len(preds) == 5
         assert all(p in [0, 1, 2] for p in preds)
 
+    def test_majority_degraded_blend_refuses_to_serve(self, ensemble_config, sample_match_data):
+        # Guard for the July-2026 constant-prior incident (audit doc §1.1):
+        # when members holding a MAJORITY of the weight fail, predict_proba
+        # must raise — not silently serve whatever minority survived.
+        model = EnsemblePredictor(ensemble_config)
+        broken = self._make_mock_model()
+        broken.predict_proba = MagicMock(side_effect=KeyError("feature__odds_home not in index"))
+        model.add_model("learned", broken, weight=0.8)
+        model.add_model("prior", self._make_mock_model(), weight=0.2)
+
+        with pytest.raises(ValueError, match="refusing to serve"):
+            model.predict_proba(sample_match_data.head(5))
+
+    def test_minority_member_failure_still_serves(self, ensemble_config, sample_match_data):
+        # A minority-weight failure degrades gracefully (logged, reweighted).
+        model = EnsemblePredictor(ensemble_config)
+        broken = self._make_mock_model()
+        broken.predict_proba = MagicMock(side_effect=KeyError("boom"))
+        model.add_model("small", broken, weight=0.2)
+        model.add_model("main", self._make_mock_model(), weight=0.8)
+
+        proba = model.predict_proba(sample_match_data.head(5))
+        assert proba.shape == (5, 3)
+        np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=0.05)
+
     def test_predict_no_models(self, ensemble_config, sample_match_data):
         model = EnsemblePredictor(ensemble_config)
         with pytest.raises(ValueError, match="No models in ensemble"):

@@ -162,17 +162,28 @@ class EnsemblePredictor(BaseModel):
         cal.fit(y_proba, y_true)
         self.calibrator = cal
 
+    # A member failure drops its weight from the blend. Below this surviving
+    # fraction we refuse to serve: a majority-degraded blend is not "the
+    # ensemble, slightly worse" — it silently becomes whichever members
+    # survived. This exact failure mode served a constant Poisson/DC prior
+    # for every soccer match for a month (July-2026 audit §1.1) because the
+    # learned members KeyError'd on renamed features and were swallowed here.
+    MIN_SURVIVING_WEIGHT_FRACTION = 0.5
+
     def predict_proba(self, X: pd.DataFrame, apply_calibration: bool = True) -> np.ndarray:
         if not self.models:
             raise ValueError("No models in ensemble")
 
         blended = None
         total_weight = 0.0
+        attempted_weight = 0.0
+        failed: list[str] = []
 
         for name, model in self.models.items():
             w = self.weights.get(name, 0.0)
             if w <= 0:
                 continue
+            attempted_weight += w
             try:
                 proba = model.predict_proba(X)
                 if blended is None:
@@ -180,10 +191,18 @@ class EnsemblePredictor(BaseModel):
                 blended += w * proba
                 total_weight += w
             except Exception as e:
-                logger.error(f"Model '{name}' prediction failed: {e}")
+                failed.append(name)
+                logger.error("Ensemble member %r failed to predict: %s", name, e)
 
         if blended is None:
-            raise ValueError("No model produced valid predictions")
+            raise ValueError(f"No model produced valid predictions (all members failed: {failed})")
+
+        if failed and attempted_weight > 0 and total_weight < self.MIN_SURVIVING_WEIGHT_FRACTION * attempted_weight:
+            raise ValueError(
+                f"Ensemble degraded: members {failed} failed; surviving weight "
+                f"{total_weight:.3f} of {attempted_weight:.3f} is below the "
+                f"{self.MIN_SURVIVING_WEIGHT_FRACTION:.0%} serving threshold — refusing to serve"
+            )
 
         if total_weight > 0:
             blended /= total_weight

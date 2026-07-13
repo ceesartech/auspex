@@ -249,15 +249,13 @@ def _load_dixon_coles_artifact(path_str: str, label: str):
 
     path = Path(path_str)
     if not path.exists():
-        logger.info("%s Dixon-Coles artifact not found at %s; %s markets disabled.",
-                    label, path, label)
+        logger.info("%s Dixon-Coles artifact not found at %s; %s markets disabled.", label, path, label)
         return None
     try:
         from predictors.model_config import DIXON_COLES_CONFIG  # type: ignore
         from predictors.poisson_models import DixonColesPredictor  # type: ignore
     except Exception as e:
-        logger.warning("%s model imports failed; %s markets disabled: %s",
-                       label, label, e)
+        logger.warning("%s model imports failed; %s markets disabled: %s", label, label, e)
         return None
     model = DixonColesPredictor(DIXON_COLES_CONFIG)
     try:
@@ -321,6 +319,7 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                 derive_markets,
                 derive_soccer_htft_markets,
             )
+
             ht_derive_ready = True
         except Exception as ht_e:
             logger.warning("HT derivation imports failed; skipping HT markets: %s", ht_e)
@@ -330,11 +329,7 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
         ht_derive_ready = False
         derive_soccer_htft_markets = None
     # HT/FT joint requires BOTH models. Either missing → no-op.
-    htft_derive_ready = (
-        ht_derive_ready
-        and second_half_dc_model is not None
-        and derive_soccer_htft_markets is not None
-    )
+    htft_derive_ready = ht_derive_ready and second_half_dc_model is not None and derive_soccer_htft_markets is not None
 
     feature_medians = compute_feature_medians(database_url)
     logger.info("Loaded %d feature-medians for NaN fallback", len(feature_medians))
@@ -393,6 +388,19 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                         for k, v in features.items()
                     }
 
+                    # Mirror plain keys into feature__-prefixed duplicates —
+                    # the bridge every other sport's precompute already has
+                    # (see precompute_predictions_nfl.py). Training flattens
+                    # the features_cache JSONB into feature__* columns, so
+                    # the trained models' feature_names use that prefix;
+                    # without the mirror, XGB/LGBM/NN KeyError and only
+                    # Poisson/DC's global prior survives (the July-2026
+                    # audit §1.1 constant-prior incident).
+                    for k in list(filled.keys()):
+                        prefixed = k if k.startswith("feature__") else f"feature__{k}"
+                        if prefixed not in filled:
+                            filled[prefixed] = filled[k]
+
                     proba = ensemble.predict_proba(pd.DataFrame([filled]))[0]
                     if not np.all(np.isfinite(proba)):
                         logger.info(
@@ -449,16 +457,21 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                 if ht_derive_ready and ht_dc_model is not None:
                     try:
                         ht_h_lam, ht_a_lam = ht_dc_model.lambdas_for_match(
-                            m["home_team"], m["away_team"],
+                            m["home_team"],
+                            m["away_team"],
                         )
                         ht_P = build_dc_matrix(
-                            ht_h_lam, ht_a_lam,
+                            ht_h_lam,
+                            ht_a_lam,
                             float(getattr(ht_dc_model, "rho", 0.0) or 0.0),
                             max_goals=MAX_GOALS_DERIVE,
                         )
                         ht_markets = derive_markets("soccer_halftime", ht_P)
                         market_rows += store_market_predictions(
-                            cur, m["match_id"], ht_markets, model_version,
+                            cur,
+                            m["match_id"],
+                            ht_markets,
+                            model_version,
                         )
                     except Exception as e:
                         logger.warning("HT market derivation failed for %s: %s", m["match_id"], e)
@@ -473,21 +486,27 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                 if htft_derive_ready and ht_P is not None:
                     try:
                         h2_h_lam, h2_a_lam = second_half_dc_model.lambdas_for_match(
-                            m["home_team"], m["away_team"],
+                            m["home_team"],
+                            m["away_team"],
                         )
                         h2_P = build_dc_matrix(
-                            h2_h_lam, h2_a_lam,
+                            h2_h_lam,
+                            h2_a_lam,
                             float(getattr(second_half_dc_model, "rho", 0.0) or 0.0),
                             max_goals=MAX_GOALS_DERIVE,
                         )
                         htft_markets = derive_soccer_htft_markets(ht_P, h2_P)
                         market_rows += store_market_predictions(
-                            cur, m["match_id"], htft_markets, model_version,
+                            cur,
+                            m["match_id"],
+                            htft_markets,
+                            model_version,
                         )
                     except Exception as e:
                         logger.warning(
                             "HT/FT joint derivation failed for %s: %s",
-                            m["match_id"], e,
+                            m["match_id"],
+                            e,
                         )
 
                 # Accumulate for the end-of-run digest instead of
