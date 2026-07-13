@@ -1,13 +1,8 @@
 # Deployment Guide
 
-> **Personal-VM path (default).** The system is sized and tuned for personal
-> use on a single small VM with $0 cloud bill (Oracle Cloud free tier) or
-> ~$5/mo (Hetzner). See [Personal-VM deployment](#personal-vm-deployment)
-> below for the recommended path.
->
-> **Multi-tenant / GKE path.** The GKE/Cloud SQL/Memorystore instructions
-> further down still work but are unsupported for personal use — they cost
-> ~$90/mo idle and add operational overhead you don't need.
+> The system runs on a **single Hetzner VM** with Docker Compose behind Caddy.
+> There is no Kubernetes/Terraform/GCP path (removed 2026-07). See
+> [Production (single Hetzner VM + Docker Compose)](#production-single-hetzner-vm--docker-compose).
 
 ## Personal-VM deployment
 
@@ -52,8 +47,7 @@ Airflow DAG. CI auto-deploys are opt-in — see [CI/CD pipeline](#cicd-pipeline)
 | Environment | Infrastructure | Purpose |
 |---|---|---|
 | Local | Docker Compose | Development and testing |
-| Production (personal) | Single VM + Docker Compose + Caddy | Recommended for personal use |
-| Production (multi-tenant) | GKE + Cloud SQL + Memorystore | Optional — adds cost, removes simplicity |
+| Production | Single Hetzner VM + Docker Compose + Caddy | The one live environment |
 
 ---
 
@@ -120,261 +114,69 @@ NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev -- --port 3001
 ```
 
 ---
+## Production (single Hetzner VM + Docker Compose)
 
-## GCP Prerequisites
+Production is one Hetzner VM (`ssh auspex` → `/opt/auspex`) running the Compose
+stack behind Caddy (automatic Let's Encrypt TLS). There is **no Kubernetes,
+Terraform, or GCP** — the GKE-era manifests were removed in the 2026-07 audit
+(`docs/SYSTEM_AUDIT_AND_ROADMAP.md` §5.2).
 
-### 1. Install tooling
-
-```bash
-# gcloud CLI
-curl https://sdk.cloud.google.com | bash
-gcloud init
-
-# kubectl
-gcloud components install kubectl
-
-# Terraform >= 1.6
-brew install terraform  # macOS
-# or: https://developer.hashicorp.com/terraform/downloads
-```
-
-### 2. Create a GCP project
+### First-time / manual deploy on the VM
 
 ```bash
-gcloud projects create betting-system-prod --name="Betting System"
-gcloud config set project betting-system-prod
+cd /opt/auspex
+# .env holds all secrets (see .env.example for the full key list).
+docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ghcr.yml up -d
+docker compose exec -T airflow-scheduler airflow db upgrade   # migrations
 ```
 
-### 3. Enable required APIs
+The three compose files layer: base (`docker-compose.yml`) + prod overlay
+(`docker-compose.prod.yml`: Caddy + frontend, strips published ports) + ghcr
+overlay (`docker-compose.ghcr.yml`: pull images instead of build). Always pass
+all three on the VM.
 
-```bash
-gcloud services enable \
-  container.googleapis.com \
-  sqladmin.googleapis.com \
-  redis.googleapis.com \
-  storage.googleapis.com \
-  artifactregistry.googleapis.com \
-  secretmanager.googleapis.com \
-  cloudmonitoring.googleapis.com
-```
-
-### 4. Create service account
-
-```bash
-gcloud iam service-accounts create betting-system-sa \
-  --display-name="Betting System SA"
-
-# Grant roles
-for role in \
-  roles/container.admin \
-  roles/cloudsql.client \
-  roles/storage.objectAdmin \
-  roles/artifactregistry.writer \
-  roles/secretmanager.secretAccessor; do
-  gcloud projects add-iam-policy-binding betting-system-prod \
-    --member="serviceAccount:betting-system-sa@betting-system-prod.iam.gserviceaccount.com" \
-    --role="$role"
-done
-
-# Download credentials
-gcloud iam service-accounts keys create ~/.config/gcloud/betting-system-sa.json \
-  --iam-account=betting-system-sa@betting-system-prod.iam.gserviceaccount.com
-
-# Set in .env
-echo 'GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud/betting-system-sa.json' >> .env
-```
-
-### 5. Create Artifact Registry for Docker images
-
-```bash
-gcloud artifacts repositories create betting-system \
-  --repository-format=docker \
-  --location=us-central1
-
-gcloud auth configure-docker us-central1-docker.pkg.dev
-```
-
----
-
-## Cloud Deployment (GCP + Kubernetes)
-
-### Step 1 — Provision infrastructure with Terraform
-
-```bash
-cd infrastructure/terraform/environments/prod
-
-# Initialise
-terraform init
-
-# Preview
-terraform plan \
-  -var="project_id=betting-system-prod" \
-  -var="region=us-central1" \
-  -var="db_password=YOUR_STRONG_DB_PASSWORD"
-
-# Apply (takes ~15 minutes)
-terraform apply \
-  -var="project_id=betting-system-prod" \
-  -var="region=us-central1" \
-  -var="db_password=YOUR_STRONG_DB_PASSWORD"
-```
-
-Terraform creates:
-- GKE Autopilot cluster: `betting-system-cluster`
-- Cloud SQL PostgreSQL 15: `betting-system-db`
-- Memorystore Redis: `betting-system-redis`
-- GCS buckets: model artifacts + database backups
-- VPC with private networking
-
-### Step 2 — Authenticate kubectl
-
-```bash
-gcloud container clusters get-credentials betting-system-cluster \
-  --region us-central1 \
-  --project betting-system-prod
-```
-
-### Step 3 — Create Kubernetes secrets
-
-```bash
-# Create namespace first
-kubectl apply -f infrastructure/kubernetes/base/namespace.yaml
-
-# Create secrets (substitute real values)
-kubectl create secret generic betting-secrets \
-  --namespace=betting-system \
-  --from-literal=DATABASE_URL="postgresql://betting_user:PASSWORD@CLOUD_SQL_IP:5432/betting_system" \
-  --from-literal=REDIS_URL="redis://:PASSWORD@REDIS_IP:6379/0" \
-  --from-literal=JWT_SECRET="YOUR_JWT_SECRET" \
-  --from-literal=SECRET_KEY="YOUR_SECRET_KEY" \
-  --from-literal=FERNET_KEY="YOUR_FERNET_KEY"
-```
-
-### Step 4 — Build and push Docker images
-
-```bash
-PROJECT_ID=betting-system-prod
-REGISTRY=us-central1-docker.pkg.dev/$PROJECT_ID/betting-system
-TAG=$(git rev-parse --short HEAD)
-
-# Build all images
-docker build -f docker/Dockerfile.api    -t $REGISTRY/betting-api:$TAG .
-docker build -f docker/Dockerfile.airflow -t $REGISTRY/betting-airflow:$TAG .
-docker build -f docker/Dockerfile.training -t $REGISTRY/betting-training:$TAG .
-
-# Push
-docker push $REGISTRY/betting-api:$TAG
-docker push $REGISTRY/betting-airflow:$TAG
-docker push $REGISTRY/betting-training:$TAG
-```
-
-### Step 5 — Deploy with Kustomize
-
-```bash
-# Update image tags in the overlay
-cd infrastructure/kubernetes/overlays/prod
-kustomize edit set image \
-  betting-api=$REGISTRY/betting-api:$TAG \
-  betting-airflow=$REGISTRY/betting-airflow:$TAG
-
-# Apply
-kubectl apply -k infrastructure/kubernetes/overlays/prod/
-
-# Watch rollout
-kubectl rollout status deployment/betting-api -n betting-system
-kubectl get pods -n betting-system -w
-```
-
-### Step 6 — Run database migrations
-
-```bash
-kubectl exec -it -n betting-system deployment/betting-api -- \
-  python -m alembic upgrade head
-```
-
-### Step 7 — Deploy monitoring stack
-
-```bash
-./monitoring/scripts/deploy-monitoring.sh --namespace monitoring
-
-# Verify
-python3 monitoring/scripts/validate-deployment.py
-```
-
-### Step 8 — Verify end-to-end
-
-```bash
-# Get external IP
-kubectl get ingress -n betting-system
-
-# Check API health
-curl https://api.YOUR_DOMAIN.com/health
-
-# Run e2e tests against production (read-only)
-API_BASE_URL=https://api.YOUR_DOMAIN.com ./scripts/run-tests.sh e2e
-```
-
----
+**Bind-mounts vs images:** `scripts/` and `services/` are bind-mounted into the
+containers, so a `git pull` on the VM hot-updates batch scripts, training code,
+and DAGs immediately. The **api/frontend/airflow images** only change when CI
+rebuilds them, and a running uvicorn needs an `api` restart to reload Python.
 
 ## CI/CD Pipeline
 
-The GitHub Actions workflows handle automated builds and deployments.
+`.github/workflows/ci-cd.yaml` runs on every push/PR: flake8 + black + isort +
+mypy, then every test suite (service suites + repo-root `tests/unit`), then —
+on `main` — it builds `ghcr.io/ceesartech/auspex/{api,airflow,frontend}` tagged
+with the commit SHA and runs `scripts/deploy_remote.sh` on the VM over SSH.
+
+`deploy_remote.sh` flow: defensive `git stash` + `git pull --ff-only` → `docker
+login ghcr.io` → `docker compose pull` (ghcr overlay) → `up -d` → 60s api
+health-check (prints logs on failure).
 
 ### Required GitHub Secrets
 
-Go to **Repository → Settings → Secrets and variables → Actions** and add:
-
-| Secret name | Value |
+| Secret | Value |
 |---|---|
-| `GCP_PROJECT_ID` | Your GCP project ID |
-| `GCP_SA_KEY` | Contents of the service account JSON file |
-| `GKE_CLUSTER` | `betting-system-cluster` |
-| `GKE_ZONE` | `us-central1` |
-| `REGISTRY` | `us-central1-docker.pkg.dev/PROJECT_ID/betting-system` |
-| `DATABASE_URL` | Production database URL |
-| `REDIS_URL` | Production Redis URL |
-| `JWT_SECRET` | Production JWT secret |
-| `TELEGRAM_BOT_TOKEN` | (optional) Telegram alerts |
-| `TELEGRAM_CHAT_ID` | (optional) Telegram chat ID |
+| `SSH_PRIVATE_KEY` / `SSH_HOST` / `SSH_USER` | VM access for the deploy step |
+| `GHCR_TOKEN` | `GITHUB_TOKEN` (pushes images to GHCR) |
 
-### Workflow triggers
-
-| Workflow | Trigger | What it does |
-|---|---|---|
-| `ci.yml` | Every push / PR | Lint, unit tests, build Docker images |
-| `deploy-dev.yml` | Push to `develop` | Deploy to dev GKE namespace |
-| `deploy-prod.yml` | Push to `main` | Build, test, deploy to production |
-| `model-retrain.yml` | Manual / schedule | Run model retraining job |
-
----
+All application secrets (DB, Redis, JWT, Telegram, API keys, B2) live in
+`/opt/auspex/.env` on the VM, not in CI.
 
 ## Rollback
 
+Images are SHA-tagged in GHCR, so rollback = redeploy an earlier tag:
+
 ```bash
-# View rollout history
-kubectl rollout history deployment/betting-api -n betting-system
-
-# Roll back one version
-kubectl rollout undo deployment/betting-api -n betting-system
-
-# Roll back to specific revision
-kubectl rollout undo deployment/betting-api --to-revision=3 -n betting-system
-
-# Verify
-kubectl rollout status deployment/betting-api -n betting-system
+cd /opt/auspex
+IMAGE_TAG=<previous-good-sha> docker compose \
+  -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ghcr.yml up -d
 ```
 
----
+For a bad migration or data issue, restore from a backup per `OPERATIONS.md`
+(local `/opt/auspex/backups/*.dump` or the Backblaze B2 copy).
 
-## Estimated Cloud Costs (GCP)
+## Costs
 
-| Resource | Tier | Monthly cost |
-|---|---|---|
-| GKE Autopilot | ~1.5 vCPU average | ~$35 |
-| Cloud SQL (db-f1-micro) | PostgreSQL 15 | ~$10 |
-| Memorystore Redis (1 GB) | Basic tier | ~$25 |
-| GCS storage (model artifacts + backups) | ~20 GB | ~$0.50 |
-| Networking / Load Balancer | — | ~$20 |
-| **Total** | | **~$90/month** |
-
-Use `./monitoring/scripts/validate-deployment.py` to check all services are healthy after any deployment.
+Single Hetzner CPX41-class VM (~€25-28/mo) + Backblaze B2 backups (<$1/mo).
+GitHub Actions + GHCR are free (public repo). See
+`docs/SYSTEM_AUDIT_AND_ROADMAP.md` §6.3 for the full cost breakdown.

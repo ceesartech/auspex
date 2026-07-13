@@ -6,90 +6,96 @@
 
 ## Description
 
-One or more `betting-api` pod instances are failing health checks.
+The `api` container is failing its health check (`/health` on `127.0.0.1:8000`).
 
 ## Impact
 
 - Service unavailable for all users.
 - No predictions served; WebSocket connections dropped.
-- Potential write failures if the pod crashes mid-request.
+- Potential write failures if the container crashes mid-request.
+
+> All commands run on the VM from `/opt/auspex`. Compose needs the three
+> production overlays — export once per shell:
+> ```bash
+> cd /opt/auspex
+> alias dc='docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ghcr.yml'
+> ```
 
 ---
 
 ## Diagnosis
 
-### 1. Pod status
+### 1. Container status
 ```bash
-kubectl get pods -n betting-system -l app=betting-api
+dc ps api
 ```
 
-### 2. Pod logs (last 200 lines)
+### 2. Logs (last 200 lines)
 ```bash
-kubectl logs -n betting-system deployment/betting-api --tail=200
+dc logs --tail=200 api
 ```
 
-### 3. Pod events
+### 3. Resource usage
 ```bash
-kubectl describe pod -n betting-system -l app=betting-api | grep -A 20 Events
+docker stats --no-stream api
 ```
 
-### 4. Resource usage
+### 4. Health endpoint (from the host)
 ```bash
-kubectl top pod -n betting-system -l app=betting-api
-```
-
-### 5. Health endpoint (from inside cluster)
-```bash
-kubectl run debug --image=curlimages/curl --restart=Never --rm -it -- \
-  curl -s http://betting-api:8000/health
+curl -s http://127.0.0.1:8000/health
 ```
 
 ---
 
 ## Resolution
 
-### CrashLoopBackOff / OOMKilled
+### Crash loop / OOM
 
 1. Check logs for the root cause (DB conn, Redis conn, OOM).
-2. Increase memory limit temporarily:
+2. Inspect exit reason:
    ```bash
-   kubectl set resources deployment/betting-api \
-     -n betting-system \
-     --limits=memory=2Gi
+   docker inspect auspex-api --format '{{.State.OOMKilled}} {{.State.ExitCode}}'
    ```
-3. Scale up replicas while investigating:
-   ```bash
-   kubectl scale deployment betting-api -n betting-system --replicas=4
-   ```
+3. If OOM, raise the per-service `mem_limit` in `docker-compose.prod.yml`,
+   then `dc up -d api`.
+
+### Restart the container
+```bash
+dc restart api
+# or force a clean recreate
+dc up -d --force-recreate api
+```
 
 ### Database connection failure
 ```bash
-# Verify connectivity from inside the pod
-kubectl exec -it deployment/betting-api -n betting-system -- \
+dc exec -T api \
   python -c "import psycopg2, os; psycopg2.connect(os.environ['DATABASE_URL']); print('DB OK')"
 ```
 See also: `DATABASE_ISSUES.md`.
 
 ### Redis connection failure
 ```bash
-kubectl exec -it deployment/betting-api -n betting-system -- \
+dc exec -T api \
   python -c "from redis import Redis; import os; Redis.from_url(os.environ['REDIS_URL']).ping(); print('Redis OK')"
 ```
 
 ### Emergency rollback
+
+Deploys are GHCR images tagged by git SHA. To roll back, set `IMAGE_TAG` to the
+previous good SHA and re-pull:
 ```bash
-kubectl rollout undo deployment/betting-api -n betting-system
-kubectl rollout status deployment/betting-api -n betting-system
+IMAGE_TAG=<previous-good-sha> dc pull api && \
+IMAGE_TAG=<previous-good-sha> dc up -d api
 ```
+(Find prior tags with `docker images ghcr.io/ceesartech/auspex/api`.)
 
 ---
 
 ## Prevention
 
-- Liveness/readiness probes configured on `/health`.
-- HPA ensures minimum 2 replicas at all times.
-- Circuit breakers prevent cascade failures from DB/Redis.
-- Regular load testing to catch resource limits early.
+- Compose healthcheck on `/health` with `restart: unless-stopped`.
+- Backups (`OPERATIONS.md`) let you recover DB state if a bad migration is the cause.
+- Watch Grafana + Alertmanager (Telegram) for early memory/latency drift.
 
 ## Related Runbooks
 

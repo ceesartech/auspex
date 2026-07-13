@@ -18,7 +18,7 @@ An enterprise-grade sports betting and lottery recommendation system built with 
 6. [Running the UI Locally](#running-the-ui-locally)
 7. [Environment Variables Reference](#environment-variables-reference)
 8. [Testing](#testing)
-9. [Production Deployment (GCP + Kubernetes)](#production-deployment-gcp--kubernetes)
+9. [Production Deployment (single VM + Docker Compose)](#production-deployment-single-vm--docker-compose)
 10. [Monitoring](#monitoring)
 11. [Project Structure](#project-structure)
 12. [Documentation Index](#documentation-index)
@@ -36,7 +36,7 @@ An enterprise-grade sports betting and lottery recommendation system built with 
 | Betting strategy | Kelly Criterion | Sizes stakes optimally based on edge over bookmaker |
 | API | FastAPI + Celery + WebSocket | Serves predictions, recommendations, real-time odds |
 | Frontend | Next.js 14 + TypeScript | Dashboard for viewing predictions, tracking ROI, building accumulators |
-| Infrastructure | GKE + Terraform + Helm | Auto-scaling Kubernetes cluster on GCP |
+| Infrastructure | Single Hetzner VM + Docker Compose + Caddy | One box, auto TLS, GHCR images |
 | Monitoring | Prometheus + Grafana + Loki + Alertmanager | Full observability with automated model retraining |
 
 ---
@@ -85,9 +85,6 @@ Observability (runs alongside everything):
 | Docker Compose | v2+ | included with Docker Desktop |
 | Python | 3.11+ | https://www.python.org/downloads/ |
 | Node.js | 18+ | https://nodejs.org/ |
-| `kubectl` | 1.28+ | for K8s deployment only |
-| `gcloud` CLI | latest | for GCP deployment only |
-| Terraform | 1.6+ | for infrastructure provisioning only |
 
 ---
 
@@ -104,29 +101,17 @@ Observability (runs alongside everything):
 
 > `./scripts/setup.sh` generates all of these automatically.
 
-### Required for cloud deployment (GCP)
+### Required for production (single Hetzner VM)
 
 | Secret | Where to get it | `.env` key |
 |---|---|---|
-| GCP Project ID | [console.cloud.google.com](https://console.cloud.google.com) → select project | `GCP_PROJECT_ID` |
-| GCP Region | Choose e.g. `us-central1` | `GCP_REGION` |
-| Service account JSON | IAM → Service Accounts → Create → download JSON | `GOOGLE_APPLICATION_CREDENTIALS` |
-| GCS bucket name | Cloud Storage → Create bucket | `GCS_BUCKET` |
+| Domain name | Your registrar / Cloudflare | `AUSPEX_DOMAIN` |
+| ACME email | Any mailbox you own (Let's Encrypt notices) | `AUSPEX_ACME_EMAIL` |
+| GHCR image tag | Set by CI per deploy (git SHA) | `IMAGE_TAG` |
+| Backblaze B2 bucket + keys | B2 → Buckets + App Keys (offsite backups) | `BACKUP_S3_BUCKET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
 
-**Required GCP APIs to enable:**
-```bash
-gcloud services enable container.googleapis.com \
-  sqladmin.googleapis.com \
-  redis.googleapis.com \
-  storage.googleapis.com \
-  artifactregistry.googleapis.com
-```
-
-**Required IAM roles for the service account:**
-- Kubernetes Engine Admin
-- Cloud SQL Client
-- Storage Object Admin
-- Artifact Registry Writer
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) and [`OPERATIONS.md`](OPERATIONS.md) for the
+full production setup (Caddy TLS, GHCR pull, backups).
 
 ### Optional integrations
 
@@ -256,15 +241,17 @@ Copy `.env.example` to `.env` and fill in values. The table below documents ever
 | `AIRFLOW__CORE__FERNET_KEY` | *(generate)* | **Yes** | Encrypts Airflow connection passwords |
 | `AIRFLOW__WEBSERVER__SECRET_KEY` | *(generate)* | **Yes** | Signs Airflow session cookies |
 
-### GCP / Cloud
+### Production deployment (single VM)
 
 | Variable | Default | Required | Description |
 |---|---|---|---|
-| `GCP_PROJECT_ID` | — | Cloud only | Your GCP project ID |
-| `GCP_REGION` | `us-central1` | Cloud only | Deployment region |
-| `GCP_ZONE` | `us-central1-a` | Cloud only | Primary zone |
-| `GCS_BUCKET` | — | Cloud only | GCS bucket for model artifacts |
-| `GOOGLE_APPLICATION_CREDENTIALS` | — | Cloud only | Path to service-account JSON |
+| `AUSPEX_DOMAIN` | — | Prod | Base domain (Caddy serves `api.`, `grafana.`, `airflow.` subdomains) |
+| `AUSPEX_ACME_EMAIL` | — | Prod | Let's Encrypt registration email |
+| `IMAGE_TAG` | `latest` | Prod | GHCR image tag (git SHA, set by CI) |
+| `DOCKER_GID` | `999` | Prod | Host docker group GID for DAG-triggered container ops |
+| `BACKUP_S3_BUCKET` | — | Prod | Backblaze B2 bucket for offsite pg_dump copies |
+| `AWS_ACCESS_KEY_ID` | — | Prod | B2 application key ID |
+| `AWS_SECRET_ACCESS_KEY` | — | Prod | B2 application key |
 
 ### ML / MLflow
 
@@ -352,56 +339,35 @@ E2E tests cover:
 
 ---
 
-## Production Deployment (GCP + Kubernetes)
+## Production Deployment (single VM + Docker Compose)
 
+Production is a **single Hetzner VM** running the Compose stack behind Caddy —
+there is no Kubernetes/Terraform (the GKE-era manifests were removed 2026-07).
 Full instructions in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Summary:
 
 ```bash
-# 1. Provision cloud infrastructure
-cd infrastructure/terraform/environments/prod
-terraform init
-terraform apply -var="project_id=$GCP_PROJECT_ID"
+# Deploy = push to main. CI (.github/workflows/ci-cd.yaml) builds the
+# ghcr.io/ceesartech/auspex/{api,airflow,frontend} images and runs
+# scripts/deploy_remote.sh on the VM (git pull → docker compose pull → up -d).
+git push origin main
 
-# 2. Authenticate kubectl
-gcloud container clusters get-credentials betting-system-cluster \
-  --region $GCP_REGION --project $GCP_PROJECT_ID
-
-# 3. Deploy application
-kubectl apply -k infrastructure/kubernetes/overlays/prod/
-
-# 4. Deploy monitoring stack
-./monitoring/scripts/deploy-monitoring.sh
-
-# 5. Validate
-python3 monitoring/scripts/validate-deployment.py
+# Manual/first-time on the VM:
+cd /opt/auspex
+docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ghcr.yml \
+  pull && docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ghcr.yml up -d
 ```
+
+Backups, restore, and disk runbooks are in [`OPERATIONS.md`](OPERATIONS.md).
 
 ---
 
 ## Monitoring
 
-After `deploy-monitoring.sh` (or `docker-compose up`):
-
-| Dashboard | URL | What it shows |
-|---|---|---|
-| ML Model Performance | Grafana → Betting System → ML Model Performance | Accuracy, ROI, drift score, calibration |
-| API Performance | Grafana → API Performance | Latency (P50/95/99), error rate, throughput |
-| Infrastructure | Grafana → Infrastructure Overview | CPU, memory, pod restarts, HPA |
-| Business Metrics | Grafana → Business Metrics | Win rate, ROI trend, daily predictions |
-| Scraping Status | Grafana → Scraping Status | Records/hour, error rate, odds freshness |
-
-**Automated retraining:**
-
-| Job | Schedule | Trigger |
-|---|---|---|
-| `model-retraining` | Weekly (Sun 02:00 UTC) | Scheduled |
-| `drift-check` | Daily 06:00 UTC | Auto (fires retraining if drift_score > 0.3) |
-| `performance-check` | Every 6 hours | Pushes Prometheus metrics |
-
-**Manual trigger:**
-```bash
-python3 monitoring/scripts/trigger-retraining.py --reason "Manual: pre-season update"
-```
+Grafana + Prometheus run in the Compose stack (Grafana at `grafana.$AUSPEX_DOMAIN`).
+The live model monitor is `scripts/monitor_models.py` (rolling ECE/MCE/Brier per
+sport+market with Telegram drift alerts, on the 15-min DAG). Retraining is the
+Airflow `retrain_models` DAG (weekly). Host/DB/Redis metrics come from the
+node/postgres/redis exporters; alerts route to Telegram via Alertmanager.
 
 ---
 
@@ -426,14 +392,9 @@ betting-system/
 │   ├── prometheus/             # Scrape config + alert rules + recording rules
 │   ├── grafana/dashboards/     # 5 pre-built dashboards
 │   ├── alertmanager/           # Routing + Telegram/email config
-│   ├── loki/                   # Log aggregation config
-│   ├── model-monitoring/       # Performance tracker, drift detector, auto-retrainer
-│   ├── scripts/                # setup, teardown, validate, trigger-retraining
 │   └── runbooks/               # API_DOWN, MODEL_DRIFT, HIGH_ERROR_RATE, DATABASE_ISSUES
 ├── infrastructure/
-│   ├── kubernetes/             # Kustomize base + overlays (dev/staging/prod)
-│   ├── terraform/              # GKE, Cloud SQL, Memorystore, GCS modules
-│   └── helm/betting-system/    # Helm chart
+│   └── caddy/                  # Caddyfile (prod reverse proxy + TLS)
 ├── tests/
 │   └── e2e/                    # End-to-end integration tests
 ├── scripts/

@@ -25,27 +25,23 @@ curl -s "http://prometheus:9090/api/v1/query?query=sum(rate(http_requests_total{
   | python -m json.tool
 ```
 
-### 2. Inspect recent errors in Loki / pod logs
+### 2. Inspect recent errors in container logs
 ```bash
-kubectl logs -n betting-system deployment/betting-api --tail=500 \
-  | grep -E '"status": 5[0-9][0-9]'
+docker compose logs --tail=500 api | grep -E '"status": 5[0-9][0-9]'
 ```
 
 ### 3. Check dependent services
 ```bash
 # Database
-kubectl exec -it deployment/betting-api -n betting-system -- \
-  python -c "import psycopg2, os; psycopg2.connect(os.environ['DATABASE_URL'])"
+docker compose exec -T api python -c "import psycopg2, os; psycopg2.connect(os.environ['DATABASE_URL'])"
 
 # Redis
-kubectl exec -it deployment/betting-api -n betting-system -- \
-  python -c "from redis import Redis; import os; Redis.from_url(os.environ['REDIS_URL']).ping()"
+docker compose exec -T api python -c "from redis import Redis; import os; Redis.from_url(os.environ['REDIS_URL']).ping()"
 ```
 
 ### 4. Review Celery task failures
 ```bash
-kubectl logs -n betting-system deployment/celery-worker --tail=200 \
-  | grep -i "error\|exception\|traceback"
+docker compose logs --tail=200 celery-worker | grep -i "error\|exception\|traceback"
 ```
 
 ---
@@ -58,23 +54,26 @@ kubectl logs -n betting-system deployment/celery-worker --tail=200 \
 
 ### Persistent errors from a specific endpoint
 1. Identify the endpoint from Grafana.
-2. Check if a recent deployment changed that route:
+2. Check whether the running image changed recently:
    ```bash
-   kubectl rollout history deployment/betting-api -n betting-system
+   docker inspect auspex-api --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+   docker images ghcr.io/ceesartech/auspex/api
    ```
-3. Roll back if a bad deploy is suspected:
+3. Roll back to the previous good SHA if a bad deploy is suspected:
    ```bash
-   kubectl rollout undo deployment/betting-api -n betting-system
+   IMAGE_TAG=<previous-good-sha> docker compose -f docker-compose.yml \
+     -f docker-compose.prod.yml -f docker-compose.ghcr.yml up -d api
    ```
 
 ### Database overload
-- Scale DB read replicas or increase connection pool size.
+- Kill long-running queries and check the connection count.
 - See `DATABASE_ISSUES.md`.
 
-### Memory pressure causing 503s from gunicorn
+### Memory pressure causing 503s from uvicorn
+Raise the api `mem_limit` in `docker-compose.prod.yml`, then:
 ```bash
-kubectl set resources deployment/betting-api \
-  -n betting-system --limits=memory=2Gi
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+  -f docker-compose.ghcr.yml up -d api
 ```
 
 ---

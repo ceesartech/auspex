@@ -21,13 +21,12 @@ detected, indicating the model may no longer generalise to current data.
 
 ### 1. Check current performance
 ```bash
-kubectl exec -it -n betting-system deployment/betting-api -- \
-  python monitoring/scripts/check-model-performance.py
+docker compose exec -T api python /app/scripts/monitor_models.py --days 30
 ```
 
 ### 2. Check drift detection results
 ```bash
-curl http://betting-api:8000/api/v1/models/drift-status | python -m json.tool
+curl -s http://127.0.0.1:8000/api/v1/models/drift-status | python -m json.tool
 ```
 
 ### 3. Grafana
@@ -51,33 +50,30 @@ LIMIT 100;
 ## Resolution
 
 ### Immediate
-1. Alert ML team via Slack `#ml-alerts`.
+1. Check the Telegram alerts channel for the drift context (sport + market).
 2. Check scraper health — stale or corrupt data is a common drift trigger.
 3. Inspect feature distributions in Grafana **Scraping Status** dashboard.
 
 ### Short-term – trigger retraining
 ```bash
-# Auto mode (only retrains if thresholds breached)
-python monitoring/scripts/trigger-retraining.py --auto
-
-# Manual override
-python monitoring/scripts/trigger-retraining.py --reason "Manual: accuracy drop detected"
-
-# Or directly via kubectl
-kubectl create job model-retraining-manual \
-  --from=cronjob/model-retraining \
-  -n betting-system
+# Retraining is Airflow-driven: trigger the retrain_models DAG.
+# Its self-gate only promotes models where ΔBrier ≤ -0.005 vs the incumbent,
+# so a no-op trigger is safe.
+docker compose exec -T airflow-scheduler airflow dags trigger retrain_models
 ```
 
-Watch job progress:
+Watch job progress in the Airflow UI (`airflow.$AUSPEX_DOMAIN` → `retrain_models`)
+or:
 ```bash
-kubectl logs -f -n betting-system job/model-retraining-manual
+docker compose logs -f airflow-scheduler
 ```
 
-### Rollback (if new model is worse)
+### Rollback (if a promoted model is worse)
+Models are versioned artifacts, not container images — the retrain gate keeps
+the prior model unless the new one beats it. To force-revert, restore the
+previous model files from a backup (see `OPERATIONS.md`) and restart the API:
 ```bash
-kubectl rollout undo deployment/betting-api -n betting-system
-kubectl rollout status deployment/betting-api -n betting-system
+docker compose restart api
 ```
 
 ### Long-term
@@ -90,9 +86,9 @@ kubectl rollout status deployment/betting-api -n betting-system
 
 ## Prevention
 
-- Automated weekly retraining (`model-retraining` CronJob).
-- Continuous drift monitoring via `DriftDetector`.
-- Alert fires when `drift_score > 0.3`.
+- Automated weekly retraining via the Airflow `retrain_models` DAG.
+- Continuous drift monitoring via `scripts/monitor_models.py` (15-min DAG).
+- Alert fires on rolling ECE/Brier degradation per sport+market.
 
 ## Related Runbooks
 

@@ -312,10 +312,10 @@ docker-compose exec redis redis-cli FLUSHDB
 docker-compose exec api celery -A services.api.celery_app inspect active
 
 # Manually trigger drift check
-python3 monitoring/scripts/trigger-retraining.py --auto
+docker compose exec -T airflow-scheduler airflow dags trigger retrain_models
 
 # Check model performance
-python3 monitoring/scripts/check-model-performance.py
+python scripts/monitor_models.py --days 30
 
 # Reload Prometheus config without restart
 curl -X POST http://localhost:9090/-/reload

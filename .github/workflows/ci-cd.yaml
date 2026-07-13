@@ -257,9 +257,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Only the services that actually run in compose. Dockerfile.scraper
-        # and Dockerfile.training exist but no compose service references
-        # them; if you start using them, add to this matrix.
+        # Only the services that actually run in compose. Add here if a new
+        # long-running service with its own Dockerfile joins the stack.
         service: [api, airflow, frontend]
         include:
           - service: api

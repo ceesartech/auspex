@@ -82,7 +82,7 @@ if [[ ! -f .env ]]; then
   sed -i.bak "s|GENERATE_RANDOM_SECRET_KEY_32_CHARS|$AIRFLOW_SECRET|" .env
   rm -f .env.bak
   success ".env created with auto-generated secrets"
-  warn "Review .env and fill in GCP_PROJECT_ID, TELEGRAM_BOT_TOKEN, and other optional values."
+  warn "Review .env and fill in THE_ODDS_API_KEY, TELEGRAM_BOT_TOKEN, and other optional values."
 else
   success ".env already exists — skipping"
 fi

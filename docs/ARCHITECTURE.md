@@ -199,19 +199,14 @@ Full schema: `services/data-ingestion/db/migrations/001_create_schema.sql`
 - Data persisted in named Docker volumes
 - Prometheus scrapes the API container directly
 
-### Production (GKE)
-- **Autopilot** cluster — no node management required
-- **Kustomize** overlays for per-environment config
-- **HPA** on `betting-api` (2–10 replicas, CPU/RPS target)
-- **Cloud SQL** PostgreSQL with private IP, automated backups
-- **Memorystore** Redis (1 GB, no persistence — cache-only)
-- **Ingress** with GCP-managed TLS certificate
-- **Workload Identity** — pods authenticate to GCP without storing service-account keys
-
-### Monitoring namespace
-- Prometheus + Alertmanager + Grafana + Loki run in a separate `monitoring` namespace
-- RBAC ClusterRole allows Prometheus to scrape all namespaces
-- Grafana provisioned via ConfigMaps — dashboards survive pod restarts
+### Production (single Hetzner VM + Docker Compose)
+- The same Compose stack as local, plus Caddy (auto Let's Encrypt TLS) and the
+  Next.js frontend, via the `docker-compose.prod.yml` overlay
+- Images pulled from GHCR (`docker-compose.ghcr.yml`), SHA-tagged per deploy
+- Postgres + Redis are containers with named volumes (not managed services)
+- Prometheus + Grafana + Alertmanager + node/postgres/redis exporters run in the
+  same stack; alerts route to Telegram
+- Backups: daily `pg_dump` → local rotation + Backblaze B2 (`OPERATIONS.md`)
 
 ---
 
@@ -219,13 +214,13 @@ Full schema: `services/data-ingestion/db/migrations/001_create_schema.sql`
 
 | Concern | Approach |
 |---|---|
-| Secrets management | Kubernetes Secrets (base64); GCP Secret Manager for prod |
-| Database access | Private VPC, SSL enforced, no public IP |
+| Secrets management | `.env` on the VM (git-ignored, `chmod 600`); never committed |
+| Database access | Postgres bound to the Docker network only, not published to the host |
 | API authentication | JWT (HS256), short-lived access tokens + refresh |
 | Input validation | Pydantic v2 on all endpoints |
 | Rate limiting | SlowAPI middleware (Redis-backed) |
-| Scraper identity | Rotating user agents; optional proxy rotation |
-| Container security | Non-root user in all Dockerfiles, read-only root fs |
+| Edge / TLS | Caddy terminates TLS (auto Let's Encrypt); only 80/443 exposed publicly |
+| Container security | Non-root user in all Dockerfiles |
 
 ---
 

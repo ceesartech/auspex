@@ -15,8 +15,8 @@ replication has fallen behind.
 
 ### 1. Check exporter / database status
 ```bash
-kubectl get pods -n betting-system -l app=postgres-exporter
-curl -s http://postgres-exporter:9187/metrics | grep pg_up
+docker compose ps postgres postgres-exporter
+curl -s http://127.0.0.1:9187/metrics | grep pg_up
 ```
 
 ### 2. Connection counts
@@ -58,16 +58,17 @@ LIMIT 20;
 
 ### DatabaseDown
 
-1. Check the Postgres pod:
+1. Check the Postgres container:
    ```bash
-   kubectl get pods -n betting-system -l app=postgres
-   kubectl logs -n betting-system statefulset/postgres --tail=100
+   docker compose ps postgres
+   docker compose logs --tail=100 postgres
    ```
 2. Restart if crashed:
    ```bash
-   kubectl rollout restart statefulset/postgres -n betting-system
+   docker compose restart postgres
    ```
-3. If using Cloud SQL, check GCP console for instance health.
+3. Confirm the data volume is intact and disk is not full (`df -h`); a full
+   disk is the most common cause of Postgres refusing writes on this VM.
 
 ### DatabaseConnectionPoolExhausted
 
@@ -96,12 +97,11 @@ LIMIT 20;
 
 ### DatabaseReplicationLag
 
-1. Check network between primary and replica.
-2. If lag is persistent, restart the replica pod:
-   ```bash
-   kubectl rollout restart statefulset/postgres-replica -n betting-system
-   ```
-3. For Cloud SQL: check the GCP console replication health tab.
+This single-VM deployment runs **one** Postgres instance — there is no replica,
+so this alert should never fire here. If it does, the `pg_stat_replication`
+scrape is misconfigured (a leftover rule); silence it or remove the rule from
+`monitoring/prometheus/alerts/`. Durability comes from the daily backup +
+Backblaze B2 offsite copy, not from streaming replication.
 
 ---
 
@@ -109,20 +109,19 @@ LIMIT 20;
 
 ```bash
 # Manual backup
-infrastructure/scripts/backup-db.sh
+docker compose exec -T api python /app/scripts/backup_postgres.py  # see OPERATIONS.md
 
 # Restore from backup
-infrastructure/scripts/restore-db.sh <backup-file>
+# restore: pg_restore --clean --if-exists from a .dump — full procedure in OPERATIONS.md
 ```
 
 ---
 
 ## Prevention
 
-- Connection pooling via PgBouncer.
-- Regular `VACUUM ANALYZE` scheduled via Airflow.
+- Regular `VACUUM ANALYZE` (Postgres autovacuum) plus `airflow db clean` for metadata.
 - Index strategy reviewed on schema changes.
-- Automated daily backups to GCS.
+- Automated daily `pg_dump` backups with local rotation + Backblaze B2 offsite copy.
 
 ## Related Runbooks
 

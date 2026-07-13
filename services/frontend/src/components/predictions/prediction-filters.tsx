@@ -13,7 +13,6 @@ const sportOptions = [
   { value: 'nba', label: 'NBA' },
   { value: 'tennis', label: 'Tennis' },
   { value: 'horse_racing', label: 'Horse Racing' },
-  { value: 'boxing', label: 'Boxing' },
   { value: 'mma', label: 'MMA' },
 ];
 

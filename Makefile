@@ -1,5 +1,5 @@
 .PHONY: help setup test lint format docker-build docker-up docker-down clean db-migrate db-reset \
-	tf-init tf-plan tf-apply tf-destroy k8s-deploy k8s-status backup restore rollback health-check
+	backup restore
 
 PYTHON_SERVICES := api data-ingestion feature-engineering ml-models
 PYTHON_SERVICE_DIRS := $(addprefix services/,$(PYTHON_SERVICES))
@@ -34,17 +34,9 @@ help:
 	@echo "  make db-reset       - Reset database (WARNING: deletes all data)"
 	@echo "  make clean          - Clean temporary files"
 	@echo ""
-	@echo "Infrastructure commands:"
-	@echo "  make tf-init ENV=dev     - Initialize Terraform for environment"
-	@echo "  make tf-plan ENV=dev     - Plan Terraform changes"
-	@echo "  make tf-apply ENV=dev    - Apply Terraform changes"
-	@echo "  make tf-destroy ENV=dev  - Destroy Terraform resources"
-	@echo "  make k8s-deploy ENV=dev  - Deploy to Kubernetes environment"
-	@echo "  make k8s-status          - Check Kubernetes status"
-	@echo "  make backup              - Create database backup"
-	@echo "  make restore FILE=<path> - Restore database from backup"
-	@echo "  make rollback SVC=betting-api - Rollback a deployment"
-	@echo "  make health-check        - Run health checks"
+	@echo "Operations commands (single-VM docker-compose; see OPERATIONS.md):"
+	@echo "  make backup              - Create a Postgres backup (scripts/backup_postgres.py)"
+	@echo "  make restore FILE=<path> - Restore Postgres from a .dump (see OPERATIONS.md)"
 
 setup:
 	python -m venv venv
@@ -130,35 +122,12 @@ clean:
 	find . -type f -name "*.log" -delete
 	rm -rf .pytest_cache .mypy_cache .coverage htmlcov/ dist/ build/ *.egg-info
 
-# Infrastructure targets
-ENV ?= dev
-
-tf-init:
-	cd infrastructure/terraform/environments/$(ENV) && terraform init
-
-tf-plan:
-	cd infrastructure/terraform/environments/$(ENV) && terraform plan
-
-tf-apply:
-	cd infrastructure/terraform/environments/$(ENV) && terraform apply
-
-tf-destroy:
-	cd infrastructure/terraform/environments/$(ENV) && terraform destroy
-
-k8s-deploy:
-	kustomize build infrastructure/kubernetes/overlays/$(ENV) | kubectl apply -f -
-
-k8s-status:
-	kubectl get all -n betting-system
-
+# Operations targets (single Hetzner VM + docker-compose; see OPERATIONS.md).
+# The GKE-era tf-*/k8s-*/rollback/health-check targets were removed with the
+# infrastructure/{terraform,kubernetes,helm} dirs (2026-07 audit §5.2).
 backup:
-	./infrastructure/scripts/backup-db.sh
+	docker compose exec -T api python /app/scripts/backup_postgres.py
 
 restore:
-	./infrastructure/scripts/restore-db.sh $(FILE)
-
-rollback:
-	./infrastructure/scripts/rollback.sh $(SVC)
-
-health-check:
-	./infrastructure/scripts/health-check.sh
+	@echo "Restore is a guarded procedure — follow OPERATIONS.md (pg_restore --clean"
+	@echo "--if-exists from a .dump). FILE=$(FILE)"

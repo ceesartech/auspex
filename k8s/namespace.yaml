@@ -1,7 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: betting-system
-  labels:
-    app: betting-system
-    environment: production

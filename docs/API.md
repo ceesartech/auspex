@@ -114,7 +114,7 @@ Authorization: Bearer <token>
 
 | Parameter | Type | Description |
 |---|---|---|
-| `sport` | string | Filter: `soccer`, `nfl`, `nhl`, `tennis`, `horse_racing`, `boxing`, `mma` |
+| `sport` | string | Filter: `soccer`, `nfl`, `nhl`, `tennis`, `horse_racing`, `mma` |
 | `league_id` | integer | Filter by league |
 | `date` | string | Match date (YYYY-MM-DD) |
 | `min_confidence` | float | Minimum confidence threshold (0.0–1.0) |
