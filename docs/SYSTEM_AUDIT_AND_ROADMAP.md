@@ -358,8 +358,9 @@ with the growth-rate driver (WAL) eliminated.
 > runbook fixed), Prometheus WAL self-healed after restart (verified clean
 > checkpoints; volume 17.9→8.7GB), 506 bug-window + 176 gated recs voided
 > (undo-lists in `/opt/auspex/backups/`), eligibility gate live (skipping
-> 212/268 at first run), CLV **not yet done**, cost downgrades **pending user
-> dashboards**, healthchecks + log caps + weekly prune cron + `VACUUM FULL
+> 212/268 at first run), CLV capture SHIPPED (`5d11199`: odds_snapshots
+> change-only capture + vw_rec_clv / vw_clv_summary; gating readout after 60-90d),
+> cost downgrades DONE (user confirmed both; weather DAGs paused — full −$95/mo), healthchecks + log caps + weekly prune cron + `VACUUM FULL
 > race_predictions` (1.5GB→123MB) + CI root-tests all shipped (`45dc9ce`).
 > Next up: §2.2 CLV capture, then §2.1 results ingestion (month-1).
 
