@@ -87,7 +87,14 @@ def list_finished_matches(cur, days: int, match_id: Optional[str]) -> list[dict]
               OR EXISTS (
                   SELECT 1 FROM betting_recommendations br
                   WHERE br.match_id = m.id
-                    AND br.status IN ('pending', 'placed')
+                    AND (
+                          br.status IN ('pending', 'placed')
+                       -- trigger-settled but P&L never computed (the
+                       -- migration-011 trigger sets status only) —
+                       -- must reach grade_match for the money fill
+                       OR (br.status IN ('won', 'lost', 'void')
+                           AND br.profit_loss IS NULL)
+                    )
               )
           )
         ORDER BY m.match_date ASC
