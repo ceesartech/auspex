@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -410,6 +411,53 @@ def insert_scheduled_match(cur, cfg: SportConfig, league_id, home_id, away_id, m
     return cur.rowcount
 
 
+def insert_finished_match(
+    cur,
+    cfg: SportConfig,
+    league_id,
+    home_id,
+    away_id,
+    match_dt,
+    venue,
+    home_score: int,
+    away_score: int,
+    result_meta: dict,
+) -> int:
+    """Record a final result (audit doc §2.1 — the missing half of the
+    feedback loop). Updates the row fetch_upcoming created via the same
+    (home, away, match_date) identity, or inserts it as finished when we
+    never saw it as a fixture (grows the corpus). grade_completed_matches
+    (already on the 15-min cadence) settles predictions + recs from here.
+    Score columns follow the corpus conventions: real scores for team
+    sports, winner-flag 1/0 for tennis/MMA."""
+    cur.execute(
+        """
+        INSERT INTO matches (league_id, home_team_id, away_team_id, match_date,
+                             status, venue, season, home_score, away_score, metadata)
+        VALUES (%s, %s, %s, %s, 'finished', %s, %s, %s, %s, %s::jsonb)
+        ON CONFLICT (home_team_id, away_team_id, match_date) DO UPDATE
+            SET status = 'finished',
+                home_score = EXCLUDED.home_score,
+                away_score = EXCLUDED.away_score,
+                metadata = COALESCE(matches.metadata, '{}'::jsonb) || EXCLUDED.metadata,
+                venue = COALESCE(matches.venue, EXCLUDED.venue),
+                updated_at = NOW()
+        """,
+        (
+            league_id,
+            home_id,
+            away_id,
+            match_dt,
+            venue,
+            cfg.season_func(match_dt),
+            home_score,
+            away_score,
+            json.dumps(result_meta),
+        ),
+    )
+    return cur.rowcount
+
+
 def _competitor_name(competitor: dict, is_individual: bool) -> str | None:
     """Pull the canonical name from a competitor entry. Team sports use
     .team.displayName; individual sports use .athlete.displayName.
@@ -443,8 +491,11 @@ def _iter_event_competitions(event: dict, cfg: SportConfig):
             yield competition
 
 
-def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict) -> bool:
-    """Insert one scheduled match from a single competition object."""
+def _competition_parts(comp: dict, cfg: SportConfig):
+    """Shared resolution for a competition object: (home, away competitor
+    dicts, names, match datetime, state, venue) — or None when the shape
+    is unusable. Used by both the fixtures path and the results path so
+    team/date identity can never drift between them."""
     competitors = comp.get("competitors") or []
 
     if cfg.is_individual:
@@ -455,32 +506,41 @@ def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict) -> b
         away = next((c for c in competitors if c.get("homeAway") == "away"), None)
         if home is None or away is None:
             if len(competitors) < 2:
-                return False
+                return None
             home, away = competitors[0], competitors[1]
     else:
         home = next((c for c in competitors if c.get("homeAway") == "home"), None)
         away = next((c for c in competitors if c.get("homeAway") == "away"), None)
         if not (home and away):
-            return False
+            return None
 
     home_name = _competitor_name(home, cfg.is_individual)
     away_name = _competitor_name(away, cfg.is_individual)
     if not (home_name and away_name):
-        return False
+        return None
 
     raw_date = comp.get("date") or comp.get("startDate")
     if not raw_date:
-        return False
+        return None
     try:
         match_dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
     except (TypeError, ValueError):
-        return False
+        return None
 
     state = (comp.get("status", {}).get("type", {}).get("state") or "pre").lower()
-    if state != "pre":
-        return False  # skip in-progress and finished events here
-
     venue = (comp.get("venue") or {}).get("fullName")
+    return home, away, home_name, away_name, match_dt, state, venue
+
+
+def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict) -> bool:
+    """Insert one scheduled match from a single competition object."""
+    parts = _competition_parts(comp, cfg)
+    if parts is None:
+        return False
+    home, away, home_name, away_name, match_dt, state, venue = parts
+
+    if state != "pre":
+        return False  # results path (--results) handles post events
 
     home_id = ensure_team(cur, cfg, home_name, league_id)
     away_id = ensure_team(cur, cfg, away_name, league_id)
@@ -490,14 +550,82 @@ def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict) -> b
     return bool(insert_scheduled_match(cur, cfg, league_id, home_id, away_id, match_dt, venue))
 
 
-def process_event(cur, cfg: SportConfig, league_id: str, event: dict) -> int:
-    """Process every match in an ESPN event. Returns the count of
-    matches inserted. For team sports this is 0 or 1 (one match per
-    event); for tennis tournaments it can be dozens (one event =
-    full bracket of matches in progress on the same day)."""
+def _final_scores(cfg: SportConfig, home: dict, away: dict) -> tuple[int, int] | None:
+    """Final (home_score, away_score) per the corpus conventions:
+    team sports use the real score; tennis/MMA use winner-flag 1/0
+    (matches how the historical loaders populated the corpus)."""
+    if cfg.is_individual:
+        hw = home.get("winner")
+        aw = away.get("winner")
+        if hw is True:
+            return 1, 0
+        if aw is True:
+            return 0, 1
+        return None  # walkover / unknown — don't guess
+    try:
+        return int(float(home.get("score"))), int(float(away.get("score")))
+    except (TypeError, ValueError):
+        return None
+
+
+_EXTRA_TIME_TOKENS = ("/OT", "/SO", "/2OT", "OVERTIME", "SHOOTOUT", "AET", "PEN")
+
+
+def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict) -> bool:
+    """Record one completed competition (state == 'post'). Grading needs:
+    scores + status='finished' (all sports), and for NHL additionally
+    metadata.regulation_winner ('draw' when the game went past regulation
+    — grading_outcomes.nhl_regulation_outcome reads it). ESPN's status
+    detail ('Final/OT', 'Final/SO') tells us that.
+
+    Known limitation (documented, accepted): soccer cup ties decided in
+    extra time / on penalties store the post-ET score, so a 1x2 grade on
+    such a match reflects the ET result rather than the 90-minute result.
+    League play (the overwhelming bulk) is unaffected; result_detail is
+    stored in metadata for a later refinement."""
+    parts = _competition_parts(comp, cfg)
+    if parts is None:
+        return False
+    home, away, home_name, away_name, match_dt, state, venue = parts
+
+    status_type = comp.get("status", {}).get("type", {})
+    if state != "post" or not status_type.get("completed", False):
+        return False
+
+    scores = _final_scores(cfg, home, away)
+    if scores is None:
+        return False
+    home_score, away_score = scores
+
+    detail = (status_type.get("detail") or status_type.get("shortDetail") or "").upper()
+    went_extra = any(tok in detail for tok in _EXTRA_TIME_TOKENS)
+
+    result_meta: dict = {"result_detail": detail or "FINAL", "result_source": "espn_scoreboard"}
+    if cfg.sport == "nhl":
+        result_meta["regulation_winner"] = "draw" if went_extra else ("home" if home_score > away_score else "away")
+
+    home_id = ensure_team(cur, cfg, home_name, league_id)
+    away_id = ensure_team(cur, cfg, away_name, league_id)
+    if not (home_id and away_id):
+        return False
+
+    return bool(
+        insert_finished_match(
+            cur, cfg, league_id, home_id, away_id, match_dt, venue, home_score, away_score, result_meta
+        )
+    )
+
+
+def process_event(cur, cfg: SportConfig, league_id: str, event: dict, handler=None) -> int:
+    """Process every match in an ESPN event with `handler` (default: the
+    scheduled-fixture path; the results path passes _record_result).
+    Returns the count of matches handled. For team sports this is 0 or 1
+    (one match per event); for tennis tournaments it can be dozens (one
+    event = full bracket of matches in progress on the same day)."""
+    handler = handler or _process_competition
     inserted = 0
     for comp in _iter_event_competitions(event, cfg):
-        if _process_competition(cur, cfg, league_id, comp):
+        if handler(cur, cfg, league_id, comp):
             inserted += 1
     return inserted
 
@@ -529,6 +657,36 @@ def fetch_all(database_url: str, cfg: SportConfig, leagues: list[str], days: int
     return counts
 
 
+def fetch_results_all(database_url: str, cfg: SportConfig, leagues: list[str], days_back: int) -> dict[str, int]:
+    """Walk recent days BACKWARD and record final results for completed
+    events (audit doc §2.1). Same endpoints, leagues, and identity as the
+    fixtures path — only the competition handler differs. Downstream,
+    grade_completed_matches (15-min cadence) settles predictions + recs
+    for anything that flips to finished here."""
+    counts: dict[str, int] = {}
+    today = date.today()
+    with psycopg2.connect(database_url) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            for slug in leagues:
+                if slug not in cfg.leagues:
+                    logger.warning("Unknown %s league slug: %s — skipping", cfg.sport, slug)
+                    continue
+                code, name, country = cfg.leagues[slug]
+                league_id = ensure_league(cur, cfg, code, name, country)
+                if not league_id:
+                    continue
+                n = 0
+                for offset in range(days_back + 1):  # today back through days_back
+                    day = today - timedelta(days=offset)
+                    for ev in fetch_day(cfg, slug, day):
+                        n += process_event(cur, cfg, league_id, ev, handler=_record_result)
+                counts[slug] = n
+                conn.commit()
+                if n:
+                    logger.info("Recorded %d %s result(s) for %s (%s)", n, cfg.sport, name, slug)
+    return counts
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
@@ -551,6 +709,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "World Cup as group stages approach, narrow enough to keep "
         "per-run feature compute cost low).",
     )
+    p.add_argument(
+        "--results",
+        action="store_true",
+        help="Results mode: walk recent days backward and record final "
+        "scores for completed events (flips matches to 'finished' so the "
+        "graders settle predictions + recommendations).",
+    )
+    p.add_argument(
+        "--days-back",
+        type=int,
+        default=3,
+        help="Results mode: how many days back to sweep (default 3 — "
+        "catches late finals + ESPN corrections without rescanning weeks).",
+    )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
 
@@ -563,6 +735,11 @@ def main(argv: list[str] | None = None) -> int:
     cfg = SPORT_CONFIGS[args.sport]
     leagues_arg = args.leagues if args.leagues is not None else ",".join(cfg.leagues.keys())
     leagues = [s.strip() for s in leagues_arg.split(",") if s.strip()]
+    if args.results:
+        counts = fetch_results_all(args.database_url, cfg, leagues, args.days_back)
+        total = sum(counts.values())
+        logger.info("Recorded %d %s result(s) across %d leagues", total, cfg.sport, len(counts))
+        return 0
     counts = fetch_all(args.database_url, cfg, leagues, args.days)
     total = sum(counts.values())
     logger.info("Fetched %d upcoming %s fixtures across %d leagues", total, cfg.sport, len(counts))

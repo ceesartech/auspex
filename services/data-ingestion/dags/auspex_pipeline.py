@@ -301,10 +301,29 @@ with DAG(
     # UPCOMING matches; grading is for FINISHED matches. The two
     # don't intersect, so this can run in parallel with the rest of
     # the pipeline.
+    # Results ingestion (audit doc §2.1) — the missing half of the
+    # feedback loop. Flips matches scheduled->finished with final scores
+    # via the same ESPN endpoints + identity the fixtures path uses, so
+    # the grader below settles predictions + recommendations within one
+    # pipeline tick of a game ending. One task, all sports chained, to
+    # keep the every-15-min task count flat (six separate tasks would
+    # add ~576 task-runs/day for no isolation benefit — a partial
+    # failure surfaces the same either way via the non-zero exit).
+    fetch_results = BashOperator(
+        task_id="fetch_results",
+        bash_command=" && ".join(
+            f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport {s} --results --days-back 3"
+            for s in ("soccer", "nhl", "nba", "nfl", "tennis", "mma")
+        ),
+    )
+
     grade_completed_matches = BashOperator(
         task_id="grade_completed_matches",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/grade_completed_matches.py --days 14",
     )
+
+    # Grade immediately after results land — same tick settlement.
+    fetch_results >> grade_completed_matches
 
     # Parallel grader for the horse-racing schema (races,
     # race_entrants, race_predictions, race_recommendations). Same
