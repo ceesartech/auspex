@@ -355,6 +355,46 @@ def insert_odds_row(
     return cur.rowcount > 0
 
 
+def insert_snapshot_row(
+    cur, match_id: str, bookmaker: str, market_type: str, selection: str, odds_decimal: float, line: float | None
+) -> bool:
+    """Append to odds_snapshots when the price CHANGED vs the key's latest
+    snapshot (or none exists yet). This is the CLV capture path (audit doc
+    §2.2): the `odds` table deliberately keeps only the first-seen price
+    (its readers average across books), so closing-line movement is
+    recorded here instead — bounded growth, one row per actual price move,
+    read only by vw_rec_clv / vw_clv_summary."""
+    cur.execute(
+        """
+        INSERT INTO odds_snapshots (match_id, bookmaker, market_type, selection, line, odds_decimal)
+        SELECT %s, %s, %s, %s, %s, %s
+        WHERE COALESCE((
+            SELECT s.odds_decimal FROM odds_snapshots s
+            WHERE s.match_id = %s AND s.bookmaker = %s
+              AND s.market_type = %s AND s.selection = %s
+              AND COALESCE(s.line, -1) = COALESCE(%s, -1)
+            ORDER BY s.captured_at DESC
+            LIMIT 1
+        ), -1) <> %s
+        """,
+        (
+            match_id,
+            bookmaker,
+            market_type,
+            selection,
+            line,
+            odds_decimal,
+            match_id,
+            bookmaker,
+            market_type,
+            selection,
+            line,
+            odds_decimal,
+        ),
+    )
+    return cur.rowcount > 0
+
+
 def _team_side(outcome_name: str, home_team_name: str, away_team_name: str) -> str | None:
     """Resolve a team-named outcome (e.g. 'Toronto Maple Leafs') to 'home'
     or 'away' relative to the event. Returns None if neither side matches."""
@@ -639,6 +679,17 @@ def insert_event_odds(
                     line,
                 ):
                     inserted += 1
+                # CLV time-series capture — independent of the odds-table
+                # dedup so price MOVEMENT is recorded (closing line).
+                insert_snapshot_row(
+                    cur,
+                    match_id,
+                    bookmaker_name,
+                    market_type,
+                    selection,
+                    float(price),
+                    line,
+                )
     return inserted
 
 
