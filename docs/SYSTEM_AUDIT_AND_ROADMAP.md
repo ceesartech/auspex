@@ -352,6 +352,17 @@ with the growth-rate driver (WAL) eliminated.
 
 ## 7. Suggested execution order
 
+> **Execution log (2026-07-13):** items 1–7 below are DONE — serve-bridge fix +
+> loud ensemble (`c28bb37`, verified: 37 distinct probs), backups live local+B2
+> (first dump 140MB verified; B2 object confirmed; appuser uid is 999 not 1000 —
+> runbook fixed), Prometheus WAL self-healed after restart (verified clean
+> checkpoints; volume 17.9→8.7GB), 506 bug-window + 176 gated recs voided
+> (undo-lists in `/opt/auspex/backups/`), eligibility gate live (skipping
+> 212/268 at first run), CLV **not yet done**, cost downgrades **pending user
+> dashboards**, healthchecks + log caps + weekly prune cron + `VACUUM FULL
+> race_predictions` (1.5GB→123MB) + CI root-tests all shipped (`45dc9ce`).
+> Next up: §2.2 CLV capture, then §2.1 results ingestion (month-1).
+
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
 2. §1.2 unpause `db_backup_daily`, verify a local dump. B2 wiring same day if keys can be created.
