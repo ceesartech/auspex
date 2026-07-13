@@ -59,6 +59,8 @@ test:
 		echo "==> pytest services/$$svc"; \
 		( cd "services/$$svc" && PYTHONPATH=src pytest tests --rootdir=. --cov=src --cov-report=term -v ); \
 	done
+	@echo "==> pytest tests/unit (repo root)"
+	@pytest tests/unit -q --rootdir=.
 
 test-unit:
 	@set -e; for svc in $(PYTHON_SERVICES); do \

@@ -43,6 +43,10 @@ case "$MODE" in
     info "Running unit tests..."
     run_service_pytest "not (integration or e2e or slow)" \
       --cov=src --cov-report=term-missing -x "$@"
+    # Repo-root tests/unit covers the scripts/ layer (EV/Kelly math,
+    # calibration metrics, graders). No DB/Redis needed.
+    info "Running repo-root tests/unit..."
+    pytest tests/unit -q --rootdir=. "$@"
     ;;
 
   integration)

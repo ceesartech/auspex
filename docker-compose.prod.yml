@@ -20,8 +20,19 @@
 # Local-only / dev: do NOT use this overlay; the base docker-compose.yml
 # exposes the API on :8000 and you can run frontend via `npm run dev`.
 
+# Bounded container logs (audit doc §6.2): json-file logs grew unbounded
+# (~40MB/day; 785MB accumulated before the 2026-07 cleanup). Applied
+# per-service; takes effect when a container is recreated (every CI
+# deploy does).
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   frontend:
+    logging: *default-logging
     build:
       context: services/frontend
       dockerfile: ../../docker/Dockerfile.frontend
@@ -37,12 +48,16 @@ services:
       - betting-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
+      # 127.0.0.1, not localhost: the container resolves localhost to
+      # ::1 first and Next.js binds IPv4 only, so the wget failed and
+      # the container sat "unhealthy" for weeks while serving fine.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/"]
       interval: 30s
       timeout: 5s
       retries: 3
 
   caddy:
+    logging: *default-logging
     image: caddy:2-alpine
     container_name: auspex-caddy
     environment:
@@ -66,16 +81,22 @@ services:
   # public internet — only Caddy should reach them. Override the upstream
   # service definitions to drop their published ports.
   api:
+    logging: *default-logging
     ports: []
   grafana:
+    logging: *default-logging
     ports: []
   prometheus:
+    logging: *default-logging
     ports: []
   mlflow:
+    logging: *default-logging
     ports: []
   redis:
+    logging: *default-logging
     ports: []
   postgres:
+    logging: *default-logging
     ports: []
 
 volumes:

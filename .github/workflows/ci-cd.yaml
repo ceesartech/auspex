@@ -191,6 +191,19 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Run repo-root unit tests
+        env:
+          ENVIRONMENT: test
+        run: |
+          # tests/unit at the repo root holds ~1,050 tests covering the
+          # scripts/ layer — including the EV/Kelly money-path math
+          # (test_recommendation_math.py) and the calibration metrics.
+          # They ran green locally for months while gating NOTHING in CI
+          # (July-2026 audit §6.1). They need no DB/Redis.
+          echo "::group::pytest tests/unit (repo root)"
+          pytest tests/unit -q --rootdir=.
+          echo "::endgroup::"
+
       - name: Run integration tests
         env:
           DATABASE_URL: postgresql://test_user:test_password@localhost:5432/betting_system_test

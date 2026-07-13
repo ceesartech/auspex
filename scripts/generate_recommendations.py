@@ -179,18 +179,49 @@ def display_selection(market_type: str, selection: str, line) -> str:
 # ── DB access ─────────────────────────────────────────────────────────────
 
 
-def list_upcoming(cur, days: int) -> list[dict]:
+def list_upcoming(cur, days: int, min_team_history: int = 10) -> list[dict]:
+    """Scheduled matches in the window whose BOTH teams have at least
+    `min_team_history` finished matches in the corpus.
+
+    Eligibility gate (audit doc §1.1.4): the Poisson/Dixon-Coles ensemble
+    members emit their global prior for teams absent from the training
+    corpus, so out-of-corpus fixtures (World Cup, newly-added summer
+    leagues) produce base-rate probabilities that the EV gate converts
+    into fictitious +EV long-shot recs. No history, no rec — until the
+    corpus backfill (audit doc §3.6) gives those leagues real coverage."""
     cur.execute(
         """
-        SELECT m.id::text AS match_id
+        WITH team_history AS (
+            SELECT t.id AS team_id, COUNT(h.id) AS finished
+            FROM teams t
+            LEFT JOIN matches h
+              ON (h.home_team_id = t.id OR h.away_team_id = t.id)
+             AND h.status = 'finished'
+            GROUP BY t.id
+        )
+        SELECT m.id::text AS match_id,
+               (hh.finished >= %(n)s AND ah.finished >= %(n)s) AS eligible
         FROM matches m
+        JOIN team_history hh ON hh.team_id = m.home_team_id
+        JOIN team_history ah ON ah.team_id = m.away_team_id
         WHERE m.status = 'scheduled'
-          AND m.match_date BETWEEN NOW() AND NOW() + (%s || ' days')::interval
+          AND m.match_date BETWEEN NOW() AND NOW() + (%(days)s || ' days')::interval
         ORDER BY m.match_date ASC
         """,
-        (str(days),),
+        {"days": str(days), "n": min_team_history},
     )
-    return [r["match_id"] for r in cur.fetchall()]
+    rows = cur.fetchall()
+    eligible = [r["match_id"] for r in rows if r["eligible"]]
+    skipped = len(rows) - len(eligible)
+    if skipped:
+        # Loud, not silent: gated volume must be visible in the DAG log.
+        logger.info(
+            "Eligibility gate: skipped %d/%d upcoming matches (a team has " "< %d finished matches in-corpus)",
+            skipped,
+            len(rows),
+            min_team_history,
+        )
+    return eligible
 
 
 def load_market_predictions(cur, match_id: str) -> dict[str, dict]:
@@ -345,11 +376,17 @@ def recommend_for_match(
     return written
 
 
-def run(database_url: str, days: int, ev_threshold: float, prob_floor: float) -> dict:
+def run(
+    database_url: str,
+    days: int,
+    ev_threshold: float,
+    prob_floor: float,
+    min_team_history: int = 10,
+) -> dict:
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             bankroll = get_bankroll(cur)
-            match_ids = list_upcoming(cur, days)
+            match_ids = list_upcoming(cur, days, min_team_history)
             logger.info("Evaluating %d upcoming match(es) (bankroll=%.2f)", len(match_ids), bankroll)
             total = 0
             matches_with_recs = 0
@@ -383,6 +420,13 @@ def parse_args(argv=None):
         default=0.10,
         help="Minimum model probability for a pick — filters thin longshots (default 0.10).",
     )
+    p.add_argument(
+        "--min-team-history",
+        type=int,
+        default=10,
+        help="Skip matches where either team has fewer than this many "
+        "finished matches in-corpus (eligibility gate; default 10, 0 disables).",
+    )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
 
@@ -392,7 +436,7 @@ def main(argv=None):
     if not args.database_url:
         logger.error("DATABASE_URL not set")
         return 2
-    run(args.database_url, args.days, args.ev_threshold, args.prob_floor)
+    run(args.database_url, args.days, args.ev_threshold, args.prob_floor, args.min_team_history)
     return 0
 
 

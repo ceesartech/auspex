@@ -1,7 +1,18 @@
+# Bounded container logs (audit doc §6.2): json-file logs grew unbounded
+# (~40MB/day; 785MB accumulated before the 2026-07 cleanup). Applied
+# per-service; takes effect when a container is recreated (every CI
+# deploy does).
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   # ============= CORE INFRASTRUCTURE =============
 
   postgres:
+    logging: *default-logging
     image: postgres:15-alpine
     container_name: betting-postgres
     environment:
@@ -24,6 +35,7 @@ services:
     restart: unless-stopped
 
   redis:
+    logging: *default-logging
     image: redis:7-alpine
     container_name: betting-redis
     environment:
@@ -51,6 +63,7 @@ services:
   # ============= AIRFLOW =============
 
   airflow-init:
+    logging: *default-logging
     image: apache/airflow:2.8.0-python3.11
     container_name: betting-airflow-init
     environment:
@@ -87,6 +100,7 @@ services:
           --email admin@example.com
 
   airflow-webserver:
+    logging: *default-logging
     build:
       context: .
       dockerfile: docker/Dockerfile.airflow
@@ -132,6 +146,7 @@ services:
     restart: unless-stopped
 
   airflow-scheduler:
+    logging: *default-logging
     build:
       context: .
       dockerfile: docker/Dockerfile.airflow
@@ -185,6 +200,7 @@ services:
   # ============= API SERVICE =============
 
   api:
+    logging: *default-logging
     build:
       context: .
       dockerfile: docker/Dockerfile.api
@@ -275,6 +291,7 @@ services:
   # ============= CELERY WORKERS =============
 
   celery-worker:
+    logging: *default-logging
     build:
       context: .
       dockerfile: docker/Dockerfile.api
@@ -295,6 +312,15 @@ services:
     # top-level module. The fully-qualified services.api.celery_app
     # path fails because services/__init__.py doesn't exist.
     command: celery -A celery_app worker --loglevel=info --concurrency=4
+    # Override the api image's baked-in HTTP healthcheck (Dockerfile.api
+    # curls :8000/health) — this container runs no HTTP server, so it
+    # reported "unhealthy" 24/7 while working, training responders to
+    # ignore the signal. A broker ping is the real liveness probe.
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A celery_app inspect ping -t 10 | grep -q pong"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
     depends_on:
       - redis
       - postgres
@@ -305,6 +331,7 @@ services:
   # ============= MONITORING =============
 
   prometheus:
+    logging: *default-logging
     image: prom/prometheus:latest
     container_name: betting-prometheus
     volumes:
@@ -325,6 +352,7 @@ services:
     restart: unless-stopped
 
   grafana:
+    logging: *default-logging
     image: grafana/grafana:latest
     container_name: betting-grafana
     environment:
@@ -347,6 +375,7 @@ services:
   # ============= MLFLOW =============
 
   mlflow:
+    logging: *default-logging
     image: ghcr.io/mlflow/mlflow:v2.10.0
     container_name: betting-mlflow
     environment:
