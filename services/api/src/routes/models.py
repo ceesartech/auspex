@@ -44,18 +44,27 @@ async def get_model_performance(
     performances = []
     for row in results:
         metrics = row.metrics or {}
+        # metrics is free-form JSONB. The calibration monitor (scripts/
+        # monitor_models.py, since 2026-06) writes non-scalar entries
+        # (reliability `buckets` list, `prediction_type` string) that
+        # violate by_sport's Dict[str, Dict[str, float]] contract and
+        # 500'd this endpoint on the first monitor row. Pass through
+        # numeric entries only; bool is an int subclass, exclude it.
+        numeric_metrics = {
+            k: float(v) for k, v in metrics.items() if isinstance(v, (int, float)) and not isinstance(v, bool)
+        }
         performances.append(
             ModelPerformanceResponse(
                 model_name=row.model_name,
                 model_version=row.model_version,
                 evaluation_date=row.evaluation_date,
                 total_predictions=row.sample_size or 0,
-                accuracy=metrics.get("accuracy", 0),
-                log_loss=metrics.get("log_loss", 0),
-                brier_score=metrics.get("brier_score", 0),
-                roi=metrics.get("roi", 0),
-                sharpe_ratio=metrics.get("sharpe_ratio"),
-                by_sport={row.sport: metrics} if row.sport else None,
+                accuracy=numeric_metrics.get("accuracy", 0),
+                log_loss=numeric_metrics.get("log_loss", 0),
+                brier_score=numeric_metrics.get("brier_score", 0),
+                roi=numeric_metrics.get("roi", 0),
+                sharpe_ratio=numeric_metrics.get("sharpe_ratio"),
+                by_sport={row.sport: numeric_metrics} if row.sport else None,
             )
         )
 
