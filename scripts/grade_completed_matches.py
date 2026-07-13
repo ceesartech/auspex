@@ -159,8 +159,13 @@ def update_prediction(cur, prediction_id: str, actual: Optional[str], correct: O
 
 
 def list_open_recs_for_match(cur, match_id: str) -> list[dict]:
-    """Recommendations still in flight (pending or placed) — both
-    need their final status, profit_loss, and settled_at populated."""
+    """Recommendations needing settlement math. Two shapes:
+    (1) still in flight (pending/placed) — need status + P&L + settled_at;
+    (2) already flipped won/lost/void by the migration-011 match-outcome
+        DB TRIGGER, which sets status/actual_result but computes NO
+        profit_loss — without this branch those rows stay P&L-less
+        forever and every ROI rollup silently understates. The settle
+        loop recomputes the same status and fills the money columns."""
     cur.execute(
         """
         SELECT br.id::text AS rec_id,
@@ -171,7 +176,10 @@ def list_open_recs_for_match(cur, match_id: str) -> list[dict]:
         FROM betting_recommendations br
         LEFT JOIN predictions p ON p.id = br.prediction_id
         WHERE br.match_id = %s
-          AND br.status IN ('pending', 'placed')
+          AND (
+                br.status IN ('pending', 'placed')
+             OR (br.status IN ('won', 'lost', 'void') AND br.profit_loss IS NULL)
+          )
         """,
         (match_id,),
     )
