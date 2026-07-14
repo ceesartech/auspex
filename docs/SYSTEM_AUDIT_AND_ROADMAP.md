@@ -397,9 +397,22 @@ with the growth-rate driver (WAL) eliminated.
 > VM: all exporters UP + scraped, AM healthy+wired (activeAlertmanagers set), 11
 > rules loaded, 0 firing. GOTCHA (now a memory): prometheus.yml is a single-file
 > bind mount → after git-pull the container keeps the old inode; a reload/restart
-> won't help, needs `up -d --force-recreate prometheus`. Grafana dashboards still
-> reference several never-emitted metrics (model_accuracy_7d, celery_tasks_total,
-> k8s pod: rules) — FOLLOW-UP: trim panels or emit those metrics.
+> won't help, needs `up -d --force-recreate prometheus`.
+>
+> **Grafana dashboards fixed (`146d5fb`, 2026-07-14).** The "trim dead metrics"
+> follow-up surfaced a bigger bug: NONE of the dashboards had loaded since March
+> — Grafana file-provisioning logged "Dashboard title cannot be empty" every 30s
+> for all three, because the JSON used the `{"dashboard": {...}}` HTTP-import
+> envelope instead of a root-level model. Unwrapped + repointed to real metrics:
+> `infrastructure.json` rewritten off the k8s pod/HPA recording rules to the
+> node/postgres/redis exporters we now run; `api-performance.json` kept its 4
+> real HTTP panels, repointed cache-hit-rate to redis-exporter keyspace
+> hits/misses, dropped 4 never-emitted panels (active_connections, websockets,
+> celery_tasks_total, prediction_duration); `business-metrics.json` DELETED (all
+> 8 panels queried Prometheus for Postgres-only data — already served by the
+> frontend Analytics page). VERIFIED on VM: provisioning errors gone, both
+> dashboards registered (`/api/search` returns API Performance + Infrastructure
+> Overview). Directory bind mount + 30s provisioner rescan → no restart needed.
 >
 > **Execution log (2026-07-14) — §6.2 tuning (safe subset) DONE (`50cdb23`):**
 > mem_limit ceilings on every long-running service in docker-compose.prod.yml,
