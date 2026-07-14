@@ -73,7 +73,7 @@ def check_redis_connection():
 def check_directory_structure():
     """Check if all required directories exist"""
     required_dirs = [
-        'services/data-ingestion/src/scrapers',
+        'services/data-ingestion/src/core',
         'services/feature-engineering',
         'services/ml-models',
         'services/api',
@@ -115,7 +115,6 @@ def check_required_files():
         'services/data-ingestion/db/migrations/003_create_functions.sql',
         'services/data-ingestion/src/core/config.py',
         'services/data-ingestion/src/core/database.py',
-        'services/data-ingestion/src/scrapers/base_scraper.py',
     ]
 
     project_root = Path(__file__).parent.parent

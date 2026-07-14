@@ -30,7 +30,7 @@ An enterprise-grade sports betting and lottery recommendation system built with 
 
 | Layer | Technology | What it does |
 |---|---|---|
-| Data ingestion | Airflow + custom scrapers | Scrapes odds, stats, results from Bet365, BetMGM, FBref, Understat, ESPN, NHL API, Transfermarkt |
+| Data ingestion | Airflow + Python fetch scripts | Pulls odds, stats, and results from JSON APIs (the-odds-api, ESPN, NHL API, TheRacingAPI) + static-HTML parsers (FBref venues, NFL injuries) |
 | Feature engineering | Python / pandas | Computes 250+ features per match (team form, H2H, player metrics, weather, referee, odds movement) |
 | ML models | XGBoost, LightGBM, Neural Net, Poisson, Dixon-Coles, Ensemble | Generates win/draw/loss probabilities with SHAP explainability |
 | Betting strategy | Kelly Criterion | Sizes stakes optimally based on edge over bookmaker |
@@ -120,7 +120,6 @@ full production setup (Caddy TLS, GHCR pull, backups).
 | Telegram | Critical alert notifications | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
 | SMTP (Gmail) | Email alerts from Alertmanager | `SMTP_PASSWORD` (App Password, not account password) |
 | Supabase | Alternative hosted PostgreSQL | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_KEY` |
-| Rotating proxies | Avoid scraper IP bans | `ROTATING_PROXY_URL`, `PROXY_LIST_URL` |
 
 **How to get a Telegram bot token:**
 1. Message `@BotFather` on Telegram → `/newbot`
@@ -288,7 +287,6 @@ Copy `.env.example` to `.env` and fill in values. The table below documents ever
 | `ENABLE_MODEL_TRAINING` | `true` | Toggle training jobs |
 | `ENABLE_PREDICTIONS` | `true` | Toggle prediction generation |
 | `ENABLE_TELEGRAM_NOTIFICATIONS` | `false` | Enable Telegram alerts |
-| `USE_PROXIES` | `false` | Route scrapers through rotating proxies |
 
 ---
 
@@ -376,9 +374,9 @@ node/postgres/redis exporters; alerts route to Telegram via Alertmanager.
 ```
 betting-system/
 ├── services/
-│   ├── data-ingestion/         # Scrapers + Airflow DAGs
-│   │   ├── src/scrapers/       # Bet365, BetMGM, FBref, Understat, ...
-│   │   ├── dags/               # Airflow pipeline definitions
+│   ├── data-ingestion/         # Airflow DAGs + ingestion core
+│   │   ├── src/core/           # config + DatabaseManager
+│   │   ├── dags/               # Airflow pipeline definitions (shell out to scripts/)
 │   │   └── db/migrations/      # SQL schema migrations
 │   ├── feature-engineering/    # 250+ feature computation
 │   │   └── src/categories/     # team_performance, h2h, player_metrics, ...

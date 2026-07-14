@@ -27,12 +27,12 @@ numpy==2.1.3
 pandas==2.2.3
 pyarrow==18.1.0
 
-# ── Web scraping ──────────────────────────────────────────────────────────────
+# ── HTML parsing ──────────────────────────────────────────────────────────────
+# Used by the lightweight fetch/scrape scripts (scrape_fbref_venues.py,
+# scrape_nfl_injury_reports.py). The Selenium/Playwright browser-automation
+# scrapers were removed in the 2026-07 audit — data now comes from JSON APIs +
+# these static-HTML parsers, so no headless browser is needed.
 beautifulsoup4==4.12.3
-selenium==4.27.1
-playwright==1.49.0
-undetected-chromedriver==3.5.5
-fake-useragent==1.5.1
 # lxml 5.x has binary wheels for Python 3.12+ on macOS
 lxml==5.3.0
 

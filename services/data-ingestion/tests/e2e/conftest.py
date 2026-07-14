@@ -106,8 +106,9 @@ def clean_tables(engine) -> Iterator:
 
 
 @pytest.fixture
-def scraper_config():
-    """A minimal ScraperConfig for tests."""
+def db_config():
+    """A minimal ingestion config for tests (DatabaseManager only reads
+    database_url; the extra fields exercise the rate-limit defaults)."""
     from src.core.config import ScraperConfig
 
     return ScraperConfig(
@@ -118,17 +119,15 @@ def scraper_config():
         min_delay=0.0,
         max_delay=0.0,
         rotate_user_agents=False,
-        use_proxies=False,
-        headless=True,
     )
 
 
 @pytest.fixture
-def db_manager(scraper_config, clean_tables):
+def db_manager(db_config, clean_tables):
     """A real DatabaseManager pointing at the test DB."""
     from src.core.database import DatabaseManager
 
-    return DatabaseManager(scraper_config)
+    return DatabaseManager(db_config)
 
 
 @pytest.fixture

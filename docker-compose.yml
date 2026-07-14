@@ -120,7 +120,6 @@ services:
       - ./services/data-ingestion/dags:/opt/airflow/dags
       - ./services/data-ingestion/logs:/opt/airflow/logs
       - ./services/data-ingestion/plugins:/opt/airflow/plugins
-      - ./services/data-ingestion/src:/opt/airflow/scrapers
       # Mount the host docker socket + the deploy dir so DAGs can run
       # `docker compose -f /opt/auspex/docker-compose.yml exec api ...`.
       - /var/run/docker.sock:/var/run/docker.sock
@@ -177,7 +176,6 @@ services:
       - ./services/data-ingestion/dags:/opt/airflow/dags
       - ./services/data-ingestion/logs:/opt/airflow/logs
       - ./services/data-ingestion/plugins:/opt/airflow/plugins
-      - ./services/data-ingestion/src:/opt/airflow/scrapers
       - /var/run/docker.sock:/var/run/docker.sock
       - /opt/auspex:/opt/auspex:ro
     depends_on:
