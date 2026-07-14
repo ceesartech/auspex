@@ -399,8 +399,28 @@ with the growth-rate driver (WAL) eliminated.
 > bind mount → after git-pull the container keeps the old inode; a reload/restart
 > won't help, needs `up -d --force-recreate prometheus`. Grafana dashboards still
 > reference several never-emitted metrics (model_accuracy_7d, celery_tasks_total,
-> k8s pod: rules) — FOLLOW-UP: trim panels or emit those metrics. Remaining audit
-> items: §6.2 mem-limits + DAG cadence split + `airflow db clean` (in progress).
+> k8s pod: rules) — FOLLOW-UP: trim panels or emit those metrics.
+>
+> **Execution log (2026-07-14) — §6.2 tuning (safe subset) DONE (`50cdb23`):**
+> mem_limit ceilings on every long-running service in docker-compose.prod.yml,
+> sized ~2-4x live docker-stats steady-state (~4.5 GiB idle whole-stack on 15.24
+> GiB): api=10g (generous — training in-process; a spike trips the new
+> HostMemoryHigh alert before OOM), postgres=3g, airflow×2+celery=1.5g,
+> prom/mlflow/redis=1g, grafana/frontend=512m, caddy/AM=256m, exporters=128m —
+> runaway guards, not working constraints. redis `--maxmemory 768mb
+> --maxmemory-policy volatile-lru` (evicts only TTL'd cache/result keys; the
+> no-TTL celery broker in db1 is never evicted → broker integrity kept; paired
+> with the 1g mem_limit so eviction precedes OOM). CADENCE SPLIT: monitor_models
+> pulled out of the */15 monolith into its own hourly DAG (96→24 runs/day; it
+> only reads graded rows so no data dependency lost, just the cosmetic
+> after-digest ordering); new airflow_db_maintenance DAG runs monthly `airflow db
+> clean --skip-archive` of >90-day metadata (was ~365 MB compounding). Both new
+> DAGs unpaused on deploy. DEFERRED (documented, not dropped): the horse-racing
+> cadence split — it's woven into the shared Redis pick-queue + send_pipeline_
+> digest fan-in + grade_completed_races, so splitting it risks the live Telegram
+> pick-alert path; its race_predictions-churn benefit was already captured by the
+> VACUUM FULL, so the metadata-churn win isn't worth risking the money path
+> without a live test window.
 
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
