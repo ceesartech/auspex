@@ -43,10 +43,16 @@ services:
     # Start with requirepass only when a password is actually provided.
     # $$REDIS_PASSWORD is compose-escaped so the shell inside the container
     # reads it from the container's environment at runtime.
+    # maxmemory + volatile-lru bounds Redis gracefully: only keys WITH a TTL
+    # (the predictions cache in db0, celery results in db2) are evicted under
+    # pressure — the celery broker messages in db1 have no TTL, so they are
+    # never evicted (broker integrity preserved). 768mb is ~85x steady use, so
+    # this is a runaway ceiling, not a working constraint. Paired with the prod
+    # mem_limit (1g) so graceful eviction happens before any OOM-kill.
     command: >
       sh -c "[ -n \"$$REDIS_PASSWORD\" ] &&
-             exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\" ||
-             exec redis-server --appendonly yes"
+             exec redis-server --appendonly yes --maxmemory 768mb --maxmemory-policy volatile-lru --requirepass \"$$REDIS_PASSWORD\" ||
+             exec redis-server --appendonly yes --maxmemory 768mb --maxmemory-policy volatile-lru"
     volumes:
       - redis_data:/data
     ports:

@@ -369,21 +369,7 @@ with DAG(
         generate_recommendations_horse_racing,
     ] >> send_pipeline_digest
 
-    # ── Model monitoring (Phase 9) ────────────────────────────────
-    # Walks graded predictions in a 30-day rolling window, computes
-    # ECE / MCE / Brier / log-loss / accuracy per (sport, market),
-    # alerts via the shared Telegram digest when drift thresholds
-    # are exceeded. Independent of the rec pipeline — runs after
-    # the digest task so any drift alert lands AFTER the day's
-    # value-bet alerts (read order matches operational priority).
-    #
-    # trigger_rule=ALL_DONE so a failed rec branch doesn't skip
-    # monitoring — drift detection is exactly when we MOST need
-    # to know if something's wrong upstream.
-    monitor_models = BashOperator(
-        task_id="monitor_models",
-        bash_command=f"{DOCKER_EXEC} python /app/scripts/monitor_models.py --days 30",
-        trigger_rule=TriggerRule.ALL_DONE,
-    )
-
-    send_pipeline_digest >> monitor_models
+    # Model monitoring (drift metrics) used to be this DAG's terminal task,
+    # recomputing a 30-day window every 15 min. It was extracted to its own
+    # hourly DAG (dags/monitor_models_dag.py, audit doc §6.2 cadence split) —
+    # it only reads graded predictions, so it never needed to run inline here.

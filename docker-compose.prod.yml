@@ -30,9 +30,16 @@ x-default-logging: &default-logging
     max-size: "50m"
     max-file: "3"
 
+# Per-service memory ceilings (audit doc §6.2). These are runaway GUARDS, not
+# working constraints — sized ~2-4x observed steady-state (docker stats: whole
+# stack ~4.5 GiB idle on a 15.24 GiB box), so normal operation is never capped.
+# The api ceiling (10g) is deliberately generous because model training runs
+# in-process; a retrain spiking past 10g would trip HostMemoryHigh (batch-4
+# alert) before any OOM. mem_limit takes effect on container recreate.
 services:
   frontend:
     logging: *default-logging
+    mem_limit: 512m
     build:
       context: services/frontend
       dockerfile: ../../docker/Dockerfile.frontend
@@ -58,6 +65,7 @@ services:
 
   caddy:
     logging: *default-logging
+    mem_limit: 256m
     image: caddy:2-alpine
     container_name: auspex-caddy
     environment:
@@ -79,25 +87,52 @@ services:
 
   # In production we don't want the raw API/Grafana ports exposed to the
   # public internet — only Caddy should reach them. Override the upstream
-  # service definitions to drop their published ports.
+  # service definitions to drop their published ports + set memory ceilings.
   api:
     logging: *default-logging
+    mem_limit: 10g       # runs model training in-process — generous headroom
     ports: []
   grafana:
     logging: *default-logging
+    mem_limit: 512m
     ports: []
   prometheus:
     logging: *default-logging
+    mem_limit: 1g
     ports: []
   mlflow:
     logging: *default-logging
+    mem_limit: 1g
     ports: []
   redis:
     logging: *default-logging
+    mem_limit: 1g        # above the 768mb maxmemory so eviction precedes OOM
     ports: []
   postgres:
     logging: *default-logging
+    mem_limit: 3g
     ports: []
+  airflow-webserver:
+    logging: *default-logging
+    mem_limit: 1536m
+  airflow-scheduler:
+    logging: *default-logging
+    mem_limit: 1536m
+  celery-worker:
+    logging: *default-logging
+    mem_limit: 1536m
+  alertmanager:
+    logging: *default-logging
+    mem_limit: 256m
+  node-exporter:
+    logging: *default-logging
+    mem_limit: 128m
+  postgres-exporter:
+    logging: *default-logging
+    mem_limit: 128m
+  redis-exporter:
+    logging: *default-logging
+    mem_limit: 128m
 
 volumes:
   caddy_data:
