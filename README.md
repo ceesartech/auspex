@@ -37,7 +37,7 @@ An enterprise-grade sports betting and lottery recommendation system built with 
 | API | FastAPI + Celery + WebSocket | Serves predictions, recommendations, real-time odds |
 | Frontend | Next.js 14 + TypeScript | Dashboard for viewing predictions, tracking ROI, building accumulators |
 | Infrastructure | Single Hetzner VM + Docker Compose + Caddy | One box, auto TLS, GHCR images |
-| Monitoring | Prometheus + Grafana + Loki + Alertmanager | Full observability with automated model retraining |
+| Monitoring | Prometheus + Grafana + Alertmanager + node/pg/redis exporters | Metrics, host/DB/Redis alerts to Telegram, automated model retraining |
 
 ---
 
@@ -70,9 +70,9 @@ Browser / Mobile
                     └──────────────────────┘
 
 Observability (runs alongside everything):
-  Prometheus → Grafana → Alertmanager → Email/Telegram
-  Loki (logs) ← Promtail (pod log shipper)
-  MLflow (model experiments)
+  node / postgres / redis exporters → Prometheus → Grafana
+                                                 ↘ Alertmanager → Telegram
+  MLflow (model experiments)          Logs: docker json-file (docker compose logs)
 ```
 
 ---
@@ -117,8 +117,7 @@ full production setup (Caddy TLS, GHCR pull, backups).
 
 | Integration | Purpose | Keys needed |
 |---|---|---|
-| Telegram | Critical alert notifications | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
-| SMTP (Gmail) | Email alerts from Alertmanager | `SMTP_PASSWORD` (App Password, not account password) |
+| Telegram | All alert notifications (Alertmanager + DAG failures + drift) | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
 | Supabase | Alternative hosted PostgreSQL | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_KEY` |
 
 **How to get a Telegram bot token:**
@@ -126,9 +125,9 @@ full production setup (Caddy TLS, GHCR pull, backups).
 2. Copy the token it gives you → `TELEGRAM_BOT_TOKEN`
 3. Add the bot to a group/channel → get the chat ID via `https://api.telegram.org/bot<TOKEN>/getUpdates`
 
-**How to get a Gmail App Password (for SMTP alerts):**
-1. Google Account → Security → 2-Step Verification → App passwords
-2. Generate a password for "Mail" → copy it → `SMTP_PASSWORD`
+> Alerting is Telegram-only. Alertmanager routes Prometheus alerts to the same
+> bot/chat that the Airflow DAG failure callbacks and the model-drift monitor
+> use — one channel for everything. There is no email/SMTP path.
 
 ---
 
@@ -267,9 +266,8 @@ Copy `.env.example` to `.env` and fill in values. The table below documents ever
 | `GRAFANA_PASSWORD` | `admin_change_me` | Grafana admin password |
 | `PROMETHEUS_PORT` | `9090` | Prometheus port |
 | `GRAFANA_PORT` | `3000` | Grafana port |
-| `TELEGRAM_BOT_TOKEN` | — | Bot token for critical alerts |
+| `TELEGRAM_BOT_TOKEN` | — | Bot token for all alerts (Alertmanager, DAG failures, drift) |
 | `TELEGRAM_CHAT_ID` | — | Target chat/group ID |
-| `SMTP_PASSWORD` | — | Gmail App Password for email alerts |
 
 ### User preferences
 

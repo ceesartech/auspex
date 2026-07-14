@@ -70,10 +70,10 @@ Every layer is independently deployable, horizontally scalable, and fully observ
          └─────────────────────────────────────────────┘
 
 Observability (runs alongside):
-  Prometheus (9090) → Grafana (3000) → Alertmanager → Email/Telegram
-  Loki (3100) ← Promtail (DaemonSet)
-  MLflow (5000) ← model training jobs
-  Pushgateway (9091) ← batch metric pushes
+  node/postgres/redis exporters → Prometheus (9090) → Grafana (3000)
+                                                    → Alertmanager (9093) → Telegram
+  MLflow (5001) ← model training jobs
+  Logs: docker json-file driver (docker compose logs)
 ```
 
 ---

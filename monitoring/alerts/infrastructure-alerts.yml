@@ -1,0 +1,106 @@
+# Host + datastore alerts for the single-VM deployment. Metrics come from the
+# three exporters wired into docker-compose.yml:
+#   node-exporter      (job="node")     — host CPU / memory / disk
+#   postgres-exporter  (job="postgres") — pg_up, connections, query time
+#   redis-exporter     (job="redis")    — up, memory
+#
+# Kubernetes-era rules (NodeNotReady, PodCrashLooping, HPAMaxReplicas,
+# replication lag) were dropped — there is one box and one Postgres, no
+# cluster and no replica.
+groups:
+  - name: host_alerts
+    rules:
+      - alert: DiskSpaceLow
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}
+          /
+          node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} < 0.10
+        for: 15m
+        labels:
+          severity: critical
+          component: host
+        annotations:
+          summary: "Low disk space on the VM root filesystem"
+          description: "Root filesystem is below 10% free ({{ $value | humanizePercentage }}). Backups + Postgres WAL fill this box first — see OPERATIONS.md."
+
+      - alert: HostMemoryHigh
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.90
+        for: 10m
+        labels:
+          severity: warning
+          component: host
+        annotations:
+          summary: "Host memory usage above 90%"
+          description: "Available memory is under 10% for 10m — check per-service mem_limits and the training jobs."
+
+      - alert: HostCPUHigh
+        expr: |
+          100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 90
+        for: 15m
+        labels:
+          severity: warning
+          component: host
+        annotations:
+          summary: "Host CPU above 90%"
+          description: "Sustained CPU saturation for 15m (current: {{ $value | printf \"%.0f\" }}%)."
+
+  - name: database_alerts
+    rules:
+      - alert: DatabaseDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "PostgreSQL is unreachable"
+          description: "postgres-exporter cannot reach the database (pg_up=0) for over 1 minute. Runbook: DATABASE_ISSUES.md."
+
+      - alert: DatabaseConnectionsHigh
+        expr: |
+          sum(pg_stat_activity_count) / on() pg_settings_max_connections > 0.80
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "Postgres connection pool nearly exhausted"
+          description: "Connection usage is at {{ $value | humanizePercentage }} of max_connections."
+
+      - alert: DatabaseLongRunningQuery
+        expr: pg_stat_activity_max_tx_duration{state="active"} > 60
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "Long-running Postgres query"
+          description: "A query has been active for over 60s. Runbook: DATABASE_ISSUES.md."
+
+  - name: redis_alerts
+    rules:
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: redis
+        annotations:
+          summary: "Redis is unreachable"
+          description: "redis-exporter cannot reach Redis for over 1 minute."
+
+      - alert: RedisMemoryHigh
+        # Guarded: only fires when a maxmemory is configured (max > 0), so an
+        # unbounded Redis never divides by zero and false-fires.
+        expr: |
+          redis_memory_max_bytes > 0
+          and
+          redis_memory_used_bytes / redis_memory_max_bytes > 0.80
+        for: 10m
+        labels:
+          severity: warning
+          component: redis
+        annotations:
+          summary: "Redis memory usage above 80% of maxmemory"
+          description: "Redis is at {{ $value | humanizePercentage }} of its configured maxmemory."

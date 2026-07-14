@@ -1,118 +1,52 @@
+# Alertmanager config for the single-VM deployment.
+#
+# This is a TEMPLATE: the alertmanager container seds __TELEGRAM_BOT_TOKEN__
+# and __TELEGRAM_CHAT_ID__ in at startup (alertmanager does not expand env vars
+# itself, and its busybox image has no envsubst). See the alertmanager service
+# entrypoint in docker-compose.yml.
+#
+# One user, one channel: everything routes to Telegram. Warnings are grouped
+# and slow-repeated; criticals fire immediately and repeat every 15m until
+# resolved.
+
 global:
   resolve_timeout: 5m
-  smtp_from: 'alertmanager@betting-system.com'
-  smtp_smarthost: 'smtp.gmail.com:587'
-  smtp_auth_username: 'alerts@betting-system.com'
-  smtp_auth_password: '${SMTP_PASSWORD}'
-  smtp_require_tls: true
-
-templates:
-  - '/etc/alertmanager/templates/*.tmpl'
 
 route:
-  receiver: 'default'
-  group_by: ['alertname', 'cluster', 'component']
-  group_wait: 10s
-  group_interval: 10s
-  repeat_interval: 12h
+  receiver: telegram
+  group_by: ['alertname', 'component']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
 
   routes:
-  # Critical alerts - immediate, short repeat
-  - match:
-      severity: critical
-    receiver: 'critical-alerts'
-    group_wait: 0s
-    repeat_interval: 5m
-    continue: true
-
-  # Model alerts - ML team
-  - match:
-      component: ml-models
-    receiver: 'ml-team'
-    group_interval: 1h
-    repeat_interval: 4h
-
-  # API alerts - backend team
-  - match:
-      component: api
-    receiver: 'backend-team'
-    repeat_interval: 1h
-
-  # Scraping alerts - data team
-  - match:
-      component: scraper
-    receiver: 'data-team'
-    repeat_interval: 2h
-
-  # Database alerts
-  - match:
-      component: database
-    receiver: 'backend-team'
-    repeat_interval: 30m
+    - matchers:
+        - severity = "critical"
+      group_wait: 0s
+      repeat_interval: 15m
+      continue: false
+      receiver: telegram
 
 receivers:
-  - name: 'default'
-    email_configs:
-    - to: 'alerts@betting-system.com'
-      headers:
-        Subject: '[Betting System] {{ .GroupLabels.alertname }}'
-      send_resolved: true
-
-  - name: 'critical-alerts'
-    email_configs:
-    - to: 'oncall@betting-system.com'
-      headers:
-        Subject: '[CRITICAL] {{ .GroupLabels.alertname }}'
-      send_resolved: true
+  - name: telegram
     telegram_configs:
-    - bot_token: '${TELEGRAM_BOT_TOKEN}'
-      chat_id: ${TELEGRAM_CHAT_ID}
-      parse_mode: 'HTML'
-      message: |
-        <b>CRITICAL ALERT</b>
-
-        Alert: {{ .GroupLabels.alertname }}
-        Severity: {{ .CommonLabels.severity }}
-        Component: {{ .CommonLabels.component }}
-        {{ range .Alerts }}
-        Summary: {{ .Annotations.summary }}
-        Description: {{ .Annotations.description }}
-        {{ if .Annotations.runbook }}Runbook: {{ .Annotations.runbook }}{{ end }}
-        Started: {{ .StartsAt }}
-        {{ end }}
-
-  - name: 'ml-team'
-    email_configs:
-    - to: 'ml-team@betting-system.com'
-      headers:
-        Subject: '[ML] {{ .GroupLabels.alertname }}'
-      send_resolved: true
-
-  - name: 'backend-team'
-    email_configs:
-    - to: 'backend-team@betting-system.com'
-      headers:
-        Subject: '[API/DB] {{ .GroupLabels.alertname }}'
-      send_resolved: true
-
-  - name: 'data-team'
-    email_configs:
-    - to: 'data-team@betting-system.com'
-      headers:
-        Subject: '[Scraping] {{ .GroupLabels.alertname }}'
-      send_resolved: true
+      - bot_token: '__TELEGRAM_BOT_TOKEN__'
+        chat_id: __TELEGRAM_CHAT_ID__
+        api_url: 'https://api.telegram.org'
+        parse_mode: 'HTML'
+        send_resolved: true
+        message: |
+          <b>{{ .Status | toUpper }}{{ if eq .Status "firing" }} ({{ .Alerts.Firing | len }}){{ end }}</b>
+          {{ range .Alerts }}
+          <b>{{ .Labels.alertname }}</b> [{{ .Labels.severity }}{{ if .Labels.component }} · {{ .Labels.component }}{{ end }}]
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ end }}
 
 inhibit_rules:
-  # Suppress warning alerts when a critical alert is already firing for the same service
-  - source_match:
-      severity: 'critical'
-    target_match:
-      severity: 'warning'
-    equal: ['alertname', 'cluster', 'component']
-
-  # Suppress API alerts when the whole cluster is down
-  - source_match:
-      alert: 'NodeNotReady'
-    target_match_re:
-      component: 'api|scraper|ml-models'
-    equal: ['cluster']
+  # A critical alert for a component silences its warnings.
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ['alertname', 'component']

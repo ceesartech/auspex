@@ -6,6 +6,11 @@ global:
 rule_files:
   - /etc/prometheus/alerts/*.yml
 
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
 scrape_configs:
   - job_name: 'prometheus'
     static_configs:
@@ -19,13 +24,10 @@ scrape_configs:
         labels:
           service: 'api'
 
-  - job_name: 'airflow'
-    metrics_path: '/admin/metrics'
-    scrape_interval: 30s
-    static_configs:
-      - targets: ['airflow-webserver:8080']
-        labels:
-          service: 'airflow'
+  # Airflow 2.x exposes no Prometheus endpoint (metrics go via StatsD, which we
+  # don't run), so there is no airflow scrape job — it would be a permanently
+  # DOWN target. DAG health is surfaced by each DAG's Telegram failure callback
+  # instead.
 
   - job_name: 'postgres'
     scrape_interval: 30s

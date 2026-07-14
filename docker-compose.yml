@@ -336,6 +336,8 @@ services:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/alerts:/etc/prometheus/alerts:ro
       - prometheus_data:/prometheus
+    depends_on:
+      - alertmanager
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
@@ -366,6 +368,90 @@ services:
       - "${GRAFANA_PORT:-3000}:3000"
     depends_on:
       - prometheus
+    networks:
+      - betting-network
+    restart: unless-stopped
+
+  # ============= EXPORTERS + ALERTMANAGER =============
+  # Exporters publish only to 127.0.0.1 (host-side debugging via the runbooks);
+  # Prometheus reaches them by service name over betting-network. They are never
+  # exposed to the public internet.
+
+  node-exporter:
+    logging: *default-logging
+    image: prom/node-exporter:latest
+    container_name: betting-node-exporter
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    ports:
+      - "127.0.0.1:9100:9100"
+    networks:
+      - betting-network
+    restart: unless-stopped
+
+  postgres-exporter:
+    logging: *default-logging
+    image: quay.io/prometheuscommunity/postgres-exporter:latest
+    container_name: betting-postgres-exporter
+    environment:
+      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+    ports:
+      - "127.0.0.1:9187:9187"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - betting-network
+    restart: unless-stopped
+
+  redis-exporter:
+    logging: *default-logging
+    image: oliver006/redis_exporter:latest
+    container_name: betting-redis-exporter
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    ports:
+      - "127.0.0.1:9121:9121"
+    depends_on:
+      - redis
+    networks:
+      - betting-network
+    restart: unless-stopped
+
+  alertmanager:
+    logging: *default-logging
+    image: prom/alertmanager:latest
+    container_name: betting-alertmanager
+    # prom/alertmanager is busybox-based (no envsubst/gettext). Alertmanager
+    # itself does NOT expand env vars in its config, so we sed the two Telegram
+    # placeholders in at startup, then exec the real binary. Placeholders are
+    # __TOKEN__-style (no `$`) to keep the compose escaping trivial.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sed -e "s#__TELEGRAM_BOT_TOKEN__#$${TELEGRAM_BOT_TOKEN}#g" \
+            -e "s#__TELEGRAM_CHAT_ID__#$${TELEGRAM_CHAT_ID}#g" \
+            /etc/alertmanager/alertmanager.tmpl.yml > /tmp/alertmanager.yml
+        exec /bin/alertmanager \
+          --config.file=/tmp/alertmanager.yml \
+          --storage.path=/alertmanager
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.tmpl.yml:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
     networks:
       - betting-network
     restart: unless-stopped
@@ -402,6 +488,8 @@ volumes:
   prometheus_data:
     driver: local
   grafana_data:
+    driver: local
+  alertmanager_data:
     driver: local
   mlflow_data:
     driver: local
