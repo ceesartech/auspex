@@ -75,6 +75,15 @@ data/temp/*
 *.pkl
 *.joblib
 
+# Backups — pg_dump output lands in backups/ via the api bind mount. MUST be
+# gitignored: deploy_remote.sh runs `git stash push --include-untracked` on a
+# dirty tree, and un-ignored dumps (a) make the tree dirty on every deploy and
+# (b) get stashed away into .git (~140MB blob per deploy) — which silently
+# defeated the 7-day local-retention layer until 2026-07-14. Ignored files are
+# skipped by --include-untracked, so this one line fixes both.
+/backups/*
+!/backups/.gitkeep
+
 # Models
 models/*
 !models/.gitkeep
