@@ -371,6 +371,36 @@ with the growth-rate driver (WAL) eliminated.
 > documented gap (grading_outcomes dispatch — AH recs won't settle until added);
 > soccer ET/pens cup ties grade on post-ET score (metadata.result_detail stored
 > for refinement); NBA/NHL/NFL validate at their season openers (2026-09/10).
+>
+> **Execution log (2026-07-14) — §5 removals + §6.2 observability DONE:**
+> §5.2 GKE-era corpse removed (`e099ca1`, 125 files / ~7.4k lines: infrastructure/
+> {kubernetes,helm,terraform,scripts,.github,docs}, k8s/, terraform/, the
+> monitoring/{model-monitoring,scripts,loki} duplicate, model-performance
+> dashboard, Dockerfile.training, requirements-airflow.txt, the GCS-era
+> model-retraining.yaml workflow, torchvision; docs/runbooks/Makefile/.env.example
+> repointed to single-VM+Compose+Caddy; kubectl→docker-compose in all four
+> runbooks). §5.1 SCRAPERS PACKAGE removed (`7222b0a`, 28 files / ~2.6k lines: the
+> whole src/scrapers/ incl. dead lottery, proxy_manager+retry_logic, 3 scraper
+> tests, Dockerfile.scraper, per-service requirements.txt, and selenium/playwright/
+> undetected-chromedriver/fake-useragent from requirements.txt — kept bs4+lxml for
+> the surviving static-HTML fetch scripts; ScraperConfig kept for DatabaseManager,
+> proxy/browser fields + dead subclasses dropped; the vestigial
+> src:/opt/airflow/scrapers compose mounts removed). Both CI-green.
+> §6.2 OBSERVABILITY SHIPPED (`472ddd4`): node/postgres/redis exporters +
+> Alertmanager added to compose (exporters bound to 127.0.0.1 only; AM entrypoint
+> seds two __PLACEHOLDER__ Telegram tokens in since alertmanager can't expand env
+> vars and its image is busybox); prometheus.yml wired `alerting:`→AM and dropped
+> the dead airflow /admin/metrics job (Airflow 2.x has no Prom endpoint);
+> api-alerts trimmed to the 2 metrics the API actually emits + new
+> infrastructure-alerts (host disk/mem/cpu, pg up/pool/query, redis up/mem, all
+> k8s rules dropped); alertmanager.yml rewritten email→Telegram-only. VERIFIED ON
+> VM: all exporters UP + scraped, AM healthy+wired (activeAlertmanagers set), 11
+> rules loaded, 0 firing. GOTCHA (now a memory): prometheus.yml is a single-file
+> bind mount → after git-pull the container keeps the old inode; a reload/restart
+> won't help, needs `up -d --force-recreate prometheus`. Grafana dashboards still
+> reference several never-emitted metrics (model_accuracy_7d, celery_tasks_total,
+> k8s pod: rules) — FOLLOW-UP: trim panels or emit those metrics. Remaining audit
+> items: §6.2 mem-limits + DAG cadence split + `airflow db clean` (in progress).
 
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
