@@ -118,20 +118,50 @@ def load_mma_predictions(cur, match_id: str) -> dict[str, dict]:
 # ── Recommendation orchestration ────────────────────────────────────
 
 
-def list_upcoming_mma(cur, days: int) -> list[str]:
+def list_upcoming_mma(cur, days: int, min_fighter_history: int = 3) -> list[str]:
+    """Scheduled MMA bouts in the window whose BOTH fighters have at
+    least `min_fighter_history` finished fights in the corpus.
+
+    Eligibility gate mirrored from soccer (audit doc §1.1.4). The default
+    is 3 (not soccer/tennis's 10): UFC fighters average far fewer corpus
+    fights than tennis players have matches, so 10 would gate most of the
+    card — 3 targets exactly the debutant/short-notice fighters whose
+    features are prior-shaped."""
     cur.execute(
         """
-        SELECT m.id::text AS match_id
+        WITH fighter_history AS (
+            SELECT t.id AS fighter_id, COUNT(h.id) AS finished
+            FROM teams t
+            LEFT JOIN matches h
+              ON (h.home_team_id = t.id OR h.away_team_id = t.id)
+             AND h.status = 'finished'
+            GROUP BY t.id
+        )
+        SELECT m.id::text AS match_id,
+               (hh.finished >= %(n)s AND ah.finished >= %(n)s) AS eligible
         FROM matches m
         JOIN leagues l ON l.id = m.league_id
+        JOIN fighter_history hh ON hh.fighter_id = m.home_team_id
+        JOIN fighter_history ah ON ah.fighter_id = m.away_team_id
         WHERE l.sport = 'mma'
           AND m.status = 'scheduled'
-          AND m.match_date BETWEEN NOW() AND NOW() + (%s || ' days')::interval
+          AND m.match_date BETWEEN NOW() AND NOW() + (%(days)s || ' days')::interval
         ORDER BY m.match_date ASC
         """,
-        (str(days),),
+        {"days": str(days), "n": min_fighter_history},
     )
-    return [r["match_id"] for r in cur.fetchall()]
+    rows = cur.fetchall()
+    eligible = [r["match_id"] for r in rows if r["eligible"]]
+    skipped = len(rows) - len(eligible)
+    if skipped:
+        # Loud, not silent: gated volume must be visible in the DAG log.
+        logger.info(
+            "Eligibility gate: skipped %d/%d upcoming MMA bouts (a fighter has < %d finished fights in-corpus)",
+            skipped,
+            len(rows),
+            min_fighter_history,
+        )
+    return eligible
 
 
 def delete_pending(cur, match_id: str) -> None:
@@ -234,13 +264,13 @@ def recommend_for_match(
     return inserted
 
 
-def run(database_url: str, days: int, ev_threshold: float, prob_floor: float) -> dict:
+def run(database_url: str, days: int, ev_threshold: float, prob_floor: float, min_fighter_history: int = 3) -> dict:
     counts = {"matches_processed": 0, "recommendations": 0}
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             bankroll = get_bankroll(cur)
             logger.info("MMA bankroll for sizing: $%.2f", bankroll)
-            matches = list_upcoming_mma(cur, days)
+            matches = list_upcoming_mma(cur, days, min_fighter_history)
             if not matches:
                 logger.info("No upcoming mma matches in the next %d days", days)
                 return counts
@@ -273,6 +303,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0.40,
         help="Minimum model probability for a pick to be considered (default 0.40).",
     )
+    p.add_argument(
+        "--min-fighter-history",
+        type=int,
+        default=3,
+        help="Both fighters need this many finished fights in-corpus to be rec-eligible (default 3; 0 disables).",
+    )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
 
@@ -282,7 +318,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.database_url:
         logger.error("DATABASE_URL not set")
         return 2
-    counts = run(args.database_url, args.days, args.ev_threshold, args.prob_floor)
+    counts = run(args.database_url, args.days, args.ev_threshold, args.prob_floor, args.min_fighter_history)
     logger.info("Done. %s", counts)
     return 0
 

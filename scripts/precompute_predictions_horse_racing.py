@@ -238,6 +238,16 @@ def store_prediction(
             probabilities = EXCLUDED.probabilities,
             metadata = EXCLUDED.metadata,
             updated_at = NOW()
+        -- No-op write guard (audit doc §6.2): without it every pipeline
+        -- tick rewrote every row (one dead tuple per row per 15 min),
+        -- which is what bloated race_predictions to 93% dead space
+        -- before the 2026-07 VACUUM FULL. Skip the UPDATE when nothing
+        -- changed so the reclaimed space stays reclaimed.
+        WHERE (race_predictions.confidence,
+               race_predictions.probabilities,
+               race_predictions.metadata)
+              IS DISTINCT FROM
+              (EXCLUDED.confidence, EXCLUDED.probabilities, EXCLUDED.metadata)
         """,
         (
             race_id,

@@ -87,7 +87,7 @@ docker compose restart api
 ## Prevention
 
 - Automated weekly retraining via the Airflow `retrain_models` DAG.
-- Continuous drift monitoring via `scripts/monitor_models.py` (15-min DAG).
+- Continuous drift monitoring via `scripts/monitor_models.py` (hourly `monitor_models` DAG), including the constant-prior canary on ungraded predictions.
 - Alert fires on rolling ECE/Brier degradation per sport+market.
 
 ## Related Runbooks

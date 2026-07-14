@@ -161,6 +161,14 @@ def store_prediction(
             probabilities = EXCLUDED.probabilities,
             metadata = EXCLUDED.metadata,
             updated_at = NOW()
+        -- No-op write guard (audit doc §6.2): skip the UPDATE when nothing
+        -- changed — same dead-tuple-churn fix as the consensus upsert in
+        -- precompute_predictions_horse_racing.py.
+        WHERE (race_predictions.confidence,
+               race_predictions.probabilities,
+               race_predictions.metadata)
+              IS DISTINCT FROM
+              (EXCLUDED.confidence, EXCLUDED.probabilities, EXCLUDED.metadata)
         """,
         (
             race_id,

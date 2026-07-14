@@ -118,20 +118,50 @@ def load_tennis_predictions(cur, match_id: str) -> dict[str, dict]:
 # ── Recommendation orchestration ────────────────────────────────────
 
 
-def list_upcoming_tennis(cur, days: int) -> list[str]:
+def list_upcoming_tennis(cur, days: int, min_player_history: int = 10) -> list[str]:
+    """Scheduled tennis matches in the window whose BOTH players have at
+    least `min_player_history` finished matches in the corpus.
+
+    Eligibility gate mirrored from soccer (audit doc §1.1.4): players
+    absent from the training corpus (qualifiers, challengers stepping up)
+    get prior-shaped probabilities that the EV gate converts into
+    fictitious +EV recs — the mechanism behind this sport's stale
+    pending-rec pileup. No history, no rec."""
     cur.execute(
         """
-        SELECT m.id::text AS match_id
+        WITH player_history AS (
+            SELECT t.id AS player_id, COUNT(h.id) AS finished
+            FROM teams t
+            LEFT JOIN matches h
+              ON (h.home_team_id = t.id OR h.away_team_id = t.id)
+             AND h.status = 'finished'
+            GROUP BY t.id
+        )
+        SELECT m.id::text AS match_id,
+               (hh.finished >= %(n)s AND ah.finished >= %(n)s) AS eligible
         FROM matches m
         JOIN leagues l ON l.id = m.league_id
+        JOIN player_history hh ON hh.player_id = m.home_team_id
+        JOIN player_history ah ON ah.player_id = m.away_team_id
         WHERE l.sport = 'tennis'
           AND m.status = 'scheduled'
-          AND m.match_date BETWEEN NOW() AND NOW() + (%s || ' days')::interval
+          AND m.match_date BETWEEN NOW() AND NOW() + (%(days)s || ' days')::interval
         ORDER BY m.match_date ASC
         """,
-        (str(days),),
+        {"days": str(days), "n": min_player_history},
     )
-    return [r["match_id"] for r in cur.fetchall()]
+    rows = cur.fetchall()
+    eligible = [r["match_id"] for r in rows if r["eligible"]]
+    skipped = len(rows) - len(eligible)
+    if skipped:
+        # Loud, not silent: gated volume must be visible in the DAG log.
+        logger.info(
+            "Eligibility gate: skipped %d/%d upcoming tennis matches (a player has < %d finished matches in-corpus)",
+            skipped,
+            len(rows),
+            min_player_history,
+        )
+    return eligible
 
 
 def delete_pending(cur, match_id: str) -> None:
@@ -234,13 +264,13 @@ def recommend_for_match(
     return inserted
 
 
-def run(database_url: str, days: int, ev_threshold: float, prob_floor: float) -> dict:
+def run(database_url: str, days: int, ev_threshold: float, prob_floor: float, min_player_history: int = 10) -> dict:
     counts = {"matches_processed": 0, "recommendations": 0}
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             bankroll = get_bankroll(cur)
             logger.info("Tennis bankroll for sizing: $%.2f", bankroll)
-            matches = list_upcoming_tennis(cur, days)
+            matches = list_upcoming_tennis(cur, days, min_player_history)
             if not matches:
                 logger.info("No upcoming tennis matches in the next %d days", days)
                 return counts
@@ -273,6 +303,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0.40,
         help="Minimum model probability for a pick to be considered (default 0.40).",
     )
+    p.add_argument(
+        "--min-player-history",
+        type=int,
+        default=10,
+        help="Both players need this many finished matches in-corpus to be rec-eligible (default 10; 0 disables).",
+    )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
 
@@ -282,7 +318,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.database_url:
         logger.error("DATABASE_URL not set")
         return 2
-    counts = run(args.database_url, args.days, args.ev_threshold, args.prob_floor)
+    counts = run(args.database_url, args.days, args.ev_threshold, args.prob_floor, args.min_player_history)
     logger.info("Done. %s", counts)
     return 0
 

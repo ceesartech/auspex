@@ -5,7 +5,7 @@
 # synthesises per scrape target.
 #
 # NOTE: model drift is NOT a Prometheus alert — the API exposes no model
-# metrics. Drift/accuracy is watched by scripts/monitor_models.py (15-min DAG)
+# metrics. Drift/accuracy is watched by scripts/monitor_models.py (hourly DAG)
 # which pages Telegram directly with per-sport+market ECE/Brier context.
 groups:
   - name: api_alerts

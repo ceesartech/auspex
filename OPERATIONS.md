@@ -263,3 +263,43 @@ restart the airflow scheduler:
 ```bash
 docker compose restart airflow-scheduler
 ```
+
+## Disk maintenance
+
+The VM's disk pressure comes from three growers; each has an automated guard:
+
+| Grower | Guard | Where |
+|---|---|---|
+| Docker images (~2-4 GB per active deploy week; CI pushes SHA-tagged images every merge) | Weekly `docker_maintenance` DAG — `docker image prune -af --filter until=336h` + `docker builder prune -af` (Sundays 05:00 UTC; 14-day retention always spans a rollback target) | `services/data-ingestion/dags/docker_maintenance.py` |
+| Container logs | json-file caps: `max-size 50m` × `max-file 3` per service | `x-default-logging` anchor in both compose files |
+| Airflow metadata (~1,500 task-runs/day) | Monthly `airflow_db_maintenance` DAG — `airflow db clean` of rows older than 90 days | `services/data-ingestion/dags/airflow_db_maintenance.py` |
+
+Also automated: Prometheus TSDB retention (30d, compose `--storage.tsdb.retention.time`),
+local pg_dump rotation (7 days, `BACKUP_LOCAL_RETENTION`), and the
+`DiskSpaceLow` alert (< 10% free on `/` for 15m → Telegram) as the backstop.
+
+> History: the audit-era hardening intended a host crontab for the image prune;
+> the 2026-07-14 verification pass found no crontab entry on the VM (~10 GB of
+> reclaimable layers had accumulated). It was replaced with the DAG above —
+> versioned, visible in the Airflow UI, and paging on failure. If images pile
+> up again, check that DAG's runs first, then `docker system df`.
+
+Manual spot-checks:
+
+```bash
+df -h /                      # host disk
+docker system df             # images / volumes / build-cache split
+du -sh /opt/auspex/.git      # deploy-stash bloat (see backups note below)
+```
+
+> Backup files in `/opt/auspex/backups/` MUST stay gitignored (`/backups/*` in
+> .gitignore). deploy_remote.sh auto-stashes untracked files before pulling —
+> un-ignored dumps get silently stashed into `.git` on every deploy (found
+> 2026-07-14: `.git` had grown to 811 MB and local dumps kept vanishing).
+
+## GitHub costs
+
+The repo is **public**: GitHub Actions minutes and GHCR image storage are free.
+If it is ever flipped private, both start billing (Actions per-minute after the
+free tier, GHCR per-GB) — CI builds 3 images per merge, so revisit the CI
+matrix and image retention before going private.

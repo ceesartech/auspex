@@ -193,7 +193,7 @@ expected value:
 | 2 | **Eligibility gate + void bogus recs (§1.1.4)** | Missing guard | Stops ~200/wk structurally −EV recs | Quick |
 | 3 | **CLV capture (§2.2)** | 1-line dedup change + view | Edge-truth in weeks; feeds gating | Quick–moderate |
 | 4 | **Market gating (§2.3)** | Blocked on 1+3 | Plausibly several % ROI on retained volume; honest: unquantifiable today | Moderate |
-| 5 | **Soccer xG via Understat backfill** | `expected_goals` NULL for 46,912/46,912 rows; corpus is exactly the 6 leagues Understat covers at 76.5% (17,936/23,456); scraper exists but orphaned + has a team_id bug (`understat_scraper.py:137`) | 40–60% chance of clearing the −0.005 Brier gate; if it does, first real soccer model win since Dixon-Coles, lifts ~15 derived markets | Moderate |
+| 5 | **Soccer xG via Understat backfill** | `expected_goals` NULL for 46,912/46,912 rows; corpus is exactly the 6 leagues Understat covers at 76.5% (17,936/23,456). ⚠️ The old orphaned scraper (`understat_scraper.py`, team_id bug at :137) was DELETED with the scrapers package in `7222b0a` — recover it as a starting point via `git show 7222b0a^:services/data-ingestion/src/scrapers/understat_scraper.py`, or (better) write a fresh standalone `scripts/backfill_understat_xg.py` in the current fetch-script idiom | 40–60% chance of clearing the −0.005 Brier gate; if it does, first real soccer model win since Dixon-Coles, lifts ~15 derived markets | Moderate |
 | 6 | **Soccer corpus 3–4× via existing loaders** | `load_football_data.py` supports ~30 league codes / 20 seasons; prod uses 6 leagues / 10 seasons. The "extra" loader covers the summer leagues (MLS, Allsvenskan, Brasileirão…) generating most current recs | Directly fixes zero-history leagues (P&L-relevant now); modest top-league Brier expectation — **gate the ship on held-out top-5-league Brier**, consider per-league-tier Dixon-Coles; only route to the 5–10× scale where the closed weather chapter could be legitimately revisited | Moderate |
 | 7 | **Horse place/show markets** | `generate_recommendations_horse_racing.py:251` hardcodes `bet_type='win'`; schema already allows place/show; settlement already works for racing; win market measured at breakeven | Place pricing is formulaic/softer; genuinely uncertain — pilot 60 days on realized ROI+CLV | Moderate |
 | 8 | **NHL derived markets** | Poisson scoreline artifacts already exist (`hockey_poisson_nhl_*`); mechanically identical to shipped soccer derivation | Multiplies rec surface 4–5× on the sport with the biggest shipped cross-book win — but sequenced behind results ingestion + season start | Moderate |
@@ -421,6 +421,55 @@ with the growth-rate driver (WAL) eliminated.
 > pick-alert path; its race_predictions-churn benefit was already captured by the
 > VACUUM FULL, so the metadata-churn win isn't worth risking the money path
 > without a live test window.
+>
+> **Correction pass (2026-07-14) — adversarial verification of the log above.**
+> A 7-agent verification workflow + a fresh prod read-only pass audited every
+> claim in this log. Everything shipped was confirmed real, but the pass found
+> the "items 1–7 DONE" header overstated, plus two silently-defeated guardrails
+> in prod. All fixed the same day:
+>
+> - **§1.1.5 constant-prior canary — was claimed done, had never been built.**
+>   Now implemented in `scripts/monitor_models.py` (`constant_prior_canary`):
+>   alerts when the last 100 soccer ensemble predictions collapse to < 5
+>   distinct home probabilities. Runs on ungraded rows, so it fires within one
+>   monitoring tick of a serve-path regression instead of weeks later.
+> - **§1.1.4 tennis/MMA eligibility-gate mirror — was swept into "DONE",
+>   didn't exist.** Now implemented: `--min-player-history` (default 10) in
+>   `generate_recommendations_tennis.py`, `--min-fighter-history` (default 3 —
+>   UFC fighters have far fewer corpus fights than tennis players have matches)
+>   in `generate_recommendations_mma.py`. Same loud-skip logging as soccer.
+> - **race_predictions no-op-write skip (§6.2's second half) — never done; the
+>   deferral rationale above ("churn benefit captured by VACUUM FULL") was
+>   wrong, since VACUUM is one-time and the bloat mechanism was intact.** Both
+>   upserts (consensus + ranker) now carry an `IS DISTINCT FROM` guard, so
+>   unchanged rows stop generating a dead tuple per 15-min tick.
+> - **Backup local retention silently defeated (found on prod):** every nightly
+>   dump was being auto-stashed into `.git` by deploy_remote.sh's
+>   `git stash --include-untracked` (dumps were untracked, not ignored; the VM
+>   `.git` grew to 811 MB and `/opt/auspex/backups/` stayed empty). B2 offsite
+>   was NEVER affected — every upload is HEAD-verified (2026-07-14 dump:
+>   146,775,964 bytes confirmed). Fixed in `ce38b90` (`/backups/*` gitignored).
+> - **Weekly image-prune cron — claimed installed, absent on the VM** (empty
+>   crontab; ~10 GB reclaimable layers had accumulated). Replaced with the
+>   versioned weekly `docker_maintenance` DAG (Sundays 05:00 UTC, 14-day image
+>   retention so rollback targets survive) + an OPERATIONS.md disk section.
+> - Prod state re-verified read-only: weather DAGs paused ✓, mem_limits applied
+>   (api 10g / postgres 3g / redis 1g) ✓, redis maxmemory 768mb volatile-lru ✓,
+>   monitor_models + airflow_db_maintenance unpaused ✓, exporters+AM up ✓.
+>
+> **Dispositions for items the log never recorded** (from the same pass):
+> `load_international.py` + monthly season loaders and the multi-sport
+> `--backfill-finished` extension are OPEN (fold into quarter item 12's corpus
+> work — the results-ingestion `--results` mode partially self-heals the WC
+> league meanwhile). `ab_nfl_travel.py` + `ab_nhl_regulation_cross_book.py`
+> verdict-fold into §4 is OPEN (do before deleting; verdicts must be quoted
+> exactly). Prod `.env` placeholder-cred cleanup (SUPABASE_*/MONGODB_*/GCP_*)
+> is OPEN — operator action, low risk, do during the next planned api restart.
+> requirements-dev black pin aligned to CI (25.11.0); stale "15-min DAG"
+> strings fixed; `services/data-ingestion/README.md` rewritten (it still
+> described the deleted scrapers); §3.5 xG row now notes the understat scraper
+> deletion + git-recovery path. Memory-vs-log voided-rec count reconciled: 682
+> total (506 bug-window + 176 gated).
 
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.

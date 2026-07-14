@@ -338,6 +338,73 @@ def build_alert(findings: list[DriftFinding]) -> Optional[Alert]:
     )
 
 
+# ── Constant-prior canary (audit doc §1.1.5) ─────────────────────────
+
+# The worst incident this system had (a month of constant-prior soccer
+# predictions) produced rows that were individually plausible but
+# collectively identical. Calibration drift metrics need weeks of graded
+# outcomes to notice that; this canary catches it on UNGRADED rows within
+# one monitoring tick by asking: across the most recent serve-path
+# predictions, how many DISTINCT probability vectors are there?
+CANARY_WINDOW = 100  # most recent predictions to inspect
+CANARY_MIN_ROWS = 30  # below this, too few rows to judge (quiet season)
+CANARY_MIN_DISTINCT = 5  # fewer distinct home-probs than this ⇒ alert
+
+
+def constant_prior_canary(cur) -> List[DriftFinding]:
+    """Alert if the last CANARY_WINDOW soccer ensemble match_result
+    predictions collapse to < CANARY_MIN_DISTINCT distinct home
+    probabilities — the signature of every member failing and the
+    ensemble (or a lone Poisson/DC survivor) serving its global prior."""
+    cur.execute(
+        """
+        SELECT COUNT(*) AS n_rows,
+               COUNT(DISTINCT p.probabilities->>'home') AS n_distinct
+        FROM (
+            SELECT pr.probabilities
+            FROM predictions pr
+            JOIN matches m ON m.id = pr.match_id
+            JOIN leagues l ON l.id = m.league_id
+            WHERE l.sport = 'soccer'
+              AND pr.prediction_type = 'match_result'
+              AND pr.model_name = 'ensemble'
+            ORDER BY pr.created_at DESC
+            LIMIT %(window)s
+        ) p
+        """,
+        {"window": CANARY_WINDOW},
+    )
+    row = cur.fetchone()
+    n_rows, n_distinct = row["n_rows"], row["n_distinct"]
+    if n_rows < CANARY_MIN_ROWS:
+        logger.info("Constant-prior canary: only %d recent soccer predictions — skipping", n_rows)
+        return []
+    if n_distinct >= CANARY_MIN_DISTINCT:
+        logger.info(
+            "Constant-prior canary OK: %d distinct home-probs across last %d soccer predictions",
+            n_distinct,
+            n_rows,
+        )
+        return []
+    return [
+        DriftFinding(
+            sport="soccer",
+            market="match_result",
+            metric="distinct_probs",
+            severity="alert",
+            current=float(n_distinct),
+            threshold=float(CANARY_MIN_DISTINCT),
+            message=(
+                f"CONSTANT-PRIOR CANARY: only {n_distinct} distinct home probabilities "
+                f"across the last {n_rows} soccer ensemble predictions (need ≥ "
+                f"{CANARY_MIN_DISTINCT}). The serve path is likely emitting a global "
+                f"prior — check the feature__ bridge and ensemble member failures "
+                f"(see audit doc §1.1)."
+            ),
+        )
+    ]
+
+
 # ── Orchestration ────────────────────────────────────────────────────
 
 
@@ -379,6 +446,12 @@ def run(database_url: str, days: int, min_samples: int, thresholds: DriftThresho
                     }
                 )
                 all_findings.extend(findings)
+
+            # Constant-prior canary (audit doc §1.1.5) — unlike the
+            # calibration slices above, this inspects UNGRADED recent
+            # predictions, so it fires within one tick of a serve-path
+            # regression instead of weeks later.
+            all_findings.extend(constant_prior_canary(cur))
 
             # Persist the calibration time series (best-effort — must not
             # break the drift-alert path below).
