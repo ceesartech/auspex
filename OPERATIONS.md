@@ -306,6 +306,11 @@ matrix and image retention before going private.
 
 ## Modal training (serverless retraining)
 
+> **Doing the cutover?** Follow the explicit step-by-step runbook in
+> [`docs/MODAL_CUTOVER.md`](docs/MODAL_CUTOVER.md) — B2-key rotation, Modal
+> secret creation, token wiring, smoke → shadow → cut over, and rollback, with
+> every command. This section is the summary.
+
 Model training can run on the VM (in the api container) or on **Modal** (13
 bundles in parallel, each its own container). The switch is one Airflow Variable
 — nothing is hardcoded, and the VM path stays as a fallback.
