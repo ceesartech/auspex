@@ -69,6 +69,13 @@ image = (
 # DATABASE_URL — data-in is exclusively the B2 dump.
 SECRETS = [modal.Secret.from_name("auspex-b2"), modal.Secret.from_name("auspex-telegram")]
 
+# Shared dump cache. prep_dump downloads the nightly B2 dump ONCE into this
+# volume; the 13 trainers read it from here instead of each pulling the ~148 MB
+# dump from B2 (13× the download blew B2's daily download cap). ~1.9 GB/run →
+# ~148 MB/run, and it's faster.
+dump_cache = modal.Volume.from_name("auspex-dump-cache", create_if_missing=True)
+CACHED_DUMP = "/cache/current.dump"
+
 PGDATA = "/tmp/pgdata"
 DB_URL = "postgresql://postgres@localhost:5432/trial"
 
@@ -129,6 +136,43 @@ def _telegram(text: str) -> None:
         pass
 
 
+# ── Dump prep: download the nightly B2 dump ONCE into the shared volume ──
+
+
+@app.function(image=image, secrets=SECRETS, volumes={"/cache": dump_cache}, timeout=1800)
+def prep_dump() -> dict:
+    """Download the latest B2 dump into the cache volume (once per run), so the
+    13 trainers read it from the volume instead of each pulling it from B2.
+    Skips the download when the cached copy already matches the latest dump."""
+    import sys
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+
+    sys.path.insert(0, "/app/scripts")
+    import b2_io
+
+    s3 = b2_io.s3_client()
+    objs = b2_io._list(s3, DUMP_PREFIX)
+    if not objs:
+        raise RuntimeError(f"No dump under s3://{b2_io.bucket()}/{DUMP_PREFIX}")
+    latest = max(objs, key=lambda o: o["LastModified"])
+    age = datetime.now(timezone.utc) - latest["LastModified"]
+    if age > timedelta(hours=30):
+        raise RuntimeError(f"Latest dump {latest['Key']} is {age} old (>30h) — refusing to train on a stale dump.")
+
+    dest = Path(CACHED_DUMP)
+    if dest.exists() and dest.stat().st_size == latest["Size"]:
+        print(f"[prep] cache hit: {latest['Key']} ({latest['Size']} bytes)")
+    else:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[prep] downloading {latest['Key']} ({latest['Size']} bytes) → {CACHED_DUMP}")
+        s3.download_file(b2_io.bucket(), latest["Key"], str(dest))
+        if dest.stat().st_size != latest["Size"]:
+            raise RuntimeError(f"Cached dump size mismatch: {dest.stat().st_size} vs {latest['Size']}")
+        dump_cache.commit()
+    return {"key": latest["Key"], "size": latest["Size"]}
+
+
 # ── The shared training body (one bundle) ────────────────────────────
 
 
@@ -146,10 +190,11 @@ def _train_one(bundle: str, run_id: str) -> dict:
     out_dir = f"/tmp/out/{bundle}"
     os.makedirs(out_dir, exist_ok=True)
     try:
-        phase("download_dump")
-        meta = b2_io.download_latest(DUMP_PREFIX, Path("/tmp/dump.dump"))
-        phase("restore", dump=meta["key"])
-        _restore_dump("/tmp/dump.dump")
+        # Read the dump prep_dump already cached in the shared volume — no B2
+        # download here (that's what blew the daily cap at 13× the dump size).
+        dump_cache.reload()
+        phase("restore", dump=CACHED_DUMP)
+        _restore_dump(CACHED_DUMP)
 
         phase("train")
         env = {**os.environ, "PYTHONPATH": "/app/ml-src", "DATABASE_URL": DB_URL}
@@ -223,7 +268,9 @@ def _train_one(bundle: str, run_id: str) -> dict:
 # Python must match the image's. Verbose, but bulletproof. Each just dispatches
 # to the shared _train_one body, and each registers as its own <bundle>_training
 # function in the Modal dashboard/logs/billing.
-_FN_KW = dict(image=image, secrets=SECRETS, cpu=4.0, memory=8192, timeout=3600, retries=1)
+_FN_KW = dict(
+    image=image, secrets=SECRETS, volumes={"/cache": dump_cache}, cpu=4.0, memory=8192, timeout=3600, retries=1
+)
 
 
 @app.function(name="soccer_match_result_training", **_FN_KW)
@@ -311,7 +358,10 @@ def main(run_id: str = "", bundles: str = ""):
     if unknown:
         raise SystemExit(f"Unknown bundle(s): {unknown}\nValid: {BUNDLES}")
 
-    print(f"run_id={run_id}\nSpawning {len(selected)} named training functions in parallel: {selected}\n")
+    print(f"run_id={run_id}\n[prep] downloading the dump once into the shared cache volume …")
+    dm = prep_dump.remote()
+    print(f"[prep] dump ready: {dm['key']} ({dm['size']} bytes)\n")
+    print(f"Spawning {len(selected)} named training functions in parallel: {selected}\n")
     handles = [TRAINERS[b].spawn(run_id) for b in selected]
     results = [h.get() for h in handles]
 
