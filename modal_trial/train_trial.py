@@ -62,12 +62,27 @@ app = modal.App("auspex-train-trial")
 # torch (the VM has no GPU, and the NN auto-selects cpu), the optional ONNX
 # exporters (so --export-onnx exercises the full path), and a Postgres server to
 # restore the dump into. libgomp1 is xgboost/lightgbm's OpenMP runtime.
+#
+# Postgres 17 specifically: the VM's server is PG15, but the api container's
+# pg_dump is 17.10 (its Debian base ships client 17), so the nightly dump is a
+# custom-format archive version 1.16 that ONLY pg_restore >= 17 can read
+# (pg_restore 15 → "unsupported version (1.16) in file header"). Modal's
+# debian_slim is bookworm (PG15), so pull PG17 from the PGDG apt repo. _pgbin()
+# then globs /usr/lib/postgresql/*/bin and picks 17. Restoring a PG15-server
+# dump into a PG17 server is forward-compatible (plain tables + rows).
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    # postgresql/-contrib: server + extensions to restore the -Fc dump into.
-    # build-essential + libpq-dev mirror the api Dockerfile so any sdist in
-    # requirements.txt builds. libgomp1 is xgboost/lightgbm's OpenMP runtime.
-    .apt_install("postgresql", "postgresql-contrib", "libgomp1", "build-essential", "libpq-dev")
+    .apt_install("curl", "ca-certificates", "gnupg", "libgomp1", "build-essential", "libpq-dev")
+    .run_commands(
+        "install -d /usr/share/postgresql-common/pgdg",
+        "curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc "
+        "https://www.postgresql.org/media/keys/ACCC4CF8.asc",
+        'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] '
+        'https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo $VERSION_CODENAME)-pgdg main" '
+        "> /etc/apt/sources.list.d/pgdg.list",
+        "apt-get update",
+        "apt-get install -y --no-install-recommends postgresql-17",
+    )
     .pip_install_from_requirements("requirements.txt")
     .run_commands("pip install --no-cache-dir torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu")
     .pip_install("onnxmltools==1.13.0", "onnxruntime==1.20.1")

@@ -105,6 +105,15 @@ parallel, ships artifacts back to the VM (via B2 or a volume download), then
 does the existing staging→production swap + api reload. Nothing here commits us
 to that — it just gives us the numbers to decide.
 
+## Troubleshooting
+
+- **`pg_restore: unsupported version (1.NN) in file header`** — the container's
+  `pg_restore` is older than the `pg_dump` that wrote the dump. The VM's server
+  is PG15 but its api container's `pg_dump` is 17, so dumps are archive v1.16 and
+  need `pg_restore >= 17`. The image installs PG17 from the PGDG apt repo for
+  exactly this reason; if the VM's `pg_dump` ever jumps to 18, bump the
+  `postgresql-17` pin in `train_trial.py`.
+
 ## Notes / knobs
 
 - **Memory**: containers default to 8 GiB. Soccer is the heaviest; if a bundle
