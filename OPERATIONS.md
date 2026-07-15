@@ -371,13 +371,15 @@ manually and re-run swap.
 
 **B2 layout:** dump in at `postgres/<db>-<ISO>.dump`; artifacts out at
 `modal-train/<run_id>/<bundle>/…`. A prep step caches the dump in a Modal volume
-so each run pulls it once (not 13×). Stop `modal-train/` artifacts accumulating
-with a lifecycle rule — run once (idempotent, preserves existing rules):
+so each run pulls it once (not 13×). `modal-train/` artifacts are pruned
+automatically by the weekly `docker_maintenance` DAG (`prune_b2_modal_artifacts`
+task, deletes >14 days). Run it by hand anytime:
 ```bash
-dc exec -T api python /app/scripts/set_b2_lifecycle.py --days 14
+dc exec -T api python /app/scripts/prune_modal_artifacts.py --days 14 --dry-run
+dc exec -T api python /app/scripts/prune_modal_artifacts.py --days 14
 ```
-(If B2 rejects the S3 lifecycle call, set it in the Backblaze console: Bucket →
-Lifecycle Settings → prefix `modal-train/`, keep for 14 days.)
+(A direct version-aware prune, not an S3 lifecycle rule — B2's versioned buckets
+reject a plain `Expiration.Days` rule.)
 
 **Rollback:** flip `training_backend=vm` (training returns to the VM with zero
 code change), and `production-prev-<stamp>` in `/app/models/` restores the prior

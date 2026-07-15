@@ -56,4 +56,16 @@ with DAG(
         bash_command="docker builder prune -af",
     )
 
-    prune_images >> prune_build_cache
+    # Prune Modal training artifacts from B2 (modal-train/<run_id>/…) older than
+    # 14 days — the weekly retrain + any test runs leave per-run trees there.
+    # Runs in the api container, which carries the B2 creds. Safe: only touches
+    # the modal-train/ prefix (intermediate artifacts), never backups or models.
+    prune_b2_modal_artifacts = BashOperator(
+        task_id="prune_b2_modal_artifacts",
+        bash_command=(
+            "docker compose -f /opt/auspex/docker-compose.yml exec -T api "
+            "python /app/scripts/prune_modal_artifacts.py --days 14"
+        ),
+    )
+
+    prune_images >> prune_build_cache >> prune_b2_modal_artifacts
