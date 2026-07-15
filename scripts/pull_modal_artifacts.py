@@ -15,7 +15,9 @@ For a given --run-id it:
   5. writes promote_decisions.json + Telegram-pages a one-line digest.
 
 GATE (per bundle, keyed by ensemble_name; lower Brier = better):
-  - challenger served Brier <= incumbent + NOISE_FLOOR (0.009)  → PROMOTE
+  - challenger served Brier <= incumbent + gate_tolerance(n)    → PROMOTE
+        (tolerance scales with the bundle's held-out size: ~0.009 at soccer's
+        n≈3522, looser for small bundles like NFL n≈128)
   - no incumbent sidecar yet (first run / new bundle)           → PROMOTE (seed)
   - training ok but no held-out test (e.g. tennis/mma, n=None)  → PROMOTE (can't
         gate; the model is valid — mirrors the calibration gate's own default)
@@ -40,7 +42,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import b2_io  # noqa: E402
 import model_metrics_store as mstore  # noqa: E402
-from modal_bundles import ARTIFACT_PREFIX, BUNDLE_TO_ENSEMBLE, NOISE_FLOOR, served_brier  # noqa: E402
+from modal_bundles import ARTIFACT_PREFIX, BUNDLE_TO_ENSEMBLE, gate_tolerance, served_brier  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("pull_modal_artifacts")
@@ -124,18 +126,19 @@ def gate_and_stage(run_id: str, models_dir: str, shadow: bool, database_url: str
         brier, kept, n = served_brier(gate.get("gate") or gate)
         incumbent = mstore.read_incumbent_brier(production, ensemble_name)
 
+        tol = gate_tolerance(n)  # scales with this bundle's held-out size
         if status != "ok" or not gate:
             decision, reason = "reject", f"training status={status!r} / no gate.json — kept incumbent"
         elif brier is None:
             decision, reason = "promote", "no held-out test to gate on — promoted (model valid)"
         elif incumbent is None:
             decision, reason = "promote", f"no incumbent yet — promoted to seed (brier={brier:.4f})"
-        elif brier <= incumbent + NOISE_FLOOR:
-            decision, reason = "promote", f"brier {brier:.4f} <= incumbent {incumbent:.4f} + {NOISE_FLOOR}"
+        elif brier <= incumbent + tol:
+            decision, reason = "promote", f"brier {brier:.4f} <= incumbent {incumbent:.4f} + tol {tol:.4f} (n={n})"
         else:
             decision, reason = (
                 "reject",
-                f"brier {brier:.4f} > incumbent {incumbent:.4f} + {NOISE_FLOOR} — kept incumbent",
+                f"brier {brier:.4f} > incumbent {incumbent:.4f} + tol {tol:.4f} (n={n}) — kept incumbent",
             )
 
         row = {

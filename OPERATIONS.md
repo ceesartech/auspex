@@ -370,8 +370,14 @@ run treats it as un-gated (promote-to-seed), or copy the bundle's tree from
 manually and re-run swap.
 
 **B2 layout:** dump in at `postgres/<db>-<ISO>.dump`; artifacts out at
-`modal-train/<run_id>/<bundle>/…`. Add a B2 lifecycle rule to expire
-`modal-train/` objects after N days so runs don't accumulate.
+`modal-train/<run_id>/<bundle>/…`. A prep step caches the dump in a Modal volume
+so each run pulls it once (not 13×). Stop `modal-train/` artifacts accumulating
+with a lifecycle rule — run once (idempotent, preserves existing rules):
+```bash
+dc exec -T api python /app/scripts/set_b2_lifecycle.py --days 14
+```
+(If B2 rejects the S3 lifecycle call, set it in the Backblaze console: Bucket →
+Lifecycle Settings → prefix `modal-train/`, keep for 14 days.)
 
 **Rollback:** flip `training_backend=vm` (training returns to the VM with zero
 code change), and `production-prev-<stamp>` in `/app/models/` restores the prior

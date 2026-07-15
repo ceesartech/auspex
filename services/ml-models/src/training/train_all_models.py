@@ -788,6 +788,40 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _raw_holdout_brier(ensemble: Any, df: pd.DataFrame, target: str) -> Optional[Dict[str, Any]]:
+    """Calibration-INDEPENDENT held-out Brier on the test set.
+
+    Fallback for bundles whose calibration gate never ran (2-class tennis/mma:
+    the isotonic calibrator step raises, so `result['calibration']` stays None
+    and no held-out number is emitted). The raw ensemble prediction works fine
+    for them — they serve — so we score it directly, giving the promote-gate a
+    served Brier to gate on. Shape-mirrors the gate's `raw` block so
+    served_brier() reads it identically. Returns None if unavailable."""
+    if ensemble is None or df is None or getattr(df, "empty", True) or target not in getattr(df, "columns", []):
+        return None
+    try:
+        from sklearn.preprocessing import LabelEncoder
+        from training.calibration import brier_multiclass
+
+        y = LabelEncoder().fit_transform(df[target].values)
+        raw = ensemble.predict_proba(df, apply_calibration=False)
+        if raw.ndim != 2 or raw.shape[1] != len(np.unique(y)):
+            return None
+        return {
+            "kept": False,
+            "reason": "raw held-out Brier (calibration gate did not run for this bundle)",
+            "n": int(len(df)),
+            "raw": {
+                "brier": round(brier_multiclass(raw, y), 5),
+                "accuracy": round(float((np.argmax(raw, axis=1) == y).mean()), 5),
+            },
+            "calibrated": None,
+        }
+    except Exception as exc:  # noqa: BLE001 — best-effort; absence just means no gate number
+        logger.warning("Raw held-out Brier fallback failed: %s", exc)
+        return None
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -832,6 +866,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     holdout = results.get(bundle.ensemble_name, {}).get("calibration")
     if holdout:
         logger.info("CALIBRATION GATE (%s): %s", bundle.ensemble_name, json.dumps(holdout))
+    else:
+        # No calibration decision (e.g. 2-class tennis/mma) → fall back to a
+        # raw held-out Brier so every bundle still emits a gate-able number.
+        holdout = _raw_holdout_brier(orchestrator.trained_models.get(bundle.ensemble_name), test_df, target)
+        if holdout:
+            logger.info("HELD-OUT RAW (%s): %s", bundle.ensemble_name, json.dumps(holdout))
 
     onnx_paths: Dict[str, str] = {}
     if args.export_onnx:

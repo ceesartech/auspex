@@ -507,6 +507,25 @@ with the growth-rate driver (WAL) eliminated.
 > with the VM fallback → delete the trial). CADENCE: stays weekly; the promote-gate
 > is the prerequisite that makes raising it safe later. OPEN operator actions before
 > cutover: rotate the B2 app key, create the two Modal Secrets, set MODAL_TOKEN_*.
+>
+> **Update (2026-07-15) — CUT OVER, LIVE.** training_backend flipped to 'modal';
+> first real retrain succeeded in ~2.5 min (vs ~90 min on the VM), promoted 13/13,
+> seeded 11 incumbent held_out_metrics.json sidecars, backed up production-prev,
+> reloaded the api clean (models loading from /app/models/production). Verified
+> across trial+smoke1+shadow1+shadow2+schedtest: soccer held-out Brier ~0.593 every
+> run (baseline ~0.5946). Hard-won gotchas fixed en route: @app.function factory →
+> global-scope error → dropped serialized=True for 13 explicit named defs (also
+> fixed the cloudpickle + local-vs-image Python 3.13/3.11 mismatch); image .env()
+> must precede add_local_*; B2 daily download cap blown by 13× dump pulls → added a
+> prep_dump that caches the dump in a shared Modal volume (1.9GB→148MB/run); B2 key
+> needed readFiles + the cap raised; MODAL_TOKEN_SECRET was mis-named in .env. Three
+> follow-ups then shipped: (1) tennis/mma now emit a calibration-independent RAW
+> held-out Brier (train_all_models `_raw_holdout_brier` fallback) so they're
+> gate-able; (2) promote-gate tolerance is now n-aware (`gate_tolerance(n)` =
+> 0.009·√(3522/n), capped 0.10) so small bundles like NFL n≈128 aren't spuriously
+> rejected; (3) `scripts/set_b2_lifecycle.py` expires modal-train/ artifacts.
+> Remaining: bake ~1 month on the VM fallback, then delete modal_trial/ + volumes
+> and make the CPX41→CPX31 downgrade call from a measured (training-free) peak week.
 
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.

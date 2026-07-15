@@ -37,10 +37,25 @@ DUMP_PREFIX = "postgres/"
 ARTIFACT_PREFIX = "modal-train/"
 
 # Promote-gate tolerance: admit a challenger iff its served held-out Brier is
-# within this of the incumbent's (lower Brier = better). This is the audit's
-# ~0.009 Brier SE noise floor, so a within-noise retrain cannot displace a good
-# incumbent — but an equal-or-better model always promotes.
+# within a tolerance of the incumbent's (lower Brier = better). NOISE_FLOOR is
+# the audit's ~0.009 Brier SE at soccer's held-out size (N_REF); gate_tolerance()
+# scales it to each bundle's own test size.
 NOISE_FLOOR = 0.009
+N_REF = 3522  # soccer's held-out test n, where NOISE_FLOOR is calibrated.
+
+
+def gate_tolerance(n) -> float:
+    """Brier tolerance scaled to the held-out test size. Brier SE shrinks
+    ~1/sqrt(n), so a fixed floor tuned for soccer (n≈3522) is far too strict for
+    small bundles — NFL (n≈128) varies ~0.02–0.05 run-to-run from the unseeded
+    NN alone, so a fixed 0.009 would spuriously reject equivalent retrains. Scale
+    by sqrt(N_REF/n), capped at 0.10 so a clearly-worse model is still caught,
+    and fall back to NOISE_FLOOR when n is unknown."""
+    import math
+
+    if not n or n <= 0:
+        return NOISE_FLOOR
+    return min(0.10, NOISE_FLOOR * math.sqrt(N_REF / n))
 
 
 def served_brier(gate: dict):
