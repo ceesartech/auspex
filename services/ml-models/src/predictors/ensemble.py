@@ -186,13 +186,29 @@ class EnsemblePredictor(BaseModel):
             attempted_weight += w
             try:
                 proba = model.predict_proba(X)
-                if blended is None:
-                    blended = np.zeros_like(proba)
-                blended += w * proba
-                total_weight += w
             except Exception as e:
                 failed.append(name)
                 logger.error("Ensemble member %r failed to predict: %s", name, e)
+                continue
+            # A member that returns NaN/inf (e.g. a neural net whose scaler
+            # learned NaN stats from an all-NaN training column) would silently
+            # POISON the blend — NaN + anything = NaN — since np averaging can't
+            # route around it. Treat non-finite output exactly like a hard
+            # failure: drop the member, log loudly, and let the surviving-weight
+            # guard below decide whether enough finite legs remain to serve.
+            if not np.isfinite(proba).all():
+                failed.append(name)
+                logger.error(
+                    "Ensemble member %r returned non-finite proba (%d/%d NaN or inf) — dropping from blend",
+                    name,
+                    int((~np.isfinite(proba)).sum()),
+                    proba.size,
+                )
+                continue
+            if blended is None:
+                blended = np.zeros_like(proba)
+            blended += w * proba
+            total_weight += w
 
         if blended is None:
             raise ValueError(f"No model produced valid predictions (all members failed: {failed})")

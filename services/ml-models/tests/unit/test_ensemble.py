@@ -258,6 +258,34 @@ class TestEnsemblePredictor:
         assert proba.shape == (5, 3)
         np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=0.05)
 
+    def test_nan_member_output_dropped_not_poisoning(self, ensemble_config, sample_match_data):
+        # A member that returns NaN instead of raising (e.g. a neural net whose
+        # scaler learned NaN stats from an all-NaN training column — the tennis/
+        # MMA odds columns) must be DROPPED, not blended in: NaN + anything = NaN
+        # would silently poison the whole ensemble. Minority NaN weight → still
+        # serves finite on the survivors.
+        model = EnsemblePredictor(ensemble_config)
+        nan_leg = self._make_mock_model()
+        nan_leg.predict_proba = MagicMock(side_effect=lambda X: np.full((len(X), 3), np.nan))
+        model.add_model("nan_nn", nan_leg, weight=0.2)
+        model.add_model("main", self._make_mock_model(), weight=0.8)
+
+        proba = model.predict_proba(sample_match_data.head(5))
+        assert np.isfinite(proba).all(), "NaN leg poisoned the blend"
+        np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=0.05)
+
+    def test_majority_nan_member_refuses_to_serve(self, ensemble_config, sample_match_data):
+        # Same guard as the majority-KeyError case, but for non-finite output:
+        # if the members that go NaN hold the majority weight, refuse to serve.
+        model = EnsemblePredictor(ensemble_config)
+        nan_leg = self._make_mock_model()
+        nan_leg.predict_proba = MagicMock(side_effect=lambda X: np.full((len(X), 3), np.nan))
+        model.add_model("nan_big", nan_leg, weight=0.8)
+        model.add_model("prior", self._make_mock_model(), weight=0.2)
+
+        with pytest.raises(ValueError, match="refusing to serve"):
+            model.predict_proba(sample_match_data.head(5))
+
     def test_predict_no_models(self, ensemble_config, sample_match_data):
         model = EnsemblePredictor(ensemble_config)
         with pytest.raises(ValueError, match="No models in ensemble"):
