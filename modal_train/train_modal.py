@@ -29,14 +29,12 @@ from pathlib import Path
 
 import modal
 
-# Bundle list + prefixes are the shared source of truth (scripts/). Needed at
-# DEFINITION time to mint the named functions, so put scripts/ on the path here.
-# BUNDLES is a list and the prefixes are strings — all serialize by value into
-# the cloudpickled functions. `served_brier` (a function from modal_bundles) is
-# imported at RUNTIME inside _train_one instead, so it's not a cross-module
-# reference cloudpickle would try (and fail) to re-import in the container.
+# Bundle list + helpers are the shared source of truth (scripts/). Put scripts/
+# on the path both here (definition time) and, in the container, via the image's
+# PYTHONPATH=/app/scripts so this same top-level import resolves when Modal
+# imports the module to run a (non-serialized) function.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
-from modal_bundles import ARTIFACT_PREFIX, BUNDLES, DUMP_PREFIX  # noqa: E402
+from modal_bundles import ARTIFACT_PREFIX, BUNDLES, DUMP_PREFIX, served_brier  # noqa: E402
 
 app = modal.App("auspex-train")
 
@@ -143,7 +141,6 @@ def _train_one(bundle: str, run_id: str) -> dict:
 
     sys.path.insert(0, "/app/scripts")
     import b2_io  # noqa: E402 — runtime import (needs boto3 + B2 env from the secret)
-    from modal_bundles import served_brier  # noqa: E402 — runtime, not a serialized cross-module ref
 
     t0 = time.time()
     out_dir = f"/tmp/out/{bundle}"
@@ -218,33 +215,84 @@ def _train_one(bundle: str, run_id: str) -> dict:
         return {"bundle": bundle, "status": "error", "error": str(exc), "seconds": round(time.time() - t0, 1)}
 
 
-# ── 13 NAMED functions, generated DRY ────────────────────────────────
+# ── 13 NAMED functions (explicit global-scope defs) ──────────────────
+# Deliberately NOT a factory + NOT serialized=True. Modal requires @app.function
+# on a global-scope function; a NON-serialized function is *imported* in the
+# container (which runs its own Python 3.11), so the caller's Python version is
+# irrelevant — this avoids the serialized=True constraint that the definer's
+# Python must match the image's. Verbose, but bulletproof. Each just dispatches
+# to the shared _train_one body, and each registers as its own <bundle>_training
+# function in the Modal dashboard/logs/billing.
+_FN_KW = dict(image=image, secrets=SECRETS, cpu=4.0, memory=8192, timeout=3600, retries=1)
 
 
-def _register(bundle: str):
-    # serialized=True is REQUIRED: these functions are generated in a factory
-    # (not at module/global scope), so Modal can't reference them by import path
-    # and raises "must apply to functions in global scope, unless serialized=True".
-    # Serialized functions are cloudpickled by value; the entrypoint runs as
-    # __main__ so _train_one + its helpers serialize by value too. name= still
-    # registers each as a distinct <bundle>_training function in the dashboard.
-    @app.function(
-        name=f"{bundle}_training",
-        image=image,
-        secrets=SECRETS,
-        cpu=4.0,
-        memory=8192,
-        timeout=3600,
-        retries=1,
-        serialized=True,
-    )
-    def _fn(run_id: str, _bundle: str = bundle) -> dict:
-        return _train_one(_bundle, run_id)
-
-    return _fn
+@app.function(name="soccer_match_result_training", **_FN_KW)
+def soccer_match_result_training(run_id: str) -> dict:
+    return _train_one("soccer_match_result", run_id)
 
 
-TRAINERS = {b: _register(b) for b in BUNDLES}
+@app.function(name="nhl_moneyline_training", **_FN_KW)
+def nhl_moneyline_training(run_id: str) -> dict:
+    return _train_one("nhl_moneyline", run_id)
+
+
+@app.function(name="nhl_regulation_training", **_FN_KW)
+def nhl_regulation_training(run_id: str) -> dict:
+    return _train_one("nhl_regulation", run_id)
+
+
+@app.function(name="nhl_puck_line_training", **_FN_KW)
+def nhl_puck_line_training(run_id: str) -> dict:
+    return _train_one("nhl_puck_line", run_id)
+
+
+@app.function(name="nhl_total_training", **_FN_KW)
+def nhl_total_training(run_id: str) -> dict:
+    return _train_one("nhl_total", run_id)
+
+
+@app.function(name="nba_moneyline_training", **_FN_KW)
+def nba_moneyline_training(run_id: str) -> dict:
+    return _train_one("nba_moneyline", run_id)
+
+
+@app.function(name="nba_spread_training", **_FN_KW)
+def nba_spread_training(run_id: str) -> dict:
+    return _train_one("nba_spread", run_id)
+
+
+@app.function(name="nba_total_training", **_FN_KW)
+def nba_total_training(run_id: str) -> dict:
+    return _train_one("nba_total", run_id)
+
+
+@app.function(name="nfl_moneyline_training", **_FN_KW)
+def nfl_moneyline_training(run_id: str) -> dict:
+    return _train_one("nfl_moneyline", run_id)
+
+
+@app.function(name="nfl_spread_training", **_FN_KW)
+def nfl_spread_training(run_id: str) -> dict:
+    return _train_one("nfl_spread", run_id)
+
+
+@app.function(name="nfl_total_training", **_FN_KW)
+def nfl_total_training(run_id: str) -> dict:
+    return _train_one("nfl_total", run_id)
+
+
+@app.function(name="tennis_moneyline_training", **_FN_KW)
+def tennis_moneyline_training(run_id: str) -> dict:
+    return _train_one("tennis_moneyline", run_id)
+
+
+@app.function(name="mma_moneyline_training", **_FN_KW)
+def mma_moneyline_training(run_id: str) -> dict:
+    return _train_one("mma_moneyline", run_id)
+
+
+# bundle key → its named function, for the entrypoint to spawn in parallel.
+TRAINERS = {b: globals()[f"{b}_training"] for b in BUNDLES}
 
 
 @app.local_entrypoint()
