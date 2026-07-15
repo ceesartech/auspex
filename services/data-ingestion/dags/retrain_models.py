@@ -38,9 +38,21 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from airflow import DAG
+from airflow.models import Variable
 from airflow.operators.bash import BashOperator
 from airflow.utils.trigger_rule import TriggerRule
 from alerting import notify_failure  # shared Telegram failure alerting
+
+# Fallback flag (audit doc §7 / Modal migration). Airflow Variable
+# 'training_backend' selects where training runs, read at parse time so the UI
+# shows only the ACTIVE graph:
+#   'vm'    → the original in-container train_<sport> tasks (default; the
+#             ~1-month fallback while Modal bakes).
+#   'modal' → trigger the auspex-train Modal app (all 13 bundles in parallel),
+#             pull + promote-gate the artifacts, then reuse swap/reload/cleanup.
+# Flip it live: `airflow variables set training_backend modal` (+ scheduler
+# re-parse). No code change, no deploy — that IS the fallback switch.
+TRAINING_BACKEND = Variable.get("training_backend", default_var="vm")
 
 # Logical sport → ordered list of SPORT_BUNDLES keys to train.
 #
@@ -109,7 +121,7 @@ DOCKER_EXEC = "docker compose -f /opt/auspex/docker-compose.yml exec -T api"
 
 with DAG(
     dag_id="retrain_models",
-    description="Weekly retrain of ensemble + base models (calibrated, on-VM)",
+    description="Weekly retrain of ensemble + base models (backend: Variable training_backend, vm|modal)",
     default_args=default_args,
     start_date=datetime(2026, 1, 1),
     schedule_interval="0 4 * * 0",  # Sundays at 04:00 UTC
@@ -129,56 +141,80 @@ with DAG(
         ),
     )
 
-    # One BashOperator per LOGICAL SPORT. Each task internally loops
-    # over that sport's bundle list, training each bundle
-    # sequentially in a single container invocation. This collapses
-    # what would otherwise be N_sports × N_markets tasks into N_sports
-    # tasks — the graph stays readable as we add NBA / NFL / etc.
-    #
-    # `set +e` inside the loop so one bundle's failure doesn't abort
-    # the rest of that sport's training. Failures are captured in
-    # `failed_bundles` and printed at the end; the task still exits 0
-    # if at least one bundle wrote artifacts to staging (the swap
-    # step's per-item merge handles partial output safely).
-    train_tasks: dict[str, BashOperator] = {}
-    for sport, bundles in SPORT_BUNDLE_GROUPS.items():
-        bundle_list_bash = " ".join(bundles)
-        train_tasks[sport] = BashOperator(
-            task_id=f"train_{sport}",
-            execution_timeout=timedelta(minutes=90),
-            # Don't let one sport's data hiccup block the others —
-            # all sport tasks attempt; swap merges whatever landed.
-            trigger_rule=TriggerRule.ALL_DONE,
+    # ── Backend-specific TRAINING tasks (conditionally defined so the
+    # inactive path's tasks never appear as orphan roots that auto-run) ──
+    if TRAINING_BACKEND == "vm":
+        # One BashOperator per LOGICAL SPORT. Each task internally loops
+        # over that sport's bundle list, training each bundle
+        # sequentially in a single container invocation. This collapses
+        # what would otherwise be N_sports × N_markets tasks into N_sports
+        # tasks — the graph stays readable as we add NBA / NFL / etc.
+        #
+        # `set +e` inside the loop so one bundle's failure doesn't abort
+        # the rest of that sport's training. Failures are captured in
+        # `failed_bundles` and printed at the end; the task still exits 0
+        # if at least one bundle wrote artifacts to staging (the swap
+        # step's per-item merge handles partial output safely).
+        train_tasks: dict[str, BashOperator] = {}
+        for sport, bundles in SPORT_BUNDLE_GROUPS.items():
+            bundle_list_bash = " ".join(bundles)
+            train_tasks[sport] = BashOperator(
+                task_id=f"train_{sport}",
+                execution_timeout=timedelta(minutes=90),
+                # Don't let one sport's data hiccup block the others —
+                # all sport tasks attempt; swap merges whatever landed.
+                trigger_rule=TriggerRule.ALL_DONE,
+                bash_command=(
+                    f"{DOCKER_EXEC} bash -c '"
+                    "cd /app/services/ml-models; "
+                    'failed_bundles=""; '
+                    f"for bundle in {bundle_list_bash}; do "
+                    'echo "=== training bundle $bundle ==="; '
+                    "if ! PYTHONPATH=src python -m training.train_all_models "
+                    "--sport $bundle "
+                    "--model-type all "
+                    '--database-url "$DATABASE_URL" '
+                    "--output-dir /app/models/staging "
+                    "--export-onnx; then "
+                    'echo "!!! bundle $bundle FAILED"; '
+                    'failed_bundles="$failed_bundles $bundle"; '
+                    "fi; "
+                    "done; "
+                    'if [ -n "$failed_bundles" ]; then '
+                    'echo "Failed bundles:$failed_bundles"; '
+                    "fi; "
+                    # Exit 0 if ANY bundle succeeded (staging has its
+                    # artifacts), non-zero only if every single bundle
+                    # failed — that surfaces a real problem worth paging.
+                    'if [ -d /app/models/staging ] && [ -n "$(ls -A /app/models/staging 2>/dev/null)" ]; then '
+                    "exit 0; "
+                    "else "
+                    'echo "No artifacts in staging — every bundle failed."; '
+                    "exit 1; "
+                    "fi"
+                    "'"
+                ),
+            )
+    else:  # TRAINING_BACKEND == "modal"
+        # Modal backend: ONE parallel run trains all 13 bundles (each in its
+        # own named Modal function), pushes artifacts to B2; the VM then pulls
+        # + promote-gates them into /app/models/staging for the SAME swap below.
+        # modal_trigger runs in the airflow-scheduler container (which carries
+        # `modal` + MODAL_TOKEN_* + /opt/auspex mounted). ts_nodash is a clean
+        # per-run id shared with pull_and_gate so both agree on the B2 prefix.
+        modal_trigger = BashOperator(
+            task_id="modal_trigger",
+            execution_timeout=timedelta(minutes=30),
             bash_command=(
-                f"{DOCKER_EXEC} bash -c '"
-                "cd /app/services/ml-models; "
-                'failed_bundles=""; '
-                f"for bundle in {bundle_list_bash}; do "
-                'echo "=== training bundle $bundle ==="; '
-                "if ! PYTHONPATH=src python -m training.train_all_models "
-                "--sport $bundle "
-                "--model-type all "
-                '--database-url "$DATABASE_URL" '
-                "--output-dir /app/models/staging "
-                "--export-onnx; then "
-                'echo "!!! bundle $bundle FAILED"; '
-                'failed_bundles="$failed_bundles $bundle"; '
-                "fi; "
-                "done; "
-                'if [ -n "$failed_bundles" ]; then '
-                'echo "Failed bundles:$failed_bundles"; '
-                "fi; "
-                # Exit 0 if ANY bundle succeeded (staging has its
-                # artifacts), non-zero only if every single bundle
-                # failed — that surfaces a real problem worth paging.
-                'if [ -d /app/models/staging ] && [ -n "$(ls -A /app/models/staging 2>/dev/null)" ]; then '
-                "exit 0; "
-                "else "
-                'echo "No artifacts in staging — every bundle failed."; '
-                "exit 1; "
-                "fi"
-                "'"
+                "cd /opt/auspex && "
+                "/opt/modal-venv/bin/modal run modal_train/train_modal.py --run-id '{{ ts_nodash }}'"
             ),
+        )
+        pull_and_gate = BashOperator(
+            task_id="pull_and_gate",
+            # ALL_DONE so a partial Modal run still gates whatever landed.
+            trigger_rule=TriggerRule.ALL_DONE,
+            bash_command=DOCKER_EXEC + " python /app/scripts/pull_modal_artifacts.py --run-id '{{ ts_nodash }}'",
         )
 
     # MERGE staging into production (don't wholesale replace). The
@@ -255,20 +291,27 @@ with DAG(
         ),
     )
 
-    # Validate gates SOCCER training only — non-soccer sports do their
-    # own data validation inside each bundle's load_frame, and a
-    # soccer corpus issue shouldn't block other sports.
-    validate_data >> train_tasks["soccer"]
+    # ── Wiring (backend-specific up to swap_production; shared after) ──
+    if TRAINING_BACKEND == "vm":
+        # Validate gates SOCCER training only — non-soccer sports do their
+        # own data validation inside each bundle's load_frame, and a
+        # soccer corpus issue shouldn't block other sports.
+        validate_data >> train_tasks["soccer"]
 
-    # Chain sport tasks sequentially. Each sport's training runs all
-    # its bundles internally (see the bash loop in each task), so the
-    # DAG only has one task per logical sport — adding NBA later =
-    # one entry in SPORT_BUNDLE_GROUPS + one extra link in this chain.
-    sport_order = list(SPORT_BUNDLE_GROUPS.keys())
-    prev = train_tasks[sport_order[0]]
-    for sport in sport_order[1:]:
-        prev >> train_tasks[sport]
-        prev = train_tasks[sport]
+        # Chain sport tasks sequentially. Each sport's training runs all
+        # its bundles internally (see the bash loop in each task), so the
+        # DAG only has one task per logical sport — adding NBA later =
+        # one entry in SPORT_BUNDLE_GROUPS + one extra link in this chain.
+        sport_order = list(SPORT_BUNDLE_GROUPS.keys())
+        prev = train_tasks[sport_order[0]]
+        for sport in sport_order[1:]:
+            prev >> train_tasks[sport]
+            prev = train_tasks[sport]
+        prev >> swap_production
+    else:  # modal
+        # validate_data still gates (soccer corpus sanity) before we spend
+        # Modal compute; then trigger → pull+gate → the SAME swap.
+        validate_data >> modal_trigger >> pull_and_gate >> swap_production
 
-    # The last sport feeds swap_production, then reload + cleanup.
-    prev >> swap_production >> reload_api >> cleanup_old_backups
+    # Shared tail: swap → reload the api → prune old backups.
+    swap_production >> reload_api >> cleanup_old_backups

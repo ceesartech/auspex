@@ -26,6 +26,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
+# Modal CLI in an ISOLATED venv. The retrain DAG's modal_trigger task calls
+# /opt/modal-venv/bin/modal when the training_backend Variable is 'modal'. It
+# lives in its own venv (NOT the Airflow env) so modal's deps can't collide with
+# Airflow 2.8's pin set — the same reason the root requirements.txt is not
+# installed here. Auth is via MODAL_TOKEN_ID/SECRET env (no config file needed).
+RUN python3 -m venv /opt/modal-venv \
+    && /opt/modal-venv/bin/pip install --no-cache-dir modal
+
 USER airflow
 
 # DO NOT install the root requirements.txt here. It pins

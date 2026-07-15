@@ -303,3 +303,71 @@ The repo is **public**: GitHub Actions minutes and GHCR image storage are free.
 If it is ever flipped private, both start billing (Actions per-minute after the
 free tier, GHCR per-GB) — CI builds 3 images per merge, so revisit the CI
 matrix and image retention before going private.
+
+## Modal training (serverless retraining)
+
+Model training can run on the VM (in the api container) or on **Modal** (13
+bundles in parallel, each its own container). The switch is one Airflow Variable
+— nothing is hardcoded, and the VM path stays as a fallback.
+
+| | VM backend (default) | Modal backend |
+|---|---|---|
+| Flag | `training_backend=vm` | `training_backend=modal` |
+| Where | api container, ~90 min sequential | Modal, ~90 s parallel, ~1¢/run |
+| Code | `retrain_models` DAG `train_<sport>` tasks | `modal_train/train_modal.py` (13 named fns) |
+
+**Flip the backend (live, no deploy):**
+```bash
+docker compose exec -T airflow-scheduler airflow variables set training_backend modal
+# roll back instantly:
+docker compose exec -T airflow-scheduler airflow variables set training_backend vm
+```
+The scheduler re-parses within ~30 s; the DAG graph shows only the active path.
+
+**One-time setup before the first Modal run:**
+1. **Rotate the B2 app key** (the trial shared one in chat). Create a fresh
+   bucket-scoped B2 application key; put it in the VM `.env` (`AWS_ACCESS_KEY_ID`
+   / `AWS_SECRET_ACCESS_KEY`) AND the Modal secret below; revoke the old key.
+2. **Create the Modal secrets** (from your own values, run locally with the
+   Modal CLI authed):
+   ```bash
+   modal secret create auspex-b2 \
+     AWS_ACCESS_KEY_ID=<b2-keyID> AWS_SECRET_ACCESS_KEY=<b2-appKey> \
+     BACKUP_S3_BUCKET=<bucket> BACKUP_S3_ENDPOINT_URL=<https://s3.<region>.backblazeb2.com>
+   modal secret create auspex-telegram \
+     TELEGRAM_BOT_TOKEN=<token> TELEGRAM_CHAT_ID=<chat> ENABLE_TELEGRAM_NOTIFICATIONS=true
+   ```
+3. **Set `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`** in the VM `.env` (read by the
+   airflow-scheduler for the `modal_trigger` task) and recreate the scheduler.
+
+**Staged rollout (do not skip):**
+1. **Smoke one bundle** (from a repo checkout with the Modal CLI authed):
+   `modal run modal_train/train_modal.py --run-id smoke1 --bundles soccer_match_result`
+   — confirm `soccer_match_result_training` is its own Modal function, served
+   Brier ≈ 0.594–0.596, artifacts under `modal-train/smoke1/`.
+2. **Shadow a full run** (gate + report, NO swap): trigger all 13, then on the VM
+   `docker compose exec -T api python /app/scripts/pull_modal_artifacts.py --run-id <id> --shadow`
+   and eyeball `promote_decisions.json` vs live Brier from `monitor_models.py`.
+   This seeds the incumbent `held_out_metrics.json` sidecars.
+3. **Cut over** one real Sunday run behind `training_backend=modal`; verify the
+   api reloaded, recs still generate, and `production-prev-<stamp>` exists.
+4. Bake ~1 month with the VM fallback retained; then delete `modal_trial/` + its
+   Modal volumes (`modal volume rm auspex-trial-data --yes`, `auspex-trial-models`).
+
+**The promote-gate.** `scripts/pull_modal_artifacts.py` only stages a bundle if
+its served held-out Brier ≤ the incumbent's + 0.009 (the noise floor). Rejected
+bundles keep their current production model (never enter staging). Decisions land
+in `/app/models/staging/promote_decisions.json`. **Force-promote** a rejected
+bundle: delete the incumbent sidecar
+(`rm /app/models/production/<ensemble_name>/held_out_metrics.json`) so the next
+run treats it as un-gated (promote-to-seed), or copy the bundle's tree from
+`/app/models/modal-incoming/<run_id>/<bundle>/` into `/app/models/staging/`
+manually and re-run swap.
+
+**B2 layout:** dump in at `postgres/<db>-<ISO>.dump`; artifacts out at
+`modal-train/<run_id>/<bundle>/…`. Add a B2 lifecycle rule to expire
+`modal-train/` objects after N days so runs don't accumulate.
+
+**Rollback:** flip `training_backend=vm` (training returns to the VM with zero
+code change), and `production-prev-<stamp>` in `/app/models/` restores the prior
+models (stop api → restore dir → start api).

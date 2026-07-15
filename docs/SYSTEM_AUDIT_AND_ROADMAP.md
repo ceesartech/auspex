@@ -484,6 +484,30 @@ with the growth-rate driver (WAL) eliminated.
 > deletion + git-recovery path. Memory-vs-log voided-rec count reconciled: 682
 > total (506 bug-window + 176 gated).
 
+> **Execution log (2026-07-15) — training-to-Modal migration LANDED behind a flag
+> (not yet cut over).** A trial (modal_trial/) proved 13 bundles train on Modal in
+> parallel, faithfully (soccer served Brier 0.5921 vs VM baseline ~0.5946, within
+> the 0.009 floor), in ~90s for <1¢. Built the production path, all behind the
+> Airflow Variable `training_backend` (default 'vm' = unchanged): modal_train/
+> train_modal.py mints 13 NAMED functions (soccer_match_result_training …
+> mma_moneyline_training) that pull the nightly B2 dump, restore (PG17 — the api's
+> pg_dump 17 writes archive v1.16), train one bundle, and push artifacts+gate.json
+> to B2 under modal-train/<run_id>/; scripts/pull_modal_artifacts.py pulls + runs a
+> NEW PROMOTE-GATE (stage a bundle only if its served held-out Brier ≤ incumbent +
+> 0.009, else keep the incumbent — closing the 'retrain promotes unconditionally'
+> gap) then reuses the EXISTING swap_production/reload_api/cleanup verbatim;
+> scripts/model_metrics_store.py persists each promoted bundle's held-out Brier
+> (held_out_metrics.json sidecar + model_performance_logs) so the gate has an
+> incumbent to compare against — that metric was never persisted before. retrain_
+> models.py branches on the Variable (vm = today's per-sport tasks; modal =
+> trigger→pull+gate→swap). Modal CLI installed in an isolated venv in the airflow
+> image; MODAL_TOKEN_* on the scheduler; creds via Modal Secrets (auspex-b2,
+> auspex-telegram) so the DB never leaves the VM. Rollout is staged in OPERATIONS.md
+> (smoke one bundle → shadow full run to seed incumbents → cut over → bake ~1 month
+> with the VM fallback → delete the trial). CADENCE: stays weekly; the promote-gate
+> is the prerequisite that makes raising it safe later. OPEN operator actions before
+> cutover: rotate the B2 app key, create the two Modal Secrets, set MODAL_TOKEN_*.
+
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
 2. §1.2 unpause `db_backup_daily`, verify a local dump. B2 wiring same day if keys can be created.

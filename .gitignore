@@ -135,3 +135,6 @@ Thumbs.db
 # DVC
 .dvc/
 *.dvc
+
+# Postgres dumps (e.g. a Modal-trial dump pulled to the repo root) — never commit
+*.dump

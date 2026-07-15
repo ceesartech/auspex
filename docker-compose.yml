@@ -178,6 +178,10 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - ENABLE_TELEGRAM_NOTIFICATIONS=${ENABLE_TELEGRAM_NOTIFICATIONS:-false}
+      # Modal auth for the retrain_models modal_trigger task (only used when
+      # the training_backend Airflow Variable is 'modal'; harmless when 'vm').
+      - MODAL_TOKEN_ID=${MODAL_TOKEN_ID:-}
+      - MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET:-}
     volumes:
       - ./services/data-ingestion/dags:/opt/airflow/dags
       - ./services/data-ingestion/logs:/opt/airflow/logs
