@@ -59,11 +59,12 @@ image = (
     .pip_install_from_requirements("requirements.txt")
     .run_commands("pip install --no-cache-dir torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu")
     .pip_install("onnxmltools==1.13.0", "onnxruntime==1.20.1")
+    # PYTHONPATH so runtime imports of b2_io / modal_bundles resolve in the
+    # container. MUST come before add_local_* — Modal requires add_local_* to be
+    # the LAST build steps (they're layered on at container startup, not baked).
+    .env({"PYTHONPATH": "/app/scripts"})
     .add_local_dir("services/ml-models/src", "/app/ml-src")
     .add_local_dir("scripts", "/app/scripts")
-    # So runtime imports of b2_io / modal_bundles resolve in the container
-    # (also makes them importable at deserialize time for serialized functions).
-    .env({"PYTHONPATH": "/app/scripts"})
 )
 
 # B2 creds (AWS_ACCESS_KEY_ID/SECRET + BACKUP_S3_*) and Telegram creds. No
