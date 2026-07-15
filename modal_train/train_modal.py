@@ -29,10 +29,14 @@ from pathlib import Path
 
 import modal
 
-# Bundle list + ensemble map are the shared source of truth (scripts/). Needed at
+# Bundle list + prefixes are the shared source of truth (scripts/). Needed at
 # DEFINITION time to mint the named functions, so put scripts/ on the path here.
+# BUNDLES is a list and the prefixes are strings — all serialize by value into
+# the cloudpickled functions. `served_brier` (a function from modal_bundles) is
+# imported at RUNTIME inside _train_one instead, so it's not a cross-module
+# reference cloudpickle would try (and fail) to re-import in the container.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
-from modal_bundles import ARTIFACT_PREFIX, BUNDLES, DUMP_PREFIX, served_brier  # noqa: E402
+from modal_bundles import ARTIFACT_PREFIX, BUNDLES, DUMP_PREFIX  # noqa: E402
 
 app = modal.App("auspex-train")
 
@@ -57,6 +61,9 @@ image = (
     .pip_install("onnxmltools==1.13.0", "onnxruntime==1.20.1")
     .add_local_dir("services/ml-models/src", "/app/ml-src")
     .add_local_dir("scripts", "/app/scripts")
+    # So runtime imports of b2_io / modal_bundles resolve in the container
+    # (also makes them importable at deserialize time for serialized functions).
+    .env({"PYTHONPATH": "/app/scripts"})
 )
 
 # B2 creds (AWS_ACCESS_KEY_ID/SECRET + BACKUP_S3_*) and Telegram creds. No
@@ -135,6 +142,7 @@ def _train_one(bundle: str, run_id: str) -> dict:
 
     sys.path.insert(0, "/app/scripts")
     import b2_io  # noqa: E402 — runtime import (needs boto3 + B2 env from the secret)
+    from modal_bundles import served_brier  # noqa: E402 — runtime, not a serialized cross-module ref
 
     t0 = time.time()
     out_dir = f"/tmp/out/{bundle}"
