@@ -213,8 +213,21 @@ def _train_one(bundle: str, run_id: str) -> dict:
 
 
 def _register(bundle: str):
+    # serialized=True is REQUIRED: these functions are generated in a factory
+    # (not at module/global scope), so Modal can't reference them by import path
+    # and raises "must apply to functions in global scope, unless serialized=True".
+    # Serialized functions are cloudpickled by value; the entrypoint runs as
+    # __main__ so _train_one + its helpers serialize by value too. name= still
+    # registers each as a distinct <bundle>_training function in the dashboard.
     @app.function(
-        name=f"{bundle}_training", image=image, secrets=SECRETS, cpu=4.0, memory=8192, timeout=3600, retries=1
+        name=f"{bundle}_training",
+        image=image,
+        secrets=SECRETS,
+        cpu=4.0,
+        memory=8192,
+        timeout=3600,
+        retries=1,
+        serialized=True,
     )
     def _fn(run_id: str, _bundle: str = bundle) -> dict:
         return _train_one(_bundle, run_id)
