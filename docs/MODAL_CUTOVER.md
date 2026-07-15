@@ -104,10 +104,15 @@ The airflow-scheduler triggers Modal, so it needs a Modal token. Create a
    AWS_SECRET_ACCESS_KEY=<NEW_B2_APP_KEY>
    ```
 3. Recreate the two services that read those (env change needs a recreate, not a
-   restart):
+   restart). **`IMAGE_TAG` must be set** — the deploy tags images by commit SHA
+   and there is no `:latest` on the VM, so a bare `dc up` would try to pull
+   `:latest` from GHCR and fail with `error from registry: denied`. Pin it to the
+   SHA your containers already run, and skip the registry entirely:
    ```bash
-   dc up -d --force-recreate airflow-scheduler api
+   export IMAGE_TAG=$(docker inspect betting-api --format '{{.Config.Image}}' | cut -d: -f2)
+   dc up -d --force-recreate --pull never airflow-scheduler api
    ```
+   (Only `dc up` needs this; `dc ps|exec|logs|restart` don't touch images.)
 4. **Prove the new B2 key works on the VM** before revoking the old one — force a
    backup and watch for "Upload verified":
    ```bash
