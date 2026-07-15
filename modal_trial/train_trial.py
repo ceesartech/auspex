@@ -244,21 +244,27 @@ def main(bundles: str = ""):
     ok = [r for r in results if r["status"] == "ok"]
     bad = [r for r in results if r["status"] != "ok"]
 
-    print("\n" + "=" * 78)
-    print(f"{'bundle':26} {'status':7} {'secs':>7}  held-out Brier / ECE (ensemble)")
-    print("-" * 78)
+    # The `gate` dict is train_all_models' calibration self-gating decision on
+    # the held-out TEST set: {kept, reason, n, raw:{brier,ece,...},
+    # calibrated:{...}}. The SERVED Brier is `raw` if the gate dropped the
+    # calibrator (kept=false → serve raw) or `calibrated` if it kept it. That
+    # served Brier is the number to compare against the VM baseline.
+    print("\n" + "=" * 92)
+    print(f"{'bundle':24} {'status':6} {'secs':>6}  {'served Brier':>12}  {'serves':6} {'n':>5}  raw→cal")
+    print("-" * 92)
     for r in sorted(results, key=lambda x: x["bundle"]):
         g = r.get("gate") or {}
-        brier = g.get("brier") if isinstance(g, dict) else None
-        ece = g.get("ece") if isinstance(g, dict) else None
-        # _holdout_metrics may nest raw/calibrated; show whatever is present.
-        metric = ""
-        if brier is not None:
-            metric = f"Brier={brier:.4f}" + (f"  ECE={ece:.4f}" if ece is not None else "")
-        elif g:
-            metric = json.dumps(g)[:40]
-        print(f"{r['bundle']:26} {r['status']:7} {r['seconds']:>7}  {metric}")
-    print("=" * 78)
+        raw_b = (g.get("raw") or {}).get("brier") if isinstance(g, dict) else None
+        cal_b = (g.get("calibrated") or {}).get("brier") if isinstance(g, dict) else None
+        kept = g.get("kept") if isinstance(g, dict) else None
+        n = g.get("n") if isinstance(g, dict) else None
+        served = cal_b if (kept and cal_b is not None) else raw_b
+        serves = "cal" if kept else "raw"
+        served_s = f"{served:.4f}" if served is not None else "—"
+        rawcal = f"{raw_b:.4f}→{cal_b:.4f}" if (raw_b is not None and cal_b is not None) else ""
+        n_s = str(n) if n is not None else "—"
+        print(f"{r['bundle']:24} {r['status']:6} {r['seconds']:>6}  {served_s:>12}  {serves:6} {n_s:>5}  {rawcal}")
+    print("=" * 92)
     print(f"parallel wall-clock: {wall}s   ok={len(ok)}  errored={len(bad)}")
     if bad:
         print(f"failed bundles: {[r['bundle'] for r in bad]} (see per-container logs above)")
