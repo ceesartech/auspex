@@ -151,15 +151,18 @@ def gate_and_stage(run_id: str, models_dir: str, shadow: bool, database_url: str
         decisions.append(row)
         logger.info("[gate] %-22s %s (%s)", bundle, decision.upper(), reason)
 
-        if decision == "promote" and not shadow:
-            _merge_bundle_into_staging(bdir, staging)
-            # The sidecar rides along to production and becomes next run's
-            # incumbent. Only write it when we HAVE a number.
-            if brier is not None:
-                payload = mstore.build_payload(ensemble_name, served_brier=brier, kept=kept, n=n, run_id=run_id)
-                mstore.write_sidecar(str(staging), payload)
-                mstore.mirror_to_db(database_url, payload)
+        if decision == "promote":
+            # Count the DECISION in both modes so a shadow run honestly reports
+            # "would promote N" (not always 0). Only STAGE + persist on a real run.
             promoted += 1
+            if not shadow:
+                _merge_bundle_into_staging(bdir, staging)
+                # The sidecar rides along to production and becomes next run's
+                # incumbent. Only write it when we HAVE a number.
+                if brier is not None:
+                    payload = mstore.build_payload(ensemble_name, served_brier=brier, kept=kept, n=n, run_id=run_id)
+                    mstore.write_sidecar(str(staging), payload)
+                    mstore.mirror_to_db(database_url, payload)
 
     summary = {"run_id": run_id, "shadow": shadow, "promoted": promoted, "decisions": decisions}
     # Drop the decision log where an operator can find it: into staging on a real
@@ -169,7 +172,8 @@ def gate_and_stage(run_id: str, models_dir: str, shadow: bool, database_url: str
     (out_dir / "promote_decisions.json").write_text(json.dumps(summary, indent=2))
 
     rejects = [d["bundle"] for d in decisions if d["decision"] == "reject"]
-    head = f"Modal retrain {run_id}{' (SHADOW)' if shadow else ''}: promoted {promoted}/{len(decisions)}"
+    verb = "would promote" if shadow else "promoted"
+    head = f"Modal retrain {run_id}{' (SHADOW)' if shadow else ''}: {verb} {promoted}/{len(decisions)}"
     if rejects:
         head += f"; kept incumbent for {', '.join(rejects)}"
     logger.info(head)
