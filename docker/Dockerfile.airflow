@@ -31,8 +31,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # lives in its own venv (NOT the Airflow env) so modal's deps can't collide with
 # Airflow 2.8's pin set — the same reason the root requirements.txt is not
 # installed here. Auth is via MODAL_TOKEN_ID/SECRET env (no config file needed).
-RUN python3 -m venv /opt/modal-venv \
-    && /opt/modal-venv/bin/pip install --no-cache-dir modal
+#
+# PIP_USER=false is required: the apache/airflow base image sets PIP_USER=true
+# (so the airflow user's installs land in ~/.local), which makes pip attempt a
+# '--user' install INSIDE the venv and fail ("User site-packages are not visible
+# in this virtualenv"). Unset it for both venv creation + the install.
+RUN PIP_USER=false python3 -m venv /opt/modal-venv \
+    && PIP_USER=false /opt/modal-venv/bin/pip install --no-cache-dir modal
 
 USER airflow
 
