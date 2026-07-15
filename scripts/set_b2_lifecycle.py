@@ -48,11 +48,16 @@ def main(argv=None) -> int:
         if "NoSuchLifecycleConfiguration" not in str(exc):
             print(f"note: could not read existing lifecycle ({exc}); starting fresh")
 
+    # B2 buckets are versioned: Expiration.Days HIDES the object (B2's
+    # daysFromUploadingToHiding); the hidden version must also be deleted, or B2
+    # rejects with "no ExpiredObjectDeleteMarker rule". NoncurrentVersionExpiration
+    # maps to B2's daysFromHidingToDeleting — so the object is gone ~N+1 days out.
     rule = {
         "ID": RULE_ID,
         "Filter": {"Prefix": args.prefix},
         "Status": "Enabled",
         "Expiration": {"Days": args.days},
+        "NoncurrentVersionExpiration": {"NoncurrentDays": 1},
     }
     rules = existing + [rule]
     print(f"bucket={bkt} | preserving {len(existing)} existing rule(s), " f"expiring {args.prefix} after {args.days}d")
