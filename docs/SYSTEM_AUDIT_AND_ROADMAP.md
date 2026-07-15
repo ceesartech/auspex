@@ -523,7 +523,36 @@ with the growth-rate driver (WAL) eliminated.
 > held-out Brier (train_all_models `_raw_holdout_brier` fallback) so they're
 > gate-able; (2) promote-gate tolerance is now n-aware (`gate_tolerance(n)` =
 > 0.009·√(3522/n), capped 0.10) so small bundles like NFL n≈128 aren't spuriously
-> rejected; (3) `scripts/set_b2_lifecycle.py` expires modal-train/ artifacts.
+> rejected; (3) B2's S3 lifecycle API rejects a plain Expiration rule on a
+> versioned bucket, so `scripts/prune_modal_artifacts.py` does a direct
+> version-aware prune of modal-train/ artifacts >14d, wired into the weekly
+> docker_maintenance DAG (dry-run enumerated 568 test-run object-versions).
+>
+> **Update (2026-07-15) — ensemble NaN-poisoning fix (`fe72b8c`).** Verifying
+> follow-up (1) surfaced that tennis/mma's held-out Brier came back `NaN`, not a
+> number. Root cause: their neural-net leg's StandardScaler learned `NaN`
+> `mean_`/`scale_` from the all-NaN `odds_home_ml`/`odds_away_ml` columns (tennis
+> odds coverage is sparse and absent in the older train split), so the NN returns
+> all-NaN whenever those columns are present. `EnsemblePredictor.predict_proba`
+> only dropped members that *raised* — a member returning NaN was blended straight
+> in (NaN + anything = NaN), silently poisoning the whole output. Fix: treat
+> non-finite member output exactly like a hard failure (drop + log loud + let the
+> surviving-weight guard apply). **Served predictions are byte-identical** —
+> soccer/NBA/NHL/NFL legs are finite, and the tennis/mma NN was *already* dropped
+> at serve (the JSONB serve blob omits the raw odds columns, so the NN's
+> `X[feature_names]` raises KeyError). The gate now scores what actually serves:
+> tennis Brier NaN→0.4794 (acc 0.579, matches its ~58.7% OOS), mma NaN→0.4836,
+> and — bonus — both now pass the *full* calibration self-gate (the calibrator
+> could not fit on NaN before, hence the raw fallback).
+>
+> **Latent lever (documented, not fixed):** the tennis/mma NN is effectively
+> **dead at serve** — it never contributes, because it was trained WITH the raw
+> odds columns but those aren't fed at serve time (train/serve feature skew). Two
+> sports pay to train an NN leg that's always dropped. Reviving it (fix the
+> odds-column skew + make the NN scaler robust to all-NaN columns) is a genuine
+> model lever, but it changes served distributions and MUST clear the §4.3
+> validation gate — a gated experiment, not a hotfix.
+>
 > Remaining: bake ~1 month on the VM fallback, then delete modal_trial/ + volumes
 > and make the CPX41→CPX31 downgrade call from a measured (training-free) peak week.
 
