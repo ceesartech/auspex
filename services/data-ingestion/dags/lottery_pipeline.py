@@ -56,6 +56,14 @@ with DAG(
         bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_lottery_draws.py",
     )
 
+    # Per-tier winner counts + jackpot amounts for new MM draws (v1.1 —
+    # feeds the sales-inference + popularity-fit harness). Small --limit:
+    # the daily delta is 0-1 draws; the one-shot backfill ran separately.
+    fetch_lottery_winners = BashOperator(
+        task_id="fetch_lottery_winners",
+        bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_lottery_winners.py --limit 20",
+    )
+
     settle_lottery_lines = BashOperator(
         task_id="settle_lottery_lines",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/lottery_backtest.py",
@@ -66,4 +74,4 @@ with DAG(
         bash_command=f"{DOCKER_EXEC} python /app/scripts/lottery_backtest.py --generate",
     )
 
-    fetch_lottery_draws >> settle_lottery_lines >> generate_lottery_lines
+    fetch_lottery_draws >> fetch_lottery_winners >> settle_lottery_lines >> generate_lottery_lines
