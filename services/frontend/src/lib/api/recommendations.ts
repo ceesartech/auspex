@@ -1,6 +1,12 @@
 import { apiClient } from './client';
 import { Recommendation, Accumulator, AccumulatorRequest, ModelPerformance } from '@/lib/types/recommendation';
-import { LotteryDraw, LotteryAnalysis, LotteryEV, LotteryRecommendations } from '@/lib/types/user';
+import {
+  LotteryDraw,
+  LotteryAnalysis,
+  LotteryEV,
+  LotteryRecommendations,
+  LotteryTrackedLine,
+} from '@/lib/types/user';
 
 export const recommendationsApi = {
   async getRecommendations(params?: {
@@ -50,6 +56,13 @@ export const recommendationsApi = {
 
   async getLotteryDraws(game?: string, limit = 20): Promise<LotteryDraw[]> {
     const { data } = await apiClient.get('/api/v1/lottery/draws', {
+      params: { game, limit },
+    });
+    return data;
+  },
+
+  async getLotteryLines(game?: string, limit = 48): Promise<LotteryTrackedLine[]> {
+    const { data } = await apiClient.get('/api/v1/lottery/lines', {
       params: { game, limit },
     });
     return data;

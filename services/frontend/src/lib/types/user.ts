@@ -75,6 +75,24 @@ export interface LotteryDraw {
   jackpot_amount: number | null;
 }
 
+// One line from the daily backtest ledger: generated pre-draw, settled once the
+// target draw's numbers land. Settled iff settled_at is non-null; prize_tier null
+// on a settled line means no prize (the expected outcome).
+export interface LotteryTrackedLine {
+  line_id: string;
+  game: string;
+  strategy: string;
+  numbers: number[];
+  bonus_number: number;
+  score: number | null;
+  target_draw_date: string | null;
+  created_at: string;
+  matched_main: number | null;
+  matched_bonus: boolean | null;
+  prize_tier: string | null;
+  settled_at: string | null;
+}
+
 export interface LotteryAnalysis {
   game: string;
   total_draws_analyzed: number;

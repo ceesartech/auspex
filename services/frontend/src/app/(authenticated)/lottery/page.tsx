@@ -2,12 +2,15 @@
 
 import { useState } from 'react';
 import { isAxiosError } from 'axios';
+import { format, parseISO } from 'date-fns';
 import {
   useLotteryDraws,
   useLotteryAnalysis,
   useLotteryEV,
+  useLotteryLines,
   useLotteryRecommendations,
 } from '@/lib/hooks/use-recommendations';
+import { LotteryTrackedLine } from '@/lib/types/user';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Select } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
@@ -38,6 +41,20 @@ const strategyCaptions: Record<string, string> = {
   due: FUN_CAPTION,
 };
 
+// Row labels for tracked lines: reuse the generator's names, minus the captions.
+const strategyLabels: Record<string, string> = Object.fromEntries(
+  strategyOptions.map((o) => [o.value, o.label.split(' · ')[0]]),
+);
+
+// "Draw Fri, Aug 7" from a YYYY-MM-DD date string.
+function drawHeading(dateString: string): string {
+  try {
+    return `Draw ${format(parseISO(dateString), 'EEE, MMM d')}`;
+  } catch {
+    return `Draw ${dateString}`;
+  }
+}
+
 // $786M / $1.2B style.
 const compactUSD = new Intl.NumberFormat('en-US', {
   style: 'currency',
@@ -57,6 +74,16 @@ export default function LotteryPage() {
   const { data: draws, isLoading, error, refetch } = useLotteryDraws(game, 20);
   const { data: analysis } = useLotteryAnalysis(game);
   const { data: ev, isLoading: evLoading, error: evError } = useLotteryEV(game, evParams);
+  const { data: lines, isLoading: linesLoading, error: linesError } = useLotteryLines(game);
+
+  // Group by target draw date, preserving the API's newest-first order.
+  const lineGroups: [string, LotteryTrackedLine[]][] = [];
+  for (const line of lines ?? []) {
+    const key = line.target_draw_date ?? 'undated';
+    const last = lineGroups[lineGroups.length - 1];
+    if (last && last[0] === key) last[1].push(line);
+    else lineGroups.push([key, [line]]);
+  }
 
   // 422 = live jackpot estimate unavailable; prompt for a manual jackpot.
   const evUnavailable = isAxiosError(evError) && evError.response?.status === 422;
@@ -316,6 +343,68 @@ export default function LotteryPage() {
                   </span>
                   <Badge variant="secondary">score {combo.score.toFixed(2)}</Badge>
                   <span className="text-xs text-muted-foreground">{combo.rationale}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Tracked Lines</CardTitle>
+          <p className="text-xs text-muted-foreground">
+            Auto-generated daily, one line per strategy, settled against real draws — hit rates
+            are expected to match pure chance.
+          </p>
+        </CardHeader>
+        <CardContent>
+          {linesLoading ? (
+            <p className="text-sm text-muted-foreground">Loading tracked lines…</p>
+          ) : linesError ? (
+            <p className="text-sm text-destructive">Failed to load tracked lines.</p>
+          ) : !lineGroups.length ? (
+            <EmptyState icon={<Ticket className="h-8 w-8" />} title="No tracked lines yet" />
+          ) : (
+            <div className="space-y-4">
+              {lineGroups.map(([drawDate, groupLines]) => (
+                <div key={drawDate} className="space-y-2">
+                  <h3 className="text-sm font-medium text-muted-foreground">
+                    {drawDate === 'undated' ? 'Draw date pending' : drawHeading(drawDate)}
+                  </h3>
+                  {groupLines.map((line) => (
+                    <div
+                      key={line.line_id}
+                      className="flex flex-wrap items-center gap-2 rounded-lg border p-3"
+                    >
+                      <span className="w-36 text-xs font-medium">
+                        {strategyLabels[line.strategy] ?? line.strategy}
+                      </span>
+                      {line.numbers.map((n) => (
+                        <span
+                          key={n}
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground"
+                        >
+                          {n}
+                        </span>
+                      ))}
+                      <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-destructive text-xs font-bold text-destructive-foreground">
+                        {line.bonus_number}
+                      </span>
+                      {line.settled_at ? (
+                        <>
+                          <Badge variant="secondary">
+                            {line.matched_bonus
+                              ? `${line.matched_main ?? 0} + bonus`
+                              : `${line.matched_main ?? 0} matched`}
+                          </Badge>
+                          {line.prize_tier && <Badge variant="success">{line.prize_tier}</Badge>}
+                        </>
+                      ) : (
+                        <Badge variant="outline">pending</Badge>
+                      )}
+                    </div>
+                  ))}
                 </div>
               ))}
             </div>

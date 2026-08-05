@@ -70,6 +70,13 @@ export function useLotteryDraws(game?: string, limit = 20) {
   });
 }
 
+export function useLotteryLines(game?: string, limit = 48) {
+  return useQuery({
+    queryKey: ['lottery', 'lines', game, limit],
+    queryFn: () => recommendationsApi.getLotteryLines(game, limit),
+  });
+}
+
 export function useLotteryAnalysis(game: string, numDraws = 100) {
   return useQuery({
     queryKey: ['lottery', 'analysis', game, numDraws],

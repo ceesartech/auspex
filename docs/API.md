@@ -391,6 +391,18 @@ value); `422` when the live fetch fails — pass `jackpot` explicitly.
 }
 ```
 
+### Tracked backtest ledger
+
+```
+GET /api/v1/lottery/lines?game=powerball&limit=48
+Authorization: Bearer <token>
+```
+
+Lines the daily `lottery_pipeline` generated for upcoming draws (one per
+strategy per draw), with settlement (`matched_main`, `matched_bonus`,
+`prize_tier`, `settled_at`) once the target draw's numbers land. Hit rates
+are expected to track pure chance — the ledger proves it honestly.
+
 ### Hot / cold / overdue analysis (entertainment)
 
 ```

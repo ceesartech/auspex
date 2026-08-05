@@ -165,6 +165,27 @@ class LotteryRecommendationsResponse(BaseModel):
     disclaimer: str
 
 
+class LotteryTrackedLine(BaseModel):
+    """One line the daily lottery_pipeline persisted for honest backtesting:
+    generated pre-draw, stamped with its target draw, settled against the
+    actual numbers once they land. Hit rates are expected to track pure
+    chance — the ledger exists to prove that, not to find an edge."""
+
+    line_id: str
+    game: str
+    strategy: str
+    numbers: List[int]
+    bonus_number: int
+    score: Optional[float] = None
+    target_draw_date: Optional[date] = None
+    created_at: datetime
+    # Settlement (NULL until the target draw's numbers are ingested).
+    matched_main: Optional[int] = None
+    matched_bonus: Optional[bool] = None
+    prize_tier: Optional[str] = None
+    settled_at: Optional[datetime] = None
+
+
 class LotteryEVResponse(BaseModel):
     """Per-ticket expected-value verdict for the next draw.
 

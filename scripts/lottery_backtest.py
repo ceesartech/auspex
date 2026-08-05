@@ -36,21 +36,36 @@ from psycopg2.extras import RealDictCursor
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("lottery_backtest")
 
-# Make the pure engine importable both in the api container (/app) and from a
-# repo checkout (running the script directly).
-for _p in (
-    "/app/services/api/src",
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "services", "api", "src")),
-):
-    if os.path.isdir(_p) and _p not in sys.path:
-        sys.path.insert(0, _p)
+# Load the pure engine directly by file path — the repo-root `services/`
+# namespace package shadows services.api.src.services under pytest, so a
+# package import works in the container but breaks in full-suite test runs
+# (same pattern as fetch_lottery_draws.py).
+import importlib.util  # noqa: E402
 
-from services.lottery_analysis import (  # noqa: E402
-    GAME_CONFIG,
-    generate_combinations,
-    get_game_config,
-    settle,
-)
+
+def _load_engine():
+    if "lottery_analysis" in sys.modules:
+        return sys.modules["lottery_analysis"]
+    here = os.path.dirname(os.path.abspath(__file__))
+    for candidate in (
+        "/app/services/api/src/services/lottery_analysis.py",
+        os.path.join(here, "..", "services", "api", "src", "services", "lottery_analysis.py"),
+    ):
+        if os.path.isfile(candidate):
+            spec = importlib.util.spec_from_file_location("lottery_analysis", candidate)
+            assert spec and spec.loader
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["lottery_analysis"] = mod
+            spec.loader.exec_module(mod)
+            return mod
+    raise ImportError("lottery_analysis.py not found (container or repo checkout expected)")
+
+
+_engine = _load_engine()
+GAME_CONFIG = _engine.GAME_CONFIG
+generate_combinations = _engine.generate_combinations
+get_game_config = _engine.get_game_config
+settle = _engine.settle
 
 # Scheduled draw weekdays (Mon=0 … Sun=6): Powerball Mon/Wed/Sat, MM Tue/Fri.
 DRAW_WEEKDAYS = {"powerball": {0, 2, 5}, "mega_millions": {1, 4}}
@@ -90,6 +105,29 @@ def run_generate(conn, today: date, seed: int | None) -> int:
                 logger.warning("%s: no draws to analyze — skipping generation", game)
                 continue
             for strat in STRATEGIES:
+                # One tracked line per (game, strategy, target draw): the
+                # daily DAG plus any manual trigger would otherwise stack
+                # duplicate lines for the same draw and muddy the ledger's
+                # per-draw hit-rate accounting.
+                cur.execute(
+                    """
+                    SELECT numbers, bonus_number FROM lottery_predictions
+                    WHERE game = %s AND strategy = %s AND target_draw_date = %s
+                    ORDER BY created_at ASC LIMIT 1
+                    """,
+                    (game, strat, target),
+                )
+                existing = cur.fetchone()
+                if existing:
+                    logger.info(
+                        "%s %-11s already tracked for %s: %s + %d",
+                        game,
+                        strat,
+                        target,
+                        list(existing["numbers"]),
+                        existing["bonus_number"],
+                    )
+                    continue
                 combos = generate_combinations(main, bonus, cfg, strategy=strat, n=1, seed=seed)
                 for c in combos:
                     cur.execute(
@@ -111,22 +149,33 @@ def run_generate(conn, today: date, seed: int | None) -> int:
                         ),
                     )
                     written += 1
+                    logger.info(
+                        "%s %-11s -> %s + %d (target %s, score %.3f)",
+                        game,
+                        strat,
+                        c.numbers,
+                        c.bonus_number,
+                        target,
+                        c.score,
+                    )
         conn.commit()
-    logger.info("Generated %d lines for the next draw(s)", written)
+    logger.info("Generated %d new lines for the next draw(s)", written)
     return written
 
 
 def run_settle(conn) -> int:
     settled = 0
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
+        cur.execute(
+            """
             SELECT lp.id, lp.game, lp.numbers, lp.bonus_number,
                    ld.numbers AS draw_numbers, ld.bonus_number AS draw_bonus
             FROM lottery_predictions lp
             JOIN lottery_draws ld
               ON ld.game = lp.game AND ld.draw_date = lp.target_draw_date
             WHERE lp.settled_at IS NULL AND lp.target_draw_date IS NOT NULL
-            """)
+            """
+        )
         rows = cur.fetchall()
         for r in rows:
             res = settle(r["numbers"], r["bonus_number"], r["draw_numbers"], r["draw_bonus"], r["game"])
@@ -139,6 +188,17 @@ def run_settle(conn) -> int:
                 (res["matched_main"], res["matched_bonus"], res["prize_tier"], r["id"]),
             )
             settled += 1
+            logger.info(
+                "settled %s: %s + %d vs draw %s + %d -> matched %d main%s, prize: %s",
+                r["game"],
+                list(r["numbers"]),
+                r["bonus_number"],
+                list(r["draw_numbers"]),
+                r["draw_bonus"],
+                res["matched_main"],
+                " + bonus" if res["matched_bonus"] else "",
+                res["prize_tier"] or "none",
+            )
         conn.commit()
     logger.info("Settled %d prediction(s)", settled)
     return settled
@@ -146,7 +206,8 @@ def run_settle(conn) -> int:
 
 def run_report(conn) -> None:
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
+        cur.execute(
+            """
             SELECT game, strategy,
                    COUNT(*) AS n,
                    COUNT(*) FILTER (WHERE prize_tier IS NOT NULL) AS prizes,
@@ -156,7 +217,8 @@ def run_report(conn) -> None:
             WHERE settled_at IS NOT NULL
             GROUP BY game, strategy
             ORDER BY game, strategy
-            """)
+            """
+        )
         rows = cur.fetchall()
     if not rows:
         logger.info("No settled predictions yet — run with --generate before draws, then settle after.")

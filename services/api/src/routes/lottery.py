@@ -17,6 +17,7 @@ from models.responses import (
     LotteryDrawResponse,
     LotteryEVResponse,
     LotteryRecommendationsResponse,
+    LotteryTrackedLine,
 )
 from services.lottery_service import LotteryService
 from sqlalchemy import text
@@ -57,6 +58,50 @@ async def get_lottery_draws(
             bonus_number=row.bonus_number,
             multiplier=row.multiplier,
             jackpot_amount=float(row.jackpot_amount) if row.jackpot_amount else None,
+        )
+        for row in results
+    ]
+
+
+@router.get("/lines", response_model=List[LotteryTrackedLine])
+async def get_lottery_lines(
+    game: Optional[str] = Query(None, pattern="^(powerball|mega_millions)$"),
+    limit: int = Query(48, ge=1, le=500),
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_auth),
+) -> List[LotteryTrackedLine]:
+    """The tracked backtest ledger: lines the daily pipeline generated for
+    upcoming draws, and their settlement once the draw's numbers land.
+    Newest target draws first."""
+
+    query = text(
+        """
+        SELECT id, game, strategy, numbers, bonus_number, score,
+               target_draw_date, created_at,
+               matched_main, matched_bonus, prize_tier, settled_at
+        FROM lottery_predictions
+        WHERE (:game IS NULL OR game = :game)
+        ORDER BY target_draw_date DESC NULLS LAST, game, strategy, created_at ASC
+        LIMIT :limit
+    """
+    )
+
+    results = db.execute(query, {"game": game, "limit": limit}).fetchall()
+
+    return [
+        LotteryTrackedLine(
+            line_id=str(row.id),
+            game=row.game,
+            strategy=row.strategy,
+            numbers=row.numbers,
+            bonus_number=row.bonus_number,
+            score=float(row.score) if row.score is not None else None,
+            target_draw_date=row.target_draw_date,
+            created_at=row.created_at,
+            matched_main=row.matched_main,
+            matched_bonus=row.matched_bonus,
+            prize_tier=row.prize_tier,
+            settled_at=row.settled_at,
         )
         for row in results
     ]
