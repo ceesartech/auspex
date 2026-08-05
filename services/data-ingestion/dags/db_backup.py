@@ -22,8 +22,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from airflow.sdk import DAG
 from airflow.providers.standard.operators.bash import BashOperator
+from airflow.sdk import DAG
 from alerting import notify_failure  # shared Telegram failure alerting
 
 DOCKER_EXEC = "docker compose -f /opt/auspex/docker-compose.yml exec -T api"

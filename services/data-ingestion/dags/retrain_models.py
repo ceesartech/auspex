@@ -37,9 +37,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from airflow.sdk import DAG
-from airflow.sdk import Variable
 from airflow.providers.standard.operators.bash import BashOperator
+from airflow.sdk import DAG, Variable
 from airflow.utils.trigger_rule import TriggerRule
 from alerting import notify_failure  # shared Telegram failure alerting
 
