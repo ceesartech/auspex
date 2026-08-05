@@ -53,6 +53,7 @@ MODEL_VERSION = "1.0.0"
 # devigging just propagates whatever odds noise exists.
 MIN_PRICED_ENTRANTS = 3
 
+
 # Default per-entrant probability when no morning line is set —
 # uniform over field size. Used as a fallback so even partially-
 # priced races get a prediction.
@@ -203,7 +204,6 @@ def devig(entrants: list[dict]) -> dict[str, float]:
     # Backfill unpriced entrants with uniform prior, then renormalise
     # to keep the whole-field sum at 1.0.
     uniform = _uniform_prob(field_size)
-    total = sum(devigged.values())
     unpriced_eids = [ent["entrant_id"] for ent in entrants if ent["entrant_id"] not in devigged]
     if unpriced_eids:
         for eid in unpriced_eids:
@@ -226,6 +226,16 @@ def store_prediction(
 ) -> None:
     """Idempotent upsert on (race_id, entrant_id, model_name,
     model_version, prediction_type)."""
+    # The WHERE clause is the no-op write guard (audit doc §6.2): without
+    # it every pipeline tick rewrote every row (one dead tuple per row per
+    # 15 min), which bloated race_predictions to 93-percent dead space
+    # before the 2026-07 VACUUM FULL. Skip the UPDATE when nothing changed
+    # so the reclaimed space stays reclaimed.
+    #
+    # Keep prose OUT of the SQL string: psycopg2 %-interpolates the whole
+    # query, comments included, so a literal % in a SQL comment (e.g.
+    # "93% dead") parses as a placeholder and raises IndexError. That
+    # exact bug broke this task from 2026-07-14 to 2026-08-05.
     cur.execute(
         """
         INSERT INTO race_predictions
@@ -238,11 +248,7 @@ def store_prediction(
             probabilities = EXCLUDED.probabilities,
             metadata = EXCLUDED.metadata,
             updated_at = NOW()
-        -- No-op write guard (audit doc §6.2): without it every pipeline
-        -- tick rewrote every row (one dead tuple per row per 15 min),
-        -- which is what bloated race_predictions to 93% dead space
-        -- before the 2026-07 VACUUM FULL. Skip the UPDATE when nothing
-        -- changed so the reclaimed space stays reclaimed.
+        -- No-op write guard: skip the UPDATE when nothing changed.
         WHERE (race_predictions.confidence,
                race_predictions.probabilities,
                race_predictions.metadata)
