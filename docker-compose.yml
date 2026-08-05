@@ -126,6 +126,13 @@ services:
       - AIRFLOW__API_AUTH__JWT_SECRET=${AIRFLOW__WEBSERVER__SECRET_KEY}
       - AIRFLOW__CORE__AUTH_MANAGER=airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      # Behind Caddy (airflow.<domain> -> this container): generate absolute
+      # URLs with the public https origin — without this, login redirects
+      # mint http://localhost:8080 and the browser blocks the SPA's calls.
+      - AIRFLOW__API__BASE_URL=https://airflow.${AUSPEX_DOMAIN:-localhost}
+      # Caddy is a different container, so uvicorn must be told to trust
+      # X-Forwarded-Proto/-For from it (pairs with --proxy-headers below).
+      - FORWARDED_ALLOW_IPS=*
     volumes:
       - ./services/data-ingestion/dags:/opt/airflow/dags
       - ./services/data-ingestion/logs:/opt/airflow/logs
@@ -145,7 +152,9 @@ services:
         condition: service_completed_successfully
     # Airflow 3: the webserver became a generic API server (new React UI +
     # REST + the task Execution API that LocalExecutor tasks call home to).
-    command: api-server
+    # --proxy-headers: respect X-Forwarded-* from the reverse proxy so
+    # scheme-aware redirects (e.g. /auth/login/ trailing-slash 308) stay https.
+    command: api-server --proxy-headers
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/v2/monitor/health"]
       interval: 30s
