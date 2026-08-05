@@ -316,8 +316,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.error("DATABASE_URL not set")
         return 2
     counts = run(args.database_url, args.since, args.limit)
-    # Total failure with work to do = feed broken -> loud non-zero for the DAG.
-    if counts["attempted"] > 0 and counts["written"] == 0:
+    # Every attempt a hard fetch/parse failure = feed broken -> loud non-zero
+    # for the DAG. Mismatch-only runs are NOT failures: the row gets flagged
+    # and permanently skipped, which is the intended terminal state.
+    if counts["attempted"] > 0 and counts["failed"] == counts["attempted"]:
         return 1
     return 0
 
