@@ -104,13 +104,15 @@ class LotteryService:
         pre-Apr-2025 draws but is not in today's 1-24 pool."""
         main_start, bonus_start = analysis_window_starts(game)
         rows = self.db.execute(
-            text("""
+            text(
+                """
                 SELECT numbers, bonus_number, draw_date
                 FROM lottery_draws
                 WHERE game = :game AND draw_date >= :main_start
                 ORDER BY draw_date DESC
                 LIMIT :limit
-                """),
+                """
+            ),
             {"game": game, "main_start": main_start, "limit": limit},
         ).fetchall()
         main = [list(r.numbers) for r in rows]
@@ -206,14 +208,16 @@ class LotteryService:
 
     def _persist(self, game: str, strategy: str, combos: Sequence, user_id: Optional[str]) -> None:
         target = self.next_draw_date(game)
-        query = text("""
+        query = text(
+            """
             INSERT INTO lottery_predictions
             (game, strategy, numbers, bonus_number, score, features, rationale,
              target_draw_date, user_id)
             VALUES (:game, :strategy, :numbers, :bonus, :score,
                     CAST(:features AS jsonb), :rationale, :target,
                     CAST(:user_id AS uuid))
-            """)
+            """
+        )
         try:
             for c in combos:
                 self.db.execute(

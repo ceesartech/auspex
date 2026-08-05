@@ -35,14 +35,16 @@ async def get_lottery_draws(
 ) -> List[LotteryDrawResponse]:
     """Get recent lottery draw results"""
 
-    query = text("""
+    query = text(
+        """
         SELECT id, game, draw_date, draw_number, numbers, bonus_number,
                multiplier, jackpot_amount
         FROM lottery_draws
         WHERE (:game IS NULL OR game = :game)
         ORDER BY draw_date DESC
         LIMIT :limit
-    """)
+    """
+    )
 
     results = db.execute(query, {"game": game, "limit": limit}).fetchall()
 
