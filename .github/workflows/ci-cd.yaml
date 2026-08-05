@@ -314,6 +314,17 @@ jobs:
     name: Deploy to VM
     runs-on: ubuntu-latest
     needs: [build]
+    # Serialize deploys: two pushes in quick succession otherwise run
+    # `docker compose up` on the VM simultaneously, and the recreate dance
+    # (rename old container -> create new -> remove old) races itself into
+    # "Conflict: container name already in use" (run 31052461894,
+    # 2026-08-05 — commits 34s apart, both deploys hit the VM at 22:28).
+    # cancel-in-progress stays false: killing a mid-flight deploy could
+    # leave the stack half-recreated; queued deploys are cheap (~30s) and
+    # GitHub keeps only the newest pending one.
+    concurrency:
+      group: deploy-vm
+      cancel-in-progress: false
     # Personal-VM deployment via SSH + docker compose. Opt in by setting:
     #   vars.DEPLOY_ENABLED=true
     #   vars.DEPLOY_HOST=<vm-ip-or-hostname>
