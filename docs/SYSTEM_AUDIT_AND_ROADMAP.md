@@ -556,6 +556,28 @@ with the growth-rate driver (WAL) eliminated.
 > Remaining: bake ~1 month on the VM fallback, then delete modal_trial/ + volumes
 > and make the CPX41→CPX31 downgrade call from a measured (training-free) peak week.
 
+> **Update (2026-08-05) — horse-racing precompute dead 3 weeks: bare `%` in a SQL
+> comment (`8fab33d`).** `precompute_predictions_horse_racing` failed on every DAG
+> tick that had a race to score, from 2026-07-14 19:45 UTC. Root cause: the no-op
+> write-guard prose comment added in `8b51bab` said "93% dead space" *inside the
+> upsert SQL string* — psycopg2 %-interpolates the whole query, comments included,
+> so `% d` parsed as a printf placeholder (8 wanted, 7 given →
+> `IndexError: tuple index out of range`). The ranker + recs tasks cascaded
+> `upstream_failed`; the DAG run stayed **green** because `send_pipeline_digest`
+> (trigger_rule=ALL_DONE) is the only leaf — only the per-task Telegram alert
+> fired. `compute_features_horse_racing` was healthy throughout (the "feature
+> computation" symptom was the cascade, not the cause). Fix: prose hoisted out of
+> the SQL; **new repo-wide guard** `tests/unit/test_sql_placeholder_hygiene.py`
+> AST-scans scripts/ + services/ and fails on any bare `%` inside a parameterized
+> SQL string, so the class is dead. Recovery: `--all-finished` backfill wrote
+> 51,242 consensus predictions across 5,265 finished races (the 1,176-race outage
+> gap plus older never-scored races); grading catches up on the normal DAG cadence.
+> The `lightgbm_ranker_v1` series has a 3-week hole (no backfill mode; historical
+> ranker rows only served the closed ranker-vs-consensus comparison — not worth
+> building). Note for CI: `scripts/` is **not** in `PYTHON_SERVICE_DIRS`, so
+> flake8/black never see it — the hygiene test runs in the repo-root suite, which
+> does gate.
+
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
 2. §1.2 unpause `db_backup_daily`, verify a local dump. B2 wiring same day if keys can be created.
