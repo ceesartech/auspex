@@ -53,9 +53,18 @@ except ImportError:  # pragma: no cover — file-path loaders
     jackpot_odds = _rules.jackpot_odds  # type: ignore[assignment, no-redef]
 
 # (advertised_jackpot_$M, tickets_per_draw) anchors, linearly interpolated.
-# Deliberately coarse — sales estimates carry real uncertainty; the EV verdict
-# is robust to it because sharing only matters at extreme jackpots (at a
-# typical lambda~0.1 the share factor is ~0.95).
+#
+# mega_millions: FITTED 2026-08-05 from 914 draws of real winners data
+# (scripts/fit_lottery_sales_popularity.py; tickets inferred from the 0+MB
+# tier via exact era odds — per-bin median jackpot vs median tickets). The
+# hand-set priors were ~45% HIGH in the $500M-$1B band and ~26% low in the
+# $1B+ frenzy band (n=12 there — the steep last segment is real: media
+# coverage makes sales superlinear near records).
+#
+# powerball: UNFITTED hand estimates — powerball.com's CDN blocks
+# non-browser clients, so no winners feed exists to fit against. The EV
+# verdict is robust to this (sharing only matters at extreme jackpots;
+# at a typical lambda~0.1 the share factor is ~0.95).
 SALES_ANCHORS: Dict[str, List[Tuple[float, float]]] = {
     "powerball": [
         (20, 9e6),
@@ -68,14 +77,12 @@ SALES_ANCHORS: Dict[str, List[Tuple[float, float]]] = {
         (2000, 300e6),
     ],
     "mega_millions": [
-        (50, 8e6),
-        (100, 10e6),
-        (300, 16e6),
-        (500, 30e6),
-        (800, 55e6),
-        (1000, 90e6),
-        (1500, 160e6),
-        (2000, 250e6),
+        (45, 9.44e6),
+        (106, 10.98e6),
+        (209, 13.89e6),
+        (370, 18.92e6),
+        (640, 28.84e6),
+        (1175, 155.60e6),
     ],
 }
 

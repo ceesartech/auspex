@@ -185,7 +185,9 @@ def report_sales_curve(data: list[dict]) -> None:
         print("no jackpot amounts available")
         return
     bins = [(0, 75e6), (75e6, 150e6), (150e6, 300e6), (300e6, 500e6), (500e6, 1e9), (1e9, 5e9)]
-    print(f"{'jackpot bin':>22} | {'n':>4} | {'median tickets':>14} | {'current anchor est.':>19}")
+    print(
+        f"{'jackpot bin':>22} | {'n':>4} | {'med jackpot':>11} | {'median tickets':>14} | {'current anchor est.':>19}"
+    )
     for lo, hi in bins:
         rows = [d for d in priced if lo <= d["jackpot"] < hi]
         if not rows:
@@ -193,7 +195,10 @@ def report_sales_curve(data: list[dict]) -> None:
         med_tickets = float(np.median([d["tickets"] for d in rows]))
         med_jackpot = float(np.median([d["jackpot"] for d in rows]))
         anchor = lottery_ev.estimated_tickets("mega_millions", med_jackpot)
-        print(f"${lo / 1e6:>7.0f}M-${hi / 1e6:>5.0f}M | {len(rows):>4} | {med_tickets:>14,.0f} | {anchor:>19,.0f}")
+        print(
+            f"${lo / 1e6:>7.0f}M-${hi / 1e6:>5.0f}M | {len(rows):>4} | ${med_jackpot / 1e6:>9.0f}M "
+            f"| {med_tickets:>14,.0f} | {anchor:>19,.0f}"
+        )
     print("(update lottery_ev.SALES_ANCHORS by hand iff these diverge materially)")
 
 

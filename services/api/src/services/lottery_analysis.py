@@ -185,10 +185,23 @@ def combination_features(numbers: Sequence[int], cfg: GameConfig) -> Dict[str, f
 
 
 def popularity_score(numbers: Sequence[int], cfg: GameConfig) -> float:
-    """Heuristic 0..1 estimate of how commonly humans pick this combination
-    (higher = more shared = worse expected value). Calibrated to well-documented
-    human biases: calendar/birthday numbers, arithmetic sequences, lucky 7,
-    round multiples, single-decade clusters."""
+    """0..1 estimate of how commonly humans pick this combination (higher =
+    more shared = worse expected value).
+
+    Weights EMPIRICALLY GROUNDED 2026-08-05 by regressing excess winners at
+    mains-dependent tiers on winning-line features across 914 real Mega
+    Millions draws (scripts/fit_lottery_sales_popularity.py; R^2=0.80):
+      CONFIRMED  frac<=31 (t=38.9, dominant), frac<=12 (t=16.3),
+                 lucky 7 (t=6.1), <=2-decade clustering (t=3.1)
+      REFUTED    multiples-of-5 (t=-1.7) and consecutive-pair density
+                 (t=-1.4) — humans do NOT measurably over-pick these;
+                 their old weights are removed.
+      UNTESTABLE perfect arithmetic sequences (winning draws are ~never
+                 one, so the data is silent) — penalty kept from the
+                 documented play-slip literature (1-2-3-4-5 is famously
+                 the most-played line).
+    Weights are the fitted coefficients scaled onto the 0..1 score range;
+    relative sizes match the fit."""
     nums = sorted(numbers)
     n = len(nums)
     if n == 0:
@@ -196,24 +209,23 @@ def popularity_score(numbers: Sequence[int], cfg: GameConfig) -> float:
     score = 0.0
 
     # Calendar/birthday bias — the dominant tell. Numbers <= 31 are days; <= 12
-    # double as months. Heavy <=31 lines are massively over-picked.
-    score += 0.45 * (sum(1 for x in nums if x <= 31) / n)
-    score += 0.10 * (sum(1 for x in nums if x <= 12) / n)
+    # double as months. Fitted effect ratio le31:le12 ~= 0.212:0.120.
+    score += 0.50 * (sum(1 for x in nums if x <= 31) / n)
+    score += 0.28 * (sum(1 for x in nums if x <= 12) / n)
 
-    # Arithmetic / sequence patterns (1-2-3-4-5, 5-10-15-20-25, ...).
+    # Perfect arithmetic sequences (1-2-3-4-5, 5-10-15-20-25, ...) — kept,
+    # see UNTESTABLE above. Plain consecutive-pair density was refuted.
     diffs = [b - a for a, b in zip(nums, nums[1:])]
     if len(nums) >= 2 and len(set(diffs)) == 1:
         score += 0.25
-    score += 0.10 * (sum(1 for d in diffs if d == 1) / max(1, n - 1))
 
-    # "Lucky" 7 and round multiples of 5/10.
+    # "Lucky" 7 — confirmed, small.
     if 7 in nums:
-        score += 0.04
-    score += 0.04 * (sum(1 for x in nums if x % 5 == 0) / n)
+        score += 0.06
 
-    # Single/double-decade cluster.
+    # Single/double-decade cluster — confirmed, small.
     if len({(x - 1) // 10 for x in nums}) <= 2:
-        score += 0.08
+        score += 0.05
 
     return min(1.0, score)
 

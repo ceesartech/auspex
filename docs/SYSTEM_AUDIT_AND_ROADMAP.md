@@ -668,7 +668,32 @@ with the growth-rate driver (WAL) eliminated.
 > unpaused (daily 13:00 UTC). Lottery feature is now fully live: real draw
 > data, EV verdicts, honest strategy labeling.
 
-**Day 1 (production correctness + safety):**
+> **Update (2026-08-05, night) — lottery v1.1 SHIPPED + fitted on real data.**
+> megamillions.com's `GetDrawDataByTick` ASMX endpoint returns per-draw
+> jackpot (advertised + cash) and per-tier winner counts for any historical
+> date. `scripts/fetch_lottery_winners.py` backfilled **914/915 draws
+> (2017-10-31→)** — the 1 skip is a genuine NY-Socrata-vs-megamillions.com
+> megaball disagreement on 2022-05-10, refused by the numbers cross-check.
+> (Bug found en route: `winners_by_tier DEFAULT '{}'` made the first backfill
+> a silent no-op — IS NULL matched nothing; `{}` now counts as missing.
+> Long ssh→docker-exec sessions also die after ~2-5 min on this box —
+> detached in-container execution is the reliable pattern for long backfills.)
+> Daily forward-capture wired into `lottery_pipeline`. Powerball winners
+> DEFERRED (CDN blocks non-browser clients; no free feed).
+> **Fit results** (`scripts/fit_lottery_sales_popularity.py`, n=914,
+> R²=0.80): (1) **Sales curve fitted** — hand-set MM anchors were ~45% high
+> in the $500M-$1B band (median 28.8M tickets vs 41.7M assumed) and ~26% low
+> in the $1B+ frenzy band (155.6M vs 114.5M, n=12); `SALES_ANCHORS` updated
+> with fitted values (PB stays hand-set, unfittable). (2) **Popularity biases
+> empirically graded**: birthday ≤31 CONFIRMED dominant (coef 0.212,
+> t=38.9), months ≤12 (t=16.3), lucky-7 (t=6.1), decade-clustering (t=3.1);
+> **multiples-of-5 and consecutive-pair density REFUTED** (t≈−1.5, weights
+> removed); perfect-sequences untestable (kept from play-slip literature).
+> `popularity_score` weights rescaled to the fitted coefficients. Headline:
+> an all-birthday line expects a **~1.36× worse jackpot share** than an
+> all->31 line (upper-ish bound — 0+MB-denominator amplification caveat
+> stated in the harness). The ev strategy's mechanism is now measured, not
+> assumed. Tickets/draw median 12.0M (p10 6.8M, p90 23.6M).
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
 2. §1.2 unpause `db_backup_daily`, verify a local dump. B2 wiring same day if keys can be created.
 3. §1.3 Prometheus WAL window.
