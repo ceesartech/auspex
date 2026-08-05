@@ -124,7 +124,9 @@ def load_draws(cur) -> list[dict]:
         """
         SELECT draw_date, numbers, jackpot_amount, winners_by_tier
         FROM lottery_draws
-        WHERE game = 'mega_millions' AND winners_by_tier IS NOT NULL
+        WHERE game = 'mega_millions'
+          AND winners_by_tier IS NOT NULL
+          AND winners_by_tier <> '{}'::jsonb
         ORDER BY draw_date
         """
     )

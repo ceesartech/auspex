@@ -144,10 +144,14 @@ def fetch_draw_winners(session: requests.Session, draw_date: date) -> Optional[d
 
 
 def list_missing(cur, since: Optional[date], limit: Optional[int]) -> list[tuple]:
+    # winners_by_tier has DEFAULT '{}' (migration 001), so a never-filled row
+    # is {} rather than NULL — an IS NULL test alone silently no-ops the
+    # whole backfill ("No draws missing" while every row is empty).
     q = """
         SELECT draw_date, numbers, bonus_number
         FROM lottery_draws
-        WHERE game = 'mega_millions' AND winners_by_tier IS NULL
+        WHERE game = 'mega_millions'
+          AND (winners_by_tier IS NULL OR winners_by_tier = '{}'::jsonb)
     """
     params: list = []
     if since:
