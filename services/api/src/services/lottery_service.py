@@ -10,7 +10,6 @@ not by any (impossible) win probability.
 
 import json
 import logging
-import re
 import time
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -20,69 +19,57 @@ from services.lottery_analysis import DISCLAIMER, MIN_DRAWS_FOR_STATS
 from services.lottery_analysis import analyze as engine_analyze
 from services.lottery_analysis import generate_combinations, get_game_config
 from services.lottery_ev import ev_report
+from services.lottery_live import (
+    JACKPOT_SOURCES,
+    REQUEST_HEADERS,
+    parse_megamillions_payload,
+    parse_powerball_api,
+    parse_powerball_homepage,
+)
 from services.lottery_rules import DRAW_WEEKDAYS, analysis_window_starts
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-# Live next-draw jackpot estimate endpoints (both free, no key). Best-effort:
-# the EV endpoint falls back to an explicit `jackpot` query param when these
-# are unreachable. Cached in-process for 10 minutes.
-_JACKPOT_SOURCES = {
-    "powerball": "https://www.powerball.com/api/v1/estimates/powerball?_format=json",
-    "mega_millions": "https://www.megamillions.com/cmspages/utilservice.asmx/GetLatestDrawData",
-}
+# Live next-draw jackpot estimates are best-effort: the EV endpoint falls
+# back to an explicit `jackpot` query param when unreachable. Cached
+# in-process for 10 minutes. Parsers + source quirks live in lottery_live.
 _JACKPOT_CACHE_TTL_S = 600
 _jackpot_cache: Dict[str, Tuple[float, Dict]] = {}
-
-
-def _parse_dollar_amount(s: str) -> Optional[float]:
-    """'$786 Million' / '$1.2 Billion' / '$341,600,000' -> dollars."""
-    m = re.search(r"\$?\s*([\d,.]+)\s*(billion|million)?", s, re.I)
-    if not m:
-        return None
-    try:
-        value = float(m.group(1).replace(",", ""))
-    except ValueError:
-        return None
-    unit = (m.group(2) or "").lower()
-    if unit == "billion":
-        value *= 1e9
-    elif unit == "million":
-        value *= 1e6
-    return value
 
 
 def fetch_live_jackpot(game: str) -> Optional[Dict[str, float]]:
     """Current next-draw estimated jackpot {advertised, cash_value} or None.
     Never raises — a missing live estimate degrades to requiring the caller
-    to pass the jackpot explicitly."""
+    to pass the jackpot explicitly.
+
+    Powerball needs a two-step dance: its JSON API serves the SPA homepage
+    HTML to non-browser clients (CDN bot-gating), so when the JSON parse
+    comes up empty we scrape the jackpot from the homepage markup we DO
+    reliably receive (see lottery_live.parse_powerball_homepage)."""
     cached = _jackpot_cache.get(game)
     if cached and time.monotonic() - cached[0] < _JACKPOT_CACHE_TTL_S:
         return cached[1] or None
     result: Optional[Dict[str, float]] = None
     try:
-        resp = httpx.get(_JACKPOT_SOURCES[game], timeout=8.0, follow_redirects=True)
+        resp = httpx.get(JACKPOT_SOURCES[game], headers=REQUEST_HEADERS, timeout=8.0, follow_redirects=True)
         resp.raise_for_status()
-        body = resp.text
         if game == "powerball":
-            data = resp.json()
-            node = data[0] if isinstance(data, list) and data else data
-            adv = _parse_dollar_amount(str(node.get("field_prize_amount", "")))
-            cash = _parse_dollar_amount(str(node.get("field_prize_amount_cash", "")))
-            if adv:
-                result = {"advertised": adv, "cash_value": cash or 0.0}
+            result = parse_powerball_api(resp.text)
+            if result is None:
+                page = httpx.get(
+                    JACKPOT_SOURCES["powerball_fallback_page"],
+                    headers=REQUEST_HEADERS,
+                    timeout=8.0,
+                    follow_redirects=True,
+                )
+                page.raise_for_status()
+                result = parse_powerball_homepage(page.text)
         else:
-            # XML-wrapped JSON: <string ...>{...}</string>
-            inner = re.search(r">(\{.*\})<", body, re.S)
-            if inner:
-                payload = json.loads(inner.group(1))
-                jack = payload.get("Jackpot", {})
-                adv = jack.get("NextPrizePool")
-                cash = jack.get("NextCashValue")
-                if adv:
-                    result = {"advertised": float(adv), "cash_value": float(cash or 0.0)}
+            result = parse_megamillions_payload(resp.text)
+        if result is None:
+            logger.warning("Live jackpot parse produced nothing for %s", game)
     except Exception as e:
         logger.warning("Live jackpot fetch failed for %s: %s", game, e)
     _jackpot_cache[game] = (time.monotonic(), result or {})
