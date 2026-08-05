@@ -694,6 +694,29 @@ with the growth-rate driver (WAL) eliminated.
 > all->31 line (upper-ish bound — 0+MB-denominator amplification caveat
 > stated in the harness). The ev strategy's mechanism is now measured, not
 > assumed. Tickets/draw median 12.0M (p10 6.8M, p90 23.6M).
+
+> **Update (2026-08-05, late night) — Airflow 2.8 → 3.3.0 MIGRATED + verified
+> (`1a89bf3`..`907d238`).** 2.x is past EOL. Validated before cutover: ruff
+> AIR3 clean; all 10 DAGs parse with zero import errors in a throwaway 3.3.0
+> container; compose layering validated; fresh verified B2 backup
+> (`betting_system-2026-08-05T232043Z.dump`) since the metadata schema
+> migration runs inside the shared betting DB. Changes: DAG code on
+> airflow.sdk imports + `schedule=`; webserver → **api-server** (health
+> `/api/v2/monitor/health`); NEW mandatory **dag-processor** service; init
+> runs `db migrate`; FabAuthManager keeps the admin login (user survived the
+> migration); Execution-API URL pointed at the api-server container; JWT/API
+> secrets reuse the existing .env value — no prod .env edits. Post-cutover:
+> **first pipeline tick green in 81s** through the new Execution API; paused
+> states preserved. Two follow-up fixes: (1) isort ordering on the
+> sed-rewritten imports (the Code Quality gate correctly blocked the first
+> deploy attempt); (2) the UI on airflow.<domain> was minting http:// URLs
+> behind Caddy → `api-server --proxy-headers` + `FORWARDED_ALLOW_IPS` +
+> `AIRFLOW__API__BASE_URL` per the official run-behind-proxy guide; login
+> redirect verified https. Airflow-2 habits to unlearn: `dags list-runs`
+> takes the dag id positionally (no `-d`), and 2.x UI deep-link paths are
+> gone (new React SPA routes).
+
+**Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
 2. §1.2 unpause `db_backup_daily`, verify a local dump. B2 wiring same day if keys can be created.
 3. §1.3 Prometheus WAL window.
