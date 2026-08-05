@@ -578,6 +578,55 @@ with the growth-rate driver (WAL) eliminated.
 > flake8/black never see it — the hygiene test runs in the repo-root suite, which
 > does gate.
 
+> **Update (2026-08-05) — live performance readout + two grading bugs fixed
+> (`6c54a11`).** Full live-vs-baseline readout across every production model
+> (multi-agent, adversarially verified). Verdicts: **healthy** — tennis (all-time
+> 56.9% @ n=1953 vs ~58% OOS; 30d dip is <2 SE noise), NBA ML (71.7% @ 2241),
+> NFL ML (64.3% @ 286, pre-cross-book rows), horse consensus (Brier 0.0803 @
+> 127k entrants ≥ 0.0831 baseline), horse ranker (paired same-race live delta
+> **+0.0006 worse than consensus ± 0.0002** — live reconfirmation of the closed
+> structural ceiling). **Drift-watch, not action** — MMA (30d 47.4% @ n=171 =
+> 2.2 SE below 55.9% OOS, ECE 0.106, but Brier delta 0.65 SE = noise + ~10-way
+> multiple-look inflation; extend to n≥350–400 before any move; the self-gating
+> calibrator auto-enables at ≥500 held-out rows if overconfidence is real).
+> **Insufficient data** — soccer (n=1124, 100% inside a 23-day summer-mix
+> window; binary picked-outcome Brier is NOT comparable to the 0.5946 multiclass
+> baseline), NFL spread/total (pre-cross-book backfill rows), NHL (zero graded
+> rows ever — validate results ingestion at the season opener).
+> **Grading bugs found by the readout, fixed forward-path in `6c54a11`:**
+> (1) correct_score predicted_outcome was 'other' on ~every row (argmax didn't
+> exclude the aggregated tail bucket) → 0/1124 gradable; (2) double_chance
+> graded a coverage market by single-label equality → every '12' pick and every
+> 'X2'-on-a-draw mis-graded (the monitor's ECE-0.28 soccer alarm was this
+> artifact, not the model). Historical re-grade of both markets' 1,124 rows is
+> **pending operator approval** (deterministic recompute from stored JSONB +
+> scores). No model-side tuning is warranted anywhere; the open levers remain
+> xG backfill, corpus 3–4×, tennis/MMA NN revival (all §4.3-gated), grading-gap
+> closures, and the 60–90-day CLV market-gating readout (~2026-09-15).
+
+> **Update (2026-08-05) — lottery feasibility assessment (decision pending).**
+> Full audit of the dormant lottery surface: `lottery_draws` has **0 rows ever**
+> (the only fetcher died with the scrapers package in `7222b0a` and was never
+> replaced), migration 010 (`lottery_predictions`) was **never applied to prod**
+> — so the API's `persist=true` path silently no-ops via a swallowed exception in
+> `lottery_service._persist` (violates non-negotiable #3) — and the hardcoded
+> Mega Millions rules (megaball 1–25) are **stale vs the Apr-2025 rule change**
+> (1–24, $5 ticket), so the odds math is factually wrong today. ML feasibility
+> for draw prediction is **zero, permanently** (i.i.d. uniform — information-
+> theoretic, not a data gap); the existing engine already says so honestly and
+> only claims jackpot-share avoidance. EV math (adversarially verified): even
+> the record $2B Powerball was ~−17–19% EV per ticket post-tax/sharing; typical
+> jackpots ~−62%. The only honest products are decision-theoretic: play/don't-
+> play EV calculator (jackpot/cash/tax/Poisson-sharing; sales inferable from
+> `winners_by_tier` 0+PB counts × 38.32), empirically-fitted popularity
+> avoidance (conditional-EV only, ~8% share improvement at record sales), free
+> NY Open Data ingestion (PB `d6yy-54nr`, MM `5xaw-6ayf`). **Operator decision:
+> (A)** ~2–4 days to make the honest-analytics layer real (ingestion + apply 010
+> + EV calculator + rules fix + un-swallow `_persist`), or **(B)** delete the
+> feature per §5 remove-list discipline (page + routes + service + scripts +
+> migration in one commit). Either beats the status quo of a dead UI. Never
+> build a lottery model in services/ml-models under any path.
+
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
 2. §1.2 unpause `db_backup_daily`, verify a local dump. B2 wiring same day if keys can be created.
