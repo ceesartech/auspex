@@ -33,45 +33,58 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 # Live next-draw jackpot estimates are best-effort: the EV endpoint falls
-# back to an explicit `jackpot` query param when unreachable. Cached
-# in-process for 10 minutes. Parsers + source quirks live in lottery_live.
+# back to an explicit `jackpot` query param when unreachable. Successes are
+# cached in-process for 10 minutes; failures for only 60s — powerball.com's
+# CDN serves an occasional undecodable/odd variant (some edge nodes return
+# brotli regardless of Accept-Encoding), and a flake shouldn't blank the EV
+# card for 10 minutes. Parsers + source quirks live in lottery_live.
 _JACKPOT_CACHE_TTL_S = 600
+_JACKPOT_NEGATIVE_TTL_S = 60
 _jackpot_cache: Dict[str, Tuple[float, Dict]] = {}
+
+
+def _fetch_jackpot_once(game: str) -> Optional[Dict[str, float]]:
+    resp = httpx.get(JACKPOT_SOURCES[game], headers=REQUEST_HEADERS, timeout=8.0, follow_redirects=True)
+    resp.raise_for_status()
+    if game != "powerball":
+        return parse_megamillions_payload(resp.text)
+    # Powerball two-step: the JSON API serves the SPA homepage HTML to
+    # non-browser clients (CDN bot-gating); when the JSON parse comes up
+    # empty, scrape the jackpot from the homepage markup we DO receive.
+    result = parse_powerball_api(resp.text)
+    if result is None:
+        page = httpx.get(
+            JACKPOT_SOURCES["powerball_fallback_page"],
+            headers=REQUEST_HEADERS,
+            timeout=8.0,
+            follow_redirects=True,
+        )
+        page.raise_for_status()
+        result = parse_powerball_homepage(page.text)
+    return result
 
 
 def fetch_live_jackpot(game: str) -> Optional[Dict[str, float]]:
     """Current next-draw estimated jackpot {advertised, cash_value} or None.
     Never raises — a missing live estimate degrades to requiring the caller
-    to pass the jackpot explicitly.
-
-    Powerball needs a two-step dance: its JSON API serves the SPA homepage
-    HTML to non-browser clients (CDN bot-gating), so when the JSON parse
-    comes up empty we scrape the jackpot from the homepage markup we DO
-    reliably receive (see lottery_live.parse_powerball_homepage)."""
+    to pass the jackpot explicitly. One retry on a failed attempt: the CDN
+    variance is per-request, so a fresh request usually lands a good node."""
     cached = _jackpot_cache.get(game)
-    if cached and time.monotonic() - cached[0] < _JACKPOT_CACHE_TTL_S:
-        return cached[1] or None
+    if cached:
+        age = time.monotonic() - cached[0]
+        ttl = _JACKPOT_CACHE_TTL_S if cached[1] else _JACKPOT_NEGATIVE_TTL_S
+        if age < ttl:
+            return cached[1] or None
     result: Optional[Dict[str, float]] = None
-    try:
-        resp = httpx.get(JACKPOT_SOURCES[game], headers=REQUEST_HEADERS, timeout=8.0, follow_redirects=True)
-        resp.raise_for_status()
-        if game == "powerball":
-            result = parse_powerball_api(resp.text)
-            if result is None:
-                page = httpx.get(
-                    JACKPOT_SOURCES["powerball_fallback_page"],
-                    headers=REQUEST_HEADERS,
-                    timeout=8.0,
-                    follow_redirects=True,
-                )
-                page.raise_for_status()
-                result = parse_powerball_homepage(page.text)
-        else:
-            result = parse_megamillions_payload(resp.text)
-        if result is None:
-            logger.warning("Live jackpot parse produced nothing for %s", game)
-    except Exception as e:
-        logger.warning("Live jackpot fetch failed for %s: %s", game, e)
+    for attempt in (1, 2):
+        try:
+            result = _fetch_jackpot_once(game)
+        except Exception as e:
+            logger.warning("Live jackpot fetch failed for %s (attempt %d): %s", game, attempt, e)
+        if result is not None:
+            break
+    if result is None:
+        logger.warning("Live jackpot unavailable for %s after retries", game)
     _jackpot_cache[game] = (time.monotonic(), result or {})
     return result
 
