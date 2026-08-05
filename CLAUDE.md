@@ -13,7 +13,7 @@ Sports: **soccer** (the deepest — 23k matches, ~15 derived markets), NFL, NBA,
 **tennis** & **MMA** (1v1), **horse_racing** (its own multi-runner schema), lottery (dormant).
 
 Stack: FastAPI + uvicorn (`services/api`), Next 14 frontend (`services/frontend`), Postgres 15,
-Redis, Airflow 2.8 (`auspex_pipeline` DAG runs every 15 min), Caddy (TLS/reverse proxy),
+Redis, Airflow 3.3 (`auspex_pipeline` DAG runs every 15 min), Caddy (TLS/reverse proxy),
 Prometheus + Grafana, MLflow. Models in `services/ml-models`, batch scripts in `scripts/`.
 
 ## ⭐ Start here for current state
@@ -53,7 +53,7 @@ SQLEOF
 docker compose cp /tmp/q.sql postgres:/tmp/q.sql >/dev/null 2>&1
 docker compose exec -T postgres sh -c 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -f /tmp/q.sql'"
 
-# Airflow (2.8 — `dags pause` takes ONE dag_id):
+# Airflow (3.3 — api-server + scheduler + dag-processor; DAG code uses airflow.sdk imports):
 docker compose exec -T airflow-scheduler airflow dags list-runs -d <dag> -o plain
 ```
 

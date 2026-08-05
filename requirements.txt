@@ -18,6 +18,11 @@ hiredis==3.1.0
 # ── Async / HTTP ──────────────────────────────────────────────────────────────
 aiohttp==3.11.10
 httpx==0.27.2
+# powerball.com's CDN serves brotli from some edge nodes regardless of
+# Accept-Encoding — httpx needs this to decode them (lottery jackpot fetch).
+# NOTE: the api image installs THIS file (docker/Dockerfile.api copies the
+# repo-root requirements), not services/api/requirements.txt.
+brotli==1.1.0
 # asyncio is Python stdlib since 3.4 — do NOT install the PyPI stub
 
 # ── Data processing ───────────────────────────────────────────────────────────

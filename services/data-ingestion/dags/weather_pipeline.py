@@ -36,8 +36,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from airflow import DAG
-from airflow.operators.bash import BashOperator
+from airflow.sdk import DAG
+from airflow.providers.standard.operators.bash import BashOperator
 from airflow.utils.trigger_rule import TriggerRule
 from alerting import notify_failure  # shared Telegram failure alerting
 
@@ -63,7 +63,7 @@ with DAG(
     description="Pull VC forecast + recent backfill for outdoor sports (daily 03:00 UTC)",
     default_args=default_args,
     start_date=datetime(2026, 1, 1),
-    schedule_interval="0 3 * * *",
+    schedule="0 3 * * *",
     catchup=False,
     max_active_runs=1,
     tags=["weather", "vc", "daily"],
@@ -112,7 +112,7 @@ with DAG(
     description="Refresh soccer team→stadium map from Wikidata + re-run soccer VC backfill (weekly Sun 02:00 UTC)",
     default_args=default_args,
     start_date=datetime(2026, 1, 1),
-    schedule_interval="0 2 * * 0",
+    schedule="0 2 * * 0",
     catchup=False,
     max_active_runs=1,
     tags=["weather", "vc", "weekly"],

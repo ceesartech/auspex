@@ -22,8 +22,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from airflow import DAG
-from airflow.operators.bash import BashOperator
+from airflow.sdk import DAG
+from airflow.providers.standard.operators.bash import BashOperator
 from alerting import notify_failure  # shared Telegram failure alerting
 
 DOCKER_EXEC = "docker compose -f /opt/auspex/docker-compose.yml exec -T api"
@@ -43,7 +43,7 @@ with DAG(
     description="Daily pg_dump → local /opt/auspex/backups + optional S3 (02:00 UTC)",
     default_args=default_args,
     start_date=datetime(2026, 1, 1),
-    schedule_interval="0 2 * * *",
+    schedule="0 2 * * *",
     catchup=False,
     max_active_runs=1,
     tags=["db", "backup", "daily"],

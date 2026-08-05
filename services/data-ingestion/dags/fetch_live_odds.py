@@ -30,8 +30,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from airflow import DAG
-from airflow.operators.bash import BashOperator
+from airflow.sdk import DAG
+from airflow.providers.standard.operators.bash import BashOperator
 from alerting import notify_failure  # shared Telegram failure alerting
 
 default_args = {
@@ -51,7 +51,7 @@ with DAG(
     description="Pull pre-match odds for upcoming fixtures (the-odds-api.com, every 90 min)",
     default_args=default_args,
     start_date=datetime(2026, 1, 1),
-    schedule_interval=timedelta(minutes=90),
+    schedule=timedelta(minutes=90),
     catchup=False,
     max_active_runs=1,
     tags=["odds", "live-data"],

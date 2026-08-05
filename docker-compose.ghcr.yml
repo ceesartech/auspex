@@ -32,6 +32,10 @@ services:
     image: ghcr.io/ceesartech/auspex/airflow:${IMAGE_TAG:-latest}
     build: !reset null
 
+  airflow-dag-processor:
+    image: ghcr.io/ceesartech/auspex/airflow:${IMAGE_TAG:-latest}
+    build: !reset null
+
   frontend:
     image: ghcr.io/ceesartech/auspex/frontend:${IMAGE_TAG:-latest}
     build: !reset null

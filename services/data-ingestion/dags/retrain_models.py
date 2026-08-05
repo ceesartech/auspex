@@ -37,9 +37,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from airflow import DAG
-from airflow.models import Variable
-from airflow.operators.bash import BashOperator
+from airflow.sdk import DAG
+from airflow.sdk import Variable
+from airflow.providers.standard.operators.bash import BashOperator
 from airflow.utils.trigger_rule import TriggerRule
 from alerting import notify_failure  # shared Telegram failure alerting
 
@@ -52,7 +52,7 @@ from alerting import notify_failure  # shared Telegram failure alerting
 #             pull + promote-gate the artifacts, then reuse swap/reload/cleanup.
 # Flip it live: `airflow variables set training_backend modal` (+ scheduler
 # re-parse). No code change, no deploy — that IS the fallback switch.
-TRAINING_BACKEND = Variable.get("training_backend", default_var="vm")
+TRAINING_BACKEND = Variable.get("training_backend", default="vm")
 
 # Logical sport → ordered list of SPORT_BUNDLES keys to train.
 #
@@ -124,7 +124,7 @@ with DAG(
     description="Weekly retrain of ensemble + base models (backend: Variable training_backend, vm|modal)",
     default_args=default_args,
     start_date=datetime(2026, 1, 1),
-    schedule_interval="0 4 * * 0",  # Sundays at 04:00 UTC
+    schedule="0 4 * * 0",  # Sundays at 04:00 UTC
     catchup=False,
     max_active_runs=1,
     tags=["ml", "retraining"],

@@ -118,6 +118,9 @@ services:
   airflow-scheduler:
     logging: *default-logging
     mem_limit: 1536m
+  airflow-dag-processor:
+    logging: *default-logging
+    mem_limit: 768m
   celery-worker:
     logging: *default-logging
     mem_limit: 1536m

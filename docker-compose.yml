@@ -70,18 +70,17 @@ services:
 
   airflow-init:
     logging: *default-logging
-    image: apache/airflow:2.8.0-python3.11
+    image: apache/airflow:3.3.0-python3.11
     container_name: betting-airflow-init
     environment:
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
-      - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW__WEBSERVER__SECRET_KEY}
-      - _AIRFLOW_DB_UPGRADE=true
-      - _AIRFLOW_WWW_USER_CREATE=true
-      - _AIRFLOW_WWW_USER_USERNAME=admin
-      - _AIRFLOW_WWW_USER_PASSWORD=admin
+      # Airflow 3: FAB auth keeps the pre-3.x login flow (admin user in the
+      # DB); the default SimpleAuthManager would drop `airflow users` support.
+      - AIRFLOW__CORE__AUTH_MANAGER=airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+      - AIRFLOW__API__SECRET_KEY=${AIRFLOW__WEBSERVER__SECRET_KEY}
     volumes:
       - ./services/data-ingestion/dags:/opt/airflow/dags
       - ./services/data-ingestion/logs:/opt/airflow/logs
@@ -92,11 +91,12 @@ services:
     networks:
       - betting-network
     entrypoint: /bin/bash
+    # `db migrate` is the 3.x command (db init/upgrade are gone) and is what
+    # performs the 2.x -> 3.x metadata schema migration on first deploy.
     command:
       - -c
       - |
-        airflow db init &&
-        airflow db upgrade &&
+        airflow db migrate &&
         airflow users create \
           --username admin \
           --password admin \
@@ -120,7 +120,11 @@ services:
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
-      - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW__WEBSERVER__SECRET_KEY}
+      # Airflow 3 renames: webserver secret -> api secret; same .env value so
+      # no prod .env edit is needed. JWT secret signs Execution-API tokens.
+      - AIRFLOW__API__SECRET_KEY=${AIRFLOW__WEBSERVER__SECRET_KEY}
+      - AIRFLOW__API_AUTH__JWT_SECRET=${AIRFLOW__WEBSERVER__SECRET_KEY}
+      - AIRFLOW__CORE__AUTH_MANAGER=airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
     volumes:
       - ./services/data-ingestion/dags:/opt/airflow/dags
@@ -139,9 +143,11 @@ services:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
-    command: webserver
+    # Airflow 3: the webserver became a generic API server (new React UI +
+    # REST + the task Execution API that LocalExecutor tasks call home to).
+    command: api-server
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v2/monitor/health"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -162,17 +168,23 @@ services:
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
-      # Webserver and scheduler must share this so the webserver's HTTP
-      # log-fetch from the scheduler's task-runner endpoint is allowed.
-      # Without it: 403 FORBIDDEN on "Could not read served logs".
-      - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW__WEBSERVER__SECRET_KEY}
+      # Api-server and scheduler must share these secrets: the api server
+      # serves task logs, and Execution-API JWTs are minted/verified across
+      # components. Same .env value as pre-3.x — no prod .env edit needed.
+      - AIRFLOW__API__SECRET_KEY=${AIRFLOW__WEBSERVER__SECRET_KEY}
+      - AIRFLOW__API_AUTH__JWT_SECRET=${AIRFLOW__WEBSERVER__SECRET_KEY}
+      - AIRFLOW__CORE__AUTH_MANAGER=airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      # Airflow 3: LocalExecutor task processes phone home to the Execution
+      # API on the api-server container — the default localhost URL would
+      # fail from inside the scheduler container.
+      - AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://airflow-webserver:8080/execution/
       # Long-running CPU-bound tasks (e.g. Poisson MLE in train_all_models)
-      # hold the GIL, which starves the LocalTaskJob heartbeat thread.
-      # Without this bump the scheduler treats them as zombies after 5
-      # minutes and SIGTERMs the process mid-train. 1 hour is the SLA
-      # we'd accept for any single task — anything slower needs profiling.
-      - AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD=3600
+      # hold the GIL, which starves the task heartbeat thread. Without this
+      # bump the scheduler treats them as zombies and SIGTERMs the process
+      # mid-train. 1 hour is the SLA we'd accept for any single task.
+      # (3.x name for the pre-3.x scheduler_zombie_task_threshold.)
+      - AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT=3600
       # Telegram failure alerting — every DAG's on_failure_callback
       # (dags/alerting.py) reads these to page on a broken task.
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
@@ -198,6 +210,43 @@ services:
     command: scheduler
     healthcheck:
       test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $(hostname)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - betting-network
+    restart: unless-stopped
+
+  # Airflow 3 requires a standalone DAG processor (parsing moved out of the
+  # scheduler). It only parses DAG files — no docker socket needed — but it
+  # does need DB access (retrain_models reads the training_backend Variable
+  # at parse time) and the dags mount.
+  airflow-dag-processor:
+    logging: *default-logging
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.airflow
+    container_name: betting-airflow-dag-processor
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
+      - AIRFLOW__API__SECRET_KEY=${AIRFLOW__WEBSERVER__SECRET_KEY}
+      - AIRFLOW__API_AUTH__JWT_SECRET=${AIRFLOW__WEBSERVER__SECRET_KEY}
+      - AIRFLOW__CORE__AUTH_MANAGER=airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    volumes:
+      - ./services/data-ingestion/dags:/opt/airflow/dags
+      - ./services/data-ingestion/logs:/opt/airflow/logs
+      - ./services/data-ingestion/plugins:/opt/airflow/plugins
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type DagProcessorJob --hostname $(hostname)"]
       interval: 30s
       timeout: 10s
       retries: 5

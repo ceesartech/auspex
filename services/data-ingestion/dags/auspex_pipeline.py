@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from airflow import DAG
-from airflow.operators.bash import BashOperator
+from airflow.sdk import DAG
+from airflow.providers.standard.operators.bash import BashOperator
 from airflow.utils.trigger_rule import TriggerRule
 from alerting import notify_failure  # shared Telegram failure alerting
 
@@ -38,7 +38,7 @@ with DAG(
     description="Fetch fixtures, compute features, predict, notify (every 15 min)",
     default_args=default_args,
     start_date=datetime(2025, 1, 1),
-    schedule_interval="*/15 * * * *",
+    schedule="*/15 * * * *",
     catchup=False,
     max_active_runs=1,
     tags=["auspex", "pipeline"],

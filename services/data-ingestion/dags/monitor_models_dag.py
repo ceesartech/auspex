@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from airflow import DAG
-from airflow.operators.bash import BashOperator
+from airflow.sdk import DAG
+from airflow.providers.standard.operators.bash import BashOperator
 from alerting import notify_failure  # shared Telegram failure alerting
 
 default_args = {
@@ -37,7 +37,7 @@ with DAG(
     description="Rolling drift metrics per sport+market, Telegram alerts (hourly)",
     default_args=default_args,
     start_date=datetime(2025, 1, 1),
-    schedule_interval="0 * * * *",  # top of every hour
+    schedule="0 * * * *",  # top of every hour
     catchup=False,
     max_active_runs=1,
     tags=["auspex", "monitoring"],

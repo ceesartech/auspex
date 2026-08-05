@@ -21,8 +21,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from airflow import DAG
-from airflow.operators.bash import BashOperator
+from airflow.sdk import DAG
+from airflow.providers.standard.operators.bash import BashOperator
 from alerting import notify_failure  # shared Telegram failure alerting
 
 default_args = {
@@ -40,7 +40,7 @@ with DAG(
     description="Weekly prune of Docker images older than 14 days + build cache",
     default_args=default_args,
     start_date=datetime(2025, 1, 1),
-    schedule_interval="0 5 * * 0",  # Sundays 05:00 UTC, after the weekly retrain window opens
+    schedule="0 5 * * 0",  # Sundays 05:00 UTC, after the weekly retrain window opens
     catchup=False,
     max_active_runs=1,
     tags=["auspex", "maintenance"],

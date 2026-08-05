@@ -1,4 +1,4 @@
-FROM apache/airflow:2.8.0-python3.11
+FROM apache/airflow:3.3.0-python3.11
 
 USER root
 
@@ -41,19 +41,18 @@ RUN PIP_USER=false python3 -m venv /opt/modal-venv \
 
 USER airflow
 
-# DO NOT install the root requirements.txt here. It pins
-# sqlalchemy==2.0.36, which Airflow 2.8 is incompatible with — that
-# upgrade triggers
-#   sqlalchemy.exc.ArgumentError: Invalid value for 'executemany_mode': 'values'
-# at startup. Our DAGs run via BashOperator that exec's the api
-# container (which already has the full Python stack), so the Airflow
-# image only needs what apache/airflow:2.8.0-python3.11 ships with.
+# DO NOT install the root requirements.txt here — its pins are for the
+# api image and will conflict with Airflow's own pin set. Our DAGs run
+# via BashOperator that exec's the api container (which already has the
+# full Python stack), so the Airflow image only needs what
+# apache/airflow:3.3.0-python3.11 ships with (incl. the standard +
+# FAB providers used by our DAGs and auth).
 #
 # If a future DAG needs to import Python deps directly inside the
 # Airflow container, add a curated requirements-airflow-runtime.txt
 # constrained to Airflow's own pin set:
 #   pip install --constraint \
-#     https://raw.githubusercontent.com/apache/airflow/constraints-2.8.0/constraints-3.11.txt \
+#     https://raw.githubusercontent.com/apache/airflow/constraints-3.3.0/constraints-3.11.txt \
 #     -r /tmp/requirements-airflow-runtime.txt
 
 # Copy DAGs only. The scraper code lives in the api image; DAGs invoke
