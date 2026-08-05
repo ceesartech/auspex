@@ -653,6 +653,21 @@ with the growth-rate driver (WAL) eliminated.
 > XML feed carries it) → empirical popularity regression + sales-curve refit;
 > per-draw historical jackpot amounts.
 
+> **Update (2026-08-05, evening) — both operator actions EXECUTED + verified.**
+> (1) Soccer re-grade ran (`ops_regrade_soccer_markets.sh`, since deleted):
+> 3,040 correct_score rows re-pointed off the 'other' bucket + 1,124
+> double_chance grades reset; the fixed grader re-graded 2,516 predictions
+> across 285 matches. **correct_score accuracy 0.0 → 0.1005** (dead center in
+> the ~9–13% plausible band) and **double_chance 0.48 → 0.7607** (sane for a
+> two-of-three-outcomes coverage market). The monitor's soccer double_chance
+> ECE-0.28 alarm was this artifact and clears on the next hourly run.
+> (2) Lottery rollout ran (`ops_lottery_rollout.sh`, since deleted): migration
+> 010 applied; **1,975 Powerball (2010-02-03→) + 2,525 Mega Millions
+> (2002-05-17→) draws backfilled with ZERO validation skips** — empirically
+> confirming every era boundary in lottery_rules.py; `lottery_pipeline`
+> unpaused (daily 13:00 UTC). Lottery feature is now fully live: real draw
+> data, EV verdicts, honest strategy labeling.
+
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
 2. §1.2 unpause `db_backup_daily`, verify a local dump. B2 wiring same day if keys can be created.
