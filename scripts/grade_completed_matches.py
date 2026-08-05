@@ -262,7 +262,7 @@ def grade_match(cur, match: dict) -> dict:
         if actual is None:
             counts["predictions_skipped"] += 1
             continue
-        correct = grade_prediction(pred["predicted_outcome"], actual)
+        correct = grade_prediction(pred["predicted_outcome"], actual, prediction_type=pred["prediction_type"])
         update_prediction(cur, pred["prediction_id"], actual, correct)
         counts["predictions_graded"] += 1
 

@@ -189,21 +189,26 @@ def btts_outcome(home_score: int, away_score: int) -> str:
     return "yes" if home_score > 0 and away_score > 0 else "no"
 
 
+# Double-chance selections cover SETS of base results — a home win
+# satisfies both '1X' and '12', so no single actual label can grade the
+# market under string equality. actual_outcome stores the BASE result
+# ('home'/'draw'/'away') and grade_prediction() tests set membership.
+# The old single-label convention ('1X' for home-or-draw, 'X2' for away)
+# mis-graded every '12' pick and every 'X2'-pick-on-a-draw, deflating
+# accuracy to 48% and firing a false ECE-0.28 monitor alarm.
+DOUBLE_CHANCE_COVERS = {
+    "1X": {"home", "draw"},
+    "12": {"home", "away"},
+    "X2": {"draw", "away"},
+}
+
+
 def double_chance_outcome(home_score: int, away_score: int) -> str:
-    """1X / 12 / X2 — the outcome categories ALWAYS-include-draw form.
-    Matches the keys precompute writes (upper-case in the soccer
-    market-derivation engine).
-    """
-    base = soccer_match_result(home_score, away_score)
-    if base == "home":
-        # home win covers 1X (home or draw) and 12 (home or away).
-        # Convention: return "1X" since it's the "no-away" cover.
-        return "1X"
-    if base == "draw":
-        # draw covers 1X and X2.
-        return "1X"
-    # away win covers 12 and X2.
-    return "X2"
+    """Base match result ('home'/'draw'/'away') — the truthful 'what
+    happened' for a coverage market. Correctness is decided in
+    grade_prediction() via DOUBLE_CHANCE_COVERS membership, not label
+    equality."""
+    return soccer_match_result(home_score, away_score)
 
 
 def draw_no_bet_outcome(home_score: int, away_score: int) -> str:
@@ -309,12 +314,26 @@ def is_push(actual: Optional[str]) -> bool:
     return actual == "push" or actual.startswith("push_")
 
 
-def grade_prediction(predicted: Optional[str], actual: Optional[str]) -> Optional[bool]:
+def grade_prediction(
+    predicted: Optional[str],
+    actual: Optional[str],
+    prediction_type: Optional[str] = None,
+) -> Optional[bool]:
     """Final correctness verdict. NULL on ungradable outcomes (pushes
     or actual=None) so the predictions.is_correct column distinguishes
-    'we don't know' from 'we know it was wrong'."""
+    'we don't know' from 'we know it was wrong'.
+
+    double_chance grades by coverage-set membership (a '12' pick wins on
+    a home OR away result); everything else is label equality. An
+    unknown double_chance selection grades NULL, not False — it means
+    the stored pick is malformed, which is 'we don't know'."""
     if actual is None or is_push(actual):
         return None
     if predicted is None:
         return None
+    if prediction_type == "double_chance":
+        covers = DOUBLE_CHANCE_COVERS.get(predicted)
+        if covers is None:
+            return None
+        return actual in covers
     return predicted == actual

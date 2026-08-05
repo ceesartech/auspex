@@ -150,14 +150,41 @@ class TestOverUnder:
 
 
 class TestDoubleChance:
-    def test_home_win_is_1X(self):
-        assert go.double_chance_outcome(3, 1) == "1X"
+    """actual_outcome stores the BASE result; correctness is coverage-set
+    membership via grade_prediction(prediction_type='double_chance').
+    The old single-label convention ('1X' for home-or-draw) mis-graded
+    every '12' pick and every 'X2'-pick-on-a-draw."""
 
-    def test_draw_is_1X(self):
-        assert go.double_chance_outcome(1, 1) == "1X"
+    def test_actual_is_base_result(self):
+        assert go.double_chance_outcome(3, 1) == "home"
+        assert go.double_chance_outcome(1, 1) == "draw"
+        assert go.double_chance_outcome(0, 2) == "away"
 
-    def test_away_win_is_X2(self):
-        assert go.double_chance_outcome(0, 2) == "X2"
+    def test_coverage_grading_every_cell(self):
+        # (predicted, actual) -> expected verdict, all 9 combinations.
+        expected = {
+            ("1X", "home"): True,
+            ("1X", "draw"): True,
+            ("1X", "away"): False,
+            ("12", "home"): True,
+            ("12", "draw"): False,
+            ("12", "away"): True,
+            ("X2", "home"): False,
+            ("X2", "draw"): True,
+            ("X2", "away"): True,
+        }
+        for (pred, actual), want in expected.items():
+            got = go.grade_prediction(pred, actual, prediction_type="double_chance")
+            assert got is want, f"{pred} vs {actual}: got {got}, want {want}"
+
+    def test_malformed_selection_grades_null(self):
+        assert go.grade_prediction("2X", "home", prediction_type="double_chance") is None
+
+    def test_other_markets_still_grade_by_equality(self):
+        assert go.grade_prediction("home", "home", prediction_type="match_result") is True
+        assert go.grade_prediction("home", "away", prediction_type="match_result") is False
+        # And without prediction_type (back-compat callers).
+        assert go.grade_prediction("2-1", "2-1") is True
 
 
 class TestDrawNoBet:

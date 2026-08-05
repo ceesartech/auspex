@@ -175,7 +175,12 @@ def store_market_predictions(cur, match_id: str, markets: dict, model_version: s
         ptype = MARKET_PREDICTION_TYPE.get(engine_mt)
         if ptype is None or not probs:
             continue
-        selectable = {k: v for k, v in probs.items() if not k.endswith("_push")}
+        # 'other' (correct_score's aggregated tail bucket) is excluded for
+        # the same reason as '_push': it isn't a backable single outcome.
+        # Left in the argmax it wins on essentially every row (the tail sum
+        # beats any one scoreline), which made predicted_outcome 'other'
+        # permanently ungradable — 0/1124 correct_score grades ever matched.
+        selectable = {k: v for k, v in probs.items() if not k.endswith("_push") and k != "other"}
         if not selectable:
             continue
         top_sel = max(selectable, key=selectable.get)
