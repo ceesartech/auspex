@@ -48,6 +48,35 @@ import requests
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("fetch_lottery_winners")
 
+# Load lottery_rules by file path (same pattern as fetch_lottery_draws.py —
+# the repo-root `services/` namespace package shadows the api package).
+import importlib.util  # noqa: E402
+
+
+def _load_rules():
+    if "lottery_rules" in sys.modules:
+        return sys.modules["lottery_rules"]
+    here = os.path.dirname(os.path.abspath(__file__))
+    for candidate in (
+        "/app/services/api/src/services/lottery_rules.py",
+        os.path.join(here, "..", "services", "api", "src", "services", "lottery_rules.py"),
+    ):
+        if os.path.isfile(candidate):
+            spec = importlib.util.spec_from_file_location("lottery_rules", candidate)
+            assert spec and spec.loader
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["lottery_rules"] = mod
+            spec.loader.exec_module(mod)
+            return mod
+    raise ImportError("lottery_rules.py not found (container or repo checkout expected)")
+
+
+# Only eras WITH a prize table have tier semantics our TIER_LABELS mapping is
+# verified against (2017-10-31+ for MM). Older matrices (5/75+1/15 etc.) may
+# order tiers differently — fetching them would store possibly-mislabeled
+# winners, and the fit harness excludes them anyway.
+EARLIEST_FITTABLE = min(e.start for e in _load_rules().GAME_ERAS["mega_millions"] if e.prizes)
+
 MM_BYTICK_URL = "https://www.megamillions.com/cmspages/utilservice.asmx/GetDrawDataByTick"
 HEADERS = {
     "Content-Type": "application/json",
@@ -147,13 +176,18 @@ def list_missing(cur, since: Optional[date], limit: Optional[int]) -> list[tuple
     # winners_by_tier has DEFAULT '{}' (migration 001), so a never-filled row
     # is {} rather than NULL — an IS NULL test alone silently no-ops the
     # whole backfill ("No draws missing" while every row is empty).
+    # Rows flagged winners_mismatch (feed disagrees with our Socrata numbers,
+    # e.g. 2022-05-10's megaball) are permanently excluded — without the flag
+    # the daily task retried and error-logged them forever.
     q = """
         SELECT draw_date, numbers, bonus_number
         FROM lottery_draws
         WHERE game = 'mega_millions'
           AND (winners_by_tier IS NULL OR winners_by_tier = '{}'::jsonb)
+          AND NOT (COALESCE(metadata, '{}'::jsonb) ? 'winners_mismatch')
+          AND draw_date >= %s
     """
-    params: list = []
+    params: list = [EARLIEST_FITTABLE]
     if since:
         q += " AND draw_date >= %s"
         params.append(since)
@@ -163,6 +197,31 @@ def list_missing(cur, since: Optional[date], limit: Optional[int]) -> list[tuple
         params.append(limit)
     cur.execute(q, params)
     return cur.fetchall()
+
+
+def mark_mismatch(cur, draw_date: date, parsed: dict) -> None:
+    """Permanently flag a draw whose feed numbers disagree with our
+    Socrata-ingested row so list_missing stops retrying it. The flag keeps
+    the feed's version for a human to adjudicate."""
+    cur.execute(
+        """
+        UPDATE lottery_draws
+        SET metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb
+        WHERE game = 'mega_millions' AND draw_date = %s
+        """,
+        (
+            json.dumps(
+                {
+                    "winners_mismatch": {
+                        "feed_numbers": parsed["numbers"],
+                        "feed_bonus": parsed["bonus"],
+                        "source": "megamillions.com GetDrawDataByTick",
+                    }
+                }
+            ),
+            draw_date,
+        ),
+    )
 
 
 def store_winners(cur, draw_date: date, parsed: dict) -> None:
@@ -218,13 +277,14 @@ def run(database_url: str, since: Optional[date], limit: Optional[int]) -> dict:
                 # store winners against the wrong draw.
                 if parsed["numbers"] != sorted(our_numbers) or parsed["bonus"] != our_bonus:
                     logger.error(
-                        "%s: numbers mismatch (feed %s+%d vs ours %s+%d) — skipping",
+                        "%s: numbers mismatch (feed %s+%d vs ours %s+%d) — flagging, will not retry",
                         draw_date,
                         parsed["numbers"],
                         parsed["bonus"],
                         sorted(our_numbers),
                         our_bonus,
                     )
+                    mark_mismatch(cur, draw_date, parsed)
                     counts["mismatched_numbers"] += 1
                     time.sleep(SLEEP_BETWEEN_CALLS_S)
                     continue

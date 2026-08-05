@@ -77,6 +77,26 @@ class TestParsePayload:
         assert fw.parse_bytick_payload({"d": "not json"}) is None
         assert fw.parse_bytick_payload({}) is None
 
+    def test_earliest_fittable_is_the_first_prized_era(self):
+        # Derived from the rules registry, not hardcoded: the 2017-10-31 era
+        # is the first with a prize table (unambiguous tier semantics).
+        assert fw.EARLIEST_FITTABLE == date(2017, 10, 31)
+
+    def test_mark_mismatch_flags_the_row(self):
+        class Cur:
+            def __init__(self):
+                self.params = None
+
+            def execute(self, _sql, params):
+                self.params = params
+
+        cur = Cur()
+        parsed = {"numbers": [15, 19, 20, 61, 70], "bonus": 9}
+        fw.mark_mismatch(cur, date(2022, 5, 10), parsed)
+        flag = json.loads(cur.params[0])["winners_mismatch"]
+        assert flag["feed_bonus"] == 9
+        assert cur.params[1] == date(2022, 5, 10)
+
     def test_tier_labels_match_rules_registry_order(self):
         # 9 tiers, jackpot first, match_bonus last — the mapping the whole
         # v1.1 analysis rests on.
