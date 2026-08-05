@@ -351,34 +351,64 @@ Authorization: Bearer <token>
 
 ## Lottery
 
-### Lottery predictions
+Draws are uniform and independent — nothing here forecasts numbers. The
+decision-relevant endpoint is `/ev`; generation optimizes statistical profile
+and jackpot-share avoidance (conditional EV), never win probability.
+
+### Recent draws
 
 ```
-GET /api/v1/lottery/predictions
+GET /api/v1/lottery/draws?game=powerball&limit=20
 Authorization: Bearer <token>
 ```
 
-**Query parameters:** `lottery_type` — `powerball` or `mega_millions`
+### Expected value (the honest product)
 
-**Response 200:**
+```
+GET /api/v1/lottery/ev?game=powerball
+GET /api/v1/lottery/ev?game=mega_millions&jackpot=500000000&state_tax=0.0685
+Authorization: Bearer <token>
+```
+
+Omit `jackpot` to use the live next-draw estimate (advertised + actual cash
+value); `422` when the live fetch fails — pass `jackpot` explicitly.
+
+**Response 200 (abridged):**
 ```json
 {
-  "lottery_type": "powerball",
-  "recommended_numbers": [7, 14, 23, 38, 51],
-  "powerball": 12,
-  "confidence": "low",
-  "method": "frequency_analysis",
-  "generated_at": "2026-03-06T00:00:00Z",
-  "disclaimer": "Lottery draws are random. These are statistical patterns only."
+  "game": "powerball",
+  "ticket_price": 2.0,
+  "advertised_jackpot": 786000000,
+  "cash_value": 341600000,
+  "jackpot_odds": 292201338,
+  "expected_co_winners": 0.23,
+  "share_factor": 0.89,
+  "ev_total": 0.73,
+  "expected_loss_pct": 63.0,
+  "breakeven_advertised_jackpot": null,
+  "verdict": "Don't play on EV grounds: ...",
+  "disclaimer": "Lottery draws are random and independent — ..."
 }
 ```
 
-### Lottery history
+### Hot / cold / overdue analysis (entertainment)
 
 ```
-GET /api/v1/lottery/history
+GET /api/v1/lottery/analysis?game=powerball&num_draws=100
 Authorization: Bearer <token>
 ```
+
+### Generate combinations
+
+```
+POST /api/v1/lottery/recommendations?game=powerball&strategy=ev&num_sets=5
+Authorization: Bearer <token>
+```
+
+Strategies: `blend | statistical | ev | hot | due | random`. `ev` biases
+toward rarely-picked numbers (>31, no sequences) to reduce expected jackpot
+splitting — it does NOT improve win odds. The response carries `warnings`
+when draw history is too thin for the hot/due/profile statistics.
 
 ---
 

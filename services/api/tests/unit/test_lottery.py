@@ -77,7 +77,9 @@ class TestConfig:
         assert get_game_config("powerball").main_max == 69
         assert get_game_config("powerball").bonus_max == 26
         assert get_game_config("mega_millions").main_max == 70
-        assert get_game_config("mega_millions").bonus_max == 25
+        # 24 since the Apr-2025 game change (was 25) — sourced from the
+        # era-aware rules registry, not a hardcoded literal.
+        assert get_game_config("mega_millions").bonus_max == 24
 
     def test_unknown_game(self):
         with pytest.raises(ValueError):

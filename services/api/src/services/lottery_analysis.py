@@ -38,10 +38,48 @@ class GameConfig:
     bonus_name: str
 
 
+# Matrices come from the era-aware rules registry (lottery_rules.py) so a
+# game change lands in exactly one place. The Apr-2025 Mega Millions change
+# (megaball 25 -> 24) sat wrong in a hardcoded literal here for a year.
+# Import shim: the app imports this module as services.lottery_analysis, but
+# unit tests / scripts load it directly by file path (to dodge the repo-root
+# `services/` package-name clash) — fall back to loading the sibling file.
+try:
+    from services.lottery_rules import current_rules
+except ImportError:  # pragma: no cover — file-path loaders
+    import importlib.util as _ilu
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _rules = _sys.modules.get("lottery_rules")
+    if _rules is None:
+        _spec = _ilu.spec_from_file_location("lottery_rules", _Path(__file__).with_name("lottery_rules.py"))
+        assert _spec and _spec.loader
+        _rules = _ilu.module_from_spec(_spec)
+        _sys.modules["lottery_rules"] = _rules
+        _spec.loader.exec_module(_rules)
+    current_rules = _rules.current_rules  # type: ignore[assignment, no-redef]
+
+_BONUS_NAMES = {"powerball": "powerball", "mega_millions": "megaball"}
+
 GAME_CONFIG: Dict[str, GameConfig] = {
-    "powerball": GameConfig("powerball", 5, 69, 26, "powerball"),
-    "mega_millions": GameConfig("mega_millions", 5, 70, 25, "megaball"),
+    key: GameConfig(
+        key,
+        current_rules(key).main_count,
+        current_rules(key).main_max,
+        current_rules(key).bonus_max,
+        _BONUS_NAMES[key],
+    )
+    for key in ("powerball", "mega_millions")
 }
+
+# Below this many historical draws, frequency/recency/profile statistics are
+# noise: hot/due normalize to flat 0.5 and profile_fit goes neutral, so every
+# non-random strategy's ranking silently collapses to the EV (unpopularity)
+# component alone — which is why an empty lottery_draws table produces lines
+# biased toward numbers > 31 regardless of strategy. Callers should surface
+# this (the service attaches a warning) rather than let it stay silent.
+MIN_DRAWS_FOR_STATS = 30
 
 STRATEGIES: Tuple[str, ...] = ("blend", "statistical", "ev", "hot", "due", "random")
 
@@ -193,12 +231,18 @@ _PROFILE_KEYS = ("sum", "odd_count", "low_count", "spread")
 
 def profile_stats(main_draws: Sequence[Sequence[int]], cfg: GameConfig) -> Dict[str, Tuple[float, float]]:
     """Mean and (population) std of the profile features across historical
-    full-size draws. Used to score how 'typical' a candidate line looks."""
+    full-size draws. Used to score how 'typical' a candidate line looks.
+    Returns {} below MIN_DRAWS_FOR_STATS usable draws — with no history a
+    zero mean would z-score every real line to oblivion (profile_fit ~ 0 for
+    everything), silently deleting the profile component from every
+    strategy's ranking."""
     feats = [combination_features(d, cfg) for d in main_draws if len(d) == cfg.main_count]
+    if len(feats) < MIN_DRAWS_FOR_STATS:
+        return {}
     stats: Dict[str, Tuple[float, float]] = {}
     for key in _PROFILE_KEYS:
         vals = [f[key] for f in feats]
-        mean = statistics.fmean(vals) if vals else 0.0
+        mean = statistics.fmean(vals)
         std = statistics.pstdev(vals) if len(vals) > 1 else 0.0
         stats[key] = (mean, std if std > 0 else 1.0)
     return stats
@@ -206,7 +250,10 @@ def profile_stats(main_draws: Sequence[Sequence[int]], cfg: GameConfig) -> Dict[
 
 def profile_fit(numbers: Sequence[int], cfg: GameConfig, stats: Dict[str, Tuple[float, float]]) -> float:
     """0..1 Gaussian closeness of this combination's profile features to the
-    historical means (1.0 = dead-on typical, →0 as it gets unusual)."""
+    historical means (1.0 = dead-on typical, →0 as it gets unusual).
+    Neutral 0.5 when stats are unavailable (thin history)."""
+    if not stats:
+        return 0.5
     feats = combination_features(numbers, cfg)
     z_sq = 0.0
     for key, (mean, std) in stats.items():

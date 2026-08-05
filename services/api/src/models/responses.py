@@ -1,6 +1,6 @@
 """Response schemas"""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict
@@ -159,6 +159,41 @@ class LotteryRecommendationsResponse(BaseModel):
     total_draws_analyzed: int
     generated_at: datetime
     combinations: List[LotteryCombination]
+    # Non-empty when the ranking degraded (e.g. too few current-era draws for
+    # hot/due/profile statistics — the ranking is then effectively EV-only).
+    warnings: List[str] = []
+    disclaimer: str
+
+
+class LotteryEVResponse(BaseModel):
+    """Per-ticket expected-value verdict for the next draw.
+
+    The only decision-relevant lottery output: EV as a function of the
+    advertised jackpot, cash value, taxes, and expected co-winner sharing.
+    The verdict is almost always "don't play" — that is the honest answer.
+    """
+
+    game: str
+    ticket_price: float
+    advertised_jackpot: float
+    cash_value: float
+    cash_ratio: float
+    tax_rate: float
+    tickets_estimated: float
+    tickets_source: str
+    expected_co_winners: float
+    share_factor: float
+    jackpot_odds: float
+    ev_ex_jackpot: float
+    ev_jackpot_term: float
+    ev_total: float
+    ev_per_dollar: float
+    expected_loss_pct: float
+    breakeven_advertised_jackpot: Optional[float] = None
+    expected_multiplier: float
+    jackpot_source: str
+    next_draw_date: Optional[date] = None
+    verdict: str
     disclaimer: str
 
 

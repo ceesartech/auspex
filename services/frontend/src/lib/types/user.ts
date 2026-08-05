@@ -100,5 +100,34 @@ export interface LotteryRecommendations {
   total_draws_analyzed: number;
   generated_at: string;
   combinations: LotteryCombination[];
+  // Non-empty when draw history is too thin and the ranking degrades to EV-only.
+  warnings: string[];
+  disclaimer: string;
+}
+
+export interface LotteryEV {
+  game: string;
+  ticket_price: number;
+  advertised_jackpot: number;
+  cash_value: number;
+  cash_ratio: number;
+  tax_rate: number;
+  tickets_estimated: number;
+  tickets_source: string;
+  expected_co_winners: number;
+  share_factor: number;
+  // 1-in-N jackpot odds (the N, e.g. 292201338).
+  jackpot_odds: number;
+  ev_ex_jackpot: number;
+  ev_jackpot_term: number;
+  ev_total: number;
+  ev_per_dollar: number;
+  // Already in percent units (0-100).
+  expected_loss_pct: number;
+  breakeven_advertised_jackpot: number | null;
+  expected_multiplier: number;
+  jackpot_source: 'live' | 'user';
+  next_draw_date: string | null;
+  verdict: string;
   disclaimer: string;
 }

@@ -627,6 +627,32 @@ with the growth-rate driver (WAL) eliminated.
 > migration in one commit). Either beats the status quo of a dead UI. Never
 > build a lottery model in services/ml-models under any path.
 
+> **Update (2026-08-05, later) — lottery option A BUILT (honest-analytics
+> layer).** Operator chose path A. Shipped: (1) **era-aware rules registry**
+> (`lottery_rules.py`) — matrices/prices/prize tables versioned by draw date,
+> tier odds derived combinatorially and unit-tested against every published
+> figure (PB jackpot 1:292,201,338; MM post-Apr-2025 1:290,472,336, match-5
+> exactly 1:12,629,232, E[multiplier] exactly 3.0 from the 15/10/4/2/1-of-32
+> field); fixes the stale megaball-25 hardcode. (2) **EV calculator**
+> (`lottery_ev.py` + `GET /api/v1/lottery/ev`) — advertised/cash/taxes/
+> Poisson co-winner sharing with a documented sales curve; live next-draw
+> jackpot+cash fetched from powerball.com / megamillions.com (10-min cache,
+> falls back to a `?jackpot=` param). (3) **Draw ingestion**
+> (`scripts/fetch_lottery_draws.py`, NY Open Data Socrata, free; era-aware
+> validation, loud skips) + new **`lottery_pipeline` DAG** (daily 13:00 UTC:
+> fetch → settle backtest lines → generate next-draw lines). (4) `_persist`
+> exception un-swallowed (non-negotiable #3). (5) Zero-data degeneration made
+> explicit: with < 30 current-era draws, hot/due/profile stats are neutral and
+> every non-random strategy's ranking collapses to EV-only (the ">31 bias" the
+> operator noticed) — now surfaced as a `warnings` field + UI note instead of
+> silent. (6) Frontend: EV verdict card, entertainment badges on hot/due,
+> honest captions. (7) Analysis windows are era-filtered (MM mains span 2017+,
+> MM bonus only 2025-04-08+). Rollout needs on-prod: migration 010 + fetch
+> `--backfill` (operator paste-block; classifier blocks agent prod-writes).
+> Deferred v1.1: winners_by_tier ingestion (needs a second source — the MM
+> XML feed carries it) → empirical popularity regression + sales-curve refit;
+> per-draw historical jackpot amounts.
+
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
 2. §1.2 unpause `db_backup_daily`, verify a local dump. B2 wiring same day if keys can be created.

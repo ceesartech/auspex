@@ -1,6 +1,7 @@
 'use client';
 
 import { useQuery, useMutation } from '@tanstack/react-query';
+import { isAxiosError } from 'axios';
 import { recommendationsApi } from '@/lib/api/recommendations';
 import { AccumulatorRequest } from '@/lib/types/recommendation';
 
@@ -74,6 +75,18 @@ export function useLotteryAnalysis(game: string, numDraws = 100) {
     queryKey: ['lottery', 'analysis', game, numDraws],
     queryFn: () => recommendationsApi.getLotteryAnalysis(game, numDraws),
     enabled: !!game,
+  });
+}
+
+export function useLotteryEV(game: string, opts?: { jackpot?: number; stateTax?: number }) {
+  return useQuery({
+    queryKey: ['lottery', 'ev', game, opts?.jackpot ?? null, opts?.stateTax ?? null],
+    queryFn: () => recommendationsApi.getLotteryEV(game, opts),
+    enabled: !!game,
+    // 422 means the live jackpot estimate is unavailable — the UI prompts for a
+    // manual jackpot instead; retrying won't help.
+    retry: (failureCount, error) =>
+      !(isAxiosError(error) && error.response?.status === 422) && failureCount < 1,
   });
 }
 

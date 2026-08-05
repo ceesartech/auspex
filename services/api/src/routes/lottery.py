@@ -12,7 +12,12 @@ from typing import List, Optional
 from auth.dependencies import require_auth
 from database import get_db
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from models.responses import LotteryAnalysisResponse, LotteryDrawResponse, LotteryRecommendationsResponse
+from models.responses import (
+    LotteryAnalysisResponse,
+    LotteryDrawResponse,
+    LotteryEVResponse,
+    LotteryRecommendationsResponse,
+)
 from services.lottery_service import LotteryService
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -30,16 +35,14 @@ async def get_lottery_draws(
 ) -> List[LotteryDrawResponse]:
     """Get recent lottery draw results"""
 
-    query = text(
-        """
+    query = text("""
         SELECT id, game, draw_date, draw_number, numbers, bonus_number,
                multiplier, jackpot_amount
         FROM lottery_draws
         WHERE (:game IS NULL OR game = :game)
         ORDER BY draw_date DESC
         LIMIT :limit
-    """
-    )
+    """)
 
     results = db.execute(query, {"game": game, "limit": limit}).fetchall()
 
@@ -73,6 +76,37 @@ async def get_lottery_analysis(
             detail=f"No draw data found for {game}",
         )
     return LotteryAnalysisResponse(**result)
+
+
+@router.get("/ev", response_model=LotteryEVResponse)
+async def get_lottery_ev(
+    game: str = Query(..., pattern="^(powerball|mega_millions)$"),
+    jackpot: Optional[float] = Query(
+        None,
+        gt=0,
+        description="Advertised jackpot in dollars. Omit to use the live next-draw estimate.",
+    ),
+    state_tax: float = Query(0.0, ge=0.0, lt=0.6, description="State marginal tax rate, e.g. 0.0685."),
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_auth),
+) -> LotteryEVResponse:
+    """Per-ticket EV verdict for the next draw — the honest lottery product.
+
+    Computes expected value from the advertised jackpot (live-fetched with its
+    actual cash value when `jackpot` is omitted), federal + state taxes, exact
+    combinatorial tier odds, and expected co-winner sharing via a Poisson model
+    of ticket sales. The answer is almost always "don't play"; the point is to
+    quantify by how much, and which game is least bad tonight.
+    """
+    result = LotteryService(db).ev(game, jackpot=jackpot, state_tax=state_tax)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Live jackpot estimate unavailable — pass the advertised jackpot " "explicitly, e.g. ?jackpot=500000000"
+            ),
+        )
+    return LotteryEVResponse(**result)
 
 
 @router.post("/recommendations", response_model=LotteryRecommendationsResponse)

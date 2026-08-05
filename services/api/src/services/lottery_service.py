@@ -10,22 +10,83 @@ not by any (impossible) win probability.
 
 import json
 import logging
+import re
+import time
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from services.lottery_analysis import DISCLAIMER
+import httpx
+from services.lottery_analysis import DISCLAIMER, MIN_DRAWS_FOR_STATS
 from services.lottery_analysis import analyze as engine_analyze
 from services.lottery_analysis import generate_combinations, get_game_config
+from services.lottery_ev import ev_report
+from services.lottery_rules import DRAW_WEEKDAYS, analysis_window_starts
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-# Scheduled draw weekdays (Mon=0 … Sun=6): Powerball Mon/Wed/Sat, MM Tue/Fri.
-DRAW_WEEKDAYS: Dict[str, set] = {
-    "powerball": {0, 2, 5},
-    "mega_millions": {1, 4},
+# Live next-draw jackpot estimate endpoints (both free, no key). Best-effort:
+# the EV endpoint falls back to an explicit `jackpot` query param when these
+# are unreachable. Cached in-process for 10 minutes.
+_JACKPOT_SOURCES = {
+    "powerball": "https://www.powerball.com/api/v1/estimates/powerball?_format=json",
+    "mega_millions": "https://www.megamillions.com/cmspages/utilservice.asmx/GetLatestDrawData",
 }
+_JACKPOT_CACHE_TTL_S = 600
+_jackpot_cache: Dict[str, Tuple[float, Dict]] = {}
+
+
+def _parse_dollar_amount(s: str) -> Optional[float]:
+    """'$786 Million' / '$1.2 Billion' / '$341,600,000' -> dollars."""
+    m = re.search(r"\$?\s*([\d,.]+)\s*(billion|million)?", s, re.I)
+    if not m:
+        return None
+    try:
+        value = float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    unit = (m.group(2) or "").lower()
+    if unit == "billion":
+        value *= 1e9
+    elif unit == "million":
+        value *= 1e6
+    return value
+
+
+def fetch_live_jackpot(game: str) -> Optional[Dict[str, float]]:
+    """Current next-draw estimated jackpot {advertised, cash_value} or None.
+    Never raises — a missing live estimate degrades to requiring the caller
+    to pass the jackpot explicitly."""
+    cached = _jackpot_cache.get(game)
+    if cached and time.monotonic() - cached[0] < _JACKPOT_CACHE_TTL_S:
+        return cached[1] or None
+    result: Optional[Dict[str, float]] = None
+    try:
+        resp = httpx.get(_JACKPOT_SOURCES[game], timeout=8.0, follow_redirects=True)
+        resp.raise_for_status()
+        body = resp.text
+        if game == "powerball":
+            data = resp.json()
+            node = data[0] if isinstance(data, list) and data else data
+            adv = _parse_dollar_amount(str(node.get("field_prize_amount", "")))
+            cash = _parse_dollar_amount(str(node.get("field_prize_amount_cash", "")))
+            if adv:
+                result = {"advertised": adv, "cash_value": cash or 0.0}
+        else:
+            # XML-wrapped JSON: <string ...>{...}</string>
+            inner = re.search(r">(\{.*\})<", body, re.S)
+            if inner:
+                payload = json.loads(inner.group(1))
+                jack = payload.get("Jackpot", {})
+                adv = jack.get("NextPrizePool")
+                cash = jack.get("NextCashValue")
+                if adv:
+                    result = {"advertised": float(adv), "cash_value": float(cash or 0.0)}
+    except Exception as e:
+        logger.warning("Live jackpot fetch failed for %s: %s", game, e)
+    _jackpot_cache[game] = (time.monotonic(), result or {})
+    return result
 
 
 class LotteryService:
@@ -35,21 +96,25 @@ class LotteryService:
         self.db = db
 
     def _load_draws(self, game: str, limit: int) -> Tuple[List[List[int]], List[int]]:
-        """Most-recent-first main-number lists and bonus numbers for a game."""
+        """Most-recent-first main-number lists and bonus numbers for a game.
+
+        Era-aware: mains only from draws whose MAIN matrix matches current
+        rules, bonus only from the current bonus-pool era. Mixing matrices
+        poisons frequency stats — e.g. Mega Millions megaball 25 exists in
+        pre-Apr-2025 draws but is not in today's 1-24 pool."""
+        main_start, bonus_start = analysis_window_starts(game)
         rows = self.db.execute(
-            text(
-                """
-                SELECT numbers, bonus_number
+            text("""
+                SELECT numbers, bonus_number, draw_date
                 FROM lottery_draws
-                WHERE game = :game
+                WHERE game = :game AND draw_date >= :main_start
                 ORDER BY draw_date DESC
                 LIMIT :limit
-                """
-            ),
-            {"game": game, "limit": limit},
+                """),
+            {"game": game, "main_start": main_start, "limit": limit},
         ).fetchall()
         main = [list(r.numbers) for r in rows]
-        bonus = [r.bonus_number for r in rows]
+        bonus = [r.bonus_number for r in rows if r.draw_date >= bonus_start]
         return main, bonus
 
     def analyze(self, game: str, num_draws: int = 100) -> Optional[Dict]:
@@ -93,27 +158,62 @@ class LotteryService:
         if persist and combos:
             self._persist(game, strategy, combos, user_id)
 
+        warnings: List[str] = []
+        if len(main) < MIN_DRAWS_FOR_STATS and strategy not in ("ev", "random"):
+            warnings.append(
+                f"Only {len(main)} current-era draws on record (< {MIN_DRAWS_FOR_STATS}): "
+                "hot/due/profile statistics are neutral, so this strategy's ranking is "
+                "effectively EV-only (unpopular high numbers). Ingest draw history or use "
+                "the 'ev'/'random' strategies explicitly."
+            )
+
         return {
             "game": game,
             "strategy": strategy,
             "total_draws_analyzed": len(main),
             "generated_at": datetime.utcnow(),
             "combinations": [c.to_dict() for c in combos],
+            "warnings": warnings,
             "disclaimer": DISCLAIMER,
         }
 
+    def ev(
+        self,
+        game: str,
+        *,
+        jackpot: Optional[float] = None,
+        state_tax: float = 0.0,
+    ) -> Optional[Dict]:
+        """Per-ticket EV verdict for the next draw. Uses the live advertised
+        jackpot + cash value when `jackpot` isn't supplied; returns None if
+        neither is available (route turns that into a 422 asking for the
+        param)."""
+        if jackpot is not None:
+            advertised = jackpot
+            # Live cash value only applies to the live jackpot, not an override.
+            cash_value = None
+        else:
+            live = fetch_live_jackpot(game)
+            if not live:
+                return None
+            advertised = live["advertised"]
+            cash_value = live.get("cash_value") or None
+        report = ev_report(game, advertised, cash_value=cash_value, state_tax=state_tax)
+        report["jackpot_source"] = "live" if jackpot is None else "user"
+        report["next_draw_date"] = self.next_draw_date(game)
+        report["disclaimer"] = DISCLAIMER
+        return report
+
     def _persist(self, game: str, strategy: str, combos: Sequence, user_id: Optional[str]) -> None:
         target = self.next_draw_date(game)
-        query = text(
-            """
+        query = text("""
             INSERT INTO lottery_predictions
             (game, strategy, numbers, bonus_number, score, features, rationale,
              target_draw_date, user_id)
             VALUES (:game, :strategy, :numbers, :bonus, :score,
                     CAST(:features AS jsonb), :rationale, :target,
                     CAST(:user_id AS uuid))
-            """
-        )
+            """)
         try:
             for c in combos:
                 self.db.execute(
@@ -131,6 +231,11 @@ class LotteryService:
                     },
                 )
             self.db.commit()
-        except Exception as e:  # pragma: no cover - persistence is best-effort
-            logger.error("Failed to persist lottery predictions: %s", e)
+        except Exception:
+            # Loud failure by charter (audit non-negotiable #3). The old
+            # swallow-and-rollback here hid a missing lottery_predictions
+            # table on prod for over a year — persist=true "succeeded" while
+            # writing nothing.
+            logger.exception("Failed to persist lottery predictions (game=%s strategy=%s)", game, strategy)
             self.db.rollback()
+            raise

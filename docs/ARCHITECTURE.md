@@ -58,7 +58,7 @@ Every layer is independently deployable, horizontally scalable, and fully observ
          │  live_odds_scraping   (every 1 min)          │
          │  daily_stats_scraping (02:00 UTC)            │
          │  historical_backfill  (one-time / on-demand) │
-         │  lottery_scraping     (weekly)               │
+         │  lottery_pipeline     (daily 13:00 UTC)      │
          └──────────┬──────────────────────────────────┘
                     │
          ┌──────────▼──────────────────────────────────┐
