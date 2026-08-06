@@ -74,6 +74,7 @@ ALIASES = {
     "borussia m gladbach": "gladbach",
     "athletic club": "athletic bilbao",
     "fc cologne": "koln",
+    "nottingham forest": "nott m forest",
 }
 
 
