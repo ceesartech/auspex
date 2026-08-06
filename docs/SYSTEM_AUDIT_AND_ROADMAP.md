@@ -780,6 +780,21 @@ with the growth-rate driver (WAL) eliminated.
 > sequence the launch after the deploy. NOTE: the corpus is now at the scale
 > band (5–10×) named by the weather chapter's revisit condition.
 
+> **Update (2026-08-06) — corpus retrain LIVE: promoted 13/13.** After the
+> gate pass, the Modal retrain on the 7× corpus cleared the n-aware promote
+> gate for every bundle and swapped production (run
+> manual__2026-08-06T08:05). Summer-league fixtures now get modeled
+> probabilities as team history accrues past the eligibility gate. Two
+> Airflow-3 Jinja findings en route (both fixed in the retrain DAG):
+> CLI-triggered manual runs OMIT `logical_date`/`ts_nodash` from the task
+> SDK's template context entirely — even null-safe `(logical_date or …)`
+> dies on the name lookup; only `{{ run_id }}` is universally present
+> (sanitized via replace filters). And a run pins the DAG VERSION serialized
+> at trigger time — trigger only after the dag-processor reparses a fresh
+> pull (~90s), or the run executes stale code. This closes the 2026-08-05/06
+> active-work program: settlement integrity + AH grading, xG (closed, no
+> win), place pilot (live), corpus 7× (live).
+
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
 2. §1.2 unpause `db_backup_daily`, verify a local dump. B2 wiring same day if keys can be created.
