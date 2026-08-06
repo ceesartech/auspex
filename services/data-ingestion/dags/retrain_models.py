@@ -54,9 +54,11 @@ from alerting import notify_failure  # shared Telegram failure alerting
 TRAINING_BACKEND = Variable.get("training_backend", default="vm")
 
 # Null-safe run id: ts_nodash is UNDEFINED on Airflow 3 CLI manual runs
-# (no logical_date); dag_run.run_after always exists. Shared by the
+# (no logical_date — the SDK omits the NAME entirely, so even null-safe
+# expressions fail). run_id is in every task context; strip Modal/B2-
+# hostile chars with core Jinja filters. Shared by the
 # modal_trigger + pull_and_gate tasks so they address the same run.
-RUN_ID_TMPL = "{{ (logical_date or dag_run.run_after).strftime('%Y%m%dT%H%M%S') }}"
+RUN_ID_TMPL = "{{ run_id | replace(':', '') | replace('+', '') | replace('.', '') }}"
 
 # Logical sport → ordered list of SPORT_BUNDLES keys to train.
 #
