@@ -716,6 +716,20 @@ with the growth-rate driver (WAL) eliminated.
 > takes the dag id positionally (no `-d`), and 2.x UI deep-link paths are
 > gone (new React SPA routes).
 
+> **Update (2026-08-06) — settlement graded the MODEL'S pick, not the bet
+> (`abd185b`) + 5 phantom wins corrected.** Closing the asian_handicap gap
+> exposed that rec settlement used the joined prediction's argmax verdict,
+> ignoring the rec's own bet_type/selection — wrong for every non-argmax
+> selection and all lined markets. Fixed with rec-level grading
+> (grade_rec_selection: moneylines, lined totals, handicaps incl.
+> quarter-line half-win/half-loss stake math, coverage/push markets; AH
+> prediction rows also grade now). Re-audit of the 19 pre-fix settlements:
+> **5 phantom wins (+$3,117.55 fictitious P&L) corrected to lost
+> (−$377.23)** with operator approval — the readout's "tennis +1295 /
+> MMA +1055 longshot-driven PnL" was largely this artifact. Backlog graded:
+> 1,412 predictions across 289 matches (NFL pre-season baseline now real).
+> Caught before NFL/NBA/NHL season volume hit settlement.
+
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
 2. §1.2 unpause `db_backup_daily`, verify a local dump. B2 wiring same day if keys can be created.
