@@ -62,21 +62,52 @@ BASE_URL = "https://www.football-data.co.uk/mmz4281"
 # Subset of columns we care about. football-data CSVs have ~100 cols; most are
 # odds across many bookmakers we don't need.
 CORE_COLUMNS = [
-    "Div", "Date", "Time", "HomeTeam", "AwayTeam",
-    "FTHG", "FTAG", "FTR", "HTHG", "HTAG", "HTR",
-    "HS", "AS", "HST", "AST", "HC", "AC", "HF", "AF",
-    "HY", "AY", "HR", "AR",
+    "Div",
+    "Date",
+    "Time",
+    "HomeTeam",
+    "AwayTeam",
+    "FTHG",
+    "FTAG",
+    "FTR",
+    "HTHG",
+    "HTAG",
+    "HTR",
+    "HS",
+    "AS",
+    "HST",
+    "AST",
+    "HC",
+    "AC",
+    "HF",
+    "AF",
+    "HY",
+    "AY",
+    "HR",
+    "AR",
 ]
 # Closing odds — Bet365 ("B365*"), Pinnacle ("PSC*"), market avg ("Avg*"),
 # market max ("Max*"). Pinnacle and market avg are the most useful.
 ODDS_COLUMNS = [
-    "B365H", "B365D", "B365A",
-    "PSH", "PSD", "PSA",
-    "PSCH", "PSCD", "PSCA",
-    "AvgH", "AvgD", "AvgA",
-    "MaxH", "MaxD", "MaxA",
-    "B365>2.5", "B365<2.5",
-    "Avg>2.5", "Avg<2.5",
+    "B365H",
+    "B365D",
+    "B365A",
+    "PSH",
+    "PSD",
+    "PSA",
+    "PSCH",
+    "PSCD",
+    "PSCA",
+    "AvgH",
+    "AvgD",
+    "AvgA",
+    "MaxH",
+    "MaxD",
+    "MaxA",
+    "B365>2.5",
+    "B365<2.5",
+    "Avg>2.5",
+    "Avg<2.5",
 ]
 
 
@@ -104,7 +135,10 @@ def fetch_csv(league: str, season: str) -> pd.DataFrame:
     resp.raise_for_status()
     # Some seasons have stray bytes; latin-1 decodes everything.
     text = resp.content.decode("latin-1")
-    df = pd.read_csv(StringIO(text))
+    # Older season files carry ragged rows (stray commas -> more fields
+    # than the header); skip those lines rather than dying — one bad row
+    # in one of 300+ files must not kill a whole backfill sweep.
+    df = pd.read_csv(StringIO(text), on_bad_lines="skip")
     df.columns = [c.strip() for c in df.columns]
     keep = [c for c in CORE_COLUMNS + ODDS_COLUMNS if c in df.columns]
     df = df[keep].dropna(subset=["Date", "HomeTeam", "AwayTeam"])
@@ -127,6 +161,12 @@ def load_seasons(
                 df = fetch_csv(league, season)
             except FileNotFoundError:
                 logger.warning("Skipping missing %s %s", league, season)
+                continue
+            except Exception as e:
+                # Malformed file (parser errors etc.) — skip loudly, keep
+                # the sweep alive. A missing season is recoverable later;
+                # a dead 300-file backfill is not.
+                logger.error("Skipping unparseable %s %s: %s", league, season, e)
                 continue
             out.append(df)
             logger.info("Loaded %s %s: %d rows", league, season, len(df))
@@ -167,10 +207,7 @@ def write_database(frames: list[pd.DataFrame], database_url: str) -> int:
             UNIQUE ("Date", "HomeTeam", "AwayTeam")
         );
     """
-    insert_sql = (
-        "INSERT INTO raw_football_data (" + ", ".join(quoted_cols) + ") "
-        "VALUES %s ON CONFLICT DO NOTHING"
-    )
+    insert_sql = "INSERT INTO raw_football_data (" + ", ".join(quoted_cols) + ") " "VALUES %s ON CONFLICT DO NOTHING"
     rows = [tuple(None if pd.isna(v) else str(v) for v in row) for row in all_df.itertuples(index=False)]
 
     with psycopg2.connect(database_url) as conn:
@@ -183,16 +220,15 @@ def write_database(frames: list[pd.DataFrame], database_url: str) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--leagues", default="E0",
-                   help="Comma-separated league codes (default: E0).")
-    p.add_argument("--seasons", type=int, default=5,
-                   help="Number of seasons back to load (default: 5).")
-    p.add_argument("--end-year", type=int, default=None,
-                   help="End-year of the most recent season (default: current).")
-    p.add_argument("--output", type=Path, default=None,
-                   help="Optional output dir for raw CSVs.")
-    p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"),
-                   help="Postgres URL. Falls back to $DATABASE_URL. Pass empty to skip DB load.")
+    p.add_argument("--leagues", default="E0", help="Comma-separated league codes (default: E0).")
+    p.add_argument("--seasons", type=int, default=5, help="Number of seasons back to load (default: 5).")
+    p.add_argument("--end-year", type=int, default=None, help="End-year of the most recent season (default: current).")
+    p.add_argument("--output", type=Path, default=None, help="Optional output dir for raw CSVs.")
+    p.add_argument(
+        "--database-url",
+        default=os.environ.get("DATABASE_URL"),
+        help="Postgres URL. Falls back to $DATABASE_URL. Pass empty to skip DB load.",
+    )
     return p.parse_args(argv)
 
 
