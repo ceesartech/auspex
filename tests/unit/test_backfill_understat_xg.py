@@ -27,11 +27,11 @@ class TestNorm:
     def test_strips_accents_punct_and_filler(self):
         assert bx.norm("1. FC Köln") == "koln"
         assert bx.norm("AS Monaco") == "monaco"
-        assert bx.norm("Athletic Club") == "athletic bilbao"
+        assert bx.norm("Athletic Club") == "ath bilbao"
 
     def test_aliases_applied_after_normalization(self):
         assert bx.norm("Wolverhampton Wanderers") == "wolves"
-        assert bx.norm("Paris Saint Germain") == "psg"
+        assert bx.norm("Paris Saint Germain") == "paris sg"
 
     def test_plain_names_stable(self):
         assert bx.norm("Fulham") == "fulham"

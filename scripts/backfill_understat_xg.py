@@ -65,16 +65,44 @@ LEAGUES = {
 # differently. Extend deliberately when the unmatched report shows a new
 # alias — never loosen the matcher itself.
 ALIASES = {
+    # EPL
     "wolverhampton wanderers": "wolves",
-    "paris saint germain": "psg",
     "manchester united": "man united",
     "manchester city": "man city",
     "newcastle united": "newcastle",
     "west bromwich albion": "west brom",
-    "borussia m gladbach": "gladbach",
-    "athletic club": "athletic bilbao",
-    "fc cologne": "koln",
     "nottingham forest": "nott m forest",
+    # Bundesliga (ours are football-data.co.uk short forms)
+    "borussia dortmund": "dortmund",
+    "borussia m gladbach": "m gladbach",
+    "rasenballsport leipzig": "leipzig",
+    "mainz 05": "mainz",
+    "eintracht frankfurt": "ein frankfurt",
+    "bayer leverkusen": "leverkusen",
+    "fc cologne": "koln",
+    "fortuna duesseldorf": "fortuna dusseldorf",
+    "hertha berlin": "hertha",
+    "arminia bielefeld": "bielefeld",
+    "greuther fuerth": "greuther furth",
+    "hamburger": "hamburg",
+    "nuernberg": "nurnberg",
+    # La Liga
+    "atletico madrid": "ath madrid",
+    "athletic club": "ath bilbao",
+    "real sociedad": "sociedad",
+    "real betis": "betis",
+    "espanyol": "espanol",
+    "rayo vallecano": "vallecano",
+    "deportivo la coruna": "la coruna",
+    "sporting gijon": "sp gijon",
+    "real valladolid": "valladolid",
+    "real oviedo": "oviedo",
+    # Serie A
+    "hellas verona": "verona",
+    "parma calcio 1913": "parma",
+    # Ligue 1
+    "paris saint germain": "paris sg",
+    "saint etienne": "st etienne",
 }
 
 
