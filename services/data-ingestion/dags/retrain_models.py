@@ -53,6 +53,11 @@ from alerting import notify_failure  # shared Telegram failure alerting
 # re-parse). No code change, no deploy — that IS the fallback switch.
 TRAINING_BACKEND = Variable.get("training_backend", default="vm")
 
+# Null-safe run id: ts_nodash is UNDEFINED on Airflow 3 CLI manual runs
+# (no logical_date); dag_run.run_after always exists. Shared by the
+# modal_trigger + pull_and_gate tasks so they address the same run.
+RUN_ID_TMPL = "{{ (logical_date or dag_run.run_after).strftime('%Y%m%dT%H%M%S') }}"
+
 # Logical sport → ordered list of SPORT_BUNDLES keys to train.
 #
 # We use ONE DAG task per logical sport (not per bundle) so the graph
@@ -199,21 +204,24 @@ with DAG(
         # own named Modal function), pushes artifacts to B2; the VM then pulls
         # + promote-gates them into /app/models/staging for the SAME swap below.
         # modal_trigger runs in the airflow-scheduler container (which carries
-        # `modal` + MODAL_TOKEN_* + /opt/auspex mounted). ts_nodash is a clean
+        # `modal` + MODAL_TOKEN_* + /opt/auspex mounted).
+        # The run-id expression is null-safe: Airflow 3 CLI manual runs
+        # can carry NO logical_date (ts_nodash renders UndefinedError there —
+        # broke the 2026-08-06 07:06 run); dag_run.run_after always exists. A clean
         # per-run id shared with pull_and_gate so both agree on the B2 prefix.
         modal_trigger = BashOperator(
             task_id="modal_trigger",
             execution_timeout=timedelta(minutes=30),
             bash_command=(
                 "cd /opt/auspex && "
-                "/opt/modal-venv/bin/modal run modal_train/train_modal.py --run-id '{{ ts_nodash }}'"
+                "/opt/modal-venv/bin/modal run modal_train/train_modal.py --run-id '" + RUN_ID_TMPL + "'"
             ),
         )
         pull_and_gate = BashOperator(
             task_id="pull_and_gate",
             # ALL_DONE so a partial Modal run still gates whatever landed.
             trigger_rule=TriggerRule.ALL_DONE,
-            bash_command=DOCKER_EXEC + " python /app/scripts/pull_modal_artifacts.py --run-id '{{ ts_nodash }}'",
+            bash_command=DOCKER_EXEC + " python /app/scripts/pull_modal_artifacts.py --run-id '" + RUN_ID_TMPL + "'",
         )
 
     # MERGE staging into production (don't wholesale replace). The

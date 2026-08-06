@@ -760,6 +760,26 @@ with the growth-rate driver (WAL) eliminated.
 > pending. **60-day pilot clock starts 2026-08-06** — judged on realized
 > ROI + CLV per §4.3(5), fold into the ~2026-09-15 market-gating readout.
 
+> **Update (2026-08-06) — corpus 3–4× backfill SHIPPED at 7× (§3.6 CLOSED as
+> a win).** Loaded 16 European league codes × 20 seasons + 16 non-European
+> countries (football-data.co.uk): promotion landed **168,077 matches / 41
+> leagues / 1,305 teams / 804,515 odds rows** (~7× the old 23.7k corpus);
+> feature backfill covered all 168,365 finished matches in 22 min, 0 failed.
+> **Gate PASSED (ab_soccer_corpus.py)**: on a shared held-out top-5-league
+> test (n=6,066), expanded-corpus Brier 0.57939 vs original-corpus 0.58161
+> (Δ −0.0022 — required only no regression; improvement is within noise but
+> the right sign). Summer-league slice (n=4,365): 0.60424 vs 0.60842
+> (−0.0042). The structural win: summer leagues (MLS, Allsvenskan,
+> Brasileirão…) now have real training history, so the eligibility gate
+> admits their fixtures with modeled probabilities instead of blocking them.
+> Production retrain triggered immediately (promote-gate protected) rather
+> than waiting for Sunday. Three loader hardenings shipped en route: ragged
+> CSV rows skipped, unparseable season files non-fatal, team-batch upsert
+> deduped on (normalized_name, sport). Ops lesson recorded: detached
+> in-container jobs die on CI deploys — freeze pushes while one runs, or
+> sequence the launch after the deploy. NOTE: the corpus is now at the scale
+> band (5–10×) named by the weather chapter's revisit condition.
+
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
 2. §1.2 unpause `db_backup_daily`, verify a local dump. B2 wiring same day if keys can be created.
