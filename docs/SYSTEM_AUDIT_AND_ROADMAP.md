@@ -750,6 +750,16 @@ with the growth-rate driver (WAL) eliminated.
 > refresh keeps it current either way. Soccer's sole remaining open lever is
 > the corpus 3–4× backfill (§3.6).
 
+> **Update (2026-08-06) — horse PLACE pilot LIVE (§3 rank 7).** The
+> bet_type='win' hardcode is lifted: place probabilities via Harville top-k
+> over the full field's devigged win probs, place odds from UK each-way
+> terms (5–7 runners: 2 @ 1/4; 8+: 3 @ 1/5; 16+ handicap 4-place terms not
+> modeled), same EV gate + quarter-Kelly. Settlement branch added
+> (finish_position <= places paid; 94% fp coverage verified; scratched →
+> void). First tick: 70 races → 1 place rec (EV +9.6%) + 20 win recs
+> pending. **60-day pilot clock starts 2026-08-06** — judged on realized
+> ROI + CLV per §4.3(5), fold into the ~2026-09-15 market-gating readout.
+
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
 2. §1.2 unpause `db_backup_daily`, verify a local dump. B2 wiring same day if keys can be created.
