@@ -97,6 +97,7 @@ ALIASES = {
     "sporting gijon": "sp gijon",
     "real valladolid": "valladolid",
     "real oviedo": "oviedo",
+    "celta vigo": "celta",
     # Serie A
     "hellas verona": "verona",
     "parma calcio 1913": "parma",
@@ -195,7 +196,7 @@ def run(database_url: str, slugs: list[str], seasons: list[int], dry_run: bool) 
                 for season in seasons:
                     try:
                         rows = fetch_season(session, slug, season)
-                    except requests.RequestException as e:
+                    except (requests.RequestException, ValueError) as e:
                         logger.error("%s/%s: fetch failed: %s", slug, season, e)
                         totals["fetch_failures"] += 1
                         continue
