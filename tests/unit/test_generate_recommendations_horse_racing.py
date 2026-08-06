@@ -451,3 +451,28 @@ class TestHybridFilter:
         # still fire an alert based on its consensus probability.
         alert_horses = {a.home_team for a in alerts}
         assert "Horse D" in alert_horses
+
+
+class TestPlacePilotHelpers:
+    def test_ew_terms_table(self):
+        assert ghr.ew_terms(4) == (0, 0.0)
+        assert ghr.ew_terms(6) == (2, 0.25)
+        assert ghr.ew_terms(12) == (3, 0.2)
+
+    def test_harville_place_exceeds_win_and_caps_at_one(self):
+        probs = {"a": 0.4, "b": 0.3, "c": 0.2, "d": 0.1}
+        p2 = ghr.place_probability(probs, "a", 2)
+        p3 = ghr.place_probability(probs, "a", 3)
+        assert 0.4 < p2 < p3 <= 1.0
+
+    def test_harville_uniform_field_symmetric(self):
+        probs = {k: 0.25 for k in "abcd"}
+        vals = [ghr.place_probability(probs, k, 2) for k in "abcd"]
+        assert max(vals) - min(vals) < 1e-9
+        # 2 places among 4 equal runners -> exactly 0.5 each.
+        assert abs(vals[0] - 0.5) < 1e-9
+
+    def test_zero_prob_and_zero_places(self):
+        probs = {"a": 0.6, "b": 0.4}
+        assert ghr.place_probability(probs, "zz", 2) == 0.0
+        assert ghr.place_probability(probs, "a", 0) == 0.0

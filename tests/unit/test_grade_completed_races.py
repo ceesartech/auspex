@@ -169,20 +169,22 @@ class TestGradeRacePredictions:
 
 
 class TestSettleRecommendations:
-    def _rec(self, *, rec_id="r1", entrant_id="e1", selection="Big Boy",
-             stake="10.00", odds="4.50", scratched=False):
+    def _rec(self, *, rec_id="r1", entrant_id="e1", selection="Big Boy", stake="10.00", odds="4.50", scratched=False):
         return {
             "rec_id": rec_id,
             "entrant_id": entrant_id,
             "selection": selection,
             "recommended_stake": Decimal(stake),
             "odds_at_recommendation": Decimal(odds),
+            "bet_type": "win",
             "entrant_scratched": scratched,
+            "finish_position": None,
         }
 
     def test_winning_rec_settles_with_positive_profit(self):
         cur = _FakeCursor()
         cur.queue_fetchall([self._rec(entrant_id="w1", stake="10.00", odds="4.50")])
+        cur._fetchone_responses.append({"n": 10})
         counts = gcr.settle_recommendations(cur, "race-1", "w1", "Big Boy")
         assert counts == {"won": 1, "lost": 0, "void": 0}
         # Find the UPDATE call.
@@ -198,6 +200,7 @@ class TestSettleRecommendations:
     def test_losing_rec_settles_with_negative_profit(self):
         cur = _FakeCursor()
         cur.queue_fetchall([self._rec(entrant_id="loser", stake="8.50", odds="3.00")])
+        cur._fetchone_responses.append({"n": 10})
         counts = gcr.settle_recommendations(cur, "race-1", "winner", "Big Boy")
         assert counts == {"won": 0, "lost": 1, "void": 0}
         _, params = cur.executions[-1]
@@ -213,6 +216,7 @@ class TestSettleRecommendations:
         # actually won.
         cur = _FakeCursor()
         cur.queue_fetchall([self._rec(entrant_id="other", scratched=True, stake="5.00")])
+        cur._fetchone_responses.append({"n": 10})
         counts = gcr.settle_recommendations(cur, "race-1", "winner", "Big Boy")
         assert counts == {"won": 0, "lost": 0, "void": 1}
         _, params = cur.executions[-1]
@@ -231,6 +235,7 @@ class TestSettleRecommendations:
                 self._rec(rec_id="r2", entrant_id="b", stake="20.00"),
             ]
         )
+        cur._fetchone_responses.append({"n": 10})
         counts = gcr.settle_recommendations(cur, "race-1", None, None)
         assert counts == {"won": 0, "lost": 0, "void": 2}
         # Both UPDATEs marked void with profit_loss=0.
@@ -246,6 +251,7 @@ class TestSettleRecommendations:
         # Nothing pending — no settlement work to do.
         cur = _FakeCursor()
         cur.queue_fetchall([])
+        cur._fetchone_responses.append({"n": 10})
         counts = gcr.settle_recommendations(cur, "race-1", "winner", "Big Boy")
         assert counts == {"won": 0, "lost": 0, "void": 0}
 
@@ -257,9 +263,60 @@ class TestSettleRecommendations:
         rec["recommended_stake"] = None
         rec["odds_at_recommendation"] = None
         cur.queue_fetchall([rec])
+        cur._fetchone_responses.append({"n": 10})
         counts = gcr.settle_recommendations(cur, "race-1", "winner", "Big Boy")
         assert counts == {"won": 1, "lost": 0, "void": 0}
         _, params = cur.executions[-1]
         _, _, profit_loss, _ = params
         # 0 × (0 - 1) = 0
         assert profit_loss == Decimal("0")
+
+
+class TestPlaceSettlement:
+    def _place_rec(self, fp, scratched=False):
+        return {
+            "rec_id": "p1",
+            "entrant_id": "e1",
+            "selection": "Big Boy",
+            "recommended_stake": Decimal("10.00"),
+            "odds_at_recommendation": Decimal("1.70"),
+            "bet_type": "place",
+            "entrant_scratched": scratched,
+            "finish_position": fp,
+        }
+
+    def _settle(self, fp, field=10, scratched=False, winner="other"):
+        cur = _FakeCursor()
+        cur.queue_fetchall([self._place_rec(fp, scratched)])
+        cur._fetchone_responses.append({"n": field})
+        counts = gcr.settle_recommendations(cur, "race-1", winner, "Winner Horse")
+        _, params = cur.executions[-1]
+        return counts, params
+
+    def test_third_place_wins_in_big_field(self):
+        counts, params = self._settle(fp=3, field=10)
+        assert counts["won"] == 1
+        assert params[0] == "won"
+        assert params[2] == Decimal("7.000")  # 10 x (1.70 - 1)
+
+    def test_third_place_loses_in_seven_runner_field(self):
+        # 5-7 runners pay 2 places only.
+        counts, params = self._settle(fp=3, field=7)
+        assert counts["lost"] == 1 and params[0] == "lost"
+
+    def test_unplaced_and_dnf_lose(self):
+        assert self._settle(fp=6, field=10)[1][0] == "lost"
+        assert self._settle(fp=None, field=10)[1][0] == "lost"
+
+    def test_scratched_place_rec_voids(self):
+        counts, params = self._settle(fp=None, field=10, scratched=True)
+        assert counts["void"] == 1 and params[0] == "void"
+
+
+class TestEwPlaces:
+    def test_terms_by_field_size(self):
+        assert gcr.ew_places(4) == 0
+        assert gcr.ew_places(5) == 2
+        assert gcr.ew_places(7) == 2
+        assert gcr.ew_places(8) == 3
+        assert gcr.ew_places(16) == 3

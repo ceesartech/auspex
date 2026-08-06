@@ -56,6 +56,16 @@ logger = logging.getLogger("grade_completed_races")
 # ── DB I/O ────────────────────────────────────────────────────────────
 
 
+# UK/IRE each-way place terms — MUST mirror ew_terms in
+# generate_recommendations_horse_racing.py (places paid by field size).
+def ew_places(field_size: int) -> int:
+    if field_size <= 4:
+        return 0
+    if field_size <= 7:
+        return 2
+    return 3
+
+
 def list_finished_races(cur, days: int, race_id: Optional[str]) -> list[dict]:
     """Finished races needing grading. --race-id short-circuits to one
     row (operator escape hatch for ad-hoc re-grading). Otherwise: races
@@ -131,7 +141,9 @@ def fetch_consensus_favourite(cur, race_id: str) -> Optional[str]:
     return row["entrant_id"] if row else None
 
 
-def grade_race_predictions(cur, race_id: str, winner_entrant_id: Optional[str], favourite_entrant_id: Optional[str]) -> int:
+def grade_race_predictions(
+    cur, race_id: str, winner_entrant_id: Optional[str], favourite_entrant_id: Optional[str]
+) -> int:
     """UPDATE every ungraded race_predictions row in this race.
     actual_outcome is per-row (did THIS entrant win); is_correct is
     per-race (did the consensus pick win) replicated across rows so
@@ -185,16 +197,24 @@ def settle_recommendations(
             rec.selection,
             rec.recommended_stake,
             rec.odds_at_recommendation,
-            e.scratched          AS entrant_scratched
+            rec.bet_type,
+            e.scratched          AS entrant_scratched,
+            e.finish_position
         FROM race_recommendations rec
         JOIN race_entrants e ON e.id = rec.entrant_id
         WHERE rec.race_id = %s
           AND rec.status IN ('pending', 'placed')
-          AND rec.bet_type = 'win'
+          AND rec.bet_type IN ('win', 'place')
         """,
         (race_id,),
     )
     rows = list(cur.fetchall())
+    # Field size for each-way place terms: non-scratched runners.
+    cur.execute(
+        "SELECT count(*) AS n FROM race_entrants WHERE race_id = %s AND NOT scratched",
+        (race_id,),
+    )
+    places_paid = ew_places(int(cur.fetchone()["n"]))
 
     counts = {"won": 0, "lost": 0, "void": 0}
     for r in rows:
@@ -210,6 +230,15 @@ def settle_recommendations(
             status = "void"
             profit_loss = Decimal("0")
             actual_result = winner_horse_name or "void"
+        elif r["bet_type"] == "place":
+            fp = r["finish_position"]
+            if places_paid >= 2 and fp is not None and 1 <= fp <= places_paid:
+                status = "won"
+                profit_loss = stake * (odds - Decimal("1"))
+            else:
+                status = "lost"
+                profit_loss = -stake
+            actual_result = f"finished {fp}" if fp is not None else "unplaced"
         elif r["entrant_id"] == winner_entrant_id:
             status = "won"
             profit_loss = stake * (odds - Decimal("1"))
@@ -243,9 +272,7 @@ def grade_race(cur, race_id: str) -> dict:
     winner_horse_name = outcome["winner_horse_name"] if outcome else None
     favourite_entrant_id = fetch_consensus_favourite(cur, race_id)
 
-    predictions_graded = grade_race_predictions(
-        cur, race_id, winner_entrant_id, favourite_entrant_id
-    )
+    predictions_graded = grade_race_predictions(cur, race_id, winner_entrant_id, favourite_entrant_id)
     rec_counts = settle_recommendations(cur, race_id, winner_entrant_id, winner_horse_name)
     return {
         "predictions_graded": predictions_graded,
@@ -284,8 +311,7 @@ def run(database_url: str, days: int, race_id: Optional[str]) -> dict:
             conn.commit()
 
     logger.info(
-        "Graded %d races (%d with known winner): %d predictions; "
-        "recs won=%d lost=%d void=%d",
+        "Graded %d races (%d with known winner): %d predictions; " "recs won=%d lost=%d void=%d",
         totals["races_processed"],
         totals["races_with_winner"],
         totals["predictions_graded"],

@@ -131,6 +131,50 @@ def best_decimal(bookmaker_odds: list[dict]) -> Optional[dict]:
     return best
 
 
+# ── Place pilot (audit §3 rank 7 — market-side, no model change) ────────
+# UK/IRE each-way terms by field size: (places paid, fraction of win odds).
+# <5 runners: win only. 5-7: 2 places at 1/4. 8+: 3 places at 1/5.
+# (16+ handicaps pay 4 at 1/4 — we don't know handicap status, so we use
+# the conservative standard terms; noted in the audit entry.)
+
+
+def ew_terms(field_size: int) -> tuple[int, float]:
+    if field_size <= 4:
+        return 0, 0.0
+    if field_size <= 7:
+        return 2, 0.25
+    return 3, 0.2
+
+
+def place_probability(win_probs: dict[str, float], eid: str, places: int) -> float:
+    """Harville top-k probability for entrant `eid` from the field's
+    devigged WIN probabilities (sequential conditional model — the
+    standard closed-form for deriving place chances from win chances)."""
+    p = dict(win_probs)
+    pi = p.get(eid, 0.0)
+    if places <= 0 or pi <= 0:
+        return 0.0
+    total = pi  # finish 1st
+    if places >= 2:
+        for j, pj in p.items():
+            if j == eid or 1.0 - pj <= 0:
+                continue
+            total += pj * pi / (1.0 - pj)
+    if places >= 3:
+        for j, pj in p.items():
+            if j == eid:
+                continue
+            for k, pk in p.items():
+                if k in (eid, j):
+                    continue
+                d1 = 1.0 - pj
+                d2 = 1.0 - pj - pk
+                if d1 <= 0 or d2 <= 0:
+                    continue
+                total += pj * (pk / d1) * (pi / d2)
+    return min(1.0, total)
+
+
 # ── DB I/O ─────────────────────────────────────────────────────────
 
 
@@ -233,7 +277,7 @@ def delete_pending(cur, race_id: str) -> None:
         DELETE FROM race_recommendations
         WHERE race_id = %s
           AND status = 'pending'
-          AND bet_type = 'win'
+          AND bet_type IN ('win', 'place')
         """,
         (race_id,),
     )
@@ -248,7 +292,7 @@ def insert_recommendation(cur, rec: dict) -> None:
            expected_value, kelly_stake, recommended_stake, reasoning,
            risk_factors)
         VALUES
-          (%(prediction_id)s, %(race_id)s, %(entrant_id)s, 'win',
+          (%(prediction_id)s, %(race_id)s, %(entrant_id)s, %(bet_type)s,
            %(selection)s, %(odds)s, %(bookmaker)s, %(conf)s, %(ev)s,
            %(kelly_stake)s, %(rec_stake)s, %(reasoning)s, %(risk)s::jsonb)
         """,
@@ -347,6 +391,10 @@ def recommend_for_race(
         return []
     delete_pending(cur, race_id)
     field_size = len(candidates)
+    # Harville needs the WHOLE field's win distribution — capture before
+    # the ranker filter narrows the candidate list.
+    field_win_probs = {c["entrant_id"]: float(c["confidence"]) for c in candidates}
+    places, ew_fraction = ew_terms(field_size)
 
     # Hybrid filter: if RANKER_TOP_N is set AND every candidate has a
     # ranker_confidence, narrow to the top-N by ranker rank. The
@@ -402,6 +450,7 @@ def recommend_for_race(
             "prediction_id": cand["prediction_id"],
             "race_id": race_id,
             "entrant_id": cand["entrant_id"],
+            "bet_type": "win",
             "selection": cand["horse_name"],
             "odds": odds_decimal,
             "bookmaker": best["bookmaker"],
@@ -426,6 +475,41 @@ def recommend_for_race(
                 recommended_stake=stake,
             )
         )
+
+        # ── Place pilot: derived each-way place bet on the same horse ──
+        # Place odds = 1 + (win odds - 1) x EW fraction; probability from
+        # Harville over the full field. Same EV gate + quarter-Kelly.
+        if places >= 2 and ew_fraction > 0:
+            p_place = place_probability(field_win_probs, cand["entrant_id"], places)
+            place_odds = round(1.0 + (odds_decimal - 1.0) * ew_fraction, 4)
+            ev_place = expected_value(p_place, place_odds)
+            if ev_place >= ev_threshold and p_place >= prob_floor:
+                k_place = kelly_fraction(p_place, place_odds)
+                stake_place = round(bankroll * k_place * KELLY_FRACTION, 2)
+                if stake_place > 0:
+                    insert_recommendation(
+                        cur,
+                        {
+                            "prediction_id": cand["prediction_id"],
+                            "race_id": race_id,
+                            "entrant_id": cand["entrant_id"],
+                            "bet_type": "place",
+                            "selection": cand["horse_name"],
+                            "odds": place_odds,
+                            "bookmaker": best["bookmaker"],
+                            "conf": confidence_rating(ev_place, p_place),
+                            "ev": ev_place,
+                            "kelly_stake": k_place,
+                            "rec_stake": stake_place,
+                            "reasoning": (
+                                f"Place ({places} places @ {ew_fraction:.0%} odds): "
+                                f"{cand['horse_name']} — Harville {p_place:.0%} "
+                                f"@ {place_odds:.2f} → EV {ev_place:+.1%}, "
+                                f"stake ${stake_place:.2f}."
+                            ),
+                            "risk": json.dumps(_risk_factors(prob, odds_decimal, field_size)),
+                        },
+                    )
 
     return alerts
 
