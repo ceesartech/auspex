@@ -86,6 +86,8 @@ class FakeCursor:
                         "prediction_id": r["prediction_id"],
                         "recommended_stake": r["recommended_stake"],
                         "odds_at_recommendation": r["odds_at_recommendation"],
+                        "bet_type": r.get("bet_type"),
+                        "selection": r.get("selection"),
                         "status": r["status"],
                         "p_actual_outcome": p.get("actual_outcome"),
                         "p_is_correct": p.get("is_correct"),
@@ -127,9 +129,11 @@ def _pred(pid, match_id, ptype, model_name, predicted_outcome, is_correct=None, 
     }
 
 
-def _rec(rid, match_id, prediction_id, stake, odds, status="pending"):
+def _rec(rid, match_id, prediction_id, stake, odds, bet_type="1x2", selection="home", status="pending"):
     return {
         "id": rid,
+        "bet_type": bet_type,
+        "selection": selection,
         "match_id": match_id,
         "prediction_id": prediction_id,
         "recommended_stake": Decimal(str(stake)),
@@ -179,7 +183,7 @@ class TestGradeMatchSoccer:
         # Soccer over 3.0 with exactly 3 goals = push.
         match = {"match_id": "m1", "home_score": 2, "away_score": 1, "metadata": {}}
         preds = [_pred("p1", "m1", "over_under", "ensemble", "over_3")]
-        recs = [_rec("r1", "m1", "p1", stake=25, odds=1.90)]
+        recs = [_rec("r1", "m1", "p1", stake=25, odds=1.90, bet_type="over_under", selection="over_3")]
         cur = FakeCursor(preds, recs)
 
         gcm.grade_match(cur, match)
@@ -205,7 +209,7 @@ class TestGradeMatchNhl:
             "metadata": {"regulation_winner": "tie"},
         }
         preds = [_pred("p1", "m1", "match_result", "ensemble_nhl_reg", "home")]
-        recs = [_rec("r1", "m1", "p1", stake=20, odds=2.20)]
+        recs = [_rec("r1", "m1", "p1", stake=20, odds=2.20, bet_type="moneyline", selection="away")]
         cur = FakeCursor(preds, recs)
 
         gcm.grade_match(cur, match)
@@ -224,7 +228,7 @@ class TestGradeMatchNhl:
             "metadata": {"regulation_winner": "tie"},
         }
         preds = [_pred("p1", "m1", "moneyline", "ensemble_nhl_ml", "home")]
-        recs = [_rec("r1", "m1", "p1", stake=20, odds=1.80)]
+        recs = [_rec("r1", "m1", "p1", stake=20, odds=1.80, bet_type="moneyline", selection="home")]
         cur = FakeCursor(preds, recs)
 
         gcm.grade_match(cur, match)
@@ -264,10 +268,10 @@ class TestGradeMatchEdgeCases:
         assert counts["predictions_graded"] == 0
 
     def test_ungradable_market_increments_skipped_counter(self):
-        # asian_handicap isn't in the v1 dispatch — actual_outcome
+        # team_total isn't in the v1 dispatch — actual_outcome
         # returns None and the counter ticks "skipped".
         match = {"match_id": "m1", "home_score": 2, "away_score": 1, "metadata": {}}
-        preds = [_pred("p1", "m1", "asian_handicap", "ensemble", "-0.5_home")]
+        preds = [_pred("p1", "m1", "team_total", "ensemble", "-0.5_home")]
         cur = FakeCursor(preds, [])
 
         counts = gcm.grade_match(cur, match)
@@ -277,17 +281,19 @@ class TestGradeMatchEdgeCases:
         # No UPDATE happened.
         assert cur.predictions["p1"]["is_correct"] is None
 
-    def test_rec_without_graded_prediction_stays_pending(self):
-        # If the prediction is ungradable, the rec it references can't
-        # be settled either. Status stays 'pending'.
+    def test_rec_settles_from_its_own_selection_without_graded_prediction(self):
+        # Rec-level settlement: the rec grades from ITS OWN selection
+        # and the final score. The AH prediction row ALSO grades now
+        # (home_covers at -0.5) — both verdicts are independent.
         match = {"match_id": "m1", "home_score": 2, "away_score": 1, "metadata": {}}
         preds = [_pred("p1", "m1", "asian_handicap", "ensemble", "-0.5_home")]
-        recs = [_rec("r1", "m1", "p1", stake=25, odds=2.0)]
+        recs = [_rec("r1", "m1", "p1", stake=25, odds=2.0, bet_type="asian_handicap", selection="home_-0.5")]
         cur = FakeCursor(preds, recs)
 
         gcm.grade_match(cur, match)
-        assert cur.recs["r1"]["status"] == "pending"
-        assert cur.recs["r1"]["profit_loss"] is None
+        assert cur.predictions["p1"]["is_correct"] is True
+        assert cur.recs["r1"]["status"] == "won"
+        assert cur.recs["r1"]["profit_loss"] == Decimal("25.00")
 
 
 # ── profit_loss math ─────────────────────────────────────────────────
@@ -353,7 +359,7 @@ class TestGradeMatchNba:
             "metadata": None,
         }
         preds = [_pred("p1", "m-nba", "spread", "ensemble_nba_sp", "home")]
-        recs = [_rec("r1", "m-nba", "p1", stake=100, odds=1.95)]
+        recs = [_rec("r1", "m-nba", "p1", stake=100, odds=1.95, bet_type="spread", selection="home_-5")]
         cur = FakeCursor(preds, recs, features={"m-nba": {"closing_spread_home": -5.0}})
 
         counts = gcm.grade_match(cur, match)
@@ -376,7 +382,7 @@ class TestGradeMatchNba:
             "metadata": None,
         }
         preds = [_pred("p1", "m-nba", "spread", "ensemble_nba_sp", "home")]
-        recs = [_rec("r1", "m-nba", "p1", stake=100, odds=1.95)]
+        recs = [_rec("r1", "m-nba", "p1", stake=100, odds=1.95, bet_type="spread", selection="home_-5")]
         cur = FakeCursor(preds, recs, features={"m-nba": {"closing_spread_home": -5.0}})
 
         gcm.grade_match(cur, match)

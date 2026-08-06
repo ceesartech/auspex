@@ -44,7 +44,7 @@ from psycopg2.extras import RealDictCursor
 # Make the shared grading-outcomes helper importable.
 sys.path.insert(0, os.path.dirname(__file__))
 
-from grading_outcomes import actual_outcome, grade_prediction, is_push  # noqa: E402
+from grading_outcomes import actual_outcome, grade_prediction, grade_rec_selection, rec_status_and_pl  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("grade_completed_matches")
@@ -177,6 +177,7 @@ def list_open_recs_for_match(cur, match_id: str) -> list[dict]:
         """
         SELECT br.id::text AS rec_id,
                br.prediction_id::text AS prediction_id,
+               br.bet_type, br.selection,
                br.recommended_stake, br.odds_at_recommendation, br.status,
                p.actual_outcome AS p_actual_outcome,
                p.is_correct AS p_is_correct
@@ -268,16 +269,18 @@ def grade_match(cur, match: dict) -> dict:
 
     # Recs join to predictions for the actual_outcome — the prediction
     # update we just did is visible in the same txn via the join.
+    # Settlement grades each rec's OWN (bet_type, selection) against the
+    # final score — NOT the prediction's argmax verdict, which is wrong for
+    # any non-argmax selection and for every lined market (audit §7
+    # 2026-08-06). Ungradable selections stay open rather than guess.
     for rec in list_open_recs_for_match(cur, match["match_id"]):
-        is_correct = rec["p_is_correct"]
-        push = is_push(rec["p_actual_outcome"])
-        if is_correct is None and not push:
-            # Prediction couldn't be graded → can't settle the rec.
+        if match["home_score"] is None or match["away_score"] is None:
             continue
-        stake = Decimal(str(rec["recommended_stake"] or 0))
-        odds = Decimal(str(rec["odds_at_recommendation"] or 0))
-        new_status, pl = profit_loss_for(is_correct, push, stake, odds)
-        settle_recommendation(cur, rec["rec_id"], new_status, rec["p_actual_outcome"], pl)
+        outcome = grade_rec_selection(rec["bet_type"], rec["selection"], match["home_score"], match["away_score"])
+        if outcome is None:
+            continue
+        new_status, pl = rec_status_and_pl(outcome, rec["recommended_stake"], rec["odds_at_recommendation"])
+        settle_recommendation(cur, rec["rec_id"], new_status, outcome, pl)
         counts["recs_settled"] += 1
 
     return counts

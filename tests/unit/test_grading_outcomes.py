@@ -307,13 +307,14 @@ class TestActualOutcome:
         )
 
     def test_returns_none_for_ungraded_markets(self):
-        # asian_handicap isn't in the v1 dispatch table — must fall
-        # through to None so grading skips it cleanly.
+        # team_total isn't in the dispatch table — must fall through to
+        # None so grading skips it cleanly. (asian_handicap graduated to
+        # a real branch: '{line}_{side}' vs the home-perspective margin.)
         assert (
             go.actual_outcome(
-                prediction_type="asian_handicap",
+                prediction_type="team_total",
                 model_name="ensemble",
-                predicted_outcome="-0.5_home",
+                predicted_outcome="home_over_1.5",
                 home_score=2,
                 away_score=1,
                 metadata=None,
@@ -747,3 +748,81 @@ class TestModelNameHelpers:
         assert go.is_nfl_total("ensemble_nfl_tot") is True
         assert go.is_nfl_total("ensemble_nba_tot") is False
         assert go.is_nfl_total("ensemble_nfl_sp") is False
+
+
+# ── Rec-level settlement (grade_rec_selection) ───────────────────────
+
+
+class TestGradeRecSelection:
+    def test_moneyline_and_1x2(self):
+        assert go.grade_rec_selection("1x2", "away", 0, 1) == go.REC_WON
+        assert go.grade_rec_selection("1x2", "draw", 1, 1) == go.REC_WON
+        assert go.grade_rec_selection("moneyline", "home", 2, 3) == go.REC_LOST
+
+    def test_totals_with_line_and_push(self):
+        assert go.grade_rec_selection("over_under", "over_2.5", 2, 1) == go.REC_WON
+        assert go.grade_rec_selection("total", "under_5.5", 2, 3) == go.REC_WON
+        assert go.grade_rec_selection("over_under", "over_3", 2, 1) == go.REC_PUSH
+
+    def test_handicap_full_and_half_lines(self):
+        # home -0.5, home wins by 1 -> covers.
+        assert go.grade_rec_selection("asian_handicap", "home_-0.5", 2, 1) == go.REC_WON
+        # away +1.5 (own line), away loses by 1 -> covers.
+        assert go.grade_rec_selection("spread", "away_1.5", 3, 2) == go.REC_WON
+        # home -2 exactly won by 2 -> push.
+        assert go.grade_rec_selection("puck_line", "home_-2", 4, 2) == go.REC_PUSH
+
+    def test_quarter_lines_produce_half_outcomes(self):
+        # home -0.75 wins by exactly 1: win at -0.5, push at -1 -> half win.
+        assert go.grade_rec_selection("asian_handicap", "home_-0.75", 2, 1) == go.REC_HALF_WON
+        # home -0.25 draws: push at 0, lose at -0.5 -> half loss.
+        assert go.grade_rec_selection("asian_handicap", "home_-0.25", 1, 1) == go.REC_HALF_LOST
+        # home -0.75 wins by 2: clean win on both sub-lines.
+        assert go.grade_rec_selection("asian_handicap", "home_-0.75", 3, 1) == go.REC_WON
+
+    def test_coverage_and_push_markets(self):
+        assert go.grade_rec_selection("double_chance", "12", 2, 0) == go.REC_WON
+        assert go.grade_rec_selection("double_chance", "X2", 1, 1) == go.REC_WON
+        assert go.grade_rec_selection("draw_no_bet", "home", 1, 1) == go.REC_PUSH
+        assert go.grade_rec_selection("btts", "no", 3, 0) == go.REC_WON
+        assert go.grade_rec_selection("correct_score", "2-1", 2, 1) == go.REC_WON
+
+    def test_unknown_formats_stay_open(self):
+        assert go.grade_rec_selection("over_under_ht", "over_1.5", 2, 1) is None
+        assert go.grade_rec_selection("team_total", "home_over_1.5", 2, 1) is None
+        assert go.grade_rec_selection("asian_handicap", "garbage", 2, 1) is None
+
+    def test_status_and_pl_money_math(self):
+        assert go.rec_status_and_pl(go.REC_WON, 25, 2.0) == ("won", 25)
+        assert go.rec_status_and_pl(go.REC_HALF_WON, 100, 1.9) == ("won", 45)
+        status, pl = go.rec_status_and_pl(go.REC_HALF_LOST, 100, 1.9)
+        assert (status, pl) == ("lost", -50)
+        assert go.rec_status_and_pl(go.REC_PUSH, 100, 1.9)[0] == "void"
+
+
+class TestAsianHandicapPredictionGrading:
+    def test_actual_outcome_and_grade(self):
+        actual = go.actual_outcome(
+            prediction_type="asian_handicap",
+            model_name="ensemble",
+            predicted_outcome="-0.5_home",
+            home_score=2,
+            away_score=1,
+            metadata=None,
+        )
+        assert actual == "home_covers_-0.5"
+        assert go.grade_prediction("-0.5_home", actual, prediction_type="asian_handicap") is True
+        assert go.grade_prediction("-0.5_away", actual, prediction_type="asian_handicap") is False
+
+    def test_quarter_and_push_grade_null(self):
+        # Quarter-line half outcomes and pushes -> push_<line> -> NULL.
+        a = go.actual_outcome(
+            prediction_type="asian_handicap",
+            model_name="ensemble",
+            predicted_outcome="-0.75_home",
+            home_score=2,
+            away_score=1,
+            metadata=None,
+        )
+        assert a == "push_-0.75"
+        assert go.grade_prediction("-0.75_home", a, prediction_type="asian_handicap") is None

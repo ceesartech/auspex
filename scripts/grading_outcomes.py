@@ -299,6 +299,20 @@ def actual_outcome(
         return draw_no_bet_outcome(home_score, away_score)
     if prediction_type == "correct_score":
         return correct_score_outcome(home_score, away_score)
+    if prediction_type == "asian_handicap":
+        # predicted_outcome is the model key '{home_line}_{side}' (e.g.
+        # '-0.5_home'); grade the HOME-perspective line, side decides
+        # correctness in grade_prediction. Quarter-line half outcomes and
+        # pushes grade to NULL (not right or wrong).
+        line = _extract_ah_line(predicted_outcome)
+        if line is None:
+            return None
+        verdict = _handicap_outcome(home_score - away_score, line)
+        if verdict == REC_WON:
+            return f"home_covers_{_fmt_line(line)}"
+        if verdict == REC_LOST:
+            return f"away_covers_{_fmt_line(line)}"
+        return f"push_{_fmt_line(line)}"
 
     # Markets we don't grade in v1 (asian_handicap, team_total,
     # clean_sheet, etc.) fall through to None.
@@ -331,9 +345,153 @@ def grade_prediction(
         return None
     if predicted is None:
         return None
+    if prediction_type == "asian_handicap":
+        # predicted '{line}_{side}' vs actual '{home|away}_covers_{line}'.
+        if actual.startswith("push_"):
+            return None
+        side = predicted.rsplit("_", 1)[-1]
+        if side not in ("home", "away"):
+            return None
+        return actual.startswith(f"{side}_covers_")
     if prediction_type == "double_chance":
         covers = DOUBLE_CHANCE_COVERS.get(predicted)
         if covers is None:
             return None
         return actual in covers
     return predicted == actual
+
+
+# ── Rec-level settlement (grades the REC's own selection, not the model's
+#    argmax — see audit §7 2026-08-06: the old settle path mis-graded any
+#    rec on a non-argmax selection and every lined market) ────────────────
+
+REC_WON, REC_LOST, REC_PUSH, REC_HALF_WON, REC_HALF_LOST = ("won", "lost", "push", "half_won", "half_lost")
+
+_MONEYLINE_TYPES = {"1x2", "match_result", "moneyline", "h2h"}
+_HANDICAP_TYPES = {"asian_handicap", "spread", "puck_line"}
+_TOTAL_TYPES = {"over_under", "total"}
+
+
+def _split_sel_line(selection: str):
+    """'home_-0.75' / 'over_2.5' -> (side, line) or (selection, None)."""
+    if "_" in (selection or ""):
+        side, _, raw = selection.partition("_")
+        try:
+            return side.lower(), float(raw)
+        except ValueError:
+            pass
+    return (selection or "").strip().lower(), None
+
+
+def _handicap_outcome(margin: float, line: float):
+    """Home-perspective handicap: adjusted = margin + line. Quarter lines
+    split the stake across the two adjacent half-lines."""
+    if line % 0.5 == 0.25 or line % 0.5 == -0.25:
+        lo, hi = _handicap_outcome(margin, line - 0.25), _handicap_outcome(margin, line + 0.25)
+        pair = {lo, hi}
+        if pair == {REC_WON}:
+            return REC_WON
+        if pair == {REC_LOST}:
+            return REC_LOST
+        if pair == {REC_WON, REC_PUSH}:
+            return REC_HALF_WON
+        if pair == {REC_LOST, REC_PUSH}:
+            return REC_HALF_LOST
+        return REC_PUSH
+    adj = margin + line
+    if adj > 0:
+        return REC_WON
+    if adj < 0:
+        return REC_LOST
+    return REC_PUSH
+
+
+def _extract_ah_line(predicted_outcome):
+    """'-0.5_home' -> -0.5 (home-perspective line from the model key)."""
+    if not predicted_outcome or "_" not in predicted_outcome:
+        return None
+    raw = predicted_outcome.rsplit("_", 1)[0]
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def grade_rec_selection(bet_type: str, selection: str, home_score: int, away_score: int):
+    """Settlement verdict for one recommendation from ITS OWN selection and
+    the final score. Returns REC_* or None (ungradable: unknown format, or
+    a market needing data we don't grade yet — *_ht, team_total)."""
+    bt = (bet_type or "").strip().lower()
+    side, line = _split_sel_line(selection)
+    margin = home_score - away_score
+
+    if bt in _MONEYLINE_TYPES:
+        if side not in ("home", "draw", "away"):
+            return None
+        actual = soccer_match_result(home_score, away_score)
+        return REC_WON if side == actual else REC_LOST
+
+    if bt in _TOTAL_TYPES:
+        if side not in ("over", "under") or line is None:
+            return None
+        total = home_score + away_score
+        if total == line:
+            return REC_PUSH
+        hit = total > line if side == "over" else total < line
+        return REC_WON if hit else REC_LOST
+
+    if bt in _HANDICAP_TYPES:
+        if side not in ("home", "away") or line is None:
+            return None
+        # Selection stores each side's OWN signed line; normalize to
+        # home-perspective margin for the math.
+        eff_margin = margin if side == "home" else -margin
+        return _handicap_outcome(eff_margin, line)
+
+    if bt == "btts":
+        if side not in ("yes", "no"):
+            return None
+        actual = btts_outcome(home_score, away_score)
+        return REC_WON if side == actual else REC_LOST
+
+    if bt == "double_chance":
+        covers = DOUBLE_CHANCE_COVERS.get((selection or "").strip().upper())
+        if covers is None:
+            return None
+        return REC_WON if soccer_match_result(home_score, away_score) in covers else REC_LOST
+
+    if bt == "draw_no_bet":
+        if side not in ("home", "away"):
+            return None
+        actual = draw_no_bet_outcome(home_score, away_score)
+        if actual == "push":
+            return REC_PUSH
+        return REC_WON if side == actual else REC_LOST
+
+    if bt == "correct_score":
+        sel = (selection or "").strip()
+        return REC_WON if sel == correct_score_outcome(home_score, away_score) else REC_LOST
+
+    # *_ht, team_total, anything unknown: leave open rather than guess.
+    return None
+
+
+def rec_status_and_pl(outcome: str, stake, odds):
+    """(status, profit_loss) for a REC_* verdict. Half outcomes keep the
+    schema's won/lost statuses with half-stake money (actual_result records
+    the half-ness)."""
+    from decimal import Decimal
+
+    stake = Decimal(str(stake or 0))
+    odds = Decimal(str(odds or 0))
+    if outcome == REC_WON:
+        return "won", stake * (odds - 1)
+    if outcome == REC_LOST:
+        return "lost", -stake
+    if outcome == REC_PUSH:
+        return "void", Decimal("0")
+    if outcome == REC_HALF_WON:
+        return "won", stake / 2 * (odds - 1)
+    if outcome == REC_HALF_LOST:
+        return "lost", -stake / 2
+    raise ValueError(f"Unknown rec outcome {outcome!r}")
