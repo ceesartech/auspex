@@ -730,6 +730,26 @@ with the growth-rate driver (WAL) eliminated.
 > 1,412 predictions across 289 matches (NFL pre-season baseline now real).
 > Caught before NFL/NBA/NHL season volume hit settlement.
 
+> **Update (2026-08-06) — xG CHAPTER CLOSED: rolling-form xG is NOT a soccer
+> lever (`21a6a5d`..`5f1bd00` + ab_soccer_xg.py).** The backfill itself
+> succeeded completely: Understat redesigned (data now at
+> /getLeagueData/{league}/{season}); scripts/backfill_understat_xg.py filled
+> expected_goals for **17,672 matches / 35k team-rows** (98.5% of Understat's
+> coverage; exact name+score matching, 2 score-mismatch skips in 10 seasons;
+> the Championship — our largest league — has no Understat coverage). But the
+> A/B verdict is decisive: baseline Brier 0.59836 vs augmented 0.59814,
+> **dBrier −0.00022** (n=3,563 test, noise floor SE≈0.009) — 25× under the
+> −0.005 gate, accuracy flat. Six features tested: rolling xG for/against +
+> finishing overperformance (goals−xG), 5- and 10-match windows, vs the REAL
+> training frame. Walk-forward not warranted. **Third no-win soccer feature
+> lever** (calibration, match_stats, now xG) — the baseline's odds features
+> already embed slow-moving team quality, which is why form-style features
+> keep dying. REVISIT CONDITIONS: (a) xG as Dixon-Coles INPUTS (fit
+> attack/defense on xG instead of noisy goals — a different mechanism than
+> GBM features, untested); (b) 5–10× corpus. The data is banked and a weekly
+> refresh keeps it current either way. Soccer's sole remaining open lever is
+> the corpus 3–4× backfill (§3.6).
+
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
 2. §1.2 unpause `db_backup_daily`, verify a local dump. B2 wiring same day if keys can be created.
