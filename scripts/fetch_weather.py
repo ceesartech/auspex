@@ -268,7 +268,8 @@ def list_upcoming(cur, sport_filter: Optional[str], days: int) -> list[dict]:
     venue_coords.is_indoor; matches without a venue_coords row are
     skipped here and surface in the 'unknown venue' branch."""
     q = """
-        SELECT m.id::text AS match_id, m.match_date, m.venue, l.sport
+        SELECT m.id::text AS match_id, m.match_date, m.venue, l.sport,
+               m.home_team_id::text AS home_team_id
         FROM matches m
         JOIN leagues l ON l.id = m.league_id
         WHERE m.status = 'scheduled'
@@ -296,7 +297,8 @@ def list_finished_for_backfill(cur, sport_filter: Optional[str], days: int) -> l
     behind real-time so the script only attempts matches at least
     2 days old."""
     q = """
-        SELECT m.id::text AS match_id, m.match_date, m.venue, l.sport
+        SELECT m.id::text AS match_id, m.match_date, m.venue, l.sport,
+               m.home_team_id::text AS home_team_id
         FROM matches m
         JOIN leagues l ON l.id = m.league_id
         WHERE m.status = 'finished'
@@ -327,6 +329,10 @@ def fetch_and_store(cur, match: dict, kind: str) -> str:
     label for the run summary ('written', 'indoor', 'no_venue',
     'fetch_failed', 'no_window_data')."""
     venue = lookup_venue(cur, match.get("venue"))
+    if not venue and match.get("home_team_id"):
+        # football-data-loaded matches carry no venue string — fall back to
+        # the home team's stadium (geocode_team_stadiums.py rows).
+        venue = lookup_venue(cur, f"team-stadium:{match['home_team_id']}")
     if not venue:
         # Record the attempt with conditions='unknown' so we don't
         # keep retrying the same dead-end venue every run.
