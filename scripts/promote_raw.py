@@ -26,7 +26,6 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable
 
 import psycopg2
 from psycopg2.extras import Json, RealDictCursor, execute_values
@@ -183,7 +182,18 @@ def upsert_teams(cur, team_names: set[str], league_id_by_team: dict[str, str]) -
     """Insert all teams referenced; return {normalized_name: team_id}."""
     if not team_names:
         return {}
-    rows = [(name, normalize_team_name(name), league_id_by_team.get(name), "soccer") for name in team_names]
+    # Dedupe on the conflict key (normalized_name, sport): two RAW names
+    # can normalize identically ("Alaves"/"Alavés"), and ON CONFLICT DO
+    # UPDATE cannot touch the same row twice within one command
+    # (CardinalityViolation) — keep the first raw spelling.
+    seen: set[str] = set()
+    rows = []
+    for name in sorted(team_names):
+        norm = normalize_team_name(name)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        rows.append((name, norm, league_id_by_team.get(name), "soccer"))
     execute_values(
         cur,
         """
