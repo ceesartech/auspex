@@ -104,6 +104,7 @@ ALIASES = {
     # Ligue 1
     "paris saint germain": "paris sg",
     "saint etienne": "st etienne",
+    "clermont foot": "clermont",
 }
 
 
