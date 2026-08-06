@@ -79,7 +79,7 @@ ALIASES = {
     "mainz 05": "mainz",
     "eintracht frankfurt": "ein frankfurt",
     "bayer leverkusen": "leverkusen",
-    "fc cologne": "koln",
+    "cologne": "koln",
     "fortuna duesseldorf": "fortuna dusseldorf",
     "hertha berlin": "hertha",
     "arminia bielefeld": "bielefeld",
