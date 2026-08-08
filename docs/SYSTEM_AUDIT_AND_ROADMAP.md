@@ -795,6 +795,24 @@ with the growth-rate driver (WAL) eliminated.
 > active-work program: settlement integrity + AH grading, xG (closed, no
 > win), place pilot (live), corpus 7× (live).
 
+> **Update (2026-08-08) — WEATHER CHAPTER PERMANENTLY CLOSED (revisit
+> executed at full power, verdict DROP).** The 7× corpus met the chapter's
+> own revisit bar, so the revisit ran end-to-end: 715 team stadiums
+> geocoded (bulk Wikidata SPARQL — the per-entity API 429s from any IP
+> class; one SPARQL query returned 14,707 clubs+coords), then a flawless
+> VC backfill (operator re-subscribed): **97,821 matches fetched, 0
+> failures, ~$10 of metered records** → 119,986 soccer matches with
+> vc_actual (72% of the frame). ab_soccer_weather at 7×, n=20,351
+> walk-forward test: **ΔBrier +0.0002, Δlog-loss +0.0004, accuracy flat —
+> DROP.** The 1× "real but under-powered" signal did not survive power:
+> with premium data and a ~2× tighter noise floor there is nothing to
+> ship. NO further revisit condition — the question is resolved. Cancel
+> the VC subscription (it bought the definitive answer). Weather data
+> stays banked; weather DAGs stay paused. Ops findings: OM archive meters
+> long-range calls heavily (5-yr hourly chunks exhaust the free tier in
+> ~150 calls); VC match-day-only fetching beats range queries ~10:1 on
+> metered cost.
+
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
 2. §1.2 unpause `db_backup_daily`, verify a local dump. B2 wiring same day if keys can be created.
