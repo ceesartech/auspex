@@ -244,6 +244,11 @@ services:
       - AIRFLOW__API_AUTH__JWT_SECRET=${AIRFLOW__WEBSERVER__SECRET_KEY}
       - AIRFLOW__CORE__AUTH_MANAGER=airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      # 12 DAG files re-parsed every 30s (the 3.x default) pegged ~1 full
+      # core for nothing — our DAGs change on deploys, not continuously.
+      # 300s keeps post-deploy pickup under 5 min at ~1/10th the CPU.
+      - AIRFLOW__DAG_PROCESSOR__MIN_FILE_PROCESS_INTERVAL=300
+      - AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL=300
     volumes:
       - ./services/data-ingestion/dags:/opt/airflow/dags
       - ./services/data-ingestion/logs:/opt/airflow/logs
