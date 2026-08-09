@@ -48,9 +48,20 @@ with DAG(
 
     prune_images = BashOperator(
         task_id="prune_images",
-        bash_command="docker image prune -af --filter until=336h",
+        bash_command="docker image prune -af --filter until=168h",
     )
 
+    prune_airflow_task_logs = BashOperator(
+        task_id="prune_airflow_task_logs",
+        # Airflow task-log FILES are unbounded (airflow db clean prunes DB
+        # rows only): ~50-80 MB/day at the 15-min pipeline cadence, 5 GB by
+        # 2026-08. 30-day retention keeps every log the UI still links from
+        # recent runs while capping the pile at ~2 GB.
+        bash_command=(
+            "find /opt/airflow/logs -type f -name '*.log' -mtime +30 -delete "
+            "&& find /opt/airflow/logs -type d -empty -delete; true"
+        ),
+    )
     prune_build_cache = BashOperator(
         task_id="prune_build_cache",
         bash_command="docker builder prune -af",
@@ -68,4 +79,4 @@ with DAG(
         ),
     )
 
-    prune_images >> prune_build_cache >> prune_b2_modal_artifacts
+    prune_images >> prune_build_cache >> prune_airflow_task_logs >> prune_b2_modal_artifacts
