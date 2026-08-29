@@ -2,6 +2,7 @@
 
 import { Suspense, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import axios from 'axios';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -48,8 +49,16 @@ export default function LoginPage() {
   const onSubmit = async (data: LoginFormData) => {
     try {
       await login.mutateAsync(data);
-    } catch {
-      toast('Login failed. Please check your credentials.');
+    } catch (err) {
+      // A 401 means the credentials were rejected; anything without a
+      // response (container restarting, offline, CORS) never reached the
+      // server — saying "check your credentials" sends the user chasing
+      // the wrong problem.
+      if (axios.isAxiosError(err) && !err.response) {
+        toast("Can't reach the server — try again in a moment.");
+      } else {
+        toast('Login failed. Please check your credentials.');
+      }
     }
   };
 

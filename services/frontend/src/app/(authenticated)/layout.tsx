@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { Header } from '@/components/layout/header';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Footer } from '@/components/layout/footer';
-import { LoadingPage } from '@/components/shared/loading';
+import { LoadingSpinner } from '@/components/shared/loading';
 import { isSessionValid, useAuthStore } from '@/lib/store/auth-store';
 
 export default function AuthenticatedLayout({
@@ -61,7 +61,20 @@ export default function AuthenticatedLayout({
   }, [sessionValid, expiresAt, endSession]);
 
   if (!sessionValid) {
-    return <LoadingPage message="Loading your session…" />;
+    // The redirect to /login is client-side, so if the JS bundle fails to
+    // load (e.g. stale cached HTML referencing chunks replaced by a fresh
+    // deploy) this spinner is all the user ever sees. The plain anchor is
+    // server-rendered HTML and works even with dead JS.
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3">
+        <LoadingSpinner size="lg" />
+        <p className="text-sm text-muted-foreground">Loading your session…</p>
+        {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
+        <a href="/login" className="text-sm text-primary underline-offset-4 hover:underline">
+          Taking too long? Continue to sign in
+        </a>
+      </div>
+    );
   }
 
   return (
