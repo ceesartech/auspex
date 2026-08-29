@@ -282,6 +282,13 @@ services:
       - MODEL_PATH=/app/models
       - ENVIRONMENT=production
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # API auth tokens. Without this passthrough the API signs JWTs with the
+      # dev default committed in services/api/src/config.py — anyone with repo
+      # access could mint valid admin tokens. JWT_EXPIRATION_HOURS is the
+      # session lifetime the frontend decodes from `exp` and enforces
+      # client-side; 168 = 7 days.
+      - JWT_SECRET=${JWT_SECRET:-dev-secret-change-in-production}
+      - JWT_EXPIRATION_HOURS=${JWT_EXPIRATION_HOURS:-168}
       # Third-party data sources used by scripts/.
       - THE_ODDS_API_KEY=${THE_ODDS_API_KEY:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}

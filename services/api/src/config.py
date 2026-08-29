@@ -25,7 +25,10 @@ class Settings(BaseSettings):
     # JWT
     JWT_SECRET: str = os.getenv("JWT_SECRET", "dev-secret-change-in-production")
     JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRATION_HOURS: int = 24
+    # Session lifetime. The frontend decodes the JWT `exp` claim and enforces
+    # it client-side (auto-logout + "session expired" notice), so this is the
+    # single knob for how long a login lasts. 168h = 7 days.
+    JWT_EXPIRATION_HOURS: int = 168
 
     # User
     USER_DOB: str = os.getenv("USER_DOB", "1994-05-09")

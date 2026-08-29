@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Header } from '@/components/layout/header';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Footer } from '@/components/layout/footer';
-import { useAuthStore } from '@/lib/store/auth-store';
+import { LoadingPage } from '@/components/shared/loading';
+import { isSessionValid, useAuthStore } from '@/lib/store/auth-store';
 
 export default function AuthenticatedLayout({
   children,
@@ -13,16 +14,54 @@ export default function AuthenticatedLayout({
   children: React.ReactNode;
 }) {
   const router = useRouter();
-  const { isAuthenticated } = useAuthStore();
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const expiresAt = useAuthStore((s) => s.expiresAt);
+  const logout = useAuthStore((s) => s.logout);
+
+  // The persisted store only reflects localStorage on the client; gating on
+  // `mounted` keeps SSR and the first client render identical, so the
+  // redirect decision never races rehydration (and React never sees a
+  // hydration mismatch on this subtree).
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
+  const sessionValid = mounted && isSessionValid({ isAuthenticated, expiresAt });
+
+  // Both effects below can end the session; whichever fires first wins.
+  // Without the guard, the state change from logout() re-fires the other
+  // effect and its plain '/login' replace clobbers the '?expired=1' URL.
+  const sessionEndedRef = useRef(false);
+  const endSession = useCallback(
+    (expired: boolean) => {
+      if (sessionEndedRef.current) return;
+      sessionEndedRef.current = true;
+      logout();
+      router.replace(expired ? '/login?expired=1' : '/login');
+    },
+    [logout, router]
+  );
 
   useEffect(() => {
-    if (!isAuthenticated) {
-      router.push('/login');
-    }
-  }, [isAuthenticated, router]);
+    if (!mounted || sessionValid) return;
+    // A persisted flag without a live token means the session expired (or
+    // predates expiry tracking) — say so on the login page rather than
+    // rendering a dashboard whose API calls all 401.
+    endSession(isAuthenticated);
+  }, [mounted, sessionValid, isAuthenticated, endSession]);
 
-  if (!isAuthenticated) {
-    return null;
+  // End the session at the moment the token expires while the app is open,
+  // instead of waiting for the next API call to 401.
+  useEffect(() => {
+    if (!sessionValid || !expiresAt) return;
+    const timer = setTimeout(
+      () => endSession(true),
+      expiresAt - Date.now()
+    );
+    return () => clearTimeout(timer);
+  }, [sessionValid, expiresAt, endSession]);
+
+  if (!sessionValid) {
+    return <LoadingPage message="Loading your session…" />;
   }
 
   return (

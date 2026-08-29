@@ -1,5 +1,6 @@
 import axios, { AxiosInstance } from 'axios';
 import { QueryClient } from '@tanstack/react-query';
+import { useAuthStore } from '@/lib/store/auth-store';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -28,8 +29,13 @@ apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401 && typeof window !== 'undefined') {
-      localStorage.removeItem('auth_token');
-      window.location.href = '/login';
+      // Clear the whole auth store, not just the raw token — leaving the
+      // persisted `isAuthenticated` flag behind lets the layout render an
+      // unauthenticated dashboard that 401s on every call.
+      useAuthStore.getState().logout();
+      if (!window.location.pathname.startsWith('/login')) {
+        window.location.href = '/login?expired=1';
+      }
     }
     return Promise.reject(error);
   }

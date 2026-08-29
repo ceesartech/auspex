@@ -1,13 +1,18 @@
 import { act } from '@testing-library/react';
-import { useAuthStore } from '@/lib/store/auth-store';
+import { decodeTokenExpiry, isSessionValid, useAuthStore } from '@/lib/store/auth-store';
 import { useSettingsStore } from '@/lib/store/settings-store';
 import { usePredictionsStore } from '@/lib/store/predictions-store';
+
+// Mint a JWT-shaped token whose payload carries the given `exp` (seconds).
+const makeToken = (expSeconds: number) =>
+  `header.${btoa(JSON.stringify({ exp: expSeconds }))}.signature`;
 
 // Reset stores between tests
 beforeEach(() => {
   useAuthStore.setState({
     user: null,
     token: null,
+    expiresAt: null,
     isAuthenticated: false,
   });
   useSettingsStore.setState({
@@ -56,6 +61,49 @@ describe('AuthStore', () => {
     expect(state.isAuthenticated).toBe(false);
     expect(state.user).toBeNull();
     expect(state.token).toBeNull();
+    expect(state.expiresAt).toBeNull();
+  });
+
+  it('login decodes the JWT exp claim into expiresAt', () => {
+    const expSeconds = Math.floor(Date.now() / 1000) + 3600;
+    act(() => {
+      useAuthStore.getState().login(makeToken(expSeconds), { username: 'ceesar', role: 'admin' });
+    });
+
+    expect(useAuthStore.getState().expiresAt).toBe(expSeconds * 1000);
+  });
+
+  it('stores a null expiresAt for tokens without a decodable exp', () => {
+    act(() => {
+      useAuthStore.getState().login('not-a-jwt', { username: 'ceesar', role: 'admin' });
+    });
+
+    expect(useAuthStore.getState().expiresAt).toBeNull();
+  });
+});
+
+describe('decodeTokenExpiry', () => {
+  it('returns ms epoch for a well-formed token', () => {
+    const expSeconds = 1893456000; // 2030-01-01
+    expect(decodeTokenExpiry(makeToken(expSeconds))).toBe(expSeconds * 1000);
+  });
+
+  it('returns null for malformed tokens', () => {
+    expect(decodeTokenExpiry('garbage')).toBeNull();
+    expect(decodeTokenExpiry('a.b.c')).toBeNull();
+    expect(decodeTokenExpiry('')).toBeNull();
+  });
+});
+
+describe('isSessionValid', () => {
+  it('is true only for an authenticated session with a future expiry', () => {
+    const future = Date.now() + 60_000;
+    const past = Date.now() - 60_000;
+
+    expect(isSessionValid({ isAuthenticated: true, expiresAt: future })).toBe(true);
+    expect(isSessionValid({ isAuthenticated: true, expiresAt: past })).toBe(false);
+    expect(isSessionValid({ isAuthenticated: true, expiresAt: null })).toBe(false);
+    expect(isSessionValid({ isAuthenticated: false, expiresAt: future })).toBe(false);
   });
 });
 

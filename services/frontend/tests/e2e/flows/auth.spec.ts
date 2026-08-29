@@ -20,6 +20,23 @@ test.describe('Authentication Flow', () => {
     // Form validation should prevent submission
     await expect(page.getByPlaceholder('admin or you@example.com')).toBeVisible();
   });
+
+  test('expired persisted session is cleared and sent to login with a notice', async ({ page }) => {
+    await page.goto('/login');
+    await page.evaluate(() => {
+      localStorage.setItem('auth-storage', JSON.stringify({
+        state: {
+          user: { username: 'ceesar', role: 'admin' },
+          token: 'stale-token',
+          expiresAt: Date.now() - 1000,
+          isAuthenticated: true,
+        },
+      }));
+    });
+    await page.goto('/');
+    await expect(page).toHaveURL(/\/login\?expired=1/);
+    await expect(page.getByText(/session has expired/i)).toBeVisible();
+  });
 });
 
 test.describe('Navigation', () => {
@@ -31,6 +48,7 @@ test.describe('Navigation', () => {
         state: {
           user: { username: 'ceesar', role: 'admin' },
           token: 'test-token',
+          expiresAt: Date.now() + 3600_000,
           isAuthenticated: true,
         },
       }));
