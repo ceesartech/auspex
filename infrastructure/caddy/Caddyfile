@@ -65,9 +65,23 @@
 		reverse_proxy api:8000
 	}
 
-	# Everything else -> Next.js frontend.
-	handle {
+	# Next.js static assets are content-hashed — safe to cache forever.
+	@next_assets path /_next/*
+	handle @next_assets {
 		reverse_proxy frontend:3000
+	}
+
+	# Everything else -> Next.js frontend. Force HTML to revalidate: Next
+	# emits `s-maxage=31536000, stale-while-revalidate` on prerendered pages,
+	# and if any shared cache (Cloudflare, another proxy) ever honors that,
+	# a deploy leaves clients holding stale HTML that references JS chunks
+	# which no longer exist — the app loads with dead JS (the login form
+	# natively resubmits to /login, looking exactly like a redirect loop)
+	# until a hard refresh.
+	handle {
+		reverse_proxy frontend:3000 {
+			header_down Cache-Control "no-cache, must-revalidate"
+		}
 	}
 
 	# Security headers. Avoid HSTS preload before you're confident TLS
