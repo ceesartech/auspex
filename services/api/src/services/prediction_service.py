@@ -936,26 +936,36 @@ class PredictionService:
             # rows either).
             headline_pairs = list(HEADLINE_PAIRS)
 
+        # DISTINCT ON (match, prediction_type) → newest row: every weekly
+        # retrain mints a new model_version and the precompute inserts a
+        # fresh row per version (the unique key includes model_version),
+        # so long-lead fixtures (MMA cards, tennis draws) accumulate 2–3
+        # rows per market. Prod 2026-09-02: 28 MMA + 12 tennis + 2 NFL
+        # matches carried duplicates that would render as duplicate cards.
         query = text(
             """
-            SELECT p.id, p.match_id, p.predicted_outcome, p.confidence,
-                   p.probabilities, p.model_name, p.model_version,
-                   p.prediction_type,
-                   p.features_used, p.feature_importance,
-                   m.match_date, m.venue,
-                   l.name as league_name,
-                   ht.name as home_team, at.name as away_team
-            FROM predictions p
-            JOIN matches m ON p.match_id = m.id
-            JOIN leagues l ON m.league_id = l.id
-            JOIN teams ht ON m.home_team_id = ht.id
-            JOIN teams at ON m.away_team_id = at.id
-            WHERE m.status = 'scheduled' AND m.match_date > NOW()
-            AND (:sport IS NULL OR l.sport = :sport)
-            AND (:league IS NULL OR l.name = :league)
-            AND (:prediction_type IS NULL OR p.prediction_type = :prediction_type)
-            AND (:headline_pairs IS NULL OR (l.sport || ':' || p.prediction_type) = ANY(:headline_pairs))
-            ORDER BY m.match_date ASC
+            SELECT * FROM (
+                SELECT DISTINCT ON (p.match_id, p.prediction_type)
+                       p.id, p.match_id, p.predicted_outcome, p.confidence,
+                       p.probabilities, p.model_name, p.model_version,
+                       p.prediction_type,
+                       p.features_used, p.feature_importance,
+                       m.match_date, m.venue,
+                       l.name as league_name,
+                       ht.name as home_team, at.name as away_team
+                FROM predictions p
+                JOIN matches m ON p.match_id = m.id
+                JOIN leagues l ON m.league_id = l.id
+                JOIN teams ht ON m.home_team_id = ht.id
+                JOIN teams at ON m.away_team_id = at.id
+                WHERE m.status = 'scheduled' AND m.match_date > NOW()
+                AND (:sport IS NULL OR l.sport = :sport)
+                AND (:league IS NULL OR l.name = :league)
+                AND (:prediction_type IS NULL OR p.prediction_type = :prediction_type)
+                AND (:headline_pairs IS NULL OR (l.sport || ':' || p.prediction_type) = ANY(:headline_pairs))
+                ORDER BY p.match_id, p.prediction_type, p.created_at DESC
+            ) latest
+            ORDER BY match_date ASC
             LIMIT :limit
         """
         )
@@ -1037,21 +1047,29 @@ class PredictionService:
         if not exists:
             raise ValueError(f"Match {match_id} not found")
 
+        # DISTINCT ON (prediction_type) → newest row per market; see the
+        # same note in get_upcoming_predictions (retrains leave 2–3 rows
+        # per market on long-lead fixtures, which rendered as duplicate
+        # moneyline cards on the detail page).
         query = text(
             """
-            SELECT p.id, p.match_id, p.predicted_outcome, p.confidence,
-                   p.probabilities, p.model_name, p.model_version,
-                   p.prediction_type,
-                   m.match_date, m.venue,
-                   l.name as league_name, l.sport as sport,
-                   ht.name as home_team, at.name as away_team
-            FROM predictions p
-            JOIN matches m ON p.match_id = m.id
-            JOIN leagues l ON m.league_id = l.id
-            JOIN teams ht ON m.home_team_id = ht.id
-            JOIN teams at ON m.away_team_id = at.id
-            WHERE p.match_id = :match_id
-            ORDER BY p.prediction_type ASC
+            SELECT * FROM (
+                SELECT DISTINCT ON (p.prediction_type)
+                       p.id, p.match_id, p.predicted_outcome, p.confidence,
+                       p.probabilities, p.model_name, p.model_version,
+                       p.prediction_type,
+                       m.match_date, m.venue,
+                       l.name as league_name, l.sport as sport,
+                       ht.name as home_team, at.name as away_team
+                FROM predictions p
+                JOIN matches m ON p.match_id = m.id
+                JOIN leagues l ON m.league_id = l.id
+                JOIN teams ht ON m.home_team_id = ht.id
+                JOIN teams at ON m.away_team_id = at.id
+                WHERE p.match_id = :match_id
+                ORDER BY p.prediction_type, p.created_at DESC
+            ) latest
+            ORDER BY prediction_type ASC
         """
         )
 

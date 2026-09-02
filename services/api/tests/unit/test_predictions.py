@@ -416,6 +416,49 @@ class TestPredictionService:
 
         assert [p.market for p in predictions] == ["moneyline", "regulation", "puck_line", "total"]
 
+    def test_get_upcoming_predictions_keeps_only_latest_row_per_market(self, mock_db, mock_settings):
+        """Weekly retrains mint a new model_version and the precompute
+        inserts a fresh row per version (the unique key includes
+        model_version), so long-lead fixtures carry 2-3 rows per market.
+        The list must collapse to the NEWEST row per (match, market) or
+        the pane renders duplicate cards (prod 2026-09-02: 28 MMA, 12
+        tennis and 2 NFL matches carried duplicates)."""
+        from services.prediction_service import PredictionService
+
+        mock_db.execute.return_value.fetchall.return_value = []
+        PredictionService(mock_db).get_upcoming_predictions(sport="tennis", limit=10)
+
+        sql = str(mock_db.execute.call_args[0][0])
+        assert "DISTINCT ON (p.match_id, p.prediction_type)" in sql
+        assert "ORDER BY p.match_id, p.prediction_type, p.created_at DESC" in sql
+        # Outer ordering is still by kickoff so the pane reads chronologically.
+        assert "ORDER BY match_date ASC" in sql
+
+    def test_get_match_predictions_keeps_only_latest_row_per_market(self, mock_db, mock_row, mock_settings):
+        """Same retrain duplicates on the detail page: exactly one card per
+        market, the newest one."""
+        row = mock_row(
+            id=uuid.uuid4(),
+            match_id=uuid.uuid4(),
+            predicted_outcome="home",
+            confidence=0.5,
+            probabilities={"home": 0.5, "draw": 0.3, "away": 0.2},
+            model_name="ensemble",
+            model_version="v1.0",
+            prediction_type="match_result",
+            match_date=datetime(2025, 3, 15, 15, 0),
+            venue="Emirates Stadium",
+            league_name="Premier League",
+            sport="soccer",
+            home_team="Arsenal",
+            away_team="Chelsea",
+        )
+        self._run_match_predictions(mock_db, mock_row, [row])
+
+        sql = str(mock_db.execute.call_args_list[-1][0][0])
+        assert "DISTINCT ON (p.prediction_type)" in sql
+        assert "ORDER BY p.prediction_type, p.created_at DESC" in sql
+
     def test_get_match_predictions_match_not_found(self, mock_db, mock_settings):
         from services.prediction_service import PredictionService
 
