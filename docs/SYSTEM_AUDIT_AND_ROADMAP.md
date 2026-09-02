@@ -813,6 +813,35 @@ with the growth-rate driver (WAL) eliminated.
 > ~150 calls); VC match-day-only fetching beats range queries ~10:1 on
 > metered cost.
 
+> **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
+> overflowed, deploys broken by a GitHub 401.** Three root causes, all
+> fixed in one push. (1) `GET /predictions/upcoming` applied `LIMIT` to
+> ROWS and only collapsed to the headline market for NHL, so soccer's 19
+> derived-market rows per match saturated the pane's `limit=50` at ~3
+> matches — Premier League / La Liga simply never rendered. It now
+> returns ONE headline row per match for every sport (`headline_task()`;
+> `sport:prediction_type` pairs in the All-Sports path so NHL's regulation
+> market, persisted as `match_result`, is not double-counted); ceiling
+> 2000; soccer sub-markets selectable via `market=<prediction_type>`.
+> (2) `/predictions/match/{id}` was ordered by `prediction_type`, so the
+> detail sidebar donut drew `asian_handicap` (51 outcomes) with outside
+> labels — the "jumbled top-right". Headline row is now first (API +
+> client guard); the chart draws no outside labels (donut + legend ≤6
+> outcomes, scrolling bar list above that); the odds and stats cards
+> read the real API fields (`selection`/`market_type`/`line`,
+> `home_form`/`away_form`/`head_to_head` — both had been reading keys
+> that don't exist and rendered empty or label-less); every long list
+> scrolls inside its card; `bg-card` was never wired as a Tailwind token
+> (added). Lists are date-grouped with result counts, league and
+> soccer-market filters. (3) GitHub returns 401 on anonymous
+> `git-upload-pack` from the Hetzner IP even for public repos (run
+> 33670930981; the same fetch succeeds from a residential IP), so
+> `deploy_remote.sh` now authenticates with the run's `GITHUB_TOKEN` via
+> a per-process `http.extraheader` (no admin rights for a deploy key;
+> manual pulls need a PAT — `OPERATIONS.md`). Verified: api 165 tests,
+> lint, `next build`/type-check/lint, 3-lens adversarial review (two
+> medium findings fixed before commit).
+
 **Day 1 (production correctness + safety):**
 1. §1.1 serve-bridge fix + loud ensemble failures + canary → verify distinct-probs recover on the next precompute tick.
 2. §1.2 unpause `db_backup_daily`, verify a local dump. B2 wiring same day if keys can be created.

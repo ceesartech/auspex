@@ -10,24 +10,30 @@ import { EmptyState } from '@/components/shared/empty-state';
 import { Badge } from '@/components/ui/badge';
 import { Star, Sparkles } from 'lucide-react';
 
+interface RecommendationFilterState {
+  confidence_level?: string;
+  market_type?: string;
+  min_odds?: number;
+  max_odds?: number;
+  league?: string;
+}
+
 export default function RecommendationsPage() {
-  const [filters, setFilters] = useState<any>({});
+  const [filters, setFilters] = useState<RecommendationFilterState>({});
   // `league` is filtered client-side (the API has no league param); every
   // other filter goes to the server. The old default limit of 20 hid the
-  // long tail of leagues entirely.
+  // long tail of leagues entirely; 2000 is the route's ceiling and well
+  // above the ~250 active recs a full slate produces.
   const { league, ...serverFilters } = filters;
   const { data: recommendations, isLoading, error, refetch } = useRecommendations({
     ...serverFilters,
-    limit: 1000,
+    limit: 2000,
   });
   const { data: highValue } = useHighValueBets({ min_ev: 0.05, limit: 5 });
 
-  const leagueOptions = Array.from(
-    new Set((recommendations ?? []).map((r) => r.match_info.league_name))
-  ).sort();
-  const filtered = league
-    ? (recommendations ?? []).filter((r) => r.match_info.league_name === league)
-    : recommendations;
+  const fetched = recommendations ?? [];
+  const leagueOptions = Array.from(new Set(fetched.map((r) => r.match_info.league_name))).sort();
+  const filtered = league ? fetched.filter((r) => r.match_info.league_name === league) : fetched;
 
   if (isLoading) return <LoadingPage message="Loading recommendations..." />;
   if (error) return <ErrorDisplay message="Failed to load recommendations" onRetry={refetch} />;
@@ -39,7 +45,12 @@ export default function RecommendationsPage() {
         <p className="text-muted-foreground">AI-curated betting recommendations</p>
       </div>
 
-      <RecommendationFilters onFilterChange={setFilters} leagueOptions={leagueOptions} />
+      <div className="space-y-2">
+        <RecommendationFilters onFilterChange={setFilters} leagueOptions={leagueOptions} />
+        <p className="text-sm text-muted-foreground" data-testid="recommendations-result-count">
+          Showing {filtered.length} of {fetched.length} recommendations
+        </p>
+      </div>
 
       {highValue && highValue.length > 0 && (
         <div>
@@ -58,7 +69,7 @@ export default function RecommendationsPage() {
 
       <div>
         <h2 className="mb-3 text-lg font-semibold">All Recommendations</h2>
-        {!filtered?.length ? (
+        {filtered.length === 0 ? (
           <EmptyState
             icon={<Star className="h-12 w-12" />}
             title="No recommendations"

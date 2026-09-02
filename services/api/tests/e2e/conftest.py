@@ -71,19 +71,21 @@ TABLES_TO_TRUNCATE = [
 ]
 
 
-def _db_reachable(url: str) -> bool:
-    """Return True iff we can open a TCP connection to the Postgres in `url`."""
-    import socket
-    from urllib.parse import urlparse
+def _db_reachable(url: str) -> "str | None":
+    """Return None iff we can open an *authenticated* Postgres connection to `url`.
 
-    parsed = urlparse(url)
-    host = parsed.hostname or "localhost"
-    port = parsed.port or 5432
+    Otherwise return the failure reason. A TCP probe is not enough: a developer's local
+    Postgres typically answers on 5432 but has no `test_user` role / test database, and
+    that must skip the suite (like an absent server does) rather than surface as
+    per-test setup ERRORs. CI provisions the role, so the suite still runs there.
+    """
+    import psycopg2
+
     try:
-        with socket.create_connection((host, port), timeout=2):
-            return True
-    except OSError:
-        return False
+        psycopg2.connect(url, connect_timeout=2).close()
+        return None
+    except psycopg2.OperationalError as exc:
+        return str(exc).strip().splitlines()[-1] if str(exc).strip() else repr(exc)
 
 
 def _redis_reachable(url: str) -> bool:
@@ -103,15 +105,23 @@ def _redis_reachable(url: str) -> bool:
 @pytest.fixture(scope="session", autouse=True)
 def _require_services() -> None:
     """Skip the whole E2E suite if Postgres or Redis aren't available."""
-    if not _db_reachable(os.environ["DATABASE_URL"]):
-        pytest.skip(f"Postgres not reachable at {os.environ['DATABASE_URL']}", allow_module_level=True)
+    db_error = _db_reachable(os.environ["DATABASE_URL"])
+    if db_error is not None:
+        pytest.skip(
+            f"Postgres test DB unavailable at {os.environ['DATABASE_URL']}: {db_error}", allow_module_level=True
+        )
     if not _redis_reachable(os.environ["REDIS_URL"]):
         pytest.skip(f"Redis not reachable at {os.environ['REDIS_URL']}", allow_module_level=True)
 
 
 @pytest.fixture(scope="session")
-def engine():
-    """A SQLAlchemy engine pointing at the test database."""
+def engine(_require_services):
+    """A SQLAlchemy engine pointing at the test database.
+
+    Depends on `_require_services` explicitly: autouse alone does not order it before
+    `_apply_migrations` (which needs `engine`), so without this the reachability skip
+    never ran and an unreachable Postgres surfaced as 19 setup ERRORs instead of skips.
+    """
     from sqlalchemy import create_engine
 
     engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)

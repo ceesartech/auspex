@@ -16,7 +16,8 @@
 # Environment variables expected (set by CI):
 #   IMAGE_TAG        — git SHA, used to tag images
 #   GHCR_USER        — github actor (for docker login)
-#   GHCR_TOKEN       — GITHUB_TOKEN (for docker login)
+#   GHCR_TOKEN       — GITHUB_TOKEN (for docker login AND the git fetch;
+#                      see the GIT_AUTH note below)
 #   REMOTE / BRANCH  — git remote/branch on the VM (default: origin/main)
 #
 # Manual usage on the VM (without ghcr.io, fall back to local build):
@@ -64,14 +65,27 @@ if [ -n "$(git status --porcelain)" ]; then
   git stash push --include-untracked -m "auto-stash before deploy_remote $(date -Iseconds)" >/dev/null
 fi
 
+# GitHub answers anonymous git-upload-pack POSTs from cloud IP ranges
+# with 401 even for PUBLIC repos (CI run 33670930981, 2026-09-02: the VM's
+# GET info/refs returned 200 but the POST returned 401 + www-authenticate,
+# while the identical anonymous fetch succeeded from a residential IP).
+# The deploying account has no repo-admin rights, so a deploy key is not
+# an option; instead reuse the ephemeral GITHUB_TOKEN CI already hands us
+# for the ghcr login. The header lives only in this process's `-c`
+# config — nothing is written to .git/config or ~/.git-credentials.
+GIT_AUTH=()
+if [ -n "${GHCR_TOKEN:-}" ]; then
+  GIT_AUTH=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GHCR_TOKEN" | base64 | tr -d '\n')")
+fi
+
 log "Fetching $REMOTE/$BRANCH..."
-git fetch --quiet "$REMOTE" "$BRANCH"
+git ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} fetch --quiet "$REMOTE" "$BRANCH"
 NEW_SHA="$(git rev-parse "$REMOTE/$BRANCH")"
 
 if [ "$OLD_SHA" = "$NEW_SHA" ] && [ "$FORCE_LOCAL_BUILD" != "1" ]; then
   log "Already up to date at $OLD_SHA. Will still pull/swap in case IMAGE_TAG changed."
 else
-  git pull --ff-only "$REMOTE" "$BRANCH"
+  git ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} pull --ff-only "$REMOTE" "$BRANCH"
   log "Now at: $NEW_SHA"
 fi
 

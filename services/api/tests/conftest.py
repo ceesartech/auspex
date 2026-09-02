@@ -10,7 +10,18 @@ import jwt as pyjwt
 import pytest
 
 # Add src to path for absolute imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+_SRC_DIR = Path(__file__).parent.parent / "src"
+sys.path.insert(0, str(_SRC_DIR))
+
+# When pytest is run from services/api WITHOUT `--rootdir=.` (the Makefile and CI pass
+# it), rootdir resolves to the repo root and importlib-mode names this file
+# `services.api.tests.conftest`. Importing it registers the repo-root `services/`
+# directory as a *namespace* package in sys.modules, which shadows `src/services`
+# and turns every `services.<module>` import into ModuleNotFoundError. Evict the
+# shadow so the real package (src/services/__init__.py) wins regardless of rootdir.
+_shadow = sys.modules.get("services")
+if _shadow is not None and not str(getattr(_shadow, "__file__", None) or "").startswith(str(_SRC_DIR)):
+    del sys.modules["services"]
 
 
 # ==================== Auth Fixtures ====================

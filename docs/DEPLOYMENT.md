@@ -152,6 +152,12 @@ with the commit SHA and runs `scripts/deploy_remote.sh` on the VM over SSH.
 login ghcr.io` → `docker compose pull` (ghcr overlay) → `up -d` → 60s api
 health-check (prints logs on failure).
 
+The fetch/pull is authenticated with the run's `GITHUB_TOKEN` (passed as
+`GHCR_TOKEN`) via a per-process `http.extraheader` — GitHub returns 401 on
+anonymous `git-upload-pack` from cloud IP ranges even for public repos (first
+seen 2026-09-02, run 33670930981). Manual pulls on the VM need a PAT; see
+`OPERATIONS.md` → "Manual git pull on the VM needs a token".
+
 ### Required GitHub Secrets
 
 | Secret | Value |

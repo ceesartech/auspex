@@ -16,8 +16,18 @@ const sportOptions = [
   { value: 'mma', label: 'MMA' },
 ];
 
-// Markets available per sport. Soccer is single-market so we don't show
-// the market dropdown at all when selectedSport is 'soccer' or empty.
+// Markets available per sport. The market dropdown only renders when the
+// selected sport has an entry here; tennis / MMA / horse racing are
+// single-market (moneyline / win) so they get no dropdown, and neither
+// does "All Sports" because a market value only makes sense within one
+// sport's schema.
+//
+// Soccer exposes the ~19 markets derived from the Dixon-Coles scoreline
+// model (docs: soccer market derivation). The '' default asks the API for
+// the headline market only (match_result / 1X2, one row per match); every
+// other value is passed through verbatim as the `prediction_type` filter,
+// which is why these values must match the prediction_type strings the
+// precompute job writes.
 //
 // NHL exposes the 4 markets shipped in Phase 3 — moneyline (headline) →
 // regulation → puck_line → total, locked to fixed canonical lines
@@ -33,6 +43,27 @@ const sportOptions = [
 // line-as-feature design. NFL spreads typically live on key numbers
 // (3, 7, 10, 14) and totals in the 40-50 range; labels stay generic.
 const marketOptionsBySport: Record<string, { value: string; label: string }[]> = {
+  soccer: [
+    { value: '', label: 'Default (1X2)' },
+    { value: 'over_under', label: 'Over/Under' },
+    { value: 'btts', label: 'BTTS' },
+    { value: 'asian_handicap', label: 'Asian Handicap' },
+    { value: 'correct_score', label: 'Correct Score' },
+    { value: 'double_chance', label: 'Double Chance' },
+    { value: 'draw_no_bet', label: 'Draw No Bet' },
+    { value: 'total_goals', label: 'Total Goals' },
+    { value: 'winning_margin', label: 'Winning Margin' },
+    { value: 'team_total', label: 'Team Total' },
+    { value: 'clean_sheet', label: 'Clean Sheet' },
+    { value: 'win_to_nil', label: 'Win To Nil' },
+    { value: 'odd_even', label: 'Odd/Even' },
+    { value: 'over_under_ht', label: 'HT Over/Under' },
+    { value: 'match_result_ht', label: 'HT Result' },
+    { value: 'btts_ht', label: 'HT BTTS' },
+    { value: 'result_btts', label: 'Result & BTTS' },
+    { value: 'result_over_under', label: 'Result & O/U' },
+    { value: 'ht_ft_double_result', label: 'HT/FT' },
+  ],
   nhl: [
     { value: '', label: 'Default (Moneyline)' },
     { value: 'moneyline', label: 'Moneyline' },

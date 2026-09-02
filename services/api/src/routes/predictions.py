@@ -101,26 +101,31 @@ async def get_bulk_predictions(
 
 @router.get("/upcoming", response_model=List[PredictionResponse])
 async def get_upcoming_predictions(
-    sport: Optional[str] = Query(None, description="Filter by sport ('soccer' or 'nhl')."),
+    sport: Optional[str] = Query(
+        None, description="Filter by sport ('soccer', 'nhl', 'nba', 'nfl', 'tennis', 'mma', ...)."
+    ),
     league: Optional[str] = Query(None, description="Filter by league name (exact match)."),
     market: Optional[str] = Query(
         None,
         description=(
             "Filter by market — e.g. 'moneyline', 'regulation', 'puck_line', "
-            "'total' for NHL, 'match_result' for soccer. Omit to get the "
-            "default headline market per sport (soccer→match_result, "
-            "nhl→moneyline)."
+            "'total' for NHL, 'match_result' or a raw derived type such as "
+            "'over_under' / 'asian_handicap' for soccer. Omit to get ONE row "
+            "per match: the headline market per sport (soccer→match_result, "
+            "every other sport→moneyline)."
         ),
     ),
-    limit: int = Query(20, ge=1, le=1000),
+    limit: int = Query(20, ge=1, le=2000),
     db: Session = Depends(get_db),
     user: dict = Depends(require_auth),
 ):
     """Get predictions for upcoming matches.
 
     With market omitted, returns one prediction per match (the headline
-    market for each sport). With market set, returns predictions for
-    that market only — useful for sport-specific dashboards.
+    market for each sport, across every sport when `sport` is omitted).
+    With market set, returns predictions for that market only — useful
+    for sport-specific dashboards. `limit` counts rows == matches in the
+    default mode; raise it (up to 2000) to see the whole upcoming slate.
     """
 
     prediction_service = PredictionService(db)

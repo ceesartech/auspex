@@ -336,6 +336,34 @@ def tasks_for_sport(sport: str) -> List[TaskSpec]:
     return [spec for spec in TASKS.values() if spec.sport == sport]
 
 
+def headline_task(sport: str) -> Optional[TaskSpec]:
+    """The HEADLINE task for a sport — the market shown when a caller
+    doesn't ask for one (soccer→match_result, every other sport→
+    moneyline). Defined as the FIRST TaskSpec registered for the sport,
+    so registry order is load-bearing: keep the headline entry first
+    when adding markets. Returns None for sports with no TaskSpec
+    (e.g. horse_racing), which callers treat as "no market filter".
+    """
+    for spec in TASKS.values():
+        if spec.sport == sport:
+            return spec
+    return None
+
+
+# "<sport>:<prediction_type>" pairs for every sport's HEADLINE task —
+# today ['mma:moneyline', 'nba:moneyline', 'nfl:moneyline',
+# 'nhl:moneyline', 'soccer:match_result', 'tennis:moneyline']. Used by
+# the cross-sport upcoming list to keep ONE row per match without
+# knowing the sport up front. Pairs (not bare prediction_types) because
+# a non-headline market can reuse a headline prediction_type for a
+# different sport: NHL 'regulation' persists as 'match_result', which
+# a bare-type filter would let through as a second NHL row per game.
+# Sorted so the SQL bind is deterministic (tests + logs).
+HEADLINE_PAIRS: List[str] = sorted(
+    f"{spec.sport}:{spec.prediction_type}" for spec in TASKS.values() if headline_task(spec.sport) is spec
+)
+
+
 # Process-wide model registry. Populated once during app startup
 # (see services/api/src/main.py lifespan) and shared across requests.
 # Loading joblib pickles on every request adds ~10-50ms; this avoids that.
@@ -849,15 +877,36 @@ class PredictionService:
         market: Optional[str] = None,
         limit: int = 20,
     ) -> List[PredictionResponse]:
-        """Get predictions for upcoming matches.
+        """Get predictions for upcoming matches — ONE ROW PER MATCH by
+        default.
 
-        With NHL's 4 markets per match, calling this without any filter
-        for NHL would return 4× as many rows as matches and rapidly hit
-        the limit. To keep the list "one row per match" by default, NHL
-        without an explicit market filter defaults to moneyline (the
-        headline). Soccer's only market is match_result so the default
-        is harmless there. Set `market` explicitly to override (e.g.
-        market='puck_line' for NHL puck-line predictions only).
+        Every sport stores several prediction_type rows per match
+        (soccer: 19 — match_result plus ~18 Dixon-Coles-derived markets
+        like over_under / asian_handicap; NHL: 4; NFL/NBA: 3). The SQL
+        LIMIT applies to ROWS, so an unfiltered list would be saturated
+        by a handful of matches (prod: limit=50 rendered ~3 soccer
+        matches and whole leagues never appeared). With `market` omitted
+        we therefore filter to each sport's HEADLINE market, derived
+        from the TASKS registry via headline_task():
+
+          * sport given  → that sport's headline prediction_type
+                           (soccer→match_result, nhl/nba/nfl/tennis/
+                           mma→moneyline). Sports with no TaskSpec keep
+                           no filter.
+          * sport omitted → (sport, prediction_type) restricted to each
+                           sport's headline pair (HEADLINE_PAIRS), bound
+                           as a list of "sport:type" strings and matched
+                           with `(l.sport || ':' || p.prediction_type)
+                           = ANY(:headline_pairs)`. Pairs, not bare
+                           types, so NHL 'regulation' (persisted as
+                           'match_result') doesn't leak in as a second
+                           NHL row per game.
+
+        Set `market` explicitly to override: friendly names map through
+        TASKS (e.g. market='puck_line' for NHL → prediction_type
+        'spread'); unknown strings pass straight through as a raw
+        prediction_type filter (e.g. market='over_under' for soccer).
+        Results are ordered by match_date ASC.
         """
 
         # Map the friendly market name through the TASKS registry to the
@@ -865,15 +914,27 @@ class PredictionService:
         # SQL filter unchanged so callers can target prediction_type
         # values that don't have a TaskSpec yet (forward-compat).
         prediction_type: Optional[str] = None
+        headline_pairs: Optional[List[str]] = None
         if market is not None:
             matched_task = next(
                 (t for t in TASKS.values() if t.sport == (sport or t.sport) and t.market == market),
                 None,
             )
             prediction_type = matched_task.prediction_type if matched_task else market
-        elif sport == "nhl":
-            # Default the NHL list to moneyline so one row per match.
-            prediction_type = TASKS["nhl:moneyline"].prediction_type
+        elif sport is not None:
+            # Default the single-sport list to its headline market so
+            # one row per match. Sports without a TaskSpec (e.g.
+            # horse_racing) get no filter.
+            headline = headline_task(sport)
+            prediction_type = headline.prediction_type if headline else None
+        else:
+            # Cross-sport list: keep only rows whose (sport,
+            # prediction_type) is that sport's headline pair. Sports
+            # with no TaskSpec (e.g. horse_racing) have no pair and are
+            # therefore excluded from the default cross-sport list —
+            # same as before (they have no 'match_result'/'moneyline'
+            # rows either).
+            headline_pairs = list(HEADLINE_PAIRS)
 
         query = text(
             """
@@ -893,6 +954,7 @@ class PredictionService:
             AND (:sport IS NULL OR l.sport = :sport)
             AND (:league IS NULL OR l.name = :league)
             AND (:prediction_type IS NULL OR p.prediction_type = :prediction_type)
+            AND (:headline_pairs IS NULL OR (l.sport || ':' || p.prediction_type) = ANY(:headline_pairs))
             ORDER BY m.match_date ASC
             LIMIT :limit
         """
@@ -905,6 +967,10 @@ class PredictionService:
                 "sport": sport,
                 "league": league,
                 "prediction_type": prediction_type,
+                # psycopg2 adapts a Python list to a Postgres ARRAY, so
+                # `= ANY(:headline_pairs)` works without an expanding
+                # bindparam; None short-circuits the clause.
+                "headline_pairs": headline_pairs,
                 "limit": limit,
             },
         ).fetchall()
@@ -943,10 +1009,17 @@ class PredictionService:
 
     def get_match_predictions(self, match_id: str) -> List[PredictionResponse]:
         """Return every stored prediction for a single match — one row
-        per (model, prediction_type). Soccer matches have a single
-        match_result row; NHL matches return up to four (moneyline,
-        regulation, puck_line, total). Ordered by prediction_type so
-        the frontend can rely on a stable display order.
+        per (model, prediction_type). Soccer matches return match_result
+        plus ~18 Dixon-Coles-derived markets (asian_handicap, over_under,
+        btts, correct_score, ...); NHL matches return up to four
+        (moneyline, regulation, puck_line, total).
+
+        Ordering is stable and the frontend relies on it: the sport's
+        HEADLINE market (headline_task(): soccer→match_result, others→
+        moneyline) is ALWAYS index 0, followed by the remaining markets
+        in prediction_type order. Without this, a soccer match's first
+        row was asian_handicap (51 outcome keys) and the detail-page
+        chart rendered that instead of the 1X2 probabilities.
 
         Raises ValueError if the match itself doesn't exist. An empty
         list (vs. ValueError) means the match exists but predictions
@@ -970,7 +1043,7 @@ class PredictionService:
                    p.probabilities, p.model_name, p.model_version,
                    p.prediction_type,
                    m.match_date, m.venue,
-                   l.name as league_name,
+                   l.name as league_name, l.sport as sport,
                    ht.name as home_team, at.name as away_team
             FROM predictions p
             JOIN matches m ON p.match_id = m.id
@@ -982,7 +1055,17 @@ class PredictionService:
         """
         )
 
-        results = db.execute(query, {"match_id": match_id}).fetchall()
+        results = list(db.execute(query, {"match_id": match_id}).fetchall())
+
+        # Headline market first, everything else keeps the SQL
+        # prediction_type order (Python's sort is stable). Sport comes
+        # from the leagues join so detection doesn't depend on
+        # model_name conventions (soccer pins model_name='ensemble').
+        def _is_headline(row: Any) -> bool:
+            headline = headline_task(row.sport)
+            return headline is not None and row.prediction_type == headline.prediction_type
+
+        results.sort(key=lambda row: 0 if _is_headline(row) else 1)
 
         # Map (ensemble_name, prediction_type) → friendly market name.
         # Keying on ensemble_name alone would work today but tomorrow

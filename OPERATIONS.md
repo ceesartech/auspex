@@ -221,11 +221,28 @@ docker compose up -d --force-recreate api  # full recreate (picks up new .env / 
 
 ```bash
 ssh auspex && cd /opt/auspex
-git pull
+git pull      # see "Manual git pull needs a token" below
 docker compose cp services/data-ingestion/db/migrations/0XX_thing.sql postgres:/tmp/0XX.sql
 docker compose exec -T postgres sh -c \
     'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /tmp/0XX.sql'
 ```
+
+### Manual `git pull` on the VM needs a token
+
+Since 2026-09-02 GitHub answers anonymous `git-upload-pack` POSTs from cloud
+IP ranges with **401 even for public repos** (the ref advertisement still
+returns 200, so `curl` looks fine while `git fetch` dies with "could not read
+Username"). CI's `deploy_remote.sh` authenticates automatically with the
+ephemeral `GITHUB_TOKEN`; a human pulling by hand needs a fine-grained PAT
+(Contents: read). One-shot, nothing written to disk:
+
+```bash
+read -rs TOKEN    # paste the PAT; never echo it
+git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)" pull --ff-only
+unset TOKEN
+```
+
+(A read-only deploy key would be cleaner but needs repo-admin on the org.)
 
 ### Roll back a model promotion
 

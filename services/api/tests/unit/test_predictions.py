@@ -156,9 +156,11 @@ class TestPredictionService:
         assert call_args is not None
         assert call_args[0][1]["prediction_type"] == "spread"
 
-    def test_get_upcoming_predictions_soccer_no_market_filter(self, mock_db, mock_row, mock_settings):
-        """Soccer is single-market so we don't auto-filter — the SQL
-        gets prediction_type=None and the AND clause short-circuits."""
+    def test_get_upcoming_predictions_soccer_default_market_is_match_result(self, mock_db, mock_row, mock_settings):
+        """Soccer stores ~19 prediction_type rows per match (match_result
+        plus the Dixon-Coles-derived markets), so the default MUST pin
+        the headline 'match_result' or the row LIMIT is eaten by ~3
+        matches and whole leagues vanish from the list."""
         from services.prediction_service import PredictionService
 
         mock_db.execute.return_value.fetchall.return_value = []
@@ -168,7 +170,90 @@ class TestPredictionService:
 
         call_args = mock_db.execute.call_args
         assert call_args is not None
-        assert call_args[0][1]["prediction_type"] is None
+        params = call_args[0][1]
+        assert params["prediction_type"] == "match_result"
+        assert params["headline_pairs"] is None
+
+    def test_get_upcoming_predictions_all_sports_default_restricts_to_headline_set(
+        self, mock_db, mock_row, mock_settings
+    ):
+        """No sport + no market → restrict to each sport's headline
+        (sport, prediction_type) PAIR via the list bind, scalar left None.
+
+        Pairs, not bare prediction_types: NHL 'regulation' persists as
+        prediction_type='match_result' (soccer's headline), so a bare
+        `prediction_type = ANY(['match_result','moneyline'])` would return
+        two rows per NHL game (moneyline + regulation) and the frontend
+        would render two cards per match."""
+        from services.prediction_service import HEADLINE_PAIRS, TASKS, PredictionService
+
+        mock_db.execute.return_value.fetchall.return_value = []
+        service = PredictionService(mock_db)
+
+        service.get_upcoming_predictions(limit=10)
+
+        call_args = mock_db.execute.call_args
+        assert call_args is not None
+        params = call_args[0][1]
+        assert params["prediction_type"] is None
+        assert params["headline_pairs"] == [
+            "mma:moneyline",
+            "nba:moneyline",
+            "nfl:moneyline",
+            "nhl:moneyline",
+            "soccer:match_result",
+            "tennis:moneyline",
+        ]
+        assert params["headline_pairs"] == HEADLINE_PAIRS
+        # Regression guard: NHL regulation shares soccer's headline
+        # prediction_type but must NOT be in the cross-sport default.
+        assert TASKS["nhl:regulation"].prediction_type == "match_result"
+        assert "nhl:match_result" not in params["headline_pairs"]
+        # The SQL must pair sport with prediction_type and use the list bind.
+        sql = str(call_args[0][0])
+        assert "(l.sport || ':' || p.prediction_type) = ANY(:headline_pairs)" in sql
+
+    def test_get_upcoming_predictions_tennis_default_market_is_moneyline(self, mock_db, mock_row, mock_settings):
+        from services.prediction_service import PredictionService
+
+        mock_db.execute.return_value.fetchall.return_value = []
+        service = PredictionService(mock_db)
+
+        service.get_upcoming_predictions(sport="tennis", limit=10)
+
+        call_args = mock_db.execute.call_args
+        assert call_args is not None
+        params = call_args[0][1]
+        assert params["prediction_type"] == "moneyline"
+        assert params["headline_pairs"] is None
+
+    def test_get_upcoming_predictions_unregistered_sport_has_no_filter(self, mock_db, mock_row, mock_settings):
+        """Sports with no TaskSpec (horse_racing) keep today's behaviour:
+        no prediction_type filter at all."""
+        from services.prediction_service import PredictionService
+
+        mock_db.execute.return_value.fetchall.return_value = []
+        service = PredictionService(mock_db)
+
+        service.get_upcoming_predictions(sport="horse_racing", limit=10)
+
+        params = mock_db.execute.call_args[0][1]
+        assert params["prediction_type"] is None
+        assert params["headline_pairs"] is None
+
+    def test_get_upcoming_predictions_explicit_soccer_submarket_passes_through(self, mock_db, mock_row, mock_settings):
+        """Soccer derived markets have no TaskSpec; the raw string must
+        reach the SQL unchanged and disable the headline default."""
+        from services.prediction_service import PredictionService
+
+        mock_db.execute.return_value.fetchall.return_value = []
+        service = PredictionService(mock_db)
+
+        service.get_upcoming_predictions(sport="soccer", market="over_under", limit=10)
+
+        params = mock_db.execute.call_args[0][1]
+        assert params["prediction_type"] == "over_under"
+        assert params["headline_pairs"] is None
 
     def test_get_match_predictions_returns_all_markets(self, mock_db, mock_row, mock_settings):
         """NHL match returns all 4 markets ordered by prediction_type."""
@@ -190,6 +275,7 @@ class TestPredictionService:
                 match_date=datetime(2025, 3, 15, 19, 0),
                 venue="Bell Centre",
                 league_name="NHL",
+                sport="nhl",
                 home_team="Canadiens",
                 away_team="Rangers",
             ),
@@ -205,6 +291,7 @@ class TestPredictionService:
                 match_date=datetime(2025, 3, 15, 19, 0),
                 venue="Bell Centre",
                 league_name="NHL",
+                sport="nhl",
                 home_team="Canadiens",
                 away_team="Rangers",
             ),
@@ -229,6 +316,105 @@ class TestPredictionService:
         assert len(predictions) == 2
         assert predictions[0].market == "moneyline"
         assert predictions[1].market == "total"
+
+    @staticmethod
+    def _match_rows(mock_row, match_uuid, sport, league_name, model_name, prediction_types):
+        """Rows in the SQL's prediction_type ASC order, as the DB returns them."""
+        return [
+            mock_row(
+                id=uuid.uuid4(),
+                match_id=match_uuid,
+                predicted_outcome="home",
+                confidence=0.5,
+                probabilities={"home": 0.5},
+                model_name=model_name,
+                model_version="v1.0",
+                prediction_type=pt,
+                match_date=datetime(2025, 3, 15, 19, 0),
+                venue="Somewhere",
+                league_name=league_name,
+                sport=sport,
+                home_team="A",
+                away_team="B",
+            )
+            for pt in sorted(prediction_types)
+        ]
+
+    def _run_match_predictions(self, mock_db, mock_row, rows):
+        from services.prediction_service import PredictionService
+
+        existence_row = mock_row(exists=True)
+        call_count = [0]
+
+        def side_effect(query, params=None):
+            call_count[0] += 1
+            result = MagicMock()
+            if call_count[0] == 1:
+                result.fetchone.return_value = existence_row
+            else:
+                result.fetchall.return_value = rows
+            return result
+
+        mock_db.execute.side_effect = side_effect
+        return PredictionService(mock_db).get_match_predictions(str(rows[0].match_id))
+
+    def test_get_match_predictions_soccer_headline_first(self, mock_db, mock_row, mock_settings):
+        """Soccer's 19 markets sort alphabetically with asian_handicap
+        (51 outcomes) first — the detail-page chart consumes index 0,
+        so match_result must be promoted to the front and the rest keep
+        prediction_type order."""
+        rows = self._match_rows(
+            mock_row,
+            uuid.uuid4(),
+            "soccer",
+            "Premier League",
+            "ensemble",
+            ["asian_handicap", "btts", "correct_score", "match_result", "over_under", "winning_margin"],
+        )
+        predictions = self._run_match_predictions(mock_db, mock_row, rows)
+
+        assert [p.market for p in predictions] == [
+            "match_result",
+            "asian_handicap",
+            "btts",
+            "correct_score",
+            "over_under",
+            "winning_margin",
+        ]
+
+    def test_get_match_predictions_nhl_moneyline_before_spread(self, mock_db, mock_row, mock_settings):
+        """NHL: 'moneyline' sorts after 'match_result' (regulation) in
+        prediction_type order; headline promotion puts moneyline first
+        and leaves regulation/spread/total in their SQL order."""
+        rows = [
+            mock_row(
+                id=uuid.uuid4(),
+                match_id=uuid.uuid4(),
+                predicted_outcome="home",
+                confidence=0.5,
+                probabilities={"home": 0.5},
+                model_name=model_name,
+                model_version="v1.0",
+                prediction_type=pt,
+                match_date=datetime(2025, 3, 15, 19, 0),
+                venue="Bell Centre",
+                league_name="NHL",
+                sport="nhl",
+                home_team="Canadiens",
+                away_team="Rangers",
+            )
+            for pt, model_name in [
+                ("match_result", "ensemble_nhl_reg"),
+                ("moneyline", "ensemble_nhl_ml"),
+                ("spread", "ensemble_nhl_pl"),
+                ("total", "ensemble_nhl_tot"),
+            ]
+        ]
+        for r in rows:
+            r.match_id = rows[0].match_id
+        predictions = self._run_match_predictions(mock_db, mock_row, rows)
+
+        assert [p.market for p in predictions] == ["moneyline", "regulation", "puck_line", "total"]
 
     def test_get_match_predictions_match_not_found(self, mock_db, mock_settings):
         from services.prediction_service import PredictionService

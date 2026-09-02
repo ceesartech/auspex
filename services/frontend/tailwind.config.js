@@ -14,6 +14,13 @@ module.exports = {
         ring: 'hsl(var(--ring))',
         background: 'hsl(var(--background))',
         foreground: 'hsl(var(--foreground))',
+        // --card/--card-foreground were declared in globals.css but never
+        // wired into Tailwind, so `bg-card` (Card primitive, sticky odds
+        // headings) compiled to nothing — sticky headings were transparent.
+        card: {
+          DEFAULT: 'hsl(var(--card))',
+          foreground: 'hsl(var(--card-foreground))',
+        },
         primary: {
           DEFAULT: 'hsl(var(--primary))',
           foreground: 'hsl(var(--primary-foreground))',
