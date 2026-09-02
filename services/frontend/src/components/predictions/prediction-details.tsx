@@ -17,9 +17,9 @@ export function PredictionDetails({ prediction }: PredictionDetailsProps) {
     <div className="space-y-6">
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle>{match_info.home_team} vs {match_info.away_team}</CardTitle>
-            <Badge variant="outline">{match_info.league_name}</Badge>
+          <div className="flex items-center justify-between gap-2">
+            <CardTitle className="min-w-0 break-words">{match_info.home_team} vs {match_info.away_team}</CardTitle>
+            <Badge variant="outline" className="shrink-0">{match_info.league_name}</Badge>
           </div>
           <div className="flex gap-2 text-sm text-muted-foreground">
             <span>{formatDateTime(match_info.match_date)}</span>
@@ -27,11 +27,14 @@ export function PredictionDetails({ prediction }: PredictionDetailsProps) {
           </div>
         </CardHeader>
         <CardContent>
+          {/* min-w-0 on both columns: grid tracks default to minmax(auto,1fr),
+              so long outcome names (e.g. tennis players) would otherwise
+              force the column wider than the card. */}
           <div className="grid gap-6 md:grid-cols-2">
-            <div className="space-y-4">
+            <div className="space-y-4 min-w-0">
               <div>
                 <p className="text-sm text-muted-foreground">Predicted Outcome</p>
-                <p className={cn('text-3xl font-bold', getOutcomeColor(predicted_outcome))}>
+                <p className={cn('text-3xl font-bold break-words', getOutcomeColor(predicted_outcome))}>
                   {predicted_outcome}
                 </p>
               </div>
@@ -54,14 +57,14 @@ export function PredictionDetails({ prediction }: PredictionDetailsProps) {
               </div>
             </div>
 
-            <div>
+            <div className="min-w-0">
               <p className="mb-3 text-sm font-medium">Probabilities</p>
               <div className="space-y-3">
                 {Object.entries(probabilities).map(([outcome, prob]) => (
                   <div key={outcome}>
-                    <div className="flex justify-between text-sm">
-                      <span>{outcome}</span>
-                      <span className="font-medium">{formatPercentage(prob)}</span>
+                    <div className="flex justify-between gap-2 text-sm">
+                      <span className="min-w-0 break-words">{outcome}</span>
+                      <span className="shrink-0 font-medium">{formatPercentage(prob)}</span>
                     </div>
                     <div className="mt-1 h-2 rounded-full bg-muted">
                       <div
@@ -88,11 +91,11 @@ export function PredictionDetails({ prediction }: PredictionDetailsProps) {
           <CardContent>
             <div className="space-y-3">
               {Object.entries(explanation).map(([key, value]) => (
-                <div key={key} className="flex justify-between border-b pb-2 last:border-0">
-                  <span className="text-sm text-muted-foreground">
+                <div key={key} className="flex justify-between gap-4 border-b pb-2 last:border-0">
+                  <span className="min-w-0 break-words text-sm text-muted-foreground">
                     {key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
                   </span>
-                  <span className="text-sm font-medium">
+                  <span className="min-w-0 break-words text-right text-sm font-medium">
                     {typeof value === 'number' ? value.toFixed(4) : String(value)}
                   </span>
                 </div>

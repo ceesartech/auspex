@@ -54,13 +54,13 @@ export function PredictionCard({ prediction, compact = false }: PredictionCardPr
         <CardContent>
           <div className="space-y-3">
             <div className="text-center">
-              <p className="text-sm font-medium">{match_info.home_team}</p>
+              <p className="text-sm font-medium break-words">{match_info.home_team}</p>
               <p className="text-xs text-muted-foreground">vs</p>
-              <p className="text-sm font-medium">{match_info.away_team}</p>
+              <p className="text-sm font-medium break-words">{match_info.away_team}</p>
             </div>
 
             <div className="text-center">
-              <p className={cn('text-lg font-bold', outcomeColor)}>
+              <p className={cn('text-lg font-bold break-words', outcomeColor)}>
                 {predicted_outcome}
               </p>
               <p className="text-xs text-muted-foreground">
@@ -69,10 +69,10 @@ export function PredictionCard({ prediction, compact = false }: PredictionCardPr
             </div>
 
             {!compact && (
-              <div className="flex justify-between text-xs">
+              <div className="flex justify-between gap-2 text-xs">
                 {Object.entries(probabilities).map(([outcome, prob]) => (
-                  <div key={outcome} className="text-center">
-                    <p className="text-muted-foreground">{outcome}</p>
+                  <div key={outcome} className="min-w-0 text-center">
+                    <p className="text-muted-foreground break-words">{outcome}</p>
                     <p className="font-medium">{formatPercentage(prob)}</p>
                   </div>
                 ))}

@@ -35,14 +35,14 @@ export const usePredictionsStore = create<PredictionsState>()((set) => ({
       return { livePredictions: [...state.livePredictions, prediction] };
     }),
 
-  // Changing sport resets the market filter because a market that was
-  // valid for the previous sport (e.g. 'puck_line' under NHL) makes no
-  // sense after switching (soccer has no puck-line market).
+  // Changing sport resets the market and league filters because a market
+  // or league that was valid for the previous sport (e.g. 'puck_line' or
+  // 'Premier League' under soccer) makes no sense after switching.
   setSelectedSport: (sport) =>
     set((state) =>
       state.selectedSport === sport
         ? { selectedSport: sport }
-        : { selectedSport: sport, selectedMarket: null }
+        : { selectedSport: sport, selectedMarket: null, selectedLeague: null }
     ),
   setSelectedLeague: (league) => set({ selectedLeague: league }),
   setSelectedMarket: (market) => set({ selectedMarket: market }),

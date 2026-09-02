@@ -11,10 +11,15 @@ interface FilterState {
   market_type?: string;
   min_odds?: number;
   max_odds?: number;
+  // Client-side only — the recommendations API has no league param, so the
+  // page filters on match_info.league_name instead of forwarding this.
+  league?: string;
 }
 
 interface RecommendationFiltersProps {
   onFilterChange: (filters: FilterState) => void;
+  // League names present in the current result set.
+  leagueOptions?: string[];
 }
 
 const confidenceOptions = [
@@ -46,7 +51,7 @@ const marketOptions = [
   { value: 'win', label: 'Win (Horse Racing)' },
 ];
 
-export function RecommendationFilters({ onFilterChange }: RecommendationFiltersProps) {
+export function RecommendationFilters({ onFilterChange, leagueOptions = [] }: RecommendationFiltersProps) {
   const [filters, setFilters] = useState<FilterState>({});
 
   const updateFilter = (key: keyof FilterState, value: string | number | undefined) => {
@@ -76,6 +81,17 @@ export function RecommendationFilters({ onFilterChange }: RecommendationFiltersP
         onChange={(e) => updateFilter('market_type', e.target.value)}
         className="w-[160px]"
       />
+      {leagueOptions.length > 0 && (
+        <Select
+          options={[
+            { value: '', label: 'All Leagues' },
+            ...leagueOptions.map((league) => ({ value: league, label: league })),
+          ]}
+          value={filters.league || ''}
+          onChange={(e) => updateFilter('league', e.target.value)}
+          className="w-[180px]"
+        />
+      )}
       <Input
         type="number"
         placeholder="Min odds"

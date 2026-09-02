@@ -21,7 +21,7 @@ async def get_recommendations(
     market_type: Optional[str] = Query(None),
     min_odds: Optional[float] = Query(None, ge=1.01),
     max_odds: Optional[float] = Query(None),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(20, ge=1, le=1000),
     db: Session = Depends(get_db),
     user: dict = Depends(require_auth),
 ):

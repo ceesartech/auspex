@@ -92,16 +92,19 @@ export default function PredictionDetailPage() {
             <ArrowLeft className="h-5 w-5" />
           </Button>
         </Link>
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-bold tracking-tight break-words">
             {headerMatch.home_team} vs {headerMatch.away_team}
           </h1>
           <p className="text-muted-foreground">{headerMatch.league_name}</p>
         </div>
       </div>
 
+      {/* min-w-0 on both columns: grid tracks default to minmax(auto,1fr),
+          so long content (bookmaker lists, JSON blobs) would otherwise
+          stretch the column past the viewport. */}
       <div className="grid gap-6 lg:grid-cols-3">
-        <div className="lg:col-span-2 space-y-4">
+        <div className="lg:col-span-2 space-y-4 min-w-0">
           {/* One card per market. The PredictionDetails component reads
               probabilities + predicted_outcome + confidence from each row,
               so it naturally handles soccer's 3-way 1X2, NHL's mix of
@@ -119,7 +122,7 @@ export default function PredictionDetailPage() {
           ))}
         </div>
 
-        <div className="space-y-6">
+        <div className="space-y-6 min-w-0">
           {/* Show the probability chart for the first (headline) market
               only. Showing 3 charts for NBA would crowd the sidebar. */}
           <ProbabilityChart probabilities={predictions[0].probabilities} />
@@ -130,11 +133,14 @@ export default function PredictionDetailPage() {
                 <CardTitle className="text-lg">Current Odds</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="space-y-2">
+                {/* Scrollable: one row per bookmaker × outcome can run to
+                    dozens of rows; without a cap the sidebar stretches past
+                    the main column and wraps into a jumble. */}
+                <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
                   {odds.map((o: any, i: number) => (
-                    <div key={i} className="flex items-center justify-between text-sm">
-                      <span className="text-muted-foreground">{o.bookmaker || 'N/A'}</span>
-                      <div className="flex gap-2">
+                    <div key={i} className="flex items-center justify-between gap-2 text-sm">
+                      <span className="min-w-0 truncate text-muted-foreground">{o.bookmaker || 'N/A'}</span>
+                      <div className="flex shrink-0 items-center gap-2">
                         {o.outcome && <Badge variant="outline">{o.outcome}</Badge>}
                         <span className="font-medium">
                           {formatOdds(o.odds_decimal || o.odds, oddsFormat)}
@@ -153,17 +159,21 @@ export default function PredictionDetailPage() {
                 <CardTitle className="text-lg">Match Stats</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="space-y-2 text-sm">
+                <div className="space-y-3 text-sm">
                   {stats.team_form && (
                     <div>
-                      <p className="text-muted-foreground">Home Form</p>
-                      <p className="font-medium break-words">{JSON.stringify(stats.team_form)}</p>
+                      <p className="mb-1 text-muted-foreground">Home Form</p>
+                      <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 font-mono text-xs">
+                        {JSON.stringify(stats.team_form, null, 2)}
+                      </pre>
                     </div>
                   )}
                   {stats.h2h && (
                     <div>
-                      <p className="text-muted-foreground">Head to Head</p>
-                      <p className="font-medium break-words">{JSON.stringify(stats.h2h)}</p>
+                      <p className="mb-1 text-muted-foreground">Head to Head</p>
+                      <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 font-mono text-xs">
+                        {JSON.stringify(stats.h2h, null, 2)}
+                      </pre>
                     </div>
                   )}
                 </div>

@@ -54,12 +54,21 @@ const marketOptionsBySport: Record<string, { value: string; label: string }[]> =
   ],
 };
 
-export function PredictionFilters() {
+interface PredictionFiltersProps {
+  // League names present in the current result set, for the league
+  // dropdown. Derived from the fetched predictions so the options always
+  // reflect what's actually on screen.
+  leagueOptions?: string[];
+}
+
+export function PredictionFilters({ leagueOptions = [] }: PredictionFiltersProps) {
   const {
     selectedSport,
     setSelectedSport,
     selectedMarket,
     setSelectedMarket,
+    selectedLeague,
+    setSelectedLeague,
     clearFilters,
   } = usePredictionsStore();
 
@@ -73,6 +82,17 @@ export function PredictionFilters() {
         onChange={(e) => setSelectedSport(e.target.value || null)}
         className="w-[180px]"
       />
+      {leagueOptions.length > 0 && (
+        <Select
+          options={[
+            { value: '', label: 'All Leagues' },
+            ...leagueOptions.map((league) => ({ value: league, label: league })),
+          ]}
+          value={selectedLeague || ''}
+          onChange={(e) => setSelectedLeague(e.target.value || null)}
+          className="w-[200px]"
+        />
+      )}
       {marketOptions && (
         <Select
           options={marketOptions}
@@ -81,7 +101,7 @@ export function PredictionFilters() {
           className="w-[220px]"
         />
       )}
-      {(selectedSport || selectedMarket) && (
+      {(selectedSport || selectedMarket || selectedLeague) && (
         <Button variant="ghost" size="sm" onClick={clearFilters}>
           <X className="mr-1 h-3 w-3" /> Clear
         </Button>

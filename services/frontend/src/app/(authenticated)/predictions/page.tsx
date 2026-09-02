@@ -12,13 +12,25 @@ import { Badge } from '@/components/ui/badge';
 import { TrendingUp } from 'lucide-react';
 
 export default function PredictionsPage() {
-  const { selectedSport, selectedMarket } = usePredictionsStore();
+  const { selectedSport, selectedMarket, selectedLeague } = usePredictionsStore();
+  // Fetch the full upcoming slate for the sport (the old limit=50 silently
+  // dropped every match past the first 50 by kickoff — entire leagues like
+  // the Premier League never rendered). League filtering happens
+  // client-side so the league dropdown's options never collapse while
+  // filtering.
   const { data: upcoming, isLoading, error, refetch } = useUpcomingPredictions({
     sport: selectedSport || undefined,
     market: selectedMarket || undefined,
-    limit: 50,
+    limit: 1000,
   });
   const { data: live } = useLivePredictions();
+
+  const leagueOptions = Array.from(
+    new Set((upcoming ?? []).map((p) => p.match_info.league_name))
+  ).sort();
+  const filtered = selectedLeague
+    ? (upcoming ?? []).filter((p) => p.match_info.league_name === selectedLeague)
+    : upcoming;
 
   if (isLoading) return <LoadingPage message="Loading predictions..." />;
   if (error) return <ErrorDisplay message="Failed to load predictions" onRetry={refetch} />;
@@ -37,7 +49,7 @@ export default function PredictionsPage() {
         )}
       </div>
 
-      <PredictionFilters />
+      <PredictionFilters leagueOptions={leagueOptions} />
 
       {/* Phase 5: accuracy / ROI panel — scopes to the same filters
           as the predictions list so the headline numbers match what
@@ -60,7 +72,7 @@ export default function PredictionsPage() {
 
       <div>
         <h2 className="mb-3 text-lg font-semibold">Upcoming</h2>
-        {!upcoming?.length ? (
+        {!filtered?.length ? (
           <EmptyState
             icon={<TrendingUp className="h-12 w-12" />}
             title="No predictions available"
@@ -68,7 +80,7 @@ export default function PredictionsPage() {
           />
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {upcoming.map((prediction) => (
+            {filtered.map((prediction) => (
               <PredictionCard key={prediction.match_info.match_id} prediction={prediction} />
             ))}
           </div>
