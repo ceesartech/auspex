@@ -56,6 +56,6 @@ with DAG(
         bash_command=(
             "CUTOFF=\"$(date -u -d '90 days ago' '+%Y-%m-%d %H:%M:%S%z')\" && "
             "docker compose -f /opt/auspex/docker-compose.yml exec -T airflow-scheduler "
-            "airflow db clean --skip-archive --yes --clean-before-timestamp \"$CUTOFF\""
+            'airflow db clean --skip-archive --yes --clean-before-timestamp "$CUTOFF"'
         ),
     )
