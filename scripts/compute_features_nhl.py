@@ -54,9 +54,29 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
+# The preseason-exclusion predicate is defined ONCE, in
+# services/ml-models/src/utils/training_data.py — see the long comment
+# there for the three marker states. scripts/ reach it by putting that
+# tree on sys.path: the api container (where these scripts run) already
+# has it on PYTHONPATH, and the repo-relative path keeps local dev +
+# the unit tests working. Inserting at position 0 also guarantees
+# `utils` resolves to ml-models' package rather than the same-named one
+# under services/data-ingestion/src.
+_ML_MODELS_SRC = str(Path(__file__).resolve().parent.parent / "services" / "ml-models" / "src")
+for _p in ("/app/services/ml-models/src", _ML_MODELS_SRC):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from utils.training_data import preseason_exclusion_sql  # noqa: E402
+
+# Rows we are willing to build rolling form from. Preseason is excluded;
+# unmarked (pre-backfill) rows are unknown and stay in.
+NOT_PRESEASON_SQL = preseason_exclusion_sql("m")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("compute_features_nhl")
@@ -385,9 +405,17 @@ def _rolling_nhl_form(cur, team_id: str, before_date, side: str) -> dict:
     rate) — a 1-of-1 game shouldn't carry the same weight as 1-of-5.
 
     `side` ∈ {'home', 'away'} prefixes the output keys; the underlying
-    rolling stats pull from both home and away games for the team."""
+    rolling stats pull from both home and away games for the team.
+
+    Preseason games are excluded from the window (see
+    NOT_PRESEASON_SQL), so the window can now reach FURTHER BACK in
+    time than it used to. That is the intended behaviour: 10 genuine
+    games of form beats 10 September exhibitions. The 6,551 rows
+    load_nhl_historical.py stamped with metadata.game_type
+    ('regular'/'playoff') are honoured by the predicate and stay in;
+    unmarked rows are unknown, not preseason, and also stay in."""
     cur.execute(
-        """
+        f"""
         WITH team_games AS (
             SELECT
                 m.id,
@@ -414,6 +442,7 @@ def _rolling_nhl_form(cur, team_id: str, before_date, side: str) -> dict:
               AND m.match_date < %(before)s
               AND m.home_score IS NOT NULL
               AND m.away_score IS NOT NULL
+              AND {NOT_PRESEASON_SQL}
             ORDER BY m.match_date DESC
             LIMIT %(n)s
         )
@@ -487,7 +516,15 @@ def _team_schedule_context(cur, team_id: str, before_date, side: str) -> dict:
 def _rolling_pace_stats(cur, team_id: str, before_date, side: str) -> dict:
     """Per-60-minute rate stats over the team's last WINDOW finished
     games. Normalizes for OT/SO game-length inflation so totals models
-    see clean rate signals instead of OT-inflated raw averages."""
+    see clean rate signals instead of OT-inflated raw averages.
+
+    Preseason games are excluded from the window (see
+    NOT_PRESEASON_SQL), so the window can now reach FURTHER BACK in
+    time than it used to. That is the intended behaviour: 10 genuine
+    games of form beats 10 September exhibitions. The 6,551 rows
+    load_nhl_historical.py stamped with metadata.game_type
+    ('regular'/'playoff') are honoured by the predicate and stay in;
+    unmarked rows are unknown, not preseason, and also stay in."""
     cur.execute(
         f"""
         WITH team_games AS (
@@ -514,6 +551,7 @@ def _rolling_pace_stats(cur, team_id: str, before_date, side: str) -> dict:
               AND m.match_date < %(before)s
               AND m.home_score IS NOT NULL
               AND m.away_score IS NOT NULL
+              AND {NOT_PRESEASON_SQL}
             ORDER BY m.match_date DESC
             LIMIT %(n)s
         )
@@ -558,9 +596,17 @@ def _rolling_5v5_stats(cur, team_id: str, before_date, side: str) -> dict:
     by the inner JOIN — for short rolling windows that include such
     games, the per-team averages collapse toward the neutral defaults.
 
-    `side` ∈ {'home', 'away'} prefixes the output keys."""
+    `side` ∈ {'home', 'away'} prefixes the output keys.
+
+    Preseason games are excluded from the window (see
+    NOT_PRESEASON_SQL), so the window can now reach FURTHER BACK in
+    time than it used to. That is the intended behaviour: 10 genuine
+    games of form beats 10 September exhibitions. The 6,551 rows
+    load_nhl_historical.py stamped with metadata.game_type
+    ('regular'/'playoff') are honoured by the predicate and stay in;
+    unmarked rows are unknown, not preseason, and also stay in."""
     cur.execute(
-        """
+        f"""
         WITH team_games AS (
             SELECT
                 s.shot_attempts_5v5      AS corsi_for,
@@ -581,6 +627,7 @@ def _rolling_5v5_stats(cur, team_id: str, before_date, side: str) -> dict:
             WHERE (m.home_team_id = %(tid)s OR m.away_team_id = %(tid)s)
               AND m.status = 'finished'
               AND m.match_date < %(before)s
+              AND {NOT_PRESEASON_SQL}
             ORDER BY m.match_date DESC
             LIMIT %(n)s
         )
@@ -656,7 +703,15 @@ def _goalie_rolling_form(cur, goalie_id: str | None, before_date, side: str) -> 
     """Per-goalie rolling stats over their last WINDOW starts: save%,
     GAA (per 60), days since last start, back-to-back flag. Returns
     Nones (filled with NEUTRAL_DEFAULTS downstream) when goalie_id is
-    None — i.e., we don't know who'll start for the upcoming game."""
+    None — i.e., we don't know who'll start for the upcoming game.
+
+    Preseason games are excluded from the window (see
+    NOT_PRESEASON_SQL), so the window can now reach FURTHER BACK in
+    time than it used to. That is the intended behaviour: 10 genuine
+    games of form beats 10 September exhibitions. The 6,551 rows
+    load_nhl_historical.py stamped with metadata.game_type
+    ('regular'/'playoff') are honoured by the predicate and stay in;
+    unmarked rows are unknown, not preseason, and also stay in."""
     if goalie_id is None:
         return {
             f"{side}_goalie_roll_save_pct": None,
@@ -686,6 +741,7 @@ def _goalie_rolling_form(cur, goalie_id: str | None, before_date, side: str) -> 
             WHERE s.starting_goalie_id = %(gid)s
               AND m.status = 'finished'
               AND m.match_date < %(before)s
+              AND {NOT_PRESEASON_SQL}
             ORDER BY m.match_date DESC
             LIMIT %(n)s
         )
@@ -719,7 +775,11 @@ def _goalie_rolling_form(cur, goalie_id: str | None, before_date, side: str) -> 
 
 
 def _crossbook_per_book_query(
-    cur, match_id: str, market: str, primary: str, counter: str,
+    cur,
+    match_id: str,
+    market: str,
+    primary: str,
+    counter: str,
 ):
     """Shared helper for puck_line + total. Returns a list of
     {bookmaker, p_line, p_odds, c_odds} rows."""
@@ -785,9 +845,7 @@ def _crossbook_aggregate(rows: list, prefix: str) -> dict:
     }
     if len(lines) > 1:
         mean = out[f"{prefix}_consensus_mean"]
-        out[f"{prefix}_std"] = float(
-            (sum((x - mean) ** 2 for x in lines) / len(lines)) ** 0.5
-        )
+        out[f"{prefix}_std"] = float((sum((x - mean) ** 2 for x in lines) / len(lines)) ** 0.5)
     else:
         out[f"{prefix}_std"] = 0.0
     if devigged:

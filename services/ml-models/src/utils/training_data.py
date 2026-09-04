@@ -7,6 +7,84 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+# ── Season-type exclusion — THE single definition ────────────────────
+#
+# Every ESPN scoreboard event carries event.season.type
+# (1 = preseason, 2 = regular season, 3 = post-season).
+# scripts/fetch_upcoming.py stamps it onto
+# matches.metadata->>'season_type' as 'preseason' | 'regular' |
+# 'postseason'. Preseason football/basketball/hockey is a structurally
+# different game (NFL: mean total 37.37, sd 11.44, n=147 vs 44.85,
+# sd 14.22, n=857 for regular season) played by roster hopefuls, and it
+# carries no betting market at all — so it must never enter a training
+# frame, a rolling-form window, or a monitoring slice.
+#
+# Three marker states, and the third one is deliberate:
+#
+#   1. metadata->>'season_type' = 'preseason'  → EXCLUDED.
+#   2. metadata->>'game_type' IN ('regular', 'playoff') → NOT preseason.
+#      This is the LEGACY NHL marker written by
+#      scripts/load_nhl_historical.py on 6,551 rows (that loader drops
+#      gameType != 2/3 at discovery, so those rows are known-clean).
+#      Honouring it keeps them working before/without a backfill.
+#   3. NO marker at all → treated as UNKNOWN and INCLUDED.
+#
+# (3) is a deliberate choice, not an oversight. Rows that predate this
+# work carry neither marker; a COALESCE(..., 'regular') would silently
+# re-admit the 294 known historical preseason games (147 NFL + 147 NBA)
+# as if they were verified regular-season rows. The way those rows get
+# removed is scripts/backfill_season_type.py, which stamps them from
+# documented per-sport date rules. Until that has run, an unmarked row
+# is honestly unknown and stays in.
+#
+# Import this from scripts/ (they add services/ml-models/src to
+# sys.path) rather than copy-pasting the SQL — one definition, five
+# call sites.
+
+PRESEASON_SEASON_TYPE = "preseason"
+REGULAR_SEASON_TYPE = "regular"
+POSTSEASON_SEASON_TYPE = "postseason"
+
+# Legacy NHL marker values that affirmatively mean "not preseason".
+LEGACY_NOT_PRESEASON_GAME_TYPES = ("regular", "playoff")
+
+
+def preseason_exclusion_sql(alias: str = "m") -> str:
+    """SQL boolean that is TRUE for every row we are willing to use.
+
+    `alias` is the table alias for `matches` in the calling query.
+    Drop it into a WHERE with a leading AND, e.g.
+
+        WHERE l.sport = 'nfl'
+          AND {preseason_exclusion_sql('m')}
+
+    The OR arm gives the legacy NHL `game_type` marker the final say:
+    a row explicitly tagged regular/playoff by load_nhl_historical is
+    never preseason, whatever else metadata holds.
+    """
+    return (
+        f"({alias}.metadata->>'season_type' IS DISTINCT FROM 'preseason'"
+        f" OR {alias}.metadata->>'game_type' IN ('regular', 'playoff'))"
+    )
+
+
+def is_preseason(metadata: Optional[Dict[str, Any]]) -> bool:
+    """Python mirror of preseason_exclusion_sql for row-level checks.
+
+    Same three-state semantics: an explicit 'preseason' season_type is
+    preseason, the legacy NHL game_type marker overrides it, and a
+    missing marker is unknown → NOT preseason (so the row is kept).
+    """
+    md = metadata or {}
+    if md.get("game_type") in LEGACY_NOT_PRESEASON_GAME_TYPES:
+        return False
+    return md.get("season_type") == PRESEASON_SEASON_TYPE
+
+
+# SQL fragment for the `matches m` alias every query in this module
+# uses. Precomputed so the query constants below stay plain f-strings.
+MATCH_NOT_PRESEASON_SQL = preseason_exclusion_sql("m")
+
 # Pulls finished SOCCER matches with closing odds joined in, plus the most
 # recent features_cache row from the 'baseline' (soccer) feature set. The
 # odds-derived columns let us train a working baseline model even before
@@ -106,7 +184,7 @@ NHL_MONEYLINE_TARGET = "nhl_moneyline"
 #      regardless of feature_set, which would mix incompatible schemas
 #      for a sport that has both. NHL never overlaps but pinning by
 #      feature_set is the load-bearing invariant going forward.
-NHL_MONEYLINE_TRAINING_QUERY = """
+NHL_MONEYLINE_TRAINING_QUERY = f"""
     SELECT
         m.id::text AS match_id,
         m.match_date,
@@ -160,6 +238,9 @@ NHL_MONEYLINE_TRAINING_QUERY = """
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
       AND m.home_score <> m.away_score  -- NHL always has a winner; ties = data error
+      -- Preseason is a different game and carries no market; excluded
+      -- via the shared predicate. Unmarked (pre-backfill) rows stay in.
+      AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
 
@@ -203,7 +284,7 @@ NHL_REGULATION_TARGET = "nhl_regulation"
 #   4. The features_cache pin (feature_set='nhl_baseline') stays — the
 #      same feature set serves both moneyline and regulation models;
 #      only the target column changes.
-NHL_REGULATION_TRAINING_QUERY = """
+NHL_REGULATION_TRAINING_QUERY = f"""
     SELECT
         m.id::text AS match_id,
         m.match_date,
@@ -256,6 +337,9 @@ NHL_REGULATION_TRAINING_QUERY = """
       AND m.away_score IS NOT NULL
       AND m.metadata ? 'regulation_winner'
       AND m.metadata->>'regulation_winner' IN ('home', 'tie', 'away')
+      -- Preseason is a different game and carries no market; excluded
+      -- via the shared predicate. Unmarked (pre-backfill) rows stay in.
+      AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
 
@@ -666,7 +750,7 @@ NHL_PUCK_LINE_TARGET = "nhl_puck_line"
 # defensive filters) carries over verbatim because the feature inputs
 # don't change between NHL classification tasks. The target swap is
 # what makes each task its own model.
-NHL_PUCK_LINE_TRAINING_QUERY = """
+NHL_PUCK_LINE_TRAINING_QUERY = f"""
     SELECT
         m.id::text AS match_id,
         m.match_date,
@@ -716,6 +800,9 @@ NHL_PUCK_LINE_TRAINING_QUERY = """
       AND m.status = 'finished'
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
+      -- Preseason is a different game and carries no market; excluded
+      -- via the shared predicate. Unmarked (pre-backfill) rows stay in.
+      AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
 
@@ -742,7 +829,7 @@ NHL_PUCK_LINE_NON_FEATURE_COLUMNS = {
 # NHL convention), 1 = under 5.5 (sum <= 5).
 NHL_TOTAL_TARGET = "nhl_total"
 
-NHL_TOTAL_TRAINING_QUERY = """
+NHL_TOTAL_TRAINING_QUERY = f"""
     SELECT
         m.id::text AS match_id,
         m.match_date,
@@ -792,6 +879,9 @@ NHL_TOTAL_TRAINING_QUERY = """
       AND m.status = 'finished'
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
+      -- Preseason is a different game and carries no market; excluded
+      -- via the shared predicate. Unmarked (pre-backfill) rows stay in.
+      AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
 
@@ -929,7 +1019,7 @@ NBA_TOTAL_TARGET = "nba_total"
 
 # Moneyline: home win = 0, away win = 1. NBA always has a winner
 # after OT, so no tie row to filter.
-NBA_MONEYLINE_TRAINING_QUERY = """
+NBA_MONEYLINE_TRAINING_QUERY = f"""
     SELECT
         m.id::text AS match_id,
         m.match_date,
@@ -966,6 +1056,9 @@ NBA_MONEYLINE_TRAINING_QUERY = """
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
       AND m.home_score <> m.away_score  -- NBA never ties; ties = data error
+      -- Preseason is a different game and carries no market; excluded
+      -- via the shared predicate. Unmarked (pre-backfill) rows stay in.
+      AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
 
@@ -975,7 +1068,7 @@ NBA_MONEYLINE_TRAINING_QUERY = """
 # margin > 7.5). The LATERAL spread.* subquery returns the avg closing
 # line across books — INNER joined so matches without a closing spread
 # are dropped from the training corpus.
-NBA_SPREAD_TRAINING_QUERY = """
+NBA_SPREAD_TRAINING_QUERY = f"""
     SELECT
         m.id::text AS match_id,
         m.match_date,
@@ -1018,6 +1111,7 @@ NBA_SPREAD_TRAINING_QUERY = """
       AND m.status = 'finished'
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
+      AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
 
@@ -1025,7 +1119,7 @@ NBA_SPREAD_TRAINING_QUERY = """
 # > closing_total_line. INNER LATERAL filters to matches with a real
 # total line (~85% of NBA matches in DB after the historical-odds
 # backfill).
-NBA_TOTAL_TRAINING_QUERY = """
+NBA_TOTAL_TRAINING_QUERY = f"""
     SELECT
         m.id::text AS match_id,
         m.match_date,
@@ -1068,6 +1162,7 @@ NBA_TOTAL_TRAINING_QUERY = """
       AND m.status = 'finished'
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
+      AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
 
@@ -1226,7 +1321,7 @@ NFL_TOTAL_TARGET = "nfl_total"
 #     treat NaN as a "missing direction" in split learning — a
 #     distinct concept from any literal default value, so no
 #     leakage even though the corpus contains missing rows.
-NFL_MONEYLINE_TRAINING_QUERY = """
+NFL_MONEYLINE_TRAINING_QUERY = f"""
     SELECT
         m.id::text AS match_id,
         m.match_date,
@@ -1262,6 +1357,9 @@ NFL_MONEYLINE_TRAINING_QUERY = """
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
       AND m.home_score <> m.away_score
+      -- Preseason is a different game and carries no market; excluded
+      -- via the shared predicate. Unmarked (pre-backfill) rows stay in.
+      AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
 
@@ -1269,7 +1367,7 @@ NFL_MONEYLINE_TRAINING_QUERY = """
 # math as NBA. NFL spreads span -14.5 to +14.5 with 0.5-point steps,
 # so pushes are rare but possible at half-point lines (in practice
 # NFL lines are usually half-points to eliminate pushes).
-NFL_SPREAD_TRAINING_QUERY = """
+NFL_SPREAD_TRAINING_QUERY = f"""
     SELECT
         m.id::text AS match_id,
         m.match_date,
@@ -1312,11 +1410,12 @@ NFL_SPREAD_TRAINING_QUERY = """
       AND m.status = 'finished'
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
+      AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
 
 # Total: over = 0, under = 1. NFL totals span 38-55 typically.
-NFL_TOTAL_TRAINING_QUERY = """
+NFL_TOTAL_TRAINING_QUERY = f"""
     SELECT
         m.id::text AS match_id,
         m.match_date,
@@ -1359,6 +1458,7 @@ NFL_TOTAL_TRAINING_QUERY = """
       AND m.status = 'finished'
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
+      AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
 

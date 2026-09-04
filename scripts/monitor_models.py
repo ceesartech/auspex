@@ -5,9 +5,14 @@ Runs on a rolling window (default 30 days). For each
 (sport, prediction_type, model_name) slice with at least
 --min-samples graded predictions:
 
-  1. Pull (predicted_prob_for_picked_outcome, is_correct) pairs.
-     Pushes (is_correct IS NULL) are excluded — they're neither
-     right nor wrong and would distort calibration.
+  1. Pull (predicted_prob_for_picked_outcome, is_correct) pairs,
+     ONE PER MATCH. Pushes (is_correct IS NULL) are excluded — they're
+     neither right nor wrong and would distort calibration — and so
+     are preseason games and stale retrain duplicates (see
+     _DEDUPED_GRADED_PREDICTIONS_SQL). Reported n is therefore much
+     smaller than it was before 2026-09 (NFL 220 -> ~47, MMA
+     444 -> ~121); the drift thresholds are n-sensitive, so read a
+     changed n as a corrected denominator, not as lost data.
   2. Compute ECE / MCE / Brier / log-loss + accuracy via
      calibration_metrics.calibration_report.
   3. Compare against DriftThresholds; collect findings.
@@ -49,6 +54,7 @@ import os
 import sys
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 
 import psycopg2
@@ -56,6 +62,18 @@ from psycopg2.extras import Json, RealDictCursor
 
 # Reuse the pure calibration math + the shared telegram digest.
 sys.path.insert(0, os.path.dirname(__file__))
+
+# The preseason-exclusion predicate is defined ONCE, in
+# services/ml-models/src/utils/training_data.py — see the long comment
+# there for the three marker states. The api container (where this
+# runs) already has that tree on PYTHONPATH; the repo-relative path
+# keeps local dev + the unit tests working. Position 0 also guarantees
+# `utils` resolves to ml-models' package rather than the same-named one
+# under services/data-ingestion/src.
+_ML_MODELS_SRC = str(Path(__file__).resolve().parent.parent / "services" / "ml-models" / "src")
+for _p in ("/app/services/ml-models/src", _ML_MODELS_SRC):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from calibration_metrics import (  # noqa: E402
     CalibrationReport,
@@ -65,6 +83,10 @@ from calibration_metrics import (  # noqa: E402
     detect_drift,
 )
 from telegram_notify import Alert, send_telegram_digest  # noqa: E402
+from utils.training_data import preseason_exclusion_sql  # noqa: E402
+
+# Only count graded rows for games that were actually played for real.
+NOT_PRESEASON_SQL = preseason_exclusion_sql("m")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("monitor_models")
@@ -88,27 +110,74 @@ MARKET_DISPLAY = {
 # ── DB I/O ───────────────────────────────────────────────────────────
 
 
-def fetch_slices(cur, days: int, min_samples: int) -> list[dict]:
-    """Return rows of {sport, prediction_type, model_name, count} that
-    pass the min-samples gate, sorted so the report is stable across
-    runs."""
-    cur.execute(
-        """
-        SELECT l.sport,
+# ── One row per MATCH, not per predictions row ───────────────────────
+#
+# Every weekly retrain writes a FRESH predictions row for the same
+# (match, market) under a new model_version, and grading fills
+# is_correct on all of them. A naive COUNT(*) therefore counted the
+# same game once per retrain: the NFL 30-day slice reported
+# n = 220 / 220 / 226 for only 47 / 49 / 49 DISTINCT matches (4.7x),
+# and MMA's headline "n = 444" was 121 distinct fights. Those extra
+# rows are near-duplicates of each other, so ECE/Brier confidence
+# intervals computed from them were far too tight.
+#
+# DISTINCT ON (match_id, prediction_type) ... ORDER BY ... created_at
+# DESC keeps the NEWEST graded row per match+market — the version
+# actually serving now — and drops the historical copies. Preseason
+# games are excluded too (the current NFL 30-day slice is 100
+# percent preseason).
+#
+# Pushes stay excluded via is_correct IS NOT NULL: they are neither
+# right nor wrong and would distort calibration.
+_DEDUPED_GRADED_PREDICTIONS_SQL = f"""        SELECT DISTINCT ON (p.match_id, p.prediction_type)
+               p.match_id,
+               p.created_at,
+               l.sport,
                p.prediction_type,
                p.model_name,
-               COUNT(*) AS n
+               (p.probabilities->>p.predicted_outcome)::float AS picked_prob,
+               (p.is_correct)::int AS correct
         FROM predictions p
         JOIN matches m ON m.id = p.match_id
         JOIN leagues l ON l.id = m.league_id
         WHERE p.is_correct IS NOT NULL
           AND m.status = 'finished'
-          AND m.match_date >= NOW() - (%s || ' days')::interval
-        GROUP BY l.sport, p.prediction_type, p.model_name
-        HAVING COUNT(*) >= %s
-        ORDER BY l.sport, p.prediction_type, p.model_name
+          AND m.match_date >= NOW() - (%(days)s || ' days')::interval
+          AND {NOT_PRESEASON_SQL}
+        ORDER BY p.match_id, p.prediction_type, p.created_at DESC
+"""
+
+
+def fetch_slices(cur, days: int, min_samples: int) -> list[dict]:
+    """Return rows of {sport, prediction_type, model_name, count} that
+    pass the min-samples gate, sorted so the report is stable across
+    runs.
+
+    n is per-MATCH, not per predictions row. Retrain duplicates are
+    collapsed by _DEDUPED_GRADED_PREDICTIONS_SQL and preseason games
+    are dropped, so reported n fell sharply when this landed
+    (NFL 220 -> ~47, MMA 444 -> ~121). The DriftThresholds are
+    n-sensitive — a slice that used to clear --min-samples on inflated
+    duplicates may now sit below it and stop being reported at all.
+    That is the honest number; re-tune the gate, don't re-inflate n.
+
+    model_name comes from the surviving (newest) row, so a slice is
+    attributed to the version actually serving.
+    """
+    cur.execute(
+        f"""
+        SELECT sport,
+               prediction_type,
+               model_name,
+               COUNT(*) AS n
+        FROM (
+{_DEDUPED_GRADED_PREDICTIONS_SQL}
+        ) d
+        GROUP BY sport, prediction_type, model_name
+        HAVING COUNT(*) >= %(min_samples)s
+        ORDER BY sport, prediction_type, model_name
         """,
-        (str(days), min_samples),
+        {"days": str(days), "min_samples": min_samples},
     )
     return [dict(r) for r in cur.fetchall()]
 
@@ -123,22 +192,29 @@ def fetch_slice_pairs(
     """Pull (predicted_prob_for_picked, is_correct) pairs for one
     (sport, market, model_name) slice. We use the picked outcome's
     probability — predictions.probabilities is JSONB keyed by label,
-    so we look up probabilities[predicted_outcome]."""
+    so we look up probabilities[predicted_outcome].
+
+    One pair per MATCH: the same de-duplication fetch_slices uses runs
+    here first, so the counts in the report and the arrays the
+    calibration math sees can never disagree. Preseason is excluded and
+    pushes stay out (is_correct IS NOT NULL).
+    """
     cur.execute(
-        """
-        SELECT (p.probabilities->>p.predicted_outcome)::float AS picked_prob,
-               (p.is_correct)::int AS correct
-        FROM predictions p
-        JOIN matches m ON m.id = p.match_id
-        JOIN leagues l ON l.id = m.league_id
-        WHERE l.sport = %s
-          AND p.prediction_type = %s
-          AND p.model_name = %s
-          AND p.is_correct IS NOT NULL
-          AND m.status = 'finished'
-          AND m.match_date >= NOW() - (%s || ' days')::interval
+        f"""
+        SELECT picked_prob, correct
+        FROM (
+{_DEDUPED_GRADED_PREDICTIONS_SQL}
+        ) d
+        WHERE d.sport = %(sport)s
+          AND d.prediction_type = %(prediction_type)s
+          AND d.model_name = %(model_name)s
         """,
-        (sport, prediction_type, model_name, str(days)),
+        {
+            "days": str(days),
+            "sport": sport,
+            "prediction_type": prediction_type,
+            "model_name": model_name,
+        },
     )
     rows = cur.fetchall()
     predicted: list[float] = []
@@ -420,13 +496,9 @@ def run(database_url: str, days: int, min_samples: int, thresholds: DriftThresho
 
             for s in slices:
                 if s["sport"] == "horse_racing":
-                    predicted, actual = fetch_horse_racing_pairs(
-                        cur, s["prediction_type"], s["model_name"], days
-                    )
+                    predicted, actual = fetch_horse_racing_pairs(cur, s["prediction_type"], s["model_name"], days)
                 else:
-                    predicted, actual = fetch_slice_pairs(
-                        cur, s["sport"], s["prediction_type"], s["model_name"], days
-                    )
+                    predicted, actual = fetch_slice_pairs(cur, s["sport"], s["prediction_type"], s["model_name"], days)
                 if len(predicted) < min_samples:
                     continue
                 report = calibration_report(predicted, actual)

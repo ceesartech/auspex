@@ -1,0 +1,13 @@
+[flake8]
+# Vendored / generated trees are not repo source. `make lint` and CI only point
+# flake8 at the four first-party service packages, so they never saw these; a
+# broader invocation (e.g. `flake8 scripts services`) otherwise fails on
+# third-party code such as services/frontend/node_modules/flatted/python/flatted.py.
+# extend-exclude (not exclude) keeps flake8's built-in defaults (.git, __pycache__, ...).
+extend-exclude =
+    node_modules,
+    venv,
+    .venv,
+    .next,
+    build,
+    dist

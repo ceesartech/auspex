@@ -26,10 +26,31 @@ import os
 import sys
 from pathlib import Path
 
+# The preseason-exclusion predicate is defined ONCE, in
+# services/ml-models/src/utils/training_data.py. Same sys.path dance as
+# scripts/compute_features_nfl.py: the api container already has that tree
+# on PYTHONPATH, and the repo-relative path keeps local dev + the unit
+# tests working. Position 0 also guarantees `utils` resolves to
+# ml-models' package rather than the same-named one under
+# services/data-ingestion/src.
+_ML_MODELS_SRC = str(Path(__file__).resolve().parent.parent / "services" / "ml-models" / "src")
+for _p in ("/app/services/ml-models/src", _ML_MODELS_SRC):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from utils.training_data import preseason_exclusion_sql  # noqa: E402
+
 LOGGER = logging.getLogger("train_hockey_dixon_coles")
 
 
-NHL_DC_TRAINING_QUERY = """
+# Preseason is excluded here for the same reason it is excluded from every
+# other training frame: preseason lineups and scoring rates are structurally
+# different, and this artifact feeds 8 live NHL markets via
+# derive_hockey_markets. Unlike the NBA/NFL spread+total frames there is no
+# incidental odds join to keep it out — nothing but this predicate. NHL rows
+# loaded by load_nhl_historical.py carry the legacy metadata.game_type marker
+# instead of season_type, which preseason_exclusion_sql also honours.
+NHL_DC_TRAINING_QUERY = f"""
     SELECT
         m.id::text AS match_id,
         m.match_date,
@@ -63,6 +84,7 @@ NHL_DC_TRAINING_QUERY = """
       AND m.status = 'finished'
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
+      AND {preseason_exclusion_sql('m')}
     ORDER BY m.match_date ASC
 """
 

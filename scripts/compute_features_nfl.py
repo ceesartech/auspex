@@ -62,10 +62,30 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Optional
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
+# The preseason-exclusion predicate is defined ONCE, in
+# services/ml-models/src/utils/training_data.py — see the long comment
+# there for the three marker states. scripts/ reach it by putting that
+# tree on sys.path: the api container (where these scripts run) already
+# has it on PYTHONPATH, and the repo-relative path keeps local dev +
+# the unit tests working. Inserting at position 0 also guarantees
+# `utils` resolves to ml-models' package rather than the same-named one
+# under services/data-ingestion/src.
+_ML_MODELS_SRC = str(Path(__file__).resolve().parent.parent / "services" / "ml-models" / "src")
+for _p in ("/app/services/ml-models/src", _ML_MODELS_SRC):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from utils.training_data import preseason_exclusion_sql  # noqa: E402
+
+# Rows we are willing to build rolling form from. Preseason is excluded;
+# unmarked (pre-backfill) rows are unknown and stay in.
+NOT_PRESEASON_SQL = preseason_exclusion_sql("m")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("compute_features_nfl")
@@ -299,9 +319,18 @@ def fetch_team_rolling(cur, team_id: str, before_date) -> dict:
     matches from the `matches` table — scores only, no per-drive
     advanced stats (those come in v2). Returns the bare numeric dict
     keyed by 'roll_pts_scored', etc., un-prefixed; caller prefixes
-    with home_ / away_."""
+    with home_ / away_.
+
+    Preseason games are excluded from the window (see
+    NOT_PRESEASON_SQL). That means the window can now reach FURTHER
+    BACK in time than it used to — a regular-season week-1 row is built
+    from last season's real football instead of August exhibitions.
+    That is the intended behaviour: 5 genuine games of form beats
+    5 games of roster-hopeful scrimmages. Rows with no season_type
+    marker at all are still included (unknown != preseason); the
+    historical ones are stamped by scripts/backfill_season_type.py."""
     cur.execute(
-        """
+        f"""
         WITH last_games AS (
             SELECT m.id, m.match_date, m.home_team_id, m.away_team_id,
                    m.home_score, m.away_score
@@ -310,6 +339,7 @@ def fetch_team_rolling(cur, team_id: str, before_date) -> dict:
             WHERE l.sport = 'nfl'
               AND m.status = 'finished'
               AND m.home_score IS NOT NULL AND m.away_score IS NOT NULL
+              AND {NOT_PRESEASON_SQL}
               AND (m.home_team_id = %s OR m.away_team_id = %s)
               AND m.match_date < %s
             ORDER BY m.match_date DESC
@@ -539,9 +569,7 @@ def fetch_moneyline_crossbook(cur, match_id: str) -> dict:
     }
     if len(home_probs) > 1:
         mean = out["ml_consensus_home_prob"]
-        out["ml_std_home_prob"] = float(
-            (sum((p - mean) ** 2 for p in home_probs) / len(home_probs)) ** 0.5
-        )
+        out["ml_std_home_prob"] = float((sum((p - mean) ** 2 for p in home_probs) / len(home_probs)) ** 0.5)
     else:
         out["ml_std_home_prob"] = 0.0
     return out

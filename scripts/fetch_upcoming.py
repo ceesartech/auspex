@@ -424,9 +424,10 @@ def insert_finished_match(
     result_meta: dict,
 ) -> int:
     """Record a final result (audit doc §2.1 — the missing half of the
-    feedback loop). Updates the row fetch_upcoming created via the same
-    (home, away, match_date) identity, or inserts it as finished when we
-    never saw it as a fixture (grows the corpus). grade_completed_matches
+    feedback loop). Updates the row fetch_upcoming created — callers run
+    _reconcile_match_row first so that row's match_date already matches
+    ESPN's current time — or inserts it as finished when we never saw it
+    as a fixture (grows the corpus). grade_completed_matches
     (already on the 15-min cadence) settles predictions + recs from here.
     Score columns follow the corpus conventions: real scores for team
     sports, winner-flag 1/0 for tennis/MMA."""
@@ -470,8 +471,404 @@ def _competitor_name(competitor: dict, is_individual: bool) -> str | None:
     return team.get("displayName") or team.get("name")
 
 
+# ESPN's event.season.type enum. 1 = preseason, 2 = regular season,
+# 3 = post-season. Verified live 2026-09-04 against the NFL, NBA and NHL
+# scoreboards (NFL 2026-08-15 -> 7 type-1 events; NFL 2026-09-13 -> 13
+# type-2; NBA 2023-10-05 / 2024-10-04 and NHL 2025-09-22 -> type 1).
+_ESPN_SEASON_TYPES: dict[int, str] = {1: "preseason", 2: "regular", 3: "postseason"}
+
+# Unknown enum values are logged ONCE per process (ESPN occasionally adds
+# codes — e.g. all-star / exhibition windows). Storing nothing is the safe
+# choice: readers treat a MISSING marker as "unknown", never as "regular".
+_UNKNOWN_SEASON_TYPES_SEEN: set[str] = set()
+
+
+def _event_season_type(event: dict | None) -> str | None:
+    """Map ESPN `event.season.type` to our stored season_type label.
+
+    Returns 'preseason' | 'regular' | 'postseason', or None when ESPN
+    omitted the field or sent a code we don't recognise. None means
+    "unknown" and is never written — a COALESCE(..., 'regular') anywhere
+    downstream would silently re-admit preseason games into training.
+    """
+    raw = ((event or {}).get("season") or {}).get("type")
+    if raw is None:
+        return None
+    try:
+        mapped = _ESPN_SEASON_TYPES.get(int(raw))
+    except (TypeError, ValueError):
+        mapped = None
+    if mapped is None:
+        key = repr(raw)
+        if key not in _UNKNOWN_SEASON_TYPES_SEEN:
+            _UNKNOWN_SEASON_TYPES_SEEN.add(key)
+            logger.warning(
+                "Unrecognised ESPN season.type %s on event %s — storing no season_type "
+                "(rows without the marker are treated as unknown downstream)",
+                key,
+                (event or {}).get("id"),
+            )
+    return mapped
+
+
+def _event_context(event: dict | None) -> dict:
+    """The slice of the ESPN *event* that individual competitions need but
+    don't carry themselves. season.type lives on the event, while the
+    competition is the unit of a match — for tennis the two are separated
+    by two levels of nesting (event.groupings[].competitions[])."""
+    return {"season_type": _event_season_type(event), "event_id": (event or {}).get("id")}
+
+
+# Healing window: how far either side of ESPN's kickoff we look for the
+# row a slid fixture already owns. Prod's measured twin shifts: min
+# 0.08 h, p25 0.58 h, median 2 h, p75 24 h, max 70.5 h.
+IDENTITY_WINDOW_HOURS = 72
+
+# A heal that drags a row further than this is past the measured p75 and
+# is worth an ERROR line even though the payload guard has cleared it.
+LARGE_SHIFT_HOURS = 24
+
+
+def _pair_key(home_name: str, away_name: str) -> tuple[str, str]:
+    """Index key for a fixture's ORDERED team pair.
+
+    Keyed on the ESPN display names rather than our team ids: the index is
+    built from the raw payload before any team row is touched, ensure_team
+    maps a name onto an id deterministically within a run, and the healing
+    query is itself keyed on the ordered (home, away) pair."""
+    return (home_name, away_name)
+
+
+def build_pair_index(cfg: SportConfig, events: list[dict]) -> dict[tuple[str, str], list[datetime]]:
+    """Map every ordered team pair in a sweep to the kickoff times ESPN
+    published for it. This is what makes step-3 healing payload-aware.
+
+    Healing resolves an incoming competition onto "the one unidentified
+    'scheduled' row for this pair within +/- 72 h". That is wrong whenever
+    the SAME pair plays twice inside the window and only one of the two
+    rows exists: the surviving row belongs to the OTHER game, and healing
+    would drag it onto this kickoff and then overwrite it with this game's
+    result — silently settling one fixture's predictions and recs against
+    another fixture's outcome, and erasing it from the corpus.
+
+    Same-pair repeats inside 72 h are routine, not exotic: 21 NBA pairs
+    41-65 h apart in 2026-04-18..05-12, 13 NHL pairs in 2026-04-22..05-11,
+    and back-to-backs in the regular season too. Both games are always in
+    the same sweep, so counting the payload blocks every such merge."""
+    index: dict[tuple[str, str], list[datetime]] = {}
+    for event in events or []:
+        for comp, _context in _iter_event_competitions(event, cfg):
+            parts = _competition_parts(comp, cfg)
+            if parts is None:
+                continue
+            _home, _away, home_name, away_name, match_dt, _state, _venue, _espn = parts
+            index.setdefault(_pair_key(home_name, away_name), []).append(match_dt)
+    return index
+
+
+def healing_allowed(
+    pair_index: dict[tuple[str, str], list[datetime]] | None,
+    home_name: str,
+    away_name: str,
+    match_dt: datetime,
+    window_hours: int = IDENTITY_WINDOW_HOURS,
+) -> bool:
+    """False when THIS sweep published more than one competition for this
+    ordered pair inside the healing window — i.e. when "the single
+    unidentified row for this pair" is ambiguous by construction, whether
+    or not both rows happen to exist in `matches`.
+
+    A None index means "no payload knowledge" (a caller holding a bare
+    competition) and leaves healing enabled."""
+    if pair_index is None:
+        return True
+    times = pair_index.get(_pair_key(home_name, away_name)) or []
+    lo = match_dt - timedelta(hours=window_hours)
+    hi = match_dt + timedelta(hours=window_hours)
+    near = [t for t in times if lo <= t <= hi]
+    if len(near) <= 1:
+        return True
+    logger.warning(
+        "Refusing fixture healing for %s vs %s at %s: ESPN published %d competitions for this "
+        "pair within %dh (%s) — healing cannot tell them apart, so this competition gets its "
+        "own row rather than risking a merge of two different fixtures",
+        home_name,
+        away_name,
+        match_dt,
+        len(near),
+        window_hours,
+        ", ".join(sorted(t.isoformat() for t in near)),
+    )
+    return False
+
+
+def _resolve_match_id(
+    cur,
+    cfg: SportConfig,
+    espn_id,
+    home_id,
+    away_id,
+    match_dt,
+    window_hours: int = IDENTITY_WINDOW_HOURS,
+    allow_heal: bool = True,
+):
+    """Resolve an ESPN competition to an EXISTING matches row, or None.
+
+    matches is keyed UNIQUE (home_team_id, away_team_id, match_date) and
+    ESPN slides scheduled kickoff times, so one real fixture used to become
+    several rows: predictions/odds/recommendations attached to the early
+    row while the result landed on a later one (prod: 19,008 stale tennis
+    rows, 1,727 recs that could never settle). Resolution order:
+
+      1. external_ids->>'espn' — the stable identity, scoped to this sport
+         (an ESPN id is only unique within a sport, so an unscoped lookup
+         could collide with e.g. an NFL competition of the same number).
+      2. the exact (home, away, match_date) triple — the legacy identity,
+         still correct whenever ESPN hasn't moved the time.
+      3. HEALING — exactly ONE 'scheduled' row for the same team pair
+         within +/- `window_hours` that carries no ESPN id yet. This is
+         what re-attaches the pre-fix orphans instead of forking a new row.
+
+    Step 3 refuses to resolve when two or more rows qualify: a same-pair
+    rematch inside 72 h is routine (playoff series, back-to-backs,
+    two-legged ties) and guessing would corrupt a fixture. It logs the
+    candidates so the ambiguity is visible rather than silent. That check
+    only sees rows that EXIST, though — when the second fixture has no row
+    yet, the first fixture's row looks like a lone healing candidate. The
+    caller therefore passes allow_heal=False (see healing_allowed) whenever
+    the sweep's own payload shows two competitions for the pair inside the
+    window.
+
+    Returns (match_id, source) where source is one of "espn" / "date" /
+    "healed" / None; the public resolve_match_id() wrapper returns just the
+    id. Callers use the source to tell a trusted realignment from a healed
+    one.
+    """
+    if espn_id:
+        # ORDER BY (not a bare LIMIT 1): a pre-fix duplicate can leave the
+        # same ESPN id on two rows, and an unordered LIMIT 1 would answer
+        # differently run to run, making the fragmentation permanent
+        # instead of self-healing. LIMIT 2 so the duplicate is detectable.
+        cur.execute(
+            """
+            SELECT m.id
+              FROM matches m
+              JOIN leagues l ON l.id = m.league_id
+             WHERE m.external_ids->>'espn' = %s
+               AND l.sport = %s
+             ORDER BY m.match_date DESC
+             LIMIT 2
+            """,
+            (str(espn_id), cfg.sport),
+        )
+        rows = cur.fetchall() or []
+        if len(rows) > 1:
+            logger.error(
+                "ESPN %s id %s is on %d matches rows — the fixture is fragmented; resolving the "
+                "most recent (%s). Repair the duplicates: predictions/odds/recs are split across them.",
+                cfg.sport,
+                espn_id,
+                len(rows),
+                rows[0]["id"],
+            )
+        if rows:
+            return rows[0]["id"], "espn"
+
+    cur.execute(
+        "SELECT id FROM matches WHERE home_team_id = %s AND away_team_id = %s AND match_date = %s",
+        (home_id, away_id, match_dt),
+    )
+    row = cur.fetchone()
+    if row:
+        return row["id"], "date"
+
+    if not allow_heal:
+        return None, None
+
+    cur.execute(
+        """
+        SELECT id, match_date
+          FROM matches
+         WHERE home_team_id = %s
+           AND away_team_id = %s
+           AND status = 'scheduled'
+           AND external_ids->>'espn' IS NULL
+           AND match_date BETWEEN %s AND %s
+         ORDER BY match_date
+        """,
+        (
+            home_id,
+            away_id,
+            match_dt - timedelta(hours=window_hours),
+            match_dt + timedelta(hours=window_hours),
+        ),
+    )
+    candidates = cur.fetchall() or []
+    if len(candidates) == 1:
+        return candidates[0]["id"], "healed"
+    if len(candidates) > 1:
+        logger.warning(
+            "Ambiguous fixture healing for %s vs %s at %s: %d unidentified scheduled rows within %dh (%s) "
+            "— resolving nothing rather than guessing (same-pair rematch?)",
+            home_id,
+            away_id,
+            match_dt,
+            len(candidates),
+            window_hours,
+            ", ".join(f"{c['id']}@{c['match_date']}" for c in candidates),
+        )
+    return None, None
+
+
+def resolve_match_id(
+    cur,
+    cfg: SportConfig,
+    espn_id,
+    home_id,
+    away_id,
+    match_dt,
+    window_hours: int = IDENTITY_WINDOW_HOURS,
+    allow_heal: bool = True,
+):
+    """Public wrapper: the resolved match id, or None. See _resolve_match_id."""
+    return _resolve_match_id(cur, cfg, espn_id, home_id, away_id, match_dt, window_hours, allow_heal)[0]
+
+
+def _realign_match_date(cur, match_id, home_id, away_id, match_dt, healed: bool = False) -> bool:
+    """Point a resolved row at ESPN's CURRENT kickoff time.
+
+    This is the de-fragmentation step: without it a moved kickoff makes the
+    upsert's ON CONFLICT (home, away, match_date) target miss and insert a
+    twin.
+
+    Returns True when the row SITS AT `match_dt` afterwards — it was
+    already there, or it moved — and False when it does not (pair drift, a
+    refused move, a vanished row). The caller needs exactly that
+    distinction: if the resolved row could not be put at (home, away,
+    match_dt), then that slot belongs to a DIFFERENT row and stamping the
+    ESPN id there would put one id on two rows.
+
+    Both the guard and the UPDATE are keyed on the RESOLVED ROW's own team
+    pair, never the incoming one. Step 1 resolves by ESPN id alone, so the
+    row it returns can carry a different pair than the current parse: MMA
+    competitors carry no homeAway at all (verified live — every competitor
+    on UFC comps 401913130 / 401902948 / 401911287 returns None), so
+    _competition_parts orders them by array POSITION and ESPN reorders that
+    array freely; ensure_team's fuzzy branch can likewise re-resolve a
+    vendor name onto another team. Moving such a row would silently rewrite
+    a fixture we did not parse, and a guard checking a different key than
+    the UPDATE writes cannot prevent the unique violation that would abort
+    the whole league's ingest.
+    """
+    cur.execute(
+        "SELECT home_team_id, away_team_id, match_date FROM matches WHERE id = %s",
+        (match_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        logger.error("Resolved match %s disappeared before realignment — not touching it", match_id)
+        return False
+    if row["home_team_id"] != home_id or row["away_team_id"] != away_id:
+        logger.error(
+            "Resolved match %s is %s vs %s but this ESPN competition parses as %s vs %s — refusing "
+            "to realign or stamp it (team pair drifted; check competitor ordering / team matching)",
+            match_id,
+            row["home_team_id"],
+            row["away_team_id"],
+            home_id,
+            away_id,
+        )
+        return False
+    if row["match_date"] == match_dt:
+        return True
+    cur.execute(
+        """
+        UPDATE matches
+           SET match_date = %s,
+               updated_at = NOW()
+         WHERE id = %s
+           AND NOT EXISTS (
+                 SELECT 1 FROM matches dup
+                  WHERE dup.home_team_id = %s
+                    AND dup.away_team_id = %s
+                    AND dup.match_date = %s
+                    AND dup.id <> %s)
+        """,
+        (match_dt, match_id, row["home_team_id"], row["away_team_id"], match_dt, match_id),
+    )
+    if cur.rowcount == 0:
+        logger.warning(
+            "Refusing to realign match %s from %s to %s — another row already holds that slot; "
+            "the fixture stays fragmented until the duplicate is repaired",
+            match_id,
+            row["match_date"],
+            match_dt,
+        )
+        return False
+    shift_h = abs((match_dt - row["match_date"]).total_seconds()) / 3600.0
+    if healed and shift_h > LARGE_SHIFT_HOURS:
+        # Loud on purpose: a heal is an inference, and this one moved the
+        # row further than the p75 shift measured on prod (24 h).
+        logger.error(
+            "Healed match %s moved %.1f h (%s -> %s), past the %dh p75 shift measured on prod — "
+            "verify this is the same fixture and not two games for the same pair",
+            match_id,
+            shift_h,
+            row["match_date"],
+            match_dt,
+            LARGE_SHIFT_HOURS,
+        )
+    else:
+        logger.info("Realigned match %s: %s -> %s (ESPN moved the kickoff)", match_id, row["match_date"], match_dt)
+    return True
+
+
+def _stamp_identity(cur, home_id, away_id, match_dt, espn_id, season_type) -> bool:
+    """Merge the ESPN competition id and the season-type marker onto the
+    row now living at (home, away, match_dt).
+
+    Both columns are MERGED (`||`), never replaced, so nothing else already
+    stored in external_ids / metadata (result_detail, result_source,
+    regulation_winner, the legacy NHL game_type marker) is dropped. A no-op
+    when ESPN gave us neither value.
+    """
+    external = {"espn": str(espn_id)} if espn_id else {}
+    meta = {"season_type": season_type} if season_type else {}
+    if not external and not meta:
+        return False
+    cur.execute(
+        """
+        UPDATE matches
+           SET external_ids = COALESCE(external_ids, '{}'::jsonb) || %s::jsonb,
+               metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb,
+               updated_at = NOW()
+         WHERE home_team_id = %s AND away_team_id = %s AND match_date = %s
+        """,
+        (json.dumps(external), json.dumps(meta), home_id, away_id, match_dt),
+    )
+    return cur.rowcount > 0
+
+
+def _reconcile_match_row(cur, cfg: SportConfig, espn_id, home_id, away_id, match_dt, allow_heal: bool = True) -> bool:
+    """Pre-insert half of the identity fix, shared by both insert paths:
+    find the row this competition already owns and drag its match_date to
+    ESPN's current time so the upsert that follows lands ON that row
+    instead of forking a twin.
+
+    Returns True when the upsert that follows will land on the row this
+    competition owns — i.e. when it is safe to stamp the ESPN id onto
+    (home, away, match_dt). False means a row was resolved but could not be
+    put at that slot, so the slot belongs to someone else."""
+    match_id, source = _resolve_match_id(cur, cfg, espn_id, home_id, away_id, match_dt, allow_heal=allow_heal)
+    if match_id is None:
+        # Nothing to reconcile: step 2 already proved the slot is empty, so
+        # the upsert inserts a fresh row there and the stamp is safe.
+        return True
+    return _realign_match_date(cur, match_id, home_id, away_id, match_dt, healed=(source == "healed"))
+
+
 def _iter_event_competitions(event: dict, cfg: SportConfig):
-    """Yield each competition (= match) from an ESPN event.
+    """Yield (competition, event_context) for each match in an ESPN event.
 
     For team sports, an ESPN event IS a match — its `competitions[0]`
     holds the competitors. We yield that single competition.
@@ -481,21 +878,31 @@ def _iter_event_competitions(event: dict, cfg: SportConfig):
         event.groupings[].competitions[]
     We walk that structure and yield each leaf competition. Each one
     is treated as a standalone match downstream.
+
+    The event context travels alongside because `season.type` (preseason /
+    regular / postseason) lives on the EVENT, not the competition, and
+    dropping it is what let 147 NFL and 147 NBA preseason games into the
+    training corpus untagged.
     """
+    context = _event_context(event)
     if cfg.is_individual and event.get("groupings"):
         for grouping in event["groupings"]:
             for competition in grouping.get("competitions") or []:
-                yield competition
+                yield competition, context
     else:
         for competition in event.get("competitions") or []:
-            yield competition
+            yield competition, context
 
 
 def _competition_parts(comp: dict, cfg: SportConfig):
     """Shared resolution for a competition object: (home, away competitor
-    dicts, names, match datetime, state, venue) — or None when the shape
-    is unusable. Used by both the fixtures path and the results path so
-    team/date identity can never drift between them."""
+    dicts, names, match datetime, state, venue, espn competition id) — or
+    None when the shape is unusable. Used by both the fixtures path and the
+    results path so team/date identity can never drift between them.
+
+    The trailing espn id is the COMPETITION id, not the event id: a
+    competition is the unit of a match (a tennis event is a whole
+    tournament, an MMA event a whole fight card)."""
     competitors = comp.get("competitors") or []
 
     if cfg.is_individual:
@@ -529,15 +936,21 @@ def _competition_parts(comp: dict, cfg: SportConfig):
 
     state = (comp.get("status", {}).get("type", {}).get("state") or "pre").lower()
     venue = (comp.get("venue") or {}).get("fullName")
-    return home, away, home_name, away_name, match_dt, state, venue
+    espn_id = comp.get("id")
+    espn_id = str(espn_id) if espn_id is not None else None
+    return home, away, home_name, away_name, match_dt, state, venue, espn_id
 
 
-def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict) -> bool:
-    """Insert one scheduled match from a single competition object."""
+def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict, event_context: dict | None = None) -> bool:
+    """Insert one scheduled match from a single competition object.
+
+    `event_context` carries the season_type that lives on the parent ESPN
+    event; it defaults to None so a caller with only a competition in hand
+    still works (the marker is simply not written, i.e. "unknown")."""
     parts = _competition_parts(comp, cfg)
     if parts is None:
         return False
-    home, away, home_name, away_name, match_dt, state, venue = parts
+    home, away, home_name, away_name, match_dt, state, venue, espn_id = parts
 
     if state != "pre":
         return False  # results path (--results) handles post events
@@ -547,7 +960,28 @@ def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict) -> b
     if not (home_id and away_id):
         return False
 
-    return bool(insert_scheduled_match(cur, cfg, league_id, home_id, away_id, match_dt, venue))
+    season_type = (event_context or {}).get("season_type")
+    identity_safe = _reconcile_match_row(
+        cur,
+        cfg,
+        espn_id,
+        home_id,
+        away_id,
+        match_dt,
+        allow_heal=healing_allowed((event_context or {}).get("pair_index"), home_name, away_name, match_dt),
+    )
+    written = bool(insert_scheduled_match(cur, cfg, league_id, home_id, away_id, match_dt, venue))
+    _stamp_identity(cur, home_id, away_id, match_dt, espn_id if identity_safe else None, season_type)
+    if espn_id and not identity_safe:
+        logger.error(
+            "Not stamping ESPN id %s onto %s vs %s at %s: the row that owns this fixture could not "
+            "be realigned onto that slot, so stamping would put one ESPN id on two rows",
+            espn_id,
+            home_name,
+            away_name,
+            match_dt,
+        )
+    return written
 
 
 def _final_scores(cfg: SportConfig, home: dict, away: dict) -> tuple[int, int] | None:
@@ -571,7 +1005,7 @@ def _final_scores(cfg: SportConfig, home: dict, away: dict) -> tuple[int, int] |
 _EXTRA_TIME_TOKENS = ("/OT", "/SO", "/2OT", "OVERTIME", "SHOOTOUT", "AET", "PEN")
 
 
-def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict) -> bool:
+def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_context: dict | None = None) -> bool:
     """Record one completed competition (state == 'post'). Grading needs:
     scores + status='finished' (all sports), and for NHL additionally
     metadata.regulation_winner ('draw' when the game went past regulation
@@ -586,7 +1020,7 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict) -> bool:
     parts = _competition_parts(comp, cfg)
     if parts is None:
         return False
-    home, away, home_name, away_name, match_dt, state, venue = parts
+    home, away, home_name, away_name, match_dt, state, venue, espn_id = parts
 
     status_type = comp.get("status", {}).get("type", {})
     if state != "post" or not status_type.get("completed", False):
@@ -609,14 +1043,39 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict) -> bool:
     if not (home_id and away_id):
         return False
 
-    return bool(
+    # The RESULTS path fragments fixtures too: 20 of the 119 prod twins were
+    # inserted here, after kickoff, because ESPN had moved the time since we
+    # ingested the fixture. Reconcile first so this writes to the row that
+    # already carries the predictions/odds/recs.
+    season_type = (event_context or {}).get("season_type")
+    identity_safe = _reconcile_match_row(
+        cur,
+        cfg,
+        espn_id,
+        home_id,
+        away_id,
+        match_dt,
+        allow_heal=healing_allowed((event_context or {}).get("pair_index"), home_name, away_name, match_dt),
+    )
+    written = bool(
         insert_finished_match(
             cur, cfg, league_id, home_id, away_id, match_dt, venue, home_score, away_score, result_meta
         )
     )
+    _stamp_identity(cur, home_id, away_id, match_dt, espn_id if identity_safe else None, season_type)
+    if espn_id and not identity_safe:
+        logger.error(
+            "Not stamping ESPN id %s onto %s vs %s at %s: the row that owns this fixture could not "
+            "be realigned onto that slot, so stamping would put one ESPN id on two rows",
+            espn_id,
+            home_name,
+            away_name,
+            match_dt,
+        )
+    return written
 
 
-def process_event(cur, cfg: SportConfig, league_id: str, event: dict, handler=None) -> int:
+def process_event(cur, cfg: SportConfig, league_id: str, event: dict, handler=None, pair_index=None) -> int:
     """Process every match in an ESPN event with `handler` (default: the
     scheduled-fixture path; the results path passes _record_result).
     Returns the count of matches handled. For team sports this is 0 or 1
@@ -624,8 +1083,10 @@ def process_event(cur, cfg: SportConfig, league_id: str, event: dict, handler=No
     event = full bracket of matches in progress on the same day)."""
     handler = handler or _process_competition
     inserted = 0
-    for comp in _iter_event_competitions(event, cfg):
-        if handler(cur, cfg, league_id, comp):
+    for comp, context in _iter_event_competitions(event, cfg):
+        if pair_index is not None:
+            context = {**context, "pair_index": pair_index}
+        if handler(cur, cfg, league_id, comp, context):
             inserted += 1
     return inserted
 
@@ -643,14 +1104,21 @@ def fetch_all(database_url: str, cfg: SportConfig, leagues: list[str], days: int
                 league_id = ensure_league(cur, cfg, code, name, country)
                 if not league_id:
                     continue
-                n = 0
+                # Buffer the whole sweep BEFORE writing anything: step-3
+                # healing has to know when ESPN published two competitions
+                # for the same pair inside the window (see build_pair_index),
+                # and both are always in the same sweep.
+                events = []
                 for offset in range(days):
                     day = today + timedelta(days=offset)
-                    for ev in fetch_day(cfg, slug, day):
-                        # process_event returns the count of matches
-                        # inserted (>=1 for tennis tournaments that
-                        # contain multiple matches per ESPN event).
-                        n += process_event(cur, cfg, league_id, ev)
+                    events.extend(fetch_day(cfg, slug, day))
+                pair_index = build_pair_index(cfg, events)
+                n = 0
+                for ev in events:
+                    # process_event returns the count of matches inserted
+                    # (>=1 for tennis tournaments that contain multiple
+                    # matches per ESPN event).
+                    n += process_event(cur, cfg, league_id, ev, pair_index=pair_index)
                 counts[slug] = n
                 conn.commit()
                 logger.info("Fetched %d upcoming %s fixtures for %s (%s)", n, cfg.sport, name, slug)
@@ -675,11 +1143,16 @@ def fetch_results_all(database_url: str, cfg: SportConfig, leagues: list[str], d
                 league_id = ensure_league(cur, cfg, code, name, country)
                 if not league_id:
                     continue
-                n = 0
+                # Same sweep buffering as the fixtures path — the results
+                # path fragments fixtures too (20 of the 119 prod twins).
+                events = []
                 for offset in range(days_back + 1):  # today back through days_back
                     day = today - timedelta(days=offset)
-                    for ev in fetch_day(cfg, slug, day):
-                        n += process_event(cur, cfg, league_id, ev, handler=_record_result)
+                    events.extend(fetch_day(cfg, slug, day))
+                pair_index = build_pair_index(cfg, events)
+                n = 0
+                for ev in events:
+                    n += process_event(cur, cfg, league_id, ev, handler=_record_result, pair_index=pair_index)
                 counts[slug] = n
                 conn.commit()
                 if n:
