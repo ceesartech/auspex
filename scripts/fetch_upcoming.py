@@ -566,6 +566,27 @@ def build_pair_index(cfg: SportConfig, events: list[dict]) -> dict[tuple[str, st
     return index
 
 
+_PLACEHOLDER_NAMES = {"tbd", "tba", "to be determined", "to be announced", "bye", "qualifier"}
+
+
+def _is_placeholder_name(name: str) -> bool:
+    """True for ESPN's draw-slot placeholders, which are not real competitors.
+
+    'Qualifier' is included: ESPN uses it for an unfilled qualifying slot, and
+    like TBD it is reused across every such slot in the draw, so two unrelated
+    fixtures would collide on the same (home, away) identity.
+    """
+    return (name or "").strip().lower() in _PLACEHOLDER_NAMES
+
+
+def _sample_times(times: list[datetime], limit: int = 6) -> str:
+    """Compact rendering of a timestamp list for a log line."""
+    ordered = sorted(t.isoformat() for t in times)
+    if len(ordered) <= limit:
+        return ", ".join(ordered)
+    return "%s, ... (%d more)" % (", ".join(ordered[:limit]), len(ordered) - limit)
+
+
 def healing_allowed(
     pair_index: dict[tuple[str, str], list[datetime]] | None,
     home_name: str,
@@ -588,6 +609,9 @@ def healing_allowed(
     near = [t for t in times if lo <= t <= hi]
     if len(near) <= 1:
         return True
+    # The refusal itself is the useful signal; the full list is not. A tennis
+    # sweep can find 190+ competitions for one placeholder pair, and dumping
+    # every timestamp buries real errors in the log (non-negotiable 3).
     logger.warning(
         "Refusing fixture healing for %s vs %s at %s: ESPN published %d competitions for this "
         "pair within %dh (%s) — healing cannot tell them apart, so this competition gets its "
@@ -597,7 +621,7 @@ def healing_allowed(
         match_dt,
         len(near),
         window_hours,
-        ", ".join(sorted(t.isoformat() for t in near)),
+        _sample_times(near),
     )
     return False
 
@@ -924,6 +948,15 @@ def _competition_parts(comp: dict, cfg: SportConfig):
     home_name = _competitor_name(home, cfg.is_individual)
     away_name = _competitor_name(away, cfg.is_individual)
     if not (home_name and away_name):
+        return None
+    # Placeholder draw slots carry no identity. ESPN publishes future tennis
+    # rounds as "TBD vs TBD"; each one becomes a matches row that can never be
+    # updated when the players are known (the team ids change, so a NEW row is
+    # created and the placeholder is orphaned forever). Prod 2026-09-04 carried
+    # 3,061 such rows, 3,022 of them stale, holding 3,528 predictions and zero
+    # recommendations — pure junk that also makes every pair ambiguous for the
+    # healing check. Skip them at the door.
+    if _is_placeholder_name(home_name) or _is_placeholder_name(away_name):
         return None
 
     raw_date = comp.get("date") or comp.get("startDate")

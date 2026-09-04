@@ -481,3 +481,66 @@ class TestProcessEventThreadsTheContext:
         event = {"id": "e", "season": {"type": 1}, "competitions": [_comp()]}
         assert fu.process_event(None, SOCCER, "league", event, handler=handler) == 1
         assert seen == [{"season_type": "preseason", "event_id": "e"}]
+
+
+class TestPlaceholderCompetitors:
+    """ESPN publishes future tennis rounds as draw slots with no players yet.
+
+    Each one became a `matches` row that could never be updated when the
+    players were announced (the team ids change, so a NEW row appears and the
+    placeholder is orphaned). Prod 2026-09-04: 3,061 such rows, 3,022 stale,
+    holding 3,528 predictions. They also make the healing check useless, since
+    every placeholder shares the same (home, away) identity.
+    """
+
+    def _comp(self, home_name: str, away_name: str) -> dict:
+        return {
+            "id": "c1",
+            "date": "2026-09-09T04:00Z",
+            "competitors": [
+                {"homeAway": "home", "athlete": {"displayName": home_name}},
+                {"homeAway": "away", "athlete": {"displayName": away_name}},
+            ],
+            "status": {"type": {"state": "pre"}},
+        }
+
+    def test_tbd_pair_is_skipped(self):
+        assert fu._competition_parts(self._comp("TBD", "TBD"), TENNIS) is None
+
+    def test_one_placeholder_side_is_enough_to_skip(self):
+        assert fu._competition_parts(self._comp("Carlos Alcaraz", "TBD"), TENNIS) is None
+        assert fu._competition_parts(self._comp("Qualifier", "Jannik Sinner"), TENNIS) is None
+
+    def test_placeholder_match_is_case_and_space_insensitive(self):
+        assert fu._competition_parts(self._comp(" tbd ", "Jannik Sinner"), TENNIS) is None
+        assert fu._competition_parts(self._comp("To Be Determined", "Jannik Sinner"), TENNIS) is None
+
+    def test_real_players_still_parse(self):
+        parts = fu._competition_parts(self._comp("Carlos Alcaraz", "Jannik Sinner"), TENNIS)
+        assert parts is not None
+        assert parts[2] == "Carlos Alcaraz"
+        assert parts[3] == "Jannik Sinner"
+
+    def test_a_name_merely_containing_a_placeholder_word_is_kept(self):
+        # Guard against an over-broad substring match: only the WHOLE name is a
+        # placeholder. "Qualifier" alone is a draw slot; "Qualifier Cup" is not.
+        parts = fu._competition_parts(self._comp("Qualifier Cup Winner", "Jannik Sinner"), TENNIS)
+        assert parts is not None
+        assert parts[2] == "Qualifier Cup Winner"
+
+
+class TestSampleTimes:
+    """A tennis sweep found 192 competitions for one placeholder pair; dumping
+    every timestamp into the warning buries real errors in the log."""
+
+    def test_short_list_renders_in_full(self):
+        times = [KICKOFF, KICKOFF + timedelta(hours=1)]
+        rendered = fu._sample_times(times)
+        assert rendered.count(":") >= 2
+        assert "more)" not in rendered
+
+    def test_long_list_is_truncated_with_a_count(self):
+        times = [KICKOFF + timedelta(hours=i) for i in range(50)]
+        rendered = fu._sample_times(times)
+        assert rendered.endswith("(44 more)")
+        assert len(rendered) < 400
