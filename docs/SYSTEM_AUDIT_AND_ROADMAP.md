@@ -912,6 +912,73 @@ with the growth-rate driver (WAL) eliminated.
 > 2025-26 season is missing, and the NFL frame legitimately shrank when
 > preseason was excluded.
 
+> **Update (2026-09-04) — STEP 3: the Dixon-Coles defect was the FITTER, not
+> team coverage.** The working hypothesis was that the derived soccer markets
+> ran on a constant prior because the artifact knows both teams in only 4% of
+> live matches. Investigation refuted that as the dominant cause. The
+> iteration normalised BOTH attack and defense to mean 1, over-constraining a
+> model with exactly one scale indeterminacy and pinning mean(lambda) to a
+> hard-coded baseline: fitted E[total goals] 2.8971 against an observed 2.6415
+> (+9.7%, reproduced in-band during validation; the audit measured +10.9% on
+> prod). That is why mean P(over 2.5) was 0.567 against a realised 0.524 —
+> the model was structurally long overs, which is the mechanism behind the
+> −22.4% ROI on that stream. Also fixed: `time_decay` was serialised and read
+> back but NEVER APPLIED (an unweighted MLE over 2007-2026, an era in which
+> home goal advantage fell 0.405 → 0.29); one global `league_avg_goals` across
+> 41 leagues running 2.22 to 3.09 goals per match; and an inert
+> `regularization` that is now a real shrinkage prior (~20 effective matches),
+> which both makes an unknown team fall back to its LEAGUE baseline and makes
+> the fit converge (91 iterations vs never in 500).
+> **Validated** (`scripts/ab_soccer_dixon_coles_refit.py`, monthly
+> walk-forward, n=10,950, scored after the IPF reconciliation so it measures
+> the served path, with FOLD-CLUSTERED standard errors because 10,950 matches
+> come from only 13 fitted models). Paired ΔBrier on over-2.5: vs the served
+> artifact **−0.00698** (clustered 95% bound −0.00418); vs the same-corpus OLD
+> fitter **−0.00722** (bound −0.00231); vs a global base rate −0.00667; vs a
+> **PER-LEAGUE base rate −0.00385, which FAILS the gate**; vs the closing
+> market −0.00182 (n=546, not significant). The honest reading: it clears the
+> gate against the model it replaces and against the old fitter on identical
+> folds, but a real share of the gain is "know which league this is" rather
+> than team skill. THE DECISIVE CONTROL: the old fitter on the CURRENT corpus
+> scores +0.00024 against the served artifact — statistically identical — so
+> the defect is the fitter, and promoting the 7× challenger would NOT have
+> fixed these markets.
+> **Not un-gated.** ("soccer","over_under") stays disabled: every EV
+> configuration still loses against real book prices (−2.2% to −6.7% at
+> EV>5%). A Brier win is not an ROI win.
+> **Serving defect found in review and fixed:** the ensemble frame was built
+> from features_cache alone, so the Poisson and Dixon-Coles members inside it
+> received EMPTY team names on every live match and emitted their unknown-team
+> constant, while the weight optimiser had given them ~9-10% of the blend on
+> their team-AWARE validation scores. Identity is now passed through
+> (measured −0.00041 on served 1X2, n=600 — a correctness fix, not an accuracy
+> win). The promote gate also gains an additive derived-market guard: a
+> challenger that cannot beat a constant base rate on the market it derives is
+> rejected even if its 1x2 passes, closing the blind spot that let a
+> pre-corpus artifact serve for a month behind its 4.55% blend share.
+> **STILL OPEN — needs operator sign-off: TEAM IDENTITY.** The corpus and ESPN
+> fixture rows are different `teams` rows (1,356 soccer rows across three
+> provenance cohorts). Exact normalized matching recovers ZERO by construction
+> (`UNIQUE(normalized_name, sport)` means two rows can never share one), and
+> fuzzy matching is unusable at ANY threshold — true pairs score low
+> ('Ajax'|'Ajax Amsterdam' 0.44) while false pairs score high
+> ('Angers'|'Rangers' 0.92, 'Manchester City'|'Manchester United' 0.81), with
+> reserve teams and city-mates (Barcelona/Barcelona B, LAFC/LA Galaxy) sitting
+> exactly where prefix matching wants to go. There IS free ground truth: a
+> corpus row and an ESPN row for the same real match carry identical
+> scorelines on the same date (with a systematic ~1 h offset). That validates
+> 63 mechanical pairs (accent-strip + club-token, same-country) at 122
+> agreements / 0-1 conflicts, but the further 74 curated pairs are ~97%
+> precise and contain at least one false positive no automated rule catches
+> (Fortaleza CEIF Colombia → Fortaleza Brazil), so they need a NAMED HUMAN
+> SIGN-OFF. Payoff if merged: DC coverage of the next-14-day serve population
+> 7.1% → 38.9% (mechanical) → 59.5% (curated); the eligibility gate 30.7% →
+> 47.1%; teams under the 10-match floor 51.2% → 21.2%. The trap: the merge
+> MUST also dedupe 154 cross-identity duplicate fixtures (124 of them
+> both-finished with identical scores) or it silently double-counts real
+> matches, and it must join on match_date::date + scoreline, because only 5 of
+> them collide on exact timestamp.
+
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
 > fixed in one push. (1) `GET /predictions/upcoming` applied `LIMIT` to
