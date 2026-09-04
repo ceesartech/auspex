@@ -12,6 +12,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 
 
@@ -102,3 +104,34 @@ class TestProbabilityCap:
         capped_ev = gr_tennis.expected_value(capped, 1.50)
         assert capped_ev < raw_ev
         assert capped_ev > 0
+
+
+class TestGatedOffRunWithdrawsTheLiveBook:
+    """Tennis moneyline is disabled (audit 2026-09: model Brier 0.489 vs the
+    market's 0.333). Stopping emission is not enough — the recs the last
+    pre-gate run wrote are still status='pending' on upcoming fixtures and
+    vw_active_recommendations keeps serving them as live picks, so the
+    short-circuit has to withdraw them."""
+
+    def test_run_prunes_pending_recs_and_reports_the_count(self, monkeypatch):
+        import rec_gating
+
+        assert rec_gating.gate_for("tennis", "moneyline").enabled is False
+        calls = []
+
+        def _fake_purge(database_url, sport, bet_types):
+            calls.append((database_url, sport, tuple(bet_types)))
+            return 15
+
+        monkeypatch.setattr(rec_gating, "purge_pending_recs_for_sport", _fake_purge)
+        # A connection attempt here would mean the generator went past the
+        # short-circuit; there is no DB in a unit test.
+        monkeypatch.setattr(
+            gr_tennis.psycopg2,
+            "connect",
+            lambda *a, **k: pytest.fail("gated-off run must not open the emission path"),
+        )
+        counts = gr_tennis.run("postgresql://unit-test", days=2, ev_threshold=0.05, prob_floor=0.1)
+        assert calls == [("postgresql://unit-test", "tennis", gr_tennis.EMITTED_BET_TYPES)]
+        assert counts["pruned_pending"] == 15
+        assert counts["recommendations"] == 0

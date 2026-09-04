@@ -53,12 +53,8 @@ from psycopg2.extras import RealDictCursor
 # Reuse the math helpers from the soccer engine — same Kelly + EV formulas.
 sys.path.insert(0, os.path.dirname(__file__))
 
-from generate_recommendations import (  # noqa: E402
-    confidence_rating,
-    expected_value,
-    get_bankroll,
-    kelly_fraction,
-)
+import rec_gating  # noqa: E402
+from generate_recommendations import confidence_rating, expected_value, get_bankroll, kelly_fraction  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("generate_recommendations_nba")
@@ -110,6 +106,17 @@ NBA_LABELS: dict[str, list[str]] = {
     "spread": ["home", "away"],
     "total": ["over", "under"],
 }
+
+# ── Gating (audit 2026-09) ─────────────────────────────────────────
+#
+# Which streams may emit recommendations lives in scripts/rec_gating.py so a
+# sport is disabled in exactly one place. Predictions keep being produced and
+# graded either way — that is how we measure — only rec emission is gated.
+# The check below is per-bet_type, so a future partial re-enable (say
+# moneyline back on while spread stays off) needs no change here.
+SPORT = "nba"
+PRIMARY_BET_TYPE = "moneyline"
+EMITTED_BET_TYPES: tuple[str, ...] = ("moneyline", "spread", "total")
 
 
 # ── Per-market price + prob alignment ──────────────────────────────
@@ -281,7 +288,13 @@ def recommend_for_match(
     bankroll: float,
     ev_threshold: float,
     prob_floor: float,
+    suppressed: dict[str, int] | None = None,
 ) -> int:
+    """Emit gated value bets for one match. `suppressed` accumulates the
+    per-reason counts of candidates the gate rejected so run() can log the
+    summary — silence is the failure mode we are guarding against."""
+    if suppressed is None:
+        suppressed = {}
     preds = load_nba_predictions(cur, match_id)
     if not preds:
         return 0
@@ -292,6 +305,13 @@ def recommend_for_match(
     for ensemble_name, (market, market_label) in NBA_MARKETS.items():
         pred = preds.get(ensemble_name)
         if pred is None:
+            continue
+        # Per-bet_type gate. run() short-circuits when EVERY emitted bet_type
+        # is off; this handles a partial disable so one market can be turned
+        # off without touching the rest of the generator.
+        gate = rec_gating.gate_for(SPORT, market)
+        if not gate.enabled:
+            suppressed["stream_disabled"] = suppressed.get("stream_disabled", 0) + 1
             continue
         labels = NBA_LABELS[market]
         probs = pred["probabilities"]
@@ -322,8 +342,22 @@ def recommend_for_match(
             ev = expected_value(prob, odds_decimal)
             if ev < ev_threshold:
                 continue
+            # Odds / EV / gap caps. model_prob is the RAW (uncapped) model
+            # probability on purpose: PROB_CAP_FOR_EV is an EV/stake defence,
+            # not the model's belief, so capping first would hide exactly the
+            # model-vs-market disagreement the gap cap exists to bound.
+            market_prob = None
+            if gate.max_gap is not None:
+                market_prob = rec_gating.market_consensus_prob(cur, match_id, market, selection, offer.get("line"))
+            ok, reason = rec_gating.passes_gate(
+                SPORT, market, odds=odds_decimal, ev=ev, model_prob=raw_prob, market_prob=market_prob
+            )
+            if not ok:
+                key = reason or "gated"
+                suppressed[key] = suppressed.get(key, 0) + 1
+                continue
             k = kelly_fraction(prob, odds_decimal)
-            stake = bankroll * k * KELLY_FRACTION
+            stake = rec_gating.cap_stake(bankroll * k * KELLY_FRACTION, bankroll)
 
             offered_line = offer.get("line")
             display_sel = _selection_with_line(market, selection, offered_line)
@@ -347,7 +381,7 @@ def recommend_for_match(
                 "conf": confidence_rating(ev, prob),
                 "ev": ev,
                 "kelly_stake": k,
-                "rec_stake": round(stake, 2),
+                "rec_stake": stake,
                 "reasoning": reasoning,
                 "risk": json.dumps(_risk_factors(prob, odds_decimal)),
             }
@@ -359,6 +393,27 @@ def recommend_for_match(
 
 def run(database_url: str, days: int, ev_threshold: float, prob_floor: float) -> dict:
     counts = {"matches_processed": 0, "recommendations": 0}
+    gates = {bt: rec_gating.gate_for(SPORT, bt) for bt in EMITTED_BET_TYPES}
+    if not any(g.enabled for g in gates.values()):
+        # Loud, but NOT an exception: the DAG task must still succeed so the
+        # pipeline keeps producing and grading predictions. Only rec emission
+        # stops.
+        logger.info(
+            "recommendation generation for %s is gated OFF: %s",
+            SPORT,
+            gates[PRIMARY_BET_TYPE].note,
+        )
+        # Stopping emission is not enough. The recs the LAST pre-gate run wrote
+        # are still status='pending' on upcoming fixtures, and
+        # vw_active_recommendations (status IN ('pending','placed') AND
+        # match_date > NOW()) keeps serving them to the API and the Telegram
+        # digest as live picks. The per-match delete_pending never runs on this
+        # path, so withdraw them here — a disabled stream must have an empty
+        # book, not a frozen one.
+        pruned = rec_gating.purge_pending_recs_for_sport(database_url, SPORT, EMITTED_BET_TYPES)
+        counts["pruned_pending"] = pruned
+        return counts
+    suppressed: dict[str, int] = {}
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             bankroll = get_bankroll(cur)
@@ -369,7 +424,7 @@ def run(database_url: str, days: int, ev_threshold: float, prob_floor: float) ->
                 return counts
             logger.info("Generating NBA recommendations for %d matches", len(matches))
             for match_id in matches:
-                inserted = recommend_for_match(cur, match_id, bankroll, ev_threshold, prob_floor)
+                inserted = recommend_for_match(cur, match_id, bankroll, ev_threshold, prob_floor, suppressed)
                 counts["matches_processed"] += 1
                 counts["recommendations"] += inserted
             conn.commit()
@@ -378,6 +433,12 @@ def run(database_url: str, days: int, ev_threshold: float, prob_floor: float) ->
         counts["recommendations"],
         counts["matches_processed"],
     )
+    if suppressed:
+        logger.info(
+            "Gating suppressed %d candidate nba recs: %s",
+            sum(suppressed.values()),
+            ", ".join(f"{k}={v}" for k, v in sorted(suppressed.items())),
+        )
     return counts
 
 

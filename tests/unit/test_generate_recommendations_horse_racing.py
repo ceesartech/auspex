@@ -476,3 +476,60 @@ class TestPlacePilotHelpers:
         probs = {"a": 0.6, "b": 0.4}
         assert ghr.place_probability(probs, "zz", 2) == 0.0
         assert ghr.place_probability(probs, "a", 0) == 0.0
+
+
+class _RunnerCountCursor(_FakeCursor):
+    """_FakeCursor that answers load_runner_count's fetchone with a real
+    field size, so the 5-7 win-suppression band can be exercised."""
+
+    def __init__(self, fetchall_responses, runners):
+        super().__init__(fetchall_responses)
+        self._runners = runners
+
+    def fetchone(self):
+        return {"runners": self._runners}
+
+
+class TestWinFieldSizeSuppression:
+    """The audit's -57.1% band is a property of the RACE's runner count.
+    load_race_candidates only returns entrants that ALSO carry a win
+    prediction from an eligible model, so binning on len(candidates) would
+    suppress races never measured in the band and let true 5-7 fields through
+    (3,250 of 20,102 prod races disagree on the two counts)."""
+
+    RACE = {
+        "race_id": "race-1",
+        "track_name": "Newton Abbot",
+        "race_date": __import__("datetime").datetime(2026, 6, 4, 15, 0),
+        "race_number": 1,
+    }
+
+    def _candidates(self, n):
+        return [_cand(chr(65 + i), f"Horse {chr(65 + i)}", confidence=0.2) for i in range(n)]
+
+    def test_true_5_7_field_is_suppressed_even_when_predictions_are_fewer(self, monkeypatch):
+        monkeypatch.setattr(ghr, "RANKER_TOP_N", None)
+        cur = _RunnerCountCursor([self._candidates(3)], runners=6)
+        alerts = ghr.recommend_for_race(cur, self.RACE, bankroll=1000.0, ev_threshold=0.0, prob_floor=0.0)
+        assert alerts == []
+
+    def test_large_field_is_not_suppressed_when_predictions_land_in_the_band(self, monkeypatch):
+        monkeypatch.setattr(ghr, "RANKER_TOP_N", None)
+        cur = _RunnerCountCursor([self._candidates(6)], runners=11)
+        alerts = ghr.recommend_for_race(cur, self.RACE, bankroll=1000.0, ev_threshold=0.0, prob_floor=0.0)
+        assert len(alerts) == 6
+
+    def test_suppression_is_counted_not_silent(self, monkeypatch):
+        monkeypatch.setattr(ghr, "RANKER_TOP_N", None)
+        cur = _RunnerCountCursor([self._candidates(3)], runners=5)
+        suppressed: dict[str, int] = {}
+        ghr.recommend_for_race(cur, self.RACE, bankroll=1000.0, ev_threshold=0.0, prob_floor=0.0, suppressed=suppressed)
+        assert suppressed.get(ghr.SUPPRESSED_WIN_FIELD_REASON) == 3
+
+    def test_missing_runner_count_falls_back_to_predicted_entrants(self, monkeypatch, caplog):
+        monkeypatch.setattr(ghr, "RANKER_TOP_N", None)
+        cur = _FakeCursor([self._candidates(6)])  # fetchone() -> None
+        with caplog.at_level("WARNING"):
+            alerts = ghr.recommend_for_race(cur, self.RACE, bankroll=1000.0, ev_threshold=0.0, prob_floor=0.0)
+        assert alerts == []  # 6 predicted entrants -> inside the band
+        assert "runner count unavailable" in caplog.text

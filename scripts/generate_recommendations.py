@@ -39,6 +39,12 @@ import sys
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+# Make the shared per-stream gating helper importable (same sibling-module
+# idiom as grade_completed_matches.py -> grading_outcomes.py).
+sys.path.insert(0, os.path.dirname(__file__))
+
+import rec_gating  # noqa: E402
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("generate_recommendations")
 
@@ -309,20 +315,32 @@ def _risk_factors(prob: float, odds_decimal: float) -> list[str]:
     return risks
 
 
+def _format_suppressions(counts: dict[str, int]) -> str:
+    """Render the per-reason suppression tally deterministically
+    (biggest bucket first, then alphabetically) for the summary log."""
+    return ", ".join(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def recommend_for_match(
     cur,
     match_id: str,
     bankroll: float,
     ev_threshold: float,
     prob_floor: float,
-) -> int:
-    """Generate + persist value bets for one match. Returns rows inserted."""
+) -> tuple[int, dict[str, int]]:
+    """Generate + persist value bets for one match.
+
+    Returns (rows_inserted, suppressed_by_reason) — the second element
+    counts candidates the per-stream gate (scripts/rec_gating.py) refused,
+    keyed "<bet_type>:<reason>", so run() can log ONE loud summary of the
+    volume we chose not to bet."""
+    suppressed: dict[str, int] = {}
     preds = load_market_predictions(cur, match_id)
     if not preds:
-        return 0
+        return 0, suppressed
     odds_rows = best_odds(cur, match_id)
     if not odds_rows:
-        return 0
+        return 0, suppressed
 
     delete_pending(cur, match_id)
 
@@ -345,15 +363,50 @@ def recommend_for_match(
         if ev < ev_threshold or p_kelly < prob_floor:
             continue
 
+        # Per-stream gate (audit 2026-09: several soccer streams are
+        # disabled outright, and on the live ones model-vs-market
+        # DISAGREEMENT is anti-predictive, so the gap is capped).
+        # bet_type is the market_type the rec would carry below.
+        gate = rec_gating.gate_for("soccer", market_type)
+        market_prob = None
+        if gate.enabled and gate.max_gap is not None:
+            # Only pay for the consensus query when a gap cap can use it;
+            # passes_gate stays the authority on the decision itself.
+            market_prob = rec_gating.market_consensus_prob(cur, match_id, market_type, row["selection"], line)
+        # model_prob is p_raw — the TRUE win probability — not the
+        # push-adjusted p_kelly, so the gap is measured on the same basis
+        # as the market's implied (de-vigged) probability.
+        allowed, reason = rec_gating.passes_gate(
+            "soccer",
+            market_type,
+            odds=odds_decimal,
+            ev=ev,
+            model_prob=p_raw,
+            market_prob=market_prob,
+        )
+        if not allowed:
+            # "stream_disabled:..." already names the sport+market; the cap
+            # reasons don't, so prefix those with the market they fired on.
+            key = reason if str(reason).startswith("stream_disabled") else f"{market_type}:{reason}"
+            suppressed[key] = suppressed.get(key, 0) + 1
+            continue
+
         f = kelly_fraction(p_kelly, odds_decimal)
         if f <= 0:
             continue
         kelly_stake = round(bankroll * f, 2)
-        rec_stake = round(bankroll * f * 0.25, 2)  # quarter Kelly
+        uncapped_stake = round(bankroll * f * 0.25, 2)  # quarter Kelly
+        rec_stake = rec_gating.cap_stake(bankroll * f * 0.25, bankroll)
         sel = display_selection(market_type, row["selection"], line)
+        capped_note = (
+            f" Stake capped at {rec_gating.MAX_STAKE_FRACTION:.1%} of bankroll "
+            f"(quarter-Kelly asked {uncapped_stake:.2f})."
+            if rec_stake < uncapped_stake
+            else ""
+        )
         reasoning = (
             f"Model {p_raw:.1%} vs implied {1.0 / odds_decimal:.1%} @ {odds_decimal:.2f} "
-            f"({row['bookmaker']}); EV {ev:+.1%}, quarter-Kelly stake {rec_stake:.2f}."
+            f"({row['bookmaker']}); EV {ev:+.1%}, quarter-Kelly stake {rec_stake:.2f}.{capped_note}"
         )
         insert_recommendation(
             cur,
@@ -373,7 +426,7 @@ def recommend_for_match(
             },
         )
         written += 1
-    return written
+    return written, suppressed
 
 
 def run(
@@ -390,19 +443,30 @@ def run(
             logger.info("Evaluating %d upcoming match(es) (bankroll=%.2f)", len(match_ids), bankroll)
             total = 0
             matches_with_recs = 0
+            suppressed: dict[str, int] = {}
             for mid in match_ids:
                 try:
-                    n = recommend_for_match(cur, mid, bankroll, ev_threshold, prob_floor)
+                    n, gated = recommend_for_match(cur, mid, bankroll, ev_threshold, prob_floor)
                 except Exception as e:
                     logger.warning("Recommendation generation failed for %s: %s", mid, e)
                     conn.rollback()
                     continue
+                for reason, count in gated.items():
+                    suppressed[reason] = suppressed.get(reason, 0) + count
                 if n:
                     matches_with_recs += 1
                     total += n
                 conn.commit()
     logger.info("Wrote %d recommendation(s) across %d match(es)", total, matches_with_recs)
-    return {"recommendations": total, "matches": matches_with_recs}
+    # Loud, never silent: the gate's suppressed volume is the whole point of
+    # the audit remediation, so it gets its own line in the DAG log.
+    if suppressed:
+        logger.info(
+            "gating: suppressed %d candidate rec(s): %s",
+            sum(suppressed.values()),
+            _format_suppressions(suppressed),
+        )
+    return {"recommendations": total, "matches": matches_with_recs, "suppressed": sum(suppressed.values())}
 
 
 def parse_args(argv=None):

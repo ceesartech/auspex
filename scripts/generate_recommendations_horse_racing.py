@@ -55,6 +55,7 @@ from psycopg2.extras import RealDictCursor
 # Reuse the EV/Kelly + bankroll helpers from the soccer engine. Same
 # math; horse racing doesn't need a different formulation.
 sys.path.insert(0, os.path.dirname(__file__))
+import rec_gating  # noqa: E402
 from generate_recommendations import confidence_rating, expected_value, get_bankroll, kelly_fraction  # noqa: E402
 from telegram_notify import Alert, enqueue_alerts  # noqa: E402
 
@@ -97,6 +98,19 @@ MODEL_PRECEDENCE: list[tuple[str, str]] = [
 RANKER_MODEL_NAME = "lightgbm_ranker_v1"
 RANKER_MODEL_VERSION = "1.0.0"
 RANKER_TOP_N: Optional[int] = 3
+
+# Field-size band with the worst settled record in the 2026-09 audit:
+# WIN recs in 5-7 runner fields went n=182, ROI -57.1%, bootstrap CI
+# [-76.1%, -35.4%] — the ONLY band whose CI excludes zero, and it is
+# negative. Small fields price the favourite tightly and our devigged
+# consensus has nothing left to beat, so we suppress win recs there
+# (place recs in the same fields are handled by their own gate — place
+# under 6.0 is the one profitable racing band).
+# The band is measured on the race's RUNNER count (non-scratched
+# entrants), so it is binned on load_runner_count(), NOT on the number of
+# entrants we happened to predict.
+SUPPRESSED_WIN_FIELD_SIZES = range(5, 8)
+SUPPRESSED_WIN_FIELD_REASON = "win:field_5_7_runners"
 
 
 # ── Best-of-N pricing across bookmakers ────────────────────────────
@@ -261,6 +275,35 @@ def load_race_candidates(cur, race_id: str) -> list[dict]:
     return list(cur.fetchall())
 
 
+def load_runner_count(cur, race_id: str) -> Optional[int]:
+    """True non-scratched runner count for one race.
+
+    NOT the same as len(load_race_candidates(...)): that only returns
+    entrants which ALSO carry a win prediction from an eligible model, so it
+    is a predicted-entrant count. On prod the two disagree for 3,250 of
+    20,102 races. SUPPRESSED_WIN_FIELD_SIZES is an audit band measured on the
+    RACE's field, so it must bin on this number — otherwise races get their
+    win recs suppressed under a band never measured on them, and true 5-7
+    fields escape it.
+
+    Returns None when the count is unavailable, leaving the fallback to the
+    caller rather than silently inventing a field size."""
+    cur.execute(
+        """
+        SELECT COUNT(*) AS runners
+        FROM race_entrants
+        WHERE race_id = %s
+          AND NOT scratched
+        """,
+        (race_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    runners = row["runners"] if isinstance(row, dict) else row[0]
+    return int(runners) if runners is not None else None
+
+
 def ghr_arg(_i: int) -> str:
     """Return a literal positional placeholder for the dynamic CASE
     WHEN clause. Kept as a tiny helper so the call site reads as a
@@ -368,16 +411,28 @@ def horse_racing_alert(
 # ── Recommendation orchestration ────────────────────────────────────
 
 
+def _format_suppressions(counts: dict[str, int]) -> str:
+    """Render the per-reason suppression tally deterministically
+    (biggest bucket first, then alphabetically) for the summary log."""
+    return ", ".join(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def recommend_for_race(
     cur,
     race: dict,
     bankroll: float,
     ev_threshold: float,
     prob_floor: float,
+    suppressed: Optional[dict[str, int]] = None,
 ) -> list[Alert]:
     """Generate (and DB-insert) value-bet recs for one race; return
     the matching Alert objects ready for Redis. Returns [] when the
     race has no qualifying picks.
+
+    `suppressed` (when given) is a caller-owned counter that this
+    function increments per gate-rejection reason, keyed
+    "<bet_type>:<reason>", so run() can log ONE loud summary of the
+    volume the per-stream gate (scripts/rec_gating.py) refused.
 
     Hybrid filter (RANKER_TOP_N): when the LambdaMART ranker has
     scored this race, narrow the candidate set to the top-N entrants
@@ -385,12 +440,32 @@ def recommend_for_race(
     still drives the math; the ranker just picks which horses to
     consider. For races without ranker scores, every entrant is
     evaluated as before."""
+    counts = suppressed if suppressed is not None else {}
+
+    def _suppress(bet_type: str, reason: Optional[str]) -> None:
+        # "stream_disabled:..." already names the sport+market; the cap
+        # reasons don't, so prefix those with the leg they fired on.
+        key = str(reason) if str(reason).startswith("stream_disabled") else f"{bet_type}:{reason}"
+        counts[key] = counts.get(key, 0) + 1
+
     race_id = race["race_id"]
     candidates = load_race_candidates(cur, race_id)
     if not candidates:
         return []
     delete_pending(cur, race_id)
     field_size = len(candidates)
+    # The 5-7 band is a property of the RACE (its runner count), not of how
+    # many entrants we happened to predict, so it bins on the true
+    # non-scratched field. field_size (predicted entrants) keeps driving
+    # ew_terms and the risk factors exactly as before.
+    runner_count = load_runner_count(cur, race_id)
+    if runner_count is None:
+        logger.warning(
+            "Race %s: runner count unavailable; binning the win-suppression band on %d predicted entrant(s)",
+            race_id,
+            field_size,
+        )
+        runner_count = field_size
     # Harville needs the WHOLE field's win distribution — capture before
     # the ranker filter narrows the candidate list.
     field_win_probs = {c["entrant_id"]: float(c["confidence"]) for c in candidates}
@@ -431,8 +506,32 @@ def recommend_for_race(
         ev = expected_value(prob, odds_decimal)
         if ev < ev_threshold:
             continue
+        # Per-stream gate (audit 2026-09). Racing passes market_prob=None
+        # deliberately: its "consensus" is a single bookmaker today, so the
+        # racing gates set max_gap=None and nothing here can be rejected
+        # for a missing consensus.
+        allowed, reason = rec_gating.passes_gate(
+            "horse_racing",
+            "win",
+            odds=odds_decimal,
+            ev=ev,
+            model_prob=prob,
+            market_prob=None,
+        )
+        # The 5-7 runner band is a racing-specific suppression on top of the
+        # shared gate, binned on the race's TRUE runner count (see
+        # load_runner_count — len(candidates) is a predicted-entrant count and
+        # is not what the audit measured). Note we do NOT `continue` — the
+        # place leg below is a separately-gated market and stays eligible.
+        win_allowed = allowed and runner_count not in SUPPRESSED_WIN_FIELD_SIZES
+        if not allowed:
+            _suppress("win", reason)
+        elif not win_allowed:
+            counts[SUPPRESSED_WIN_FIELD_REASON] = counts.get(SUPPRESSED_WIN_FIELD_REASON, 0) + 1
+
         k = kelly_fraction(prob, odds_decimal)
-        stake = round(bankroll * k * KELLY_FRACTION, 2)
+        uncapped_stake = round(bankroll * k * KELLY_FRACTION, 2)
+        stake = rec_gating.cap_stake(bankroll * k * KELLY_FRACTION, bankroll)
 
         # Display label: "consensus" when this came through the
         # consensus-only path; "hybrid" when the ranker also scored
@@ -440,11 +539,17 @@ def recommend_for_race(
         # post-hoc analysis (does ranker filtering improve win rate?).
         had_ranker_score = cand.get("ranker_confidence") is not None
         label = "hybrid" if (had_ranker_score and RANKER_TOP_N) else "consensus"
+        capped_note = (
+            f" Stake capped at {rec_gating.MAX_STAKE_FRACTION:.1%} of bankroll "
+            f"(quarter-Kelly asked ${uncapped_stake:.2f})."
+            if stake < uncapped_stake
+            else ""
+        )
         reasoning = (
             f"Win: {cand['horse_name']} — {label} {prob:.0%}, "
             f"book {1/odds_decimal:.0%} (@ {odds_decimal:.2f} on "
             f"{best['bookmaker']}) → EV {ev:+.1%}, quarter-Kelly "
-            f"stake ${stake:.2f}."
+            f"stake ${stake:.2f}.{capped_note}"
         )
         rec = {
             "prediction_id": cand["prediction_id"],
@@ -461,20 +566,21 @@ def recommend_for_race(
             "reasoning": reasoning,
             "risk": json.dumps(_risk_factors(prob, odds_decimal, field_size)),
         }
-        insert_recommendation(cur, rec)
-        alerts.append(
-            horse_racing_alert(
-                track_name=race["track_name"],
-                race_date=race["race_date"],
-                race_number=race.get("race_number"),
-                horse_name=cand["horse_name"],
-                odds_decimal=odds_decimal,
-                bookmaker=best["bookmaker"],
-                confidence=prob,
-                expected_value=ev,
-                recommended_stake=stake,
+        if win_allowed:
+            insert_recommendation(cur, rec)
+            alerts.append(
+                horse_racing_alert(
+                    track_name=race["track_name"],
+                    race_date=race["race_date"],
+                    race_number=race.get("race_number"),
+                    horse_name=cand["horse_name"],
+                    odds_decimal=odds_decimal,
+                    bookmaker=best["bookmaker"],
+                    confidence=prob,
+                    expected_value=ev,
+                    recommended_stake=stake,
+                )
             )
-        )
 
         # ── Place pilot: derived each-way place bet on the same horse ──
         # Place odds = 1 + (win odds - 1) x EW fraction; probability from
@@ -484,9 +590,30 @@ def recommend_for_race(
             place_odds = round(1.0 + (odds_decimal - 1.0) * ew_fraction, 4)
             ev_place = expected_value(p_place, place_odds)
             if ev_place >= ev_threshold and p_place >= prob_floor:
+                # Same gate, this leg's own bet_type: place odds 12+ went
+                # 0/13, 6-12 -11.9%, under 6 +31.9% (audit 2026-09), so the
+                # place gate caps odds at 6.0. market_prob=None again —
+                # the place gate sets max_gap=None.
+                place_allowed, place_reason = rec_gating.passes_gate(
+                    "horse_racing",
+                    "place",
+                    odds=place_odds,
+                    ev=ev_place,
+                    model_prob=p_place,
+                    market_prob=None,
+                )
+                if not place_allowed:
+                    _suppress("place", place_reason)
                 k_place = kelly_fraction(p_place, place_odds)
-                stake_place = round(bankroll * k_place * KELLY_FRACTION, 2)
-                if stake_place > 0:
+                uncapped_place = round(bankroll * k_place * KELLY_FRACTION, 2)
+                stake_place = rec_gating.cap_stake(bankroll * k_place * KELLY_FRACTION, bankroll)
+                place_capped_note = (
+                    f" Stake capped at {rec_gating.MAX_STAKE_FRACTION:.1%} of bankroll "
+                    f"(quarter-Kelly asked ${uncapped_place:.2f})."
+                    if stake_place < uncapped_place
+                    else ""
+                )
+                if place_allowed and stake_place > 0:
                     insert_recommendation(
                         cur,
                         {
@@ -505,7 +632,7 @@ def recommend_for_race(
                                 f"Place ({places} places @ {ew_fraction:.0%} odds): "
                                 f"{cand['horse_name']} — Harville {p_place:.0%} "
                                 f"@ {place_odds:.2f} → EV {ev_place:+.1%}, "
-                                f"stake ${stake_place:.2f}."
+                                f"stake ${stake_place:.2f}.{place_capped_note}"
                             ),
                             "risk": json.dumps(_risk_factors(prob, odds_decimal, field_size)),
                         },
@@ -521,7 +648,8 @@ def run(
     prob_floor: float,
     notify: bool,
 ) -> dict:
-    counts = {"races_processed": 0, "recommendations": 0, "alerts_queued": 0, "queue_depth": 0}
+    counts = {"races_processed": 0, "recommendations": 0, "alerts_queued": 0, "queue_depth": 0, "suppressed": 0}
+    suppressed: dict[str, int] = {}
     all_alerts: list[Alert] = []
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -533,7 +661,7 @@ def run(
                 return counts
             logger.info("Generating horse racing recommendations for %d races", len(races))
             for race in races:
-                alerts = recommend_for_race(cur, race, bankroll, ev_threshold, prob_floor)
+                alerts = recommend_for_race(cur, race, bankroll, ev_threshold, prob_floor, suppressed)
                 counts["races_processed"] += 1
                 counts["recommendations"] += len(alerts)
                 all_alerts.extend(alerts)
@@ -549,6 +677,15 @@ def run(
         counts["alerts_queued"],
         queue_depth,
     )
+    # Loud, never silent: the volume the per-stream gate refused is the
+    # whole point of the audit remediation, so it gets its own DAG log line.
+    counts["suppressed"] = sum(suppressed.values())
+    if suppressed:
+        logger.info(
+            "gating: suppressed %d candidate rec(s): %s",
+            counts["suppressed"],
+            _format_suppressions(suppressed),
+        )
     return counts
 
 

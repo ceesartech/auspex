@@ -48,6 +48,7 @@ from psycopg2.extras import RealDictCursor
 # Add the scripts dir so the shared telegram_notify helper imports.
 sys.path.insert(0, os.path.dirname(__file__))
 
+import rec_gating  # noqa: E402
 from telegram_notify import Alert, enqueue_alerts  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
@@ -75,6 +76,19 @@ MARKET_LABEL_FOR_PREDICTION_TYPE = {
     "spread": "Puck Line",
     "total": "Total Goals O/U 5.5",
 }
+
+
+# ── Gating (audit 2026-09) ───────────────────────────────────────────────
+#
+# Which streams may emit recommendations lives in scripts/rec_gating.py so a
+# sport is disabled in exactly one place. Predictions keep being produced and
+# graded either way — that is how we measure — only rec emission is gated.
+# The check below is per-bet_type (the DB bet_type, so 'puck_line' not the
+# odds market_type 'spread'), so a future partial re-enable needs no change
+# here.
+SPORT = "nhl"
+PRIMARY_BET_TYPE = "moneyline"
+EMITTED_BET_TYPES: tuple[str, ...] = ("moneyline", "puck_line", "total")
 
 
 # ── Pure helpers (unit-tested in test_recommendations_nhl.py) ─────────────
@@ -294,9 +308,16 @@ def recommend_for_match(
     bankroll: float,
     ev_threshold: float,
     prob_floor: float,
+    suppressed: dict[str, int] | None = None,
 ) -> list[Alert]:
     """Generate + persist value bets for one NHL match. Returns the list
-    of Telegram alerts to enqueue (one per recommendation)."""
+    of Telegram alerts to enqueue (one per recommendation).
+
+    `suppressed` accumulates the per-reason counts of candidates the gate
+    rejected so run() can log the summary — silence is the failure mode we
+    are guarding against."""
+    if suppressed is None:
+        suppressed = {}
     preds = load_nhl_predictions(cur, match["match_id"])
     if not preds:
         return []
@@ -310,6 +331,15 @@ def recommend_for_match(
     for row in odds_rows:
         market_type = row["market_type"]  # 'moneyline' / 'spread' / 'total'
         if market_type not in preds:
+            continue
+        # DB bet_type != odds market_type for the puck line.
+        bet_type = "puck_line" if market_type == "spread" else market_type
+        # Per-bet_type gate. run() short-circuits when EVERY emitted bet_type
+        # is off; this handles a partial disable so one market can be turned
+        # off without touching the rest of the generator.
+        gate = rec_gating.gate_for(SPORT, bet_type)
+        if not gate.enabled:
+            suppressed["stream_disabled"] = suppressed.get("stream_disabled", 0) + 1
             continue
         probs = preds[market_type]["probabilities"]
         odds_decimal = float(row["odds_decimal"])
@@ -328,11 +358,24 @@ def recommend_for_match(
         f = kelly_fraction(prob, odds_decimal)
         if f <= 0:
             continue
+        # Odds / EV / gap caps. `prob` here IS the raw model probability —
+        # unlike the NBA/NFL/1v1 engines this one applies no PROB_CAP_FOR_EV,
+        # so there is nothing to un-cap before bounding model-vs-market
+        # disagreement.
+        market_prob = None
+        if gate.max_gap is not None:
+            market_prob = rec_gating.market_consensus_prob(cur, match["match_id"], market_type, row["selection"], line)
+        ok, reason = rec_gating.passes_gate(
+            SPORT, bet_type, odds=odds_decimal, ev=ev, model_prob=prob, market_prob=market_prob
+        )
+        if not ok:
+            key = reason or "gated"
+            suppressed[key] = suppressed.get(key, 0) + 1
+            continue
         kelly_stake = round(bankroll * f, 2)
-        rec_stake = round(bankroll * f * 0.25, 2)  # quarter Kelly
+        rec_stake = rec_gating.cap_stake(bankroll * f * 0.25, bankroll)  # quarter Kelly, per-bet capped
         sel_display = display_selection(market_type, row["selection"], line)
         market_label = MARKET_LABEL_FOR_PREDICTION_TYPE.get(market_type, market_type)
-        bet_type = "puck_line" if market_type == "spread" else market_type
         reasoning = (
             f"NHL {market_label}: model {prob:.1%} vs implied {1.0 / odds_decimal:.1%} "
             f"@ {odds_decimal:.2f} ({row['bookmaker']}); EV {ev:+.1%}, "
@@ -378,6 +421,31 @@ def recommend_for_match(
 def run(database_url: str, days: int, ev_threshold: float, prob_floor: float, notify: bool) -> dict:
     """Walk upcoming NHL matches and write recommendations + queue
     Telegram alerts. Returns count summary suitable for DAG return."""
+    gates = {bt: rec_gating.gate_for(SPORT, bt) for bt in EMITTED_BET_TYPES}
+    if not any(g.enabled for g in gates.values()):
+        # Loud, but NOT an exception: the DAG task must still succeed so the
+        # pipeline keeps producing and grading predictions. Only rec emission
+        # stops.
+        logger.info(
+            "recommendation generation for %s is gated OFF: %s",
+            SPORT,
+            gates[PRIMARY_BET_TYPE].note,
+        )
+        # Stopping emission is not enough. The recs the LAST pre-gate run wrote
+        # are still status='pending' on upcoming fixtures, and
+        # vw_active_recommendations (status IN ('pending','placed') AND
+        # match_date > NOW()) keeps serving them to the API and the Telegram
+        # digest as live picks. The per-match delete_pending never runs on this
+        # path, so withdraw them here — a disabled stream must have an empty
+        # book, not a frozen one.
+        pruned = rec_gating.purge_pending_recs_for_sport(database_url, SPORT, EMITTED_BET_TYPES)
+        return {
+            "matches_evaluated": 0,
+            "recommendations": 0,
+            "alerts_queued": 0,
+            "pruned_pending": pruned,
+        }
+
     upcoming = list_upcoming_nhl(database_url, days)
     if not upcoming:
         logger.info("No upcoming NHL matches with predictions in the next %d days", days)
@@ -386,12 +454,13 @@ def run(database_url: str, days: int, ev_threshold: float, prob_floor: float, no
 
     recs_written = 0
     all_alerts: list[Alert] = []
+    suppressed: dict[str, int] = {}
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             bankroll = get_bankroll(cur)
             logger.info("Bankroll: %.2f", bankroll)
             for m in upcoming:
-                alerts = recommend_for_match(cur, m, bankroll, ev_threshold, prob_floor)
+                alerts = recommend_for_match(cur, m, bankroll, ev_threshold, prob_floor, suppressed)
                 if alerts:
                     recs_written += len(alerts)
                     all_alerts.extend(alerts)
@@ -405,6 +474,12 @@ def run(database_url: str, days: int, ev_threshold: float, prob_floor: float, no
         len(all_alerts) if notify else 0,
         queue_depth,
     )
+    if suppressed:
+        logger.info(
+            "Gating suppressed %d candidate nhl recs: %s",
+            sum(suppressed.values()),
+            ", ".join(f"{k}={v}" for k, v in sorted(suppressed.items())),
+        )
     return {
         "matches_evaluated": len(upcoming),
         "recommendations": recs_written,
