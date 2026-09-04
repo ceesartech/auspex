@@ -160,10 +160,17 @@ _SOCCER_DISAGREEMENT_NOTE = (
 )
 
 _NO_SEASON_NOTE = (
-    "Entire 2025-26 season missing from the corpus (0 finished games vs 335/1403/1398 in "
-    "2024-25); NFL week-1 rolling-form windows are 61% August-2026 preseason games and the "
-    "model picked UNDER on 15 of 16 week-1 totals. Re-enable after the season backfill + "
-    "preseason filter land."
+    "The corpus was missing the entire 2025-26 season (0 finished games vs 335/1403/1398 in "
+    "2024-25), so NFL week-1 rolling-form windows were 61% August preseason and the model "
+    "picked UNDER on 15 of 16 week-1 totals. DATA FIXED 2026-09-04: 286 NFL + 1,401 NBA + "
+    "1,394 NHL games backfilled, preseason tagged and excluded, features recomputed — week-1 "
+    "rolling points moved 41.0 -> 44.89, i.e. back to the real regular-season level. STILL "
+    "GATED because the fix has not reached the MODEL: production still serves the bundle "
+    "trained on the contaminated frame and still picks under on 16 of 17 week-1 totals, and "
+    "the audit separately measured a 74% under-lean on retro 2024-25 predictions against a "
+    "53.6% actual under-or-push rate — so the bias is not solely preseason. Re-enable only "
+    "after the next scheduled retrain consumes the restored corpus AND the tilt is "
+    "re-measured against that base rate."
 )
 
 GATES: dict[tuple[str, str], MarketGate] = {
