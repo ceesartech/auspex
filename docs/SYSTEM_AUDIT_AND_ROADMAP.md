@@ -214,6 +214,11 @@ memory; this section makes it repo-canonical.
 | Horse 40+ longshot calibration | CLOSED | Bias non-stationary; isotonic on graded history +0.0007 worse; recs engine emits zero recs in those buckets anyway | — |
 | NFL spread | Parked | Cross-book didn't transfer; needs new data (paid odds archive / QB-injury infra / 5+ seasons) | New data source |
 | Tennis/MMA neural nets | **FIXED — stale memory** | Retrain of 2026-07-05 trains NN successfully for both (tennis val_acc 0.605, in-ensemble at weight 0.333). NN ≈ GBM accuracy; value is diversity only | Removing NN + torch is a defensible image-size play (§5.4): retrain with `--skip-models neural_network`, verify held-out delta ≈ 0 |
+| Training-frame horizon (refit on train+val instead of the 70/15/15 ratio cut) | **CLOSED — no win** (2026-09-03) | Paired walk-forward on a fixed 2026-03-15..08-31 test window, n=4,026: LightGBM ΔBrier **−0.00029 ± 0.00071**, XGBoost −0.00034 ± 0.00073, 50/50 blend −0.00020 ± 0.00059. No cohort clears (top-5 −0.00263 ± 0.00206). The ratio split leaves essentially nothing on the table for 1x2. Tennis cross-check also fails (+0.00077 ± 0.00177, n=910) | A frame whose newest 30% is materially different in kind, not just recency |
+| Recency weighting (exponential, 3-year half-life) | **CLOSED — worse** (2026-09-03) | ΔBrier **+0.00090 ± 0.00115** vs the ratio cut on the same n=4,026 window, and worse than the refit variant in 5 of 6 months. Brackets the audit's own −0.000..−0.004 estimate from the wrong side | — |
+| "More leagues" vs "more recent" (soccer) | **RESOLVED — corpus was the lever** (2026-09-03) | Restricting the refit to the 6 original leagues is WORSE by +0.00350 ± 0.00135; the gain shipped on 2026-08-06 came from breadth, not recency | — |
+| MMA corpus backfill as an accuracy fix | **CLOSED — insufficient alone** (2026-09-03) | The 18-month corpus hole and OOD serve features are real, but a walk-forward over the loader era, where every fighter history IS complete, still shows no skill; clamping the stale features on the live model does not recover accuracy (0.471). The binding constraint is that the model has never seen a market price | Only alongside real odds in the training frame |
+| Tennis "max odds ≤ 2.0" rescue gate | **CLOSED — not a model edge** (2026-09-03) | After de-duplicating the fixture-identity bug it is +8% flat ROI, CI [−4%, +20%], statistically identical to a no-model control ("bet every consensus favourite at the best of ~22 books" = +5.9%), and the entire effect is one month | Re-measure once tennis has market inputs and settles honestly |
 
 ### 4.3 Validation methodology (house rules)
 
@@ -812,6 +817,65 @@ with the growth-rate driver (WAL) eliminated.
 > long-range calls heavily (5-yr hourly chunks exhaust the free tier in
 > ~150 calls); VC match-day-only fetching beats range queries ~10:1 on
 > metered cost.
+
+> **Update (2026-09-04) — MODEL/ACCURACY AUDIT: the book's profit was an
+> artifact; three streams have no measurable skill. MILESTONE A SHIPPED.**
+> A 30-agent audit of live prod (7 investigators, a completeness critic, 4
+> follow-ups, 22 adversarial verdicts) asked "can any model or accuracy
+> optimisation be made?" and found that almost nothing available is model
+> tuning. Headline corrections to earlier numbers: live metrics had been
+> counting every weekly re-prediction row, inflating n by 3–4× (MMA "n=444"
+> is 121 distinct fights; soccer "n=2836" is 997 matches).
+> **What has no skill:** MMA moneyline held-out Brier 0.50254 (n=269) IS a
+> coin flip, and its odds features are the hard-coded default in 1676/1676
+> training rows (importance 0.0) — on the same 68 fights the market scores
+> 0.357 vs the model's 0.517 (paired ΔBrier +0.144, SE 0.040). Tennis
+> moneyline: 0.489 vs the market's 0.333 (n=97), with 24,446/24,446
+> historical rows carrying default odds. Soccer over_under: the production
+> Dixon-Coles knows both teams in **4%** of live matches, so 96% get
+> identical goal rates (corr(expected total, actual) = 0.036).
+> **What is honest:** soccer 1x2 is statistically indistinguishable from the
+> closing market (+0.0026 ± 0.0033, n=702) and horse-racing consensus already
+> beats SP (Brier 0.0784 vs 0.0828, n=45,055).
+> **The book was an artifact.** Reported +2.3% ROI. The BetUS asian-handicap
+> slice won 38 of 47 near-even-money handicaps (+67% ROI) off two side-swapped
+> feed runs (2026-08-09, 2026-08-22); recs are priced at the FIRST-SEEN odds
+> row (up to 8 days stale) and regenerated every cycle, so stored CLV measures
+> price drift, not edge, and true CLV is identically 0. Repriced at the real
+> closing price, soccer 1x2 recs that still PASS the EV gate lose (n=57,
+> −26.7%) while those where the model agrees with the market won (n=53,
+> +38.7%): **model-versus-market disagreement is anti-predictive at current
+> model quality.** After settling the stranded recs (below) the honest book is
+> **n=2,158, −16,478 on 141,969 staked = −11.6% ROI**; excluding the whole
+> BetUS AH slice, −14.5%. Soccer AH ex-BetUS is +0.2% (n=111).
+> **Structural defects found:** fixture identity is keyed on exact kickoff
+> time with no ESPN id stored, so one fixture becomes many rows (tennis 19,008
+> stale rows, 1,727 unsettleable recs, 121k of phantom pending stake); the
+> Modal promote gate compares held-out Briers across NON-COMPARABLE test sets
+> and has rejected the 7× corpus model 4 weeks running, so **prod has never
+> served it** (the 2026-08-06 "promoted 13/13" entry above is wrong for
+> soccer); the entire 2025-26 season is missing for NFL/NBA/NHL and 294
+> preseason games sit untagged in the NFL+NBA corpora, making NFL week-1
+> rolling windows 61% preseason (15/16 totals picked under); preseason
+> predictions were graded against a fabricated 45.0 total line that
+> NEUTRAL_DEFAULTS invented.
+> **Milestone A shipped 2026-09-04** (`scripts/rec_gating.py`): MMA, tennis,
+> soccer over_under and all of NFL/NBA/NHL are gated OFF with the evidence
+> recorded on each gate; survivors are bounded by odds/EV/model-vs-market-gap
+> caps; every stake capped at 2.5% of bankroll (quarter-Kelly had staked 23%
+> on one bet); racing suppresses win recs in 5–7 runner fields (n=182,
+> −57.1%, CI excludes zero). Predictions keep being produced and graded for
+> every sport — only rec emission stops — so a disabled stream can be measured
+> back to life. `scripts/repair_stranded_recs.py` then settled the stranded
+> recs from their finished twin rows using the repo's own grader: soccer 35
+> (15W/18L/2V, −15.31 — matching an independent hand-replay to the cent),
+> tennis 1,683 rows collapsing to **754 distinct fixtures** (−16,888 on
+> 118,734 = −14.2%), MMA 6. Gated streams now hold zero live picks.
+> **Deliberate non-action:** the settled BetUS AH rows were NOT rewritten —
+> the flip classification does not reproduce stably (10/14/28/45 recs
+> depending on method) and voting an arbitrary subset would claim a fix while
+> leaving most contamination. Both numbers are reported instead; the cause
+> (feed side-swap + first-seen pricing) is fixed in Step 2.
 
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
