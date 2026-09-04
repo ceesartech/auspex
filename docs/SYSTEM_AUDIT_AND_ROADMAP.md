@@ -877,6 +877,41 @@ with the growth-rate driver (WAL) eliminated.
 > leaving most contamination. Both numbers are reported instead; the cause
 > (feed side-swap + first-seen pricing) is fixed in Step 2.
 
+> **Update (2026-09-04) — STEP 2 SHIPPED, and a correction to the 7× corpus
+> claim.** Ingestion: fixtures are now keyed by the ESPN competition id
+> (migration 023) and realigned in place when ESPN moves a kickoff, which is
+> what stops one fixture becoming many rows; ESPN placeholder draw slots
+> ("TBD vs TBD", 3,061 rows / 3,528 predictions on prod) are skipped at the
+> door. Season type is captured and preseason excluded from every training
+> frame and rolling window; 294 historical preseason games were tagged by
+> `scripts/backfill_season_type.py`. Grading no longer scores a spread/total
+> prediction whose "closing line" was the NEUTRAL_DEFAULTS invention — the
+> guard fired on its first run (14 predictions left ungraded). monitor_models
+> now counts each match once (it had been inflating n ~4× across every sport).
+> Pricing: the `odds` table holds the CURRENT price instead of the first-seen
+> one (migration 024). First production run **updated 7,428 prices** against
+> 45 genuinely new keys — that is the scale of the staleness recommendations
+> were being written against — and the in-play guard protected 303 pre-match
+> prices. A per-bookmaker side-swap canary now drops a transposed book's whole
+> block, corroborated by its moneyline so it cannot fire on legitimate
+> disagreement. Results backfill recovered 104 World Cup fixtures plus the
+> June NBA/NHL Finals, settling every stranded NBA/NHL rec; the book now
+> stands at **n=2,180, −15,922 on 143,982 = −11.1% ROI**.
+> **CORRECTION — the 7× corpus model is NOT better.** With the promote gate
+> fixed (it now fingerprints the frame and re-scores both models on rows
+> unseen by BOTH, rather than comparing Briers computed on different test
+> sets), the soccer challenger measures **paired ΔBrier +0.00433 ± 0.00234
+> (n=728)** against the incumbent — marginally WORSE, within noise. The
+> earlier "−0.0014 ± 0.0010, n=4,061" came from a wider window. Combined, the
+> two are statistically indistinguishable, so promoting the 7× bundle is
+> justified by COVERAGE (41 leagues vs 6) and not by accuracy; do not cite it
+> as an accuracy win. The gate was also deadlocking on legacy sidecars that
+> carry no fingerprint — it now recovers the incumbent's real frame end from
+> that run's retained training_report.json. The refusals that remain are
+> honest: NBA and NHL have no games after their training cut-off because the
+> 2025-26 season is missing, and the NFL frame legitimately shrank when
+> preseason was excluded.
+
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
 > fixed in one push. (1) `GET /predictions/upcoming` applied `LIMIT` to
