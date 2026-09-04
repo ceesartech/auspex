@@ -597,3 +597,78 @@ def test_promote_decisions_json_keeps_its_shape(models_dir):
     assert not (models_dir / "staging").exists()
     # the digest still renders
     assert pages and pages[-1].startswith("🤖 Modal retrain ") and "would promote 1/1" in pages[-1]
+
+
+# ---------------------------------------------------------------------------
+# Legacy-sidecar fingerprint recovery.
+#
+# Sidecars written before the fingerprint existed carry only a run_id, so the
+# paired path fell back to the sidecar's `trained_at` — a wall-clock build
+# timestamp, not a data cut-off. For an incumbent built the same morning as the
+# challenger that leaves ~no rows after the cutoff, so every legacy bundle died
+# with "shared evaluation set too small" and the gate DEADLOCKED: nothing could
+# promote until sidecars had fingerprints, and sidecars only get one by being
+# promoted. Each run's per-bundle training_report.json is retained under
+# modal-incoming/<run_id>/<bundle>/, which is where the real frame end lives.
+# ---------------------------------------------------------------------------
+
+
+def _write_report(root: Path, run_id: str, bundle: str, rows: int, date_max: str, holdout_n: int = 500) -> None:
+    d = root / run_id / bundle
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "training_report.json").write_text(
+        json.dumps(
+            {
+                "data_quality": {"rows": rows, "date_min": "2016-08-05T00:00:00+00:00", "date_max": date_max},
+                "holdout_test": {"n": holdout_n},
+            }
+        )
+    )
+
+
+def test_recovers_frame_end_from_the_incumbents_own_run(tmp_path):
+    _write_report(tmp_path, "manual__2026-08-06T0805", "soccer_match_result", 23746, "2026-08-05T00:00:00+00:00")
+    fp, why = pull.recover_incumbent_fingerprint(tmp_path, "soccer_match_result", {"run_id": "manual__2026-08-06T0805"})
+    assert fp is not None
+    assert fp["rows"] == 23746
+    assert fp["date_max"].startswith("2026-08-05")
+    assert "manual__2026-08-06T0805" in why
+
+
+def test_recovered_cutoff_is_the_data_boundary_not_the_build_time(tmp_path):
+    """The whole point: trained_at would strand the evaluation set."""
+    _write_report(tmp_path, "run-a", "soccer_match_result", 23746, "2026-08-05T00:00:00+00:00")
+    doc = {"run_id": "run-a", "trained_at": "2026-08-30T04:05:31+00:00"}
+    fp, _ = pull.recover_incumbent_fingerprint(tmp_path, "soccer_match_result", doc)
+    cutoff, desc = pull._frame_cutoff(fp, doc)
+    assert cutoff is not None
+    # August 6th, not August 30th — three weeks of extra evaluation rows.
+    assert str(cutoff).startswith("2026-08-06")
+    assert "frame end" in desc
+
+
+def test_no_run_id_recovers_nothing(tmp_path):
+    fp, why = pull.recover_incumbent_fingerprint(tmp_path, "soccer_match_result", {"trained_at": "2026-08-30"})
+    assert fp is None
+    assert "run_id" in why
+
+
+def test_missing_report_recovers_nothing(tmp_path):
+    fp, why = pull.recover_incumbent_fingerprint(tmp_path, "soccer_match_result", {"run_id": "never-pulled"})
+    assert fp is None
+    assert "never-pulled" in why
+
+
+def test_report_without_a_row_count_recovers_nothing(tmp_path):
+    d = tmp_path / "run-b" / "soccer_match_result"
+    d.mkdir(parents=True)
+    (d / "training_report.json").write_text(json.dumps({"holdout_test": {"n": 10}}))
+    fp, why = pull.recover_incumbent_fingerprint(tmp_path, "run-b", {"run_id": "run-b"})
+    assert fp is None
+    assert why
+
+
+def test_recovery_is_skipped_when_no_incoming_root_is_known(tmp_path):
+    fp, why = pull.recover_incumbent_fingerprint(None, "soccer_match_result", {"run_id": "run-a"})
+    assert fp is None
+    assert why

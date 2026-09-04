@@ -153,6 +153,38 @@ def _challenger_fingerprint(bundle_dir: Path, gate: dict) -> Optional[dict]:
     return fingerprint_from_report(report)
 
 
+def recover_incumbent_fingerprint(incoming_root: Optional[Path], bundle: str, incumbent_doc: Optional[dict]):
+    """Frame fingerprint for a LEGACY incumbent sidecar, recovered from the
+    training_report.json of the run that produced it.
+
+    Sidecars written before the fingerprint existed carry only a run_id, so the
+    paired path had nothing to bound leakage with and fell back to the
+    sidecar's `trained_at` — a WALL-CLOCK timestamp, not a data cut-off. For an
+    incumbent built on 2026-08-30 that leaves almost no rows after the cutoff,
+    so every legacy bundle failed with "shared evaluation set too small" and
+    the gate deadlocked: it could not promote until sidecars carried
+    fingerprints, and sidecars only gain one by being promoted.
+
+    The escape is that each Modal run's per-bundle training_report.json is
+    retained under models/modal-incoming/<run_id>/<bundle>/, and the sidecar
+    records exactly which run_id it came from. That report carries the real
+    data_quality.date_max, which is what the cutoff should have been all along.
+
+    Returns (fingerprint | None, human description of where it came from).
+    """
+    run_id = (incumbent_doc or {}).get("run_id")
+    if not run_id or incoming_root is None:
+        return None, "no run_id on the incumbent sidecar"
+    report_path = Path(incoming_root) / str(run_id) / bundle / "training_report.json"
+    report = _read_json(report_path)
+    if report is None:
+        return None, f"no retained training_report.json for incumbent run {run_id}"
+    fp = fingerprint_from_report(report)
+    if not fp:
+        return None, f"incumbent run {run_id} report carries no row count"
+    return fp, f"recovered from the incumbent's own run {run_id}"
+
+
 def _fp_summary(fp: Optional[dict]) -> str:
     if not fp:
         return "unknown frame"
@@ -383,6 +415,7 @@ def decide_bundle(
     production: str,
     database_url: Optional[str],
     paired_fn=paired_rescore,
+    incoming_root: Optional[Path] = None,
 ) -> dict:
     """The whole promote decision for one bundle, as a promote_decisions.json row.
 
@@ -398,6 +431,14 @@ def decide_bundle(
     incumbent_doc = mstore.read_incumbent(production, ensemble_name)
     incumbent = mstore.read_incumbent_brier(production, ensemble_name)
     incumbent_fp = mstore.incumbent_fingerprint(incumbent_doc)
+    fp_source = "sidecar"
+    if not incumbent_fp:
+        # Legacy sidecar: recover the real frame end from the incumbent's own
+        # retained run report, so the leakage cutoff is a DATA boundary rather
+        # than the wall-clock moment the model happened to be built.
+        incumbent_fp, fp_source = recover_incumbent_fingerprint(incoming_root, bundle, incumbent_doc)
+        if incumbent_fp:
+            logger.info("[gate] %s: incumbent fingerprint %s", bundle, fp_source)
 
     tol = gate_tolerance(n)
     comparison = "none"
@@ -499,7 +540,7 @@ def gate_and_stage(
             logger.info("No artifacts for %s in this run — skipping", bundle)
             continue
 
-        row = decide_bundle(bundle, bdir, production, database_url, paired_fn=paired_fn)
+        row = decide_bundle(bundle, bdir, production, database_url, paired_fn=paired_fn, incoming_root=incoming.parent)
         decisions.append(row)
         logger.info("[gate] %-22s %s (%s)", bundle, row["decision"].upper(), row["reason"])
 
