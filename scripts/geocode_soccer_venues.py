@@ -226,7 +226,14 @@ def run(database_url: str, *, limit: Optional[int], update: bool, dry_run: bool)
                     counts["hits"] += 1
                     result = upsert_geocoded(cur, v, hit, source, update)
                     counts[result] = counts.get(result, 0) + 1
-                    logger.info("  hit: %r → (%.4f, %.4f) %s [%s]", v, hit["latitude"], hit["longitude"], hit["timezone"], result)
+                    logger.info(
+                        "  hit: %r → (%.4f, %.4f) %s [%s]",
+                        v,
+                        hit["latitude"],
+                        hit["longitude"],
+                        hit["timezone"],
+                        result,
+                    )
                 time.sleep(REQUEST_DELAY_SEC)
             if not dry_run:
                 conn.commit()

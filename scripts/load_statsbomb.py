@@ -23,7 +23,6 @@ Use cases:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -144,10 +143,7 @@ def load_competition_season(
     matches = fetch_matches(competition_id, season_id)
     logger.info("Found %d matches for competition=%s season=%s", len(matches), competition_id, season_id)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [
-            pool.submit(build_match_aggregate, m, competition_id, season_id, with_events)
-            for m in matches
-        ]
+        futures = [pool.submit(build_match_aggregate, m, competition_id, season_id, with_events) for m in matches]
         for i, fut in enumerate(as_completed(futures), 1):
             agg = fut.result()
             if agg:
@@ -194,10 +190,24 @@ def write_database(rows: list[MatchAggregate], database_url: str) -> int:
             loaded_at = NOW();
     """
     payload = [
-        (r.match_id, r.competition_id, r.season_id, r.match_date,
-         r.home_team_id, r.home_team_name, r.away_team_id, r.away_team_name,
-         r.home_score, r.away_score, r.home_xg, r.away_xg,
-         r.home_shots, r.away_shots, r.home_passes, r.away_passes)
+        (
+            r.match_id,
+            r.competition_id,
+            r.season_id,
+            r.match_date,
+            r.home_team_id,
+            r.home_team_name,
+            r.away_team_id,
+            r.away_team_name,
+            r.home_score,
+            r.away_score,
+            r.home_xg,
+            r.away_xg,
+            r.home_shots,
+            r.away_shots,
+            r.home_passes,
+            r.away_passes,
+        )
         for r in rows
     ]
     with psycopg2.connect(database_url) as conn:
@@ -213,10 +223,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--list", action="store_true", help="List available competitions and exit.")
     p.add_argument("--competition", type=int, help="StatsBomb competition_id.")
     p.add_argument("--season", type=int, help="StatsBomb season_id.")
-    p.add_argument("--all-open", action="store_true",
-                   help="Load every (competition, season) listed in competitions.json.")
-    p.add_argument("--no-events", action="store_true",
-                   help="Skip per-match event aggregation (much faster, no xG).")
+    p.add_argument(
+        "--all-open", action="store_true", help="Load every (competition, season) listed in competitions.json."
+    )
+    p.add_argument("--no-events", action="store_true", help="Skip per-match event aggregation (much faster, no xG).")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
@@ -228,8 +238,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.list:
         comps = list_competitions()
         for c in comps:
-            print(f"competition_id={c['competition_id']:<4} season_id={c['season_id']:<4} "
-                  f"{c['competition_name']} / {c['season_name']}")
+            print(
+                f"competition_id={c['competition_id']:<4} season_id={c['season_id']:<4} "
+                f"{c['competition_name']} / {c['season_name']}"
+            )
         return 0
 
     pairs: list[tuple[int, int]]

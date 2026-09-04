@@ -83,12 +83,8 @@ def _build_matchstats_features(frame: pd.DataFrame, tms: pd.DataFrame, windows: 
         hist = _rolling_team_history(tms, window)
         roll_cols = [c for c in hist.columns if c.startswith("roll_")]
         suf = f"_w{window}"
-        home = hist.rename(
-            columns={"team_id": "home_team_id", **{c: f"home_{c}{suf}" for c in roll_cols}}
-        )
-        away = hist.rename(
-            columns={"team_id": "away_team_id", **{c: f"away_{c}{suf}" for c in roll_cols}}
-        )
+        home = hist.rename(columns={"team_id": "home_team_id", **{c: f"home_{c}{suf}" for c in roll_cols}})
+        away = hist.rename(columns={"team_id": "away_team_id", **{c: f"away_{c}{suf}" for c in roll_cols}})
         frame = frame.merge(home, on=["match_id", "home_team_id"], how="left")
         frame = frame.merge(away, on=["match_id", "away_team_id"], how="left")
         for c in roll_cols:
@@ -157,8 +153,18 @@ def main() -> int:
     d_brier = augmented["brier"] - baseline["brier"]
     d_ll = augmented["log_loss"] - baseline["log_loss"]
     verdict = "SHIP" if d_brier <= -0.002 else ("MARGINAL" if d_brier <= -0.0005 else "DROP")
-    print(json.dumps({"baseline": baseline, "augmented": augmented, "delta_brier": round(d_brier, 5),
-                      "delta_log_loss": round(d_ll, 5), "verdict": verdict}, indent=2))
+    print(
+        json.dumps(
+            {
+                "baseline": baseline,
+                "augmented": augmented,
+                "delta_brier": round(d_brier, 5),
+                "delta_log_loss": round(d_ll, 5),
+                "verdict": verdict,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

@@ -51,13 +51,7 @@ from psycopg2.extras import Json, RealDictCursor
 # fetch_upcoming.py — same DB constraints, same fuzzy-matching rules.
 sys.path.insert(0, os.path.dirname(__file__))
 
-from fetch_upcoming import (  # noqa: E402
-    ESPN_BASE,
-    NFL_LEAGUES,
-    SPORT_CONFIGS,
-    ensure_league,
-    ensure_team,
-)
+from fetch_upcoming import ESPN_BASE, NFL_LEAGUES, SPORT_CONFIGS, ensure_league, ensure_team  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("load_nfl_historical")

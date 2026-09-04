@@ -210,10 +210,11 @@ class TestFetchSpreadCrossbookNBA:
         assert out == {}
 
     def test_single_book_zero_disagreement(self):
-        cur = _FakeCursor([
-            {"bookmaker": "DK", "p_line": -3.5,
-             "p_odds": 1.91, "c_odds": 1.91},
-        ])
+        cur = _FakeCursor(
+            [
+                {"bookmaker": "DK", "p_line": -3.5, "p_odds": 1.91, "c_odds": 1.91},
+            ]
+        )
         out = fnba.fetch_spread_crossbook(cur, "match-1")
         assert out["spread_book_count"] == 1.0
         assert out["spread_consensus_mean"] == -3.5
@@ -243,10 +244,8 @@ class TestFetchSpreadCrossbookNBA:
         # The line still counts toward consensus_mean even when
         # one book lacks the away odds (devig drops only that book).
         rows = [
-            {"bookmaker": "Full", "p_line": -3.5,
-             "p_odds": 1.91, "c_odds": 1.91},
-            {"bookmaker": "OnlyHome", "p_line": -4.5,
-             "p_odds": 1.91, "c_odds": None},
+            {"bookmaker": "Full", "p_line": -3.5, "p_odds": 1.91, "c_odds": 1.91},
+            {"bookmaker": "OnlyHome", "p_line": -4.5, "p_odds": 1.91, "c_odds": None},
         ]
         cur = _FakeCursor(rows)
         out = fnba.fetch_spread_crossbook(cur, "match-1")

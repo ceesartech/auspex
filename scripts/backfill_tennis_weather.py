@@ -37,12 +37,7 @@ from psycopg2.extras import RealDictCursor
 # them — keeps the API/throttle/normalization logic in one place so
 # the two scripts can't drift.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fetch_weather import (  # noqa: E402
-    REQUEST_DELAY_SEC,
-    fetch_archive,
-    match_window_summary,
-    write_weather,
-)
+from fetch_weather import REQUEST_DELAY_SEC, fetch_archive, match_window_summary, write_weather  # noqa: E402
 
 LOGGER = logging.getLogger("backfill_tennis_weather")
 

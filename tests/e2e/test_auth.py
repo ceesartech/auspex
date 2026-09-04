@@ -1,7 +1,7 @@
 """E2E: Authentication flow."""
 
-import requests
 import pytest
+import requests
 
 
 def test_login_valid_credentials(api_url, wait_for_api):

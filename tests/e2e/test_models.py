@@ -35,6 +35,7 @@ def test_model_list_endpoint(authed, api_url):
 def test_metrics_contain_model_gauges(api_url, wait_for_api):
     """The /metrics endpoint should expose model accuracy gauge after evaluation."""
     import requests
+
     resp = requests.get(f"{api_url}/metrics", timeout=5)
     assert resp.status_code == 200
     # These metrics are set by ModelPerformanceMonitor — may not be present

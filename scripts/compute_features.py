@@ -379,8 +379,7 @@ def parse_args(argv=None):
     p.add_argument(
         "--backfill-finished",
         metavar="SPORT",
-        help="Recompute features_cache for ALL finished matches of SPORT "
-        "(historical backfill; overrides --days).",
+        help="Recompute features_cache for ALL finished matches of SPORT " "(historical backfill; overrides --days).",
     )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)

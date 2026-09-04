@@ -107,9 +107,7 @@ def fetch_weather_frame(database_url: str) -> pd.DataFrame:
 
     # Indoor source-of-truth: prefer the weather row's venue link,
     # fall back to the by-name venue lookup. Both NaN -> NaN.
-    indoor = raw["weather_venue_indoor"].combine_first(
-        raw["name_lookup_indoor"]
-    )
+    indoor = raw["weather_venue_indoor"].combine_first(raw["name_lookup_indoor"])
     out["weather_indoor"] = indoor.map(
         lambda v: 1.0 if v is True or v == 1 else (0.0 if v is False or v == 0 else np.nan)
     )
@@ -303,10 +301,7 @@ def main() -> int:
     # treated identically.
     excluded = set(TENNIS_MONEYLINE_NON_FEATURE_COLUMNS) | {TENNIS_MONEYLINE_TARGET}
     numeric_cols = merged.select_dtypes(include=[np.number, bool]).columns.tolist()
-    v1_features = [
-        c for c in numeric_cols
-        if c not in excluded and c not in TENNIS_WEATHER_KEYS
-    ]
+    v1_features = [c for c in numeric_cols if c not in excluded and c not in TENNIS_WEATHER_KEYS]
     v4b_features = [c for c in numeric_cols if c not in excluded]
 
     LOGGER.info("v1-control features: %d", len(v1_features))
@@ -316,16 +311,24 @@ def main() -> int:
     v1_metrics = train_and_eval(train, test, v1_features, TENNIS_MONEYLINE_TARGET)
     LOGGER.info(
         "v1-control: acc=%.4f brier=%.4f ece=%.4f (n_train=%d, n_test=%d, n_features=%d)",
-        v1_metrics["accuracy"], v1_metrics["brier"], v1_metrics["ece"],
-        v1_metrics["n_train"], v1_metrics["n_test"], v1_metrics["n_features"],
+        v1_metrics["accuracy"],
+        v1_metrics["brier"],
+        v1_metrics["ece"],
+        v1_metrics["n_train"],
+        v1_metrics["n_test"],
+        v1_metrics["n_features"],
     )
 
     LOGGER.info("Training v4b (with weather)...")
     v4b_metrics = train_and_eval(train, test, v4b_features, TENNIS_MONEYLINE_TARGET)
     LOGGER.info(
         "v4b:        acc=%.4f brier=%.4f ece=%.4f (n_train=%d, n_test=%d, n_features=%d)",
-        v4b_metrics["accuracy"], v4b_metrics["brier"], v4b_metrics["ece"],
-        v4b_metrics["n_train"], v4b_metrics["n_test"], v4b_metrics["n_features"],
+        v4b_metrics["accuracy"],
+        v4b_metrics["brier"],
+        v4b_metrics["ece"],
+        v4b_metrics["n_train"],
+        v4b_metrics["n_test"],
+        v4b_metrics["n_features"],
     )
 
     delta_acc = v4b_metrics["accuracy"] - v1_metrics["accuracy"]

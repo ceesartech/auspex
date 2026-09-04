@@ -158,14 +158,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--env-file", type=Path, default=Path(".env"),
-                   help="Path to the .env file (default: ./.env).")
-    p.add_argument("--no-backup", action="store_true",
-                   help="Skip writing a .env.bak before overwriting.")
-    p.add_argument("--dry-run", action="store_true",
-                   help="Print the new .env content to stdout, don't write.")
-    p.add_argument("--print-only", action="store_true",
-                   help="Print just the rotated KEY=VALUE pairs and exit.")
+    p.add_argument("--env-file", type=Path, default=Path(".env"), help="Path to the .env file (default: ./.env).")
+    p.add_argument("--no-backup", action="store_true", help="Skip writing a .env.bak before overwriting.")
+    p.add_argument("--dry-run", action="store_true", help="Print the new .env content to stdout, don't write.")
+    p.add_argument("--print-only", action="store_true", help="Print just the rotated KEY=VALUE pairs and exit.")
     return p.parse_args(argv)
 
 

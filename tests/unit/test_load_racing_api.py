@@ -244,10 +244,7 @@ class TestNormalizeBookmakerOdds:
         # 8 bookmakers per horse is typical at race time. The
         # recommendation script picks max(decimal); the rest must
         # survive the normaliser so we have the audit trail.
-        payload = [
-            {"bookmaker": f"book_{i}", "decimal": str(2.0 + 0.25 * i)}
-            for i in range(8)
-        ]
+        payload = [{"bookmaker": f"book_{i}", "decimal": str(2.0 + 0.25 * i)} for i in range(8)]
         out = lra._normalize_bookmaker_odds(payload)
         assert len(out) == 8
         assert max(o["decimal"] for o in out) == 2.0 + 0.25 * 7

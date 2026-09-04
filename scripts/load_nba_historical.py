@@ -47,13 +47,7 @@ from psycopg2.extras import Json, RealDictCursor
 # same fuzzy-matching rules → consistent team rows across pipelines.
 sys.path.insert(0, os.path.dirname(__file__))
 
-from fetch_upcoming import (  # noqa: E402
-    ESPN_BASE,
-    NBA_LEAGUES,
-    SPORT_CONFIGS,
-    ensure_league,
-    ensure_team,
-)
+from fetch_upcoming import ESPN_BASE, NBA_LEAGUES, SPORT_CONFIGS, ensure_league, ensure_team  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("load_nba_historical")

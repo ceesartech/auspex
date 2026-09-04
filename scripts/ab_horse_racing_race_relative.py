@@ -95,9 +95,7 @@ def add_race_relative_features(frame: pd.DataFrame) -> pd.DataFrame:
         if total > 0:
             normalized = probs / total
         else:
-            normalized = pd.Series(
-                [1.0 / field_size] * len(probs), index=probs.index
-            )
+            normalized = pd.Series([1.0 / field_size] * len(probs), index=probs.index)
         out.loc[slice_idx, "consensus_prob_normalized"] = normalized.values
 
         # Rank: 1 = highest implied prob. NaN-aware: NaN rows get
@@ -107,9 +105,7 @@ def add_race_relative_features(frame: pd.DataFrame) -> pd.DataFrame:
         out.loc[slice_idx, "consensus_rank"] = ranks.values
 
         favorite = float(probs[valid].max())
-        out.loc[slice_idx, "consensus_gap_to_favorite"] = (
-            favorite - probs.fillna(favorite)
-        ).values
+        out.loc[slice_idx, "consensus_gap_to_favorite"] = (favorite - probs.fillna(favorite)).values
 
     return out
 
@@ -125,11 +121,7 @@ def evaluate_variant(
     v1-control, =False gives v_relative."""
     sys.path.insert(0, "/app/services/ml-models/src")
     from predictors.horse_racing_ranker import HorseRacingRanker
-    from utils.horse_racing_data import (
-        get_feature_columns,
-        group_array,
-        split_by_date,
-    )
+    from utils.horse_racing_data import get_feature_columns, group_array, split_by_date
 
     # Import helpers from the production trainer so the A/B's
     # train/val split + Brier math match what gets shipped.
@@ -146,8 +138,11 @@ def evaluate_variant(
     feature_cols = get_feature_columns(train_inner)
     LOGGER.info(
         "%s: features=%d train_rows=%d val_rows=%d test_rows=%d",
-        label, len(feature_cols),
-        len(train_inner), len(val_inner), len(test_frame),
+        label,
+        len(feature_cols),
+        len(train_inner),
+        len(val_inner),
+        len(test_frame),
     )
 
     X_train = train_inner[feature_cols]
@@ -155,10 +150,7 @@ def evaluate_variant(
     g_train = group_array(train_inner)
 
     X_val = val_inner[feature_cols] if not val_inner.empty else None
-    y_val = (
-        val_inner["target"].to_numpy(dtype=np.int64)
-        if not val_inner.empty else None
-    )
+    y_val = val_inner["target"].to_numpy(dtype=np.int64) if not val_inner.empty else None
     g_val = group_array(val_inner) if not val_inner.empty else None
 
     X_test = test_frame[feature_cols]
@@ -167,8 +159,12 @@ def evaluate_variant(
 
     model = HorseRacingRanker()
     model.fit(
-        X_train=X_train, y_train=y_train, groups_train=g_train,
-        X_val=X_val, y_val=y_val, groups_val=g_val,
+        X_train=X_train,
+        y_train=y_train,
+        groups_train=g_train,
+        X_val=X_val,
+        y_val=y_val,
+        groups_val=g_val,
     )
     test_metrics = model._evaluate(X_test, y_test, g_test)
     test_probs = model.predict_probabilities(X_test, g_test)
@@ -184,7 +180,12 @@ def evaluate_variant(
     }
     LOGGER.info(
         "%s: top1=%.4f mrr=%.4f nll=%.4f brier=%.4f races=%d",
-        out["label"], out["top1"], out["mrr"], out["nll"], out["brier"], out["races"],
+        out["label"],
+        out["top1"],
+        out["mrr"],
+        out["nll"],
+        out["brier"],
+        out["races"],
     )
     return out
 
@@ -193,12 +194,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     parser.add_argument(
-        "--split-date", default="2026-05-15",
+        "--split-date",
+        default="2026-05-15",
         help="Walk-forward split date (default matches production ranker).",
     )
     parser.add_argument("--val-fraction", type=float, default=0.15)
     parser.add_argument(
-        "--log-level", default="INFO",
+        "--log-level",
+        default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
     args = parser.parse_args()
@@ -217,7 +220,8 @@ def main():
     frame = load_training_frame(database_url=args.database_url)
     LOGGER.info(
         "Loaded %d entrant rows across %d races.",
-        len(frame), frame["race_id"].nunique() if "race_id" in frame else 0,
+        len(frame),
+        frame["race_id"].nunique() if "race_id" in frame else 0,
     )
 
     LOGGER.info("Computing race-relative features...")
@@ -225,7 +229,8 @@ def main():
     coverage = frame_with_relative["consensus_prob_normalized"].notna().sum()
     LOGGER.info(
         "Race-relative coverage: %d / %d rows (%.1f%%).",
-        coverage, len(frame_with_relative),
+        coverage,
+        len(frame_with_relative),
         100.0 * coverage / max(1, len(frame_with_relative)),
     )
 

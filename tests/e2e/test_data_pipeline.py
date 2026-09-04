@@ -26,36 +26,40 @@ def test_teams_exist_in_db(db):
 
 def test_prediction_probabilities_valid(db):
     cur = db.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         SELECT prediction_id,
                probability_home + probability_draw + probability_away AS total
         FROM predictions
         WHERE probability_home IS NOT NULL
         LIMIT 50
-    """)
+    """
+    )
     for pred_id, total in cur.fetchall():
-        assert abs(total - 1.0) < 0.02, (
-            f"Prediction {pred_id}: probabilities sum to {total}"
-        )
+        assert abs(total - 1.0) < 0.02, f"Prediction {pred_id}: probabilities sum to {total}"
 
 
 def test_finished_matches_have_outcomes(db):
     cur = db.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         SELECT COUNT(*) FROM matches
         WHERE status = 'finished' AND actual_outcome IS NULL
-    """)
+    """
+    )
     count = cur.fetchone()[0]
     assert count == 0, f"{count} finished matches are missing actual_outcome"
 
 
 def test_predictions_reference_valid_matches(db):
     cur = db.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         SELECT COUNT(*) FROM predictions p
         LEFT JOIN matches m ON p.match_id = m.match_id
         WHERE m.match_id IS NULL
-    """)
+    """
+    )
     orphans = cur.fetchone()[0]
     assert orphans == 0, f"{orphans} predictions reference non-existent matches"
 

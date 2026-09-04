@@ -1,7 +1,7 @@
 """E2E: API health and basic reachability."""
 
-import requests
 import pytest
+import requests
 
 
 def test_health_returns_200(api_url, wait_for_api):

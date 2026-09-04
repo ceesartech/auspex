@@ -204,10 +204,11 @@ class TestFetchTotalCrossbookSingleBook:
     def test_single_book_zero_disagreement(self):
         # One book → max-min = 0, std = 0, consensus_mean = the only
         # line, book_count = 1.
-        cur = _FakeCursor([
-            {"bookmaker": "DraftKings", "p_line": 47.5,
-             "p_odds": 1.91, "c_odds": 1.91},
-        ])
+        cur = _FakeCursor(
+            [
+                {"bookmaker": "DraftKings", "p_line": 47.5, "p_odds": 1.91, "c_odds": 1.91},
+            ]
+        )
         out = fnfl.fetch_total_crossbook(cur, "match-1")
         assert out["total_book_count"] == 1.0
         assert out["total_consensus_mean"] == 47.5
@@ -220,12 +221,9 @@ class TestFetchTotalCrossbookSingleBook:
 class TestFetchTotalCrossbookMultiBook:
     def test_book_count_and_consensus_mean(self):
         rows = [
-            {"bookmaker": "DraftKings", "p_line": 47.5,
-             "p_odds": 1.91, "c_odds": 1.91},
-            {"bookmaker": "FanDuel", "p_line": 48.0,
-             "p_odds": 1.91, "c_odds": 1.91},
-            {"bookmaker": "BetMGM", "p_line": 47.0,
-             "p_odds": 1.91, "c_odds": 1.91},
+            {"bookmaker": "DraftKings", "p_line": 47.5, "p_odds": 1.91, "c_odds": 1.91},
+            {"bookmaker": "FanDuel", "p_line": 48.0, "p_odds": 1.91, "c_odds": 1.91},
+            {"bookmaker": "BetMGM", "p_line": 47.0, "p_odds": 1.91, "c_odds": 1.91},
         ]
         cur = _FakeCursor(rows)
         out = fnfl.fetch_total_crossbook(cur, "match-1")
@@ -252,10 +250,8 @@ class TestFetchTotalCrossbookMultiBook:
         # Over -120 / Under -100 → over implied 0.5455 / 0.5000 raw,
         # devigged ≈ 0.522. Two books at the same prices.
         rows = [
-            {"bookmaker": "DK", "p_line": 47.5,
-             "p_odds": 1.833, "c_odds": 2.0},
-            {"bookmaker": "FD", "p_line": 47.5,
-             "p_odds": 1.833, "c_odds": 2.0},
+            {"bookmaker": "DK", "p_line": 47.5, "p_odds": 1.833, "c_odds": 2.0},
+            {"bookmaker": "FD", "p_line": 47.5, "p_odds": 1.833, "c_odds": 2.0},
         ]
         cur = _FakeCursor(rows)
         out = fnfl.fetch_total_crossbook(cur, "match-1")
@@ -272,10 +268,8 @@ class TestFetchTotalCrossbookDegenerateOdds:
         # Critical: don't let a one-sided missing odds null out
         # the whole feature row.
         rows = [
-            {"bookmaker": "DK", "p_line": 47.5,
-             "p_odds": 1.91, "c_odds": 1.91},
-            {"bookmaker": "OnlyOver", "p_line": 48.5,
-             "p_odds": 1.91, "c_odds": None},
+            {"bookmaker": "DK", "p_line": 47.5, "p_odds": 1.91, "c_odds": 1.91},
+            {"bookmaker": "OnlyOver", "p_line": 48.5, "p_odds": 1.91, "c_odds": None},
         ]
         cur = _FakeCursor(rows)
         out = fnfl.fetch_total_crossbook(cur, "match-1")
@@ -288,10 +282,8 @@ class TestFetchTotalCrossbookDegenerateOdds:
         # Defensive: zero/negative odds are impossible from real
         # bookmakers but defend against bad ingest data.
         rows = [
-            {"bookmaker": "DK", "p_line": 47.5,
-             "p_odds": 1.91, "c_odds": 1.91},
-            {"bookmaker": "Bad", "p_line": 47.5,
-             "p_odds": 0.0, "c_odds": 1.91},
+            {"bookmaker": "DK", "p_line": 47.5, "p_odds": 1.91, "c_odds": 1.91},
+            {"bookmaker": "Bad", "p_line": 47.5, "p_odds": 0.0, "c_odds": 1.91},
         ]
         cur = _FakeCursor(rows)
         out = fnfl.fetch_total_crossbook(cur, "match-1")
@@ -362,10 +354,11 @@ class TestFetchMoneylineCrossbookEmpty:
 
 class TestFetchMoneylineCrossbookSingleBook:
     def test_single_book_zero_disagreement(self):
-        cur = _FakeCursor([
-            {"bookmaker": "DraftKings",
-             "home_odds": 2.10, "away_odds": 1.80},
-        ])
+        cur = _FakeCursor(
+            [
+                {"bookmaker": "DraftKings", "home_odds": 2.10, "away_odds": 1.80},
+            ]
+        )
         out = fnfl.fetch_moneyline_crossbook(cur, "match-1")
         assert out["ml_book_count"] == 1.0
         assert out["ml_max_minus_min_home_prob"] == 0.0

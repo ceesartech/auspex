@@ -250,8 +250,7 @@ class TestNHLCrossbookAggregate:
 
     def test_single_book_zero_disagreement(self):
         rows = [
-            {"bookmaker": "DK", "p_line": -1.5,
-             "p_odds": 2.30, "c_odds": 1.65},
+            {"bookmaker": "DK", "p_line": -1.5, "p_odds": 2.30, "c_odds": 1.65},
         ]
         out = cfn._crossbook_aggregate(rows, "spread")
         assert out["spread_book_count"] == 1.0
@@ -283,10 +282,8 @@ class TestNHLCrossbookAggregate:
         # statistics (lines, mean, max-min, std) but is dropped from
         # the devigged-prob aggregation.
         rows = [
-            {"bookmaker": "Full", "p_line": 5.5,
-             "p_odds": 1.95, "c_odds": 1.95},
-            {"bookmaker": "OnlyOver", "p_line": 6.0,
-             "p_odds": 1.95, "c_odds": None},
+            {"bookmaker": "Full", "p_line": 5.5, "p_odds": 1.95, "c_odds": 1.95},
+            {"bookmaker": "OnlyOver", "p_line": 6.0, "p_odds": 1.95, "c_odds": None},
         ]
         out = cfn._crossbook_aggregate(rows, "total")
         # Both books contribute lines.
@@ -299,10 +296,8 @@ class TestNHLCrossbookAggregate:
         # Defensive: zero/negative odds are unphysical but guard
         # against ingest corruption.
         rows = [
-            {"bookmaker": "Good", "p_line": 5.5,
-             "p_odds": 2.0, "c_odds": 2.0},
-            {"bookmaker": "Bad", "p_line": 5.5,
-             "p_odds": 0.0, "c_odds": 2.0},
+            {"bookmaker": "Good", "p_line": 5.5, "p_odds": 2.0, "c_odds": 2.0},
+            {"bookmaker": "Bad", "p_line": 5.5, "p_odds": 0.0, "c_odds": 2.0},
         ]
         out = cfn._crossbook_aggregate(rows, "total")
         # Both books contribute lines; only Good contributes devig.
@@ -318,13 +313,17 @@ class TestNHLCrossbookDefaults:
     convention). The total default is 5.5 (modern modal)."""
 
     SPREAD_KEYS = (
-        "spread_book_count", "spread_consensus_mean",
-        "spread_max_minus_min", "spread_std",
+        "spread_book_count",
+        "spread_consensus_mean",
+        "spread_max_minus_min",
+        "spread_std",
         "spread_consensus_implied_prob",
     )
     TOTAL_KEYS = (
-        "total_book_count", "total_consensus_mean",
-        "total_max_minus_min", "total_std",
+        "total_book_count",
+        "total_consensus_mean",
+        "total_max_minus_min",
+        "total_std",
         "total_consensus_implied_prob",
     )
 

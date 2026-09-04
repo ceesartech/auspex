@@ -93,25 +93,18 @@ def compute_crossbook_features(snapshots: pd.DataFrame) -> pd.DataFrame:
     feature columns NaN; the consensus columns still populate as
     long as ANY book has 1x2 data."""
     # Wide pivot: one row per (match, bookmaker) with home/draw/away odds.
-    wide = (
-        snapshots
-        .pivot_table(
-            index=["match_id", "bookmaker"],
-            columns="selection",
-            values="odds_decimal",
-            aggfunc="first",
-        )
-        .reset_index()
-    )
+    wide = snapshots.pivot_table(
+        index=["match_id", "bookmaker"],
+        columns="selection",
+        values="odds_decimal",
+        aggfunc="first",
+    ).reset_index()
     wide.columns.name = None
     required = {"home", "draw", "away"}
     missing = required - set(wide.columns)
     for col in missing:
         wide[col] = np.nan
-    devigged = [
-        _devig_triple(h, d, a)
-        for h, d, a in zip(wide["home"], wide["draw"], wide["away"])
-    ]
+    devigged = [_devig_triple(h, d, a) for h, d, a in zip(wide["home"], wide["draw"], wide["away"])]
     wide["p_home"] = [t[0] for t in devigged]
     wide["p_draw"] = [t[1] for t in devigged]
     wide["p_away"] = [t[2] for t in devigged]
@@ -137,25 +130,18 @@ def compute_crossbook_features(snapshots: pd.DataFrame) -> pd.DataFrame:
             avg_d = float(non_pinn["p_draw"].mean())
             avg_a = float(non_pinn["p_away"].mean())
 
-        rows.append({
-            "match_id": match_id,
-            "pinnacle_implied_home": pinn_h,
-            "pinnacle_implied_draw": pinn_d,
-            "pinnacle_implied_away": pinn_a,
-            "pinnacle_minus_avg_home": (
-                pinn_h - avg_h
-                if not (np.isnan(pinn_h) or np.isnan(avg_h)) else np.nan
-            ),
-            "pinnacle_minus_avg_draw": (
-                pinn_d - avg_d
-                if not (np.isnan(pinn_d) or np.isnan(avg_d)) else np.nan
-            ),
-            "pinnacle_minus_avg_away": (
-                pinn_a - avg_a
-                if not (np.isnan(pinn_a) or np.isnan(avg_a)) else np.nan
-            ),
-            "pinnacle_present": pinn_present,
-        })
+        rows.append(
+            {
+                "match_id": match_id,
+                "pinnacle_implied_home": pinn_h,
+                "pinnacle_implied_draw": pinn_d,
+                "pinnacle_implied_away": pinn_a,
+                "pinnacle_minus_avg_home": (pinn_h - avg_h if not (np.isnan(pinn_h) or np.isnan(avg_h)) else np.nan),
+                "pinnacle_minus_avg_draw": (pinn_d - avg_d if not (np.isnan(pinn_d) or np.isnan(avg_d)) else np.nan),
+                "pinnacle_minus_avg_away": (pinn_a - avg_a if not (np.isnan(pinn_a) or np.isnan(avg_a)) else np.nan),
+                "pinnacle_present": pinn_present,
+            }
+        )
     return pd.DataFrame(rows)
 
 
@@ -185,7 +171,8 @@ CROSSBOOK_KEYS = (
 
 
 def date_walk_forward_split(
-    frame: pd.DataFrame, split_date: str,
+    frame: pd.DataFrame,
+    split_date: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     split_ts = pd.to_datetime(split_date, utc=True)
     frame = frame.copy()
@@ -193,14 +180,14 @@ def date_walk_forward_split(
     train = frame[frame["match_date"] < split_ts].copy()
     test = frame[frame["match_date"] >= split_ts].copy()
     if train.empty or test.empty:
-        raise ValueError(
-            f"Walk-forward at split_date={split_date}: train={len(train)} test={len(test)}"
-        )
+        raise ValueError(f"Walk-forward at split_date={split_date}: train={len(train)} test={len(test)}")
     return train, test
 
 
 def expected_calibration_error(
-    y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10,
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    n_bins: int = 10,
 ) -> float:
     """ECE on the predicted prob of the predicted class.
     Multi-class friendly — uses max class prob per sample."""
@@ -229,11 +216,17 @@ def train_and_eval(train, test, feature_cols, target):
     clf = XGBClassifier(
         objective="multi:softprob",
         num_class=3,
-        max_depth=6, learning_rate=0.05, n_estimators=400,
-        subsample=0.85, colsample_bytree=0.85,
-        min_child_weight=5, gamma=0.1,
-        reg_alpha=0.01, reg_lambda=1.0,
-        tree_method="hist", random_state=42,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=400,
+        subsample=0.85,
+        colsample_bytree=0.85,
+        min_child_weight=5,
+        gamma=0.1,
+        reg_alpha=0.01,
+        reg_lambda=1.0,
+        tree_method="hist",
+        random_state=42,
         eval_metric="mlogloss",
     )
     clf.fit(X_train, y_train)
@@ -263,11 +256,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     parser.add_argument(
-        "--split-date", default="2024-08-01",
+        "--split-date",
+        default="2024-08-01",
         help="Walk-forward boundary (YYYY-MM-DD). Default tests 2024-25 season.",
     )
     parser.add_argument(
-        "--log-level", default="INFO",
+        "--log-level",
+        default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
     args = parser.parse_args()
@@ -280,9 +275,7 @@ def main():
         return 1
 
     sys.path.insert(0, "/app/services/ml-models/src")
-    from utils.training_data import (
-        NON_FEATURE_COLUMNS, TARGET_COLUMN, load_training_frame,
-    )
+    from utils.training_data import NON_FEATURE_COLUMNS, TARGET_COLUMN, load_training_frame
 
     LOGGER.info("Loading soccer training frame...")
     base = load_training_frame(database_url=args.database_url)
@@ -290,6 +283,7 @@ def main():
 
     LOGGER.info("Loading cross-book snapshots...")
     from sqlalchemy import create_engine
+
     engine = create_engine(args.database_url)
     try:
         snapshots = pd.read_sql(SNAPSHOTS_QUERY, engine)
@@ -303,7 +297,8 @@ def main():
     crossbook = compute_crossbook_features(snapshots)
     LOGGER.info(
         "Cross-book features computed for %d matches (pinnacle on %d).",
-        len(crossbook), int(crossbook["pinnacle_present"].sum()),
+        len(crossbook),
+        int(crossbook["pinnacle_present"].sum()),
     )
 
     base["match_id"] = base["match_id"].astype(str)
@@ -312,13 +307,17 @@ def main():
     pinn_cov = (merged["pinnacle_present"] == 1.0).sum()
     LOGGER.info(
         "Test corpus: %d matches, pinnacle covers %d (%.1f%%).",
-        len(merged), pinn_cov, 100.0 * pinn_cov / max(1, len(merged)),
+        len(merged),
+        pinn_cov,
+        100.0 * pinn_cov / max(1, len(merged)),
     )
 
     train, test = date_walk_forward_split(merged, args.split_date)
     LOGGER.info(
         "Walk-forward: train=%d test=%d (split=%s)",
-        len(train), len(test), args.split_date,
+        len(train),
+        len(test),
+        args.split_date,
     )
 
     excluded = set(NON_FEATURE_COLUMNS) | {TARGET_COLUMN}
@@ -327,25 +326,34 @@ def main():
     vcb = [c for c in numeric_cols if c not in excluded]
     LOGGER.info(
         "v1 features: %d  |  v_crossbook features: %d (+%d cross-book keys)",
-        len(v1), len(vcb), len(vcb) - len(v1),
+        len(v1),
+        len(vcb),
+        len(vcb) - len(v1),
     )
 
     m_v1 = train_and_eval(train, test, v1, TARGET_COLUMN)
     LOGGER.info(
         "v1-control:   acc=%.4f brier=%.4f ece=%.4f",
-        m_v1["accuracy"], m_v1["brier"], m_v1["ece"],
+        m_v1["accuracy"],
+        m_v1["brier"],
+        m_v1["ece"],
     )
     m_cb = train_and_eval(train, test, vcb, TARGET_COLUMN)
     LOGGER.info(
         "v_crossbook:  acc=%.4f brier=%.4f ece=%.4f",
-        m_cb["accuracy"], m_cb["brier"], m_cb["ece"],
+        m_cb["accuracy"],
+        m_cb["brier"],
+        m_cb["ece"],
     )
 
     d_acc = m_cb["accuracy"] - m_v1["accuracy"]
     d_brier = m_cb["brier"] - m_v1["brier"]
     d_ece = m_cb["ece"] - m_v1["ece"]
     LOGGER.info(
-        "Δ acc: %+.4f  Δ brier: %+.4f  Δ ece: %+.4f", d_acc, d_brier, d_ece,
+        "Δ acc: %+.4f  Δ brier: %+.4f  Δ ece: %+.4f",
+        d_acc,
+        d_brier,
+        d_ece,
     )
     if d_brier <= -0.005:
         verdict = "KEEP cross-book features"

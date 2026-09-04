@@ -42,7 +42,6 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Optional
 
@@ -702,8 +701,7 @@ def run(database_url: str, kind: str, start: date, end: date) -> dict:
                 # keeps iterating.
                 if kind == "upcoming" and _CACHED_RACECARDS_PATH in _ONLY_TODAY_ENDPOINTS:
                     logger.info(
-                        "%s returns today only — stopping after pass 1 "
-                        "(date range %s..%s ignored)",
+                        "%s returns today only — stopping after pass 1 " "(date range %s..%s ignored)",
                         _CACHED_RACECARDS_PATH,
                         start,
                         end,

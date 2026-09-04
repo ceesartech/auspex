@@ -326,11 +326,7 @@ def run(database_url: str, days: int, notify: bool = True) -> dict:
     hockey_dc_model = _load_hockey_dixon_coles()
     if hockey_dc_model is not None:
         try:
-            from predictors.market_derivation import (  # type: ignore
-                MAX_GOALS_DERIVE,
-                build_dc_matrix,
-                derive_markets,
-            )
+            from predictors.market_derivation import MAX_GOALS_DERIVE, build_dc_matrix, derive_markets  # type: ignore
 
             hockey_derive_ready = True
         except Exception as e:

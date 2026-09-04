@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import find_packages, setup
 
 setup(
     name="betting-system",
@@ -15,11 +15,7 @@ setup(
         if line.strip() and not line.startswith("#")
     ],
     extras_require={
-        "dev": [
-            line.strip()
-            for line in open("requirements-dev.txt")
-            if line.strip() and not line.startswith("#")
-        ],
+        "dev": [line.strip() for line in open("requirements-dev.txt") if line.strip() and not line.startswith("#")],
     },
     classifiers=[
         "Development Status :: 4 - Beta",

@@ -1,12 +1,14 @@
 """E2E: WebSocket live-odds stream."""
 
 import json
-import time
 import threading
+import time
+
 import pytest
 
 try:
     import websocket as ws_lib  # websocket-client
+
     WS_AVAILABLE = True
 except ImportError:
     WS_AVAILABLE = False
@@ -69,6 +71,4 @@ def test_websocket_unauthenticated_rejected():
 
     # Either never connected or was closed with 4001/4003/1008
     if close_codes:
-        assert close_codes[0] in (1008, 4001, 4003, 1000), (
-            f"Unexpected close code: {close_codes[0]}"
-        )
+        assert close_codes[0] in (1008, 4001, 4003, 1000), f"Unexpected close code: {close_codes[0]}"

@@ -9,9 +9,7 @@ def test_list_recommendations(authed, api_url):
 
 
 def test_recommendations_active_only(authed, api_url):
-    resp = authed.get(
-        f"{api_url}/api/v1/recommendations?active_only=true", timeout=10
-    )
+    resp = authed.get(f"{api_url}/api/v1/recommendations?active_only=true", timeout=10)
     assert resp.status_code == 200
 
 

@@ -65,59 +65,72 @@ BASE_URL = "https://www.football-data.co.uk/new"
 
 # country code -> (league code, league name, country name)
 COUNTRY_MAP: dict[str, tuple[str, str, str]] = {
-    "ARG": ("AR1", "Primera División",        "Argentina"),
-    "AUT": ("AT1", "Bundesliga",              "Austria"),
-    "BRA": ("BR1", "Brasileirão Série A",     "Brazil"),
-    "CHN": ("CN1", "Chinese Super League",    "China"),
-    "DNK": ("DK1", "Superliga",               "Denmark"),
-    "FIN": ("FI1", "Veikkausliiga",           "Finland"),
-    "IRL": ("IE1", "Premier Division",        "Ireland"),
-    "JPN": ("JP1", "J1 League",               "Japan"),
-    "MEX": ("MX1", "Liga MX",                 "Mexico"),
-    "NOR": ("NO1", "Eliteserien",             "Norway"),
-    "POL": ("PL1", "Ekstraklasa",             "Poland"),
-    "ROU": ("RO1", "Liga I",                  "Romania"),
-    "RUS": ("RU1", "Premier League",          "Russia"),
-    "SWE": ("SE1", "Allsvenskan",             "Sweden"),
-    "SWZ": ("CH1", "Super League",            "Switzerland"),
-    "USA": ("MLS", "MLS",                     "USA"),
+    "ARG": ("AR1", "Primera División", "Argentina"),
+    "AUT": ("AT1", "Bundesliga", "Austria"),
+    "BRA": ("BR1", "Brasileirão Série A", "Brazil"),
+    "CHN": ("CN1", "Chinese Super League", "China"),
+    "DNK": ("DK1", "Superliga", "Denmark"),
+    "FIN": ("FI1", "Veikkausliiga", "Finland"),
+    "IRL": ("IE1", "Premier Division", "Ireland"),
+    "JPN": ("JP1", "J1 League", "Japan"),
+    "MEX": ("MX1", "Liga MX", "Mexico"),
+    "NOR": ("NO1", "Eliteserien", "Norway"),
+    "POL": ("PL1", "Ekstraklasa", "Poland"),
+    "ROU": ("RO1", "Liga I", "Romania"),
+    "RUS": ("RU1", "Premier League", "Russia"),
+    "SWE": ("SE1", "Allsvenskan", "Sweden"),
+    "SWZ": ("CH1", "Super League", "Switzerland"),
+    "USA": ("MLS", "MLS", "USA"),
 }
 
 # Translate the extra-leagues CSV columns to the EU schema so a single
 # staging table holds both sources. Values not present in extra files
 # simply remain unmapped → columns missing from the resulting frame.
 COLUMN_MAP: dict[str, str] = {
-    "Home":      "HomeTeam",
-    "Away":      "AwayTeam",
-    "HG":        "FTHG",
-    "AG":        "FTAG",
-    "Res":       "FTR",
+    "Home": "HomeTeam",
+    "Away": "AwayTeam",
+    "HG": "FTHG",
+    "AG": "FTAG",
+    "Res": "FTR",
     # Pinnacle in extra files is "PH/PD/PA"; treat as closing odds to
     # match the EU "PSCH/PSCD/PSCA" columns.
-    "PH":        "PSCH",
-    "PD":        "PSCD",
-    "PA":        "PSCA",
+    "PH": "PSCH",
+    "PD": "PSCD",
+    "PA": "PSCA",
     # Market average and max are common to both formats.
-    "AvgH":      "AvgH",
-    "AvgD":      "AvgD",
-    "AvgA":      "AvgA",
-    "MaxH":      "MaxH",
-    "MaxD":      "MaxD",
-    "MaxA":      "MaxA",
+    "AvgH": "AvgH",
+    "AvgD": "AvgD",
+    "AvgA": "AvgA",
+    "MaxH": "MaxH",
+    "MaxD": "MaxD",
+    "MaxA": "MaxA",
     # Over/under 2.5 — keep if present.
-    "AvgCAHH":   "Avg>2.5",
-    "AvgCAHA":   "Avg<2.5",
+    "AvgCAHH": "Avg>2.5",
+    "AvgCAHA": "Avg<2.5",
 }
 
 # Keep only columns we care about post-rename (mirrors load_football_data.py).
 KEEP_COLUMNS = [
-    "Date", "Time", "HomeTeam", "AwayTeam",
-    "FTHG", "FTAG", "FTR",
-    "PSCH", "PSCD", "PSCA",
-    "AvgH", "AvgD", "AvgA",
-    "MaxH", "MaxD", "MaxA",
-    "Avg>2.5", "Avg<2.5",
-    "league", "season",
+    "Date",
+    "Time",
+    "HomeTeam",
+    "AwayTeam",
+    "FTHG",
+    "FTAG",
+    "FTR",
+    "PSCH",
+    "PSCD",
+    "PSCA",
+    "AvgH",
+    "AvgD",
+    "AvgA",
+    "MaxH",
+    "MaxD",
+    "MaxA",
+    "Avg>2.5",
+    "Avg<2.5",
+    "league",
+    "season",
 ]
 
 
@@ -203,27 +216,22 @@ def write_database(frames: list[pd.DataFrame], database_url: str) -> int:
         with conn.cursor() as cur:
             # Discover the actual columns in raw_football_data so we
             # only insert what the table already has.
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT column_name FROM information_schema.columns
                 WHERE table_name = 'raw_football_data'
-            """)
+            """
+            )
             existing = {r[0] for r in cur.fetchall()}
             if not existing:
                 raise RuntimeError(
-                    "raw_football_data table doesn't exist. Run "
-                    "scripts/load_football_data.py first to create it."
+                    "raw_football_data table doesn't exist. Run " "scripts/load_football_data.py first to create it."
                 )
 
             cols = [c for c in all_df.columns if c in existing]
             quoted_cols = ['"' + c + '"' for c in cols]
-            insert_sql = (
-                f"INSERT INTO raw_football_data ({', '.join(quoted_cols)}) "
-                "VALUES %s ON CONFLICT DO NOTHING"
-            )
-            rows = [
-                tuple(None if pd.isna(v) else str(v) for v in row)
-                for row in all_df[cols].itertuples(index=False)
-            ]
+            insert_sql = f"INSERT INTO raw_football_data ({', '.join(quoted_cols)}) " "VALUES %s ON CONFLICT DO NOTHING"
+            rows = [tuple(None if pd.isna(v) else str(v) for v in row) for row in all_df[cols].itertuples(index=False)]
             execute_values(cur, insert_sql, rows)
             conn.commit()
             return cur.rowcount
@@ -231,12 +239,13 @@ def write_database(frames: list[pd.DataFrame], database_url: str) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--countries", default=",".join(COUNTRY_MAP.keys()),
-                   help="Comma-separated country codes (default: all known).")
-    p.add_argument("--output", type=Path, default=None,
-                   help="Optional output dir for raw normalized CSVs.")
-    p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"),
-                   help="Postgres URL. Pass empty to skip DB load.")
+    p.add_argument(
+        "--countries", default=",".join(COUNTRY_MAP.keys()), help="Comma-separated country codes (default: all known)."
+    )
+    p.add_argument("--output", type=Path, default=None, help="Optional output dir for raw normalized CSVs.")
+    p.add_argument(
+        "--database-url", default=os.environ.get("DATABASE_URL"), help="Postgres URL. Pass empty to skip DB load."
+    )
     return p.parse_args(argv)
 
 

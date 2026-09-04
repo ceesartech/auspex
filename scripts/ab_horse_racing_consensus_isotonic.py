@@ -72,8 +72,15 @@ GRADED_QUERY = """
 # comparable to the recorded baseline numbers.
 BUCKET_EDGES = [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 1.01]
 BUCKET_LABELS = [
-    "00-05", "05-10", "10-15", "15-20", "20-25",
-    "25-30", "30-40", "40-50", "50+ ",
+    "00-05",
+    "05-10",
+    "10-15",
+    "15-20",
+    "20-25",
+    "25-30",
+    "30-40",
+    "40-50",
+    "50+ ",
 ]
 
 
@@ -96,7 +103,7 @@ def per_race_brier(df: pd.DataFrame, prob_col: str) -> float:
         if grp["actual"].sum() == 0:
             continue
         diff = grp[prob_col].astype(float).to_numpy() - grp["actual"].astype(float).to_numpy()
-        total += float(np.mean(diff ** 2))
+        total += float(np.mean(diff**2))
         n += 1
     return total / n if n else float("inf")
 
@@ -114,12 +121,14 @@ def per_bucket_table(df: pd.DataFrame, prob_col: str) -> pd.DataFrame:
     for label, grp in df.groupby(bucket_idx, observed=True):
         if len(grp) == 0:
             continue
-        rows.append({
-            "bucket": str(label),
-            "predicted": float(grp[prob_col].mean()),
-            "actual": float(grp["actual"].mean()),
-            "n": int(len(grp)),
-        })
+        rows.append(
+            {
+                "bucket": str(label),
+                "predicted": float(grp[prob_col].mean()),
+                "actual": float(grp["actual"].mean()),
+                "n": int(len(grp)),
+            }
+        )
     table = pd.DataFrame(rows)
     table["gap"] = table["actual"] - table["predicted"]
     return table
@@ -145,15 +154,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     parser.add_argument(
-        "--split-date", default="2026-05-01",
+        "--split-date",
+        default="2026-05-01",
         help="Walk-forward boundary (YYYY-MM-DD). Races on/after go to test.",
     )
     parser.add_argument(
-        "--train-window-days", type=int, default=90,
+        "--train-window-days",
+        type=int,
+        default=90,
         help="Days back from split-date to use for the 'recent' isotonic.",
     )
     parser.add_argument(
-        "--log-level", default="INFO",
+        "--log-level",
+        default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
     args = parser.parse_args()
@@ -165,8 +178,8 @@ def main():
         LOGGER.error("DATABASE_URL not set.")
         return 1
 
-    from sqlalchemy import create_engine
     from sklearn.isotonic import IsotonicRegression
+    from sqlalchemy import create_engine
 
     LOGGER.info("Loading graded consensus predictions...")
     engine = create_engine(args.database_url)
@@ -177,8 +190,10 @@ def main():
     df["race_date"] = pd.to_datetime(df["race_date"], utc=True)
     LOGGER.info(
         "Loaded %d graded predictions across %d races (%s..%s).",
-        len(df), df["race_id"].nunique(),
-        df["race_date"].min().date(), df["race_date"].max().date(),
+        len(df),
+        df["race_id"].nunique(),
+        df["race_date"].min().date(),
+        df["race_date"].max().date(),
     )
 
     split_ts = pd.to_datetime(args.split_date, utc=True)
@@ -193,25 +208,35 @@ def main():
     train_recent = train_full[train_full["race_date"] >= recent_start].copy()
     LOGGER.info(
         "Walk-forward: train_full=%d (%d races) train_recent=%d (%d races, last %d days) test=%d (%d races) split=%s",
-        len(train_full), train_full["race_id"].nunique(),
-        len(train_recent), train_recent["race_id"].nunique(),
+        len(train_full),
+        train_full["race_id"].nunique(),
+        len(train_recent),
+        train_recent["race_id"].nunique(),
         args.train_window_days,
-        len(test), test["race_id"].nunique(), args.split_date,
+        len(test),
+        test["race_id"].nunique(),
+        args.split_date,
     )
 
     # Fit isotonic on full + recent train pairs.
     iso_full = IsotonicRegression(
-        y_min=0.0, y_max=1.0, out_of_bounds="clip", increasing=True,
+        y_min=0.0,
+        y_max=1.0,
+        out_of_bounds="clip",
+        increasing=True,
     )
     iso_full.fit(train_full["raw_prob"].to_numpy(), train_full["actual"].to_numpy())
     iso_recent = IsotonicRegression(
-        y_min=0.0, y_max=1.0, out_of_bounds="clip", increasing=True,
+        y_min=0.0,
+        y_max=1.0,
+        out_of_bounds="clip",
+        increasing=True,
     )
     iso_recent.fit(train_recent["raw_prob"].to_numpy(), train_recent["actual"].to_numpy())
-    iso = iso_full  # keep `iso` name for the rest of the script (full-history default)
     LOGGER.info(
         "Isotonic fits: full=%d knots, recent=%d knots.",
-        len(iso_full.X_thresholds_), len(iso_recent.X_thresholds_),
+        len(iso_full.X_thresholds_),
+        len(iso_recent.X_thresholds_),
     )
 
     # Apply to test. Compare 4 variants:
@@ -263,13 +288,22 @@ def main():
         if cc is None:
             LOGGER.info(
                 "%-7s | %.3f     %.3f       %+.3f | (bucket empty in calibrated)",
-                label, rr["predicted"], rr["actual"], rr["gap"],
+                label,
+                rr["predicted"],
+                rr["actual"],
+                rr["gap"],
             )
             continue
         LOGGER.info(
             "%-7s | %.3f     %.3f       %+.3f | %.3f     %.3f       %+.3f | %d",
-            label, rr["predicted"], rr["actual"], rr["gap"],
-            cc["predicted"], cc["actual"], cc["gap"], int(rr["n"]),
+            label,
+            rr["predicted"],
+            rr["actual"],
+            rr["gap"],
+            cc["predicted"],
+            cc["actual"],
+            cc["gap"],
+            int(rr["n"]),
         )
 
     LOGGER.info("")

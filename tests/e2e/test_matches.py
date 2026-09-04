@@ -1,7 +1,8 @@
 """E2E: Matches endpoints."""
 
-import pytest
 from datetime import date
+
+import pytest
 
 
 def test_upcoming_matches(authed, api_url):
@@ -47,7 +48,5 @@ def test_match_not_found(authed, api_url):
 
 def test_matches_filter_by_date(authed, api_url):
     today = date.today().isoformat()
-    resp = authed.get(
-        f"{api_url}/api/v1/matches/upcoming?date={today}", timeout=10
-    )
+    resp = authed.get(f"{api_url}/api/v1/matches/upcoming?date={today}", timeout=10)
     assert resp.status_code == 200

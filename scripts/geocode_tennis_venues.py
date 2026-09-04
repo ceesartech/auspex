@@ -31,11 +31,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from geocode_soccer_venues import (  # noqa: E402
-    DEFAULT_TIMEOUT_SEC,
-    geocode,
-    upsert_geocoded,
-)
+from geocode_soccer_venues import DEFAULT_TIMEOUT_SEC, geocode, upsert_geocoded  # noqa: E402
 
 LOGGER = logging.getLogger("geocode_tennis_venues")
 

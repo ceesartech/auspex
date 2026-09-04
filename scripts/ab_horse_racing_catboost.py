@@ -42,7 +42,9 @@ LOGGER = logging.getLogger("ab_horse_racing_catboost")
 
 
 def _per_race_softmax_with_temperature(
-    scores: np.ndarray, groups: np.ndarray, temperature: float,
+    scores: np.ndarray,
+    groups: np.ndarray,
+    temperature: float,
 ) -> list:
     """Same per-race softmax HorseRacingRanker.predict_probabilities
     uses — apply temperature and softmax within each race group,
@@ -52,7 +54,7 @@ def _per_race_softmax_with_temperature(
     cursor = 0
     for size in groups:
         size = int(size)
-        race_scores = scores[cursor:cursor + size]
+        race_scores = scores[cursor : cursor + size]
         cursor += size
         scaled = race_scores / max(temperature, 1e-6)
         scaled = scaled - scaled.max()  # numerical stability
@@ -61,14 +63,13 @@ def _per_race_softmax_with_temperature(
     return out
 
 
-def _per_entrant_brier(race_probs: list, groups: np.ndarray,
-                       y_true: np.ndarray) -> float:
+def _per_entrant_brier(race_probs: list, groups: np.ndarray, y_true: np.ndarray) -> float:
     total = 0.0
     n = 0
     cursor = 0
     for race_arr, size in zip(race_probs, groups):
         size = int(size)
-        actuals = y_true[cursor:cursor + size].astype(np.float64)
+        actuals = y_true[cursor : cursor + size].astype(np.float64)
         cursor += size
         if actuals.sum() == 0:
             continue
@@ -78,7 +79,9 @@ def _per_entrant_brier(race_probs: list, groups: np.ndarray,
 
 
 def _tune_temperature(
-    scores: np.ndarray, groups: np.ndarray, y_true: np.ndarray,
+    scores: np.ndarray,
+    groups: np.ndarray,
+    y_true: np.ndarray,
 ) -> Tuple[float, float]:
     """Pick the temperature ∈ [0.01, 2.0] that minimises per-race
     Brier on the val set. Mirrors the prod
@@ -86,8 +89,26 @@ def _tune_temperature(
     on the same calibration objective."""
     best_t = 1.0
     best_brier = float("inf")
-    for t in (0.01, 0.02, 0.03, 0.05, 0.08, 0.10, 0.12, 0.15,
-              0.18, 0.20, 0.24, 0.30, 0.40, 0.50, 0.70, 1.00, 1.50, 2.00):
+    for t in (
+        0.01,
+        0.02,
+        0.03,
+        0.05,
+        0.08,
+        0.10,
+        0.12,
+        0.15,
+        0.18,
+        0.20,
+        0.24,
+        0.30,
+        0.40,
+        0.50,
+        0.70,
+        1.00,
+        1.50,
+        2.00,
+    ):
         probs = _per_race_softmax_with_temperature(scores, groups, t)
         b = _per_entrant_brier(probs, groups, y_true)
         if b < best_brier:
@@ -96,15 +117,14 @@ def _tune_temperature(
     return best_t, best_brier
 
 
-def _top1_accuracy(scores: np.ndarray, groups: np.ndarray,
-                   y_true: np.ndarray) -> float:
+def _top1_accuracy(scores: np.ndarray, groups: np.ndarray, y_true: np.ndarray) -> float:
     cursor = 0
     hits = 0
     n = 0
     for size in groups:
         size = int(size)
-        race_scores = scores[cursor:cursor + size]
-        race_actual = y_true[cursor:cursor + size]
+        race_scores = scores[cursor : cursor + size]
+        race_actual = y_true[cursor : cursor + size]
         cursor += size
         if race_actual.sum() == 0:
             continue
@@ -116,8 +136,12 @@ def _top1_accuracy(scores: np.ndarray, groups: np.ndarray,
 
 
 def train_catboost(
-    X_train: pd.DataFrame, y_train: np.ndarray, g_train: np.ndarray,
-    X_val: pd.DataFrame, y_val: np.ndarray, g_val: np.ndarray,
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    g_train: np.ndarray,
+    X_val: pd.DataFrame,
+    y_val: np.ndarray,
+    g_val: np.ndarray,
 ):
     """Train a CatBoostRanker with hyperparameters comparable to the
     production LGBMRanker config (HorseRacingRankerConfig defaults)."""
@@ -129,11 +153,13 @@ def train_catboost(
         return np.repeat(np.arange(len(groups)), groups.astype(int))
 
     train_pool = Pool(
-        data=X_train.values, label=y_train,
+        data=X_train.values,
+        label=y_train,
         group_id=_row_group_ids(g_train),
     )
     val_pool = Pool(
-        data=X_val.values, label=y_val,
+        data=X_val.values,
+        label=y_val,
         group_id=_row_group_ids(g_val),
     )
 
@@ -151,14 +177,16 @@ def train_catboost(
     return model
 
 
-def evaluate(name: str, scores: np.ndarray, groups: np.ndarray,
-             y_true: np.ndarray, temperature: float) -> dict:
+def evaluate(name: str, scores: np.ndarray, groups: np.ndarray, y_true: np.ndarray, temperature: float) -> dict:
     probs = _per_race_softmax_with_temperature(scores, groups, temperature)
     brier = _per_entrant_brier(probs, groups, y_true)
     top1 = _top1_accuracy(scores, groups, y_true)
     LOGGER.info(
         "%s :: top1=%.4f  brier=%.4f  (T=%.3f)",
-        name, top1, brier, temperature,
+        name,
+        top1,
+        brier,
+        temperature,
     )
     return {"top1": top1, "brier": brier, "temperature": temperature}
 
@@ -169,7 +197,8 @@ def main():
     parser.add_argument("--split-date", default="2026-05-15")
     parser.add_argument("--val-fraction", type=float, default=0.15)
     parser.add_argument(
-        "--log-level", default="INFO",
+        "--log-level",
+        default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
     args = parser.parse_args()
@@ -183,24 +212,25 @@ def main():
 
     sys.path.insert(0, "/app/services/ml-models/src")
     from predictors.horse_racing_ranker import HorseRacingRanker
-    from utils.horse_racing_data import (
-        get_feature_columns, group_array, load_training_frame, split_by_date,
-    )
+    from utils.horse_racing_data import get_feature_columns, group_array, load_training_frame, split_by_date
+
     sys.path.insert(0, "/app/scripts")
     from train_horse_racing_win import _per_entrant_brier as _trainer_brier
     from train_horse_racing_win import _split_train_val
 
     LOGGER.info("Loading ranker training frame...")
     frame = load_training_frame(database_url=args.database_url)
-    LOGGER.info("Loaded %d rows / %d races.",
-                len(frame), frame["race_id"].nunique())
+    LOGGER.info("Loaded %d rows / %d races.", len(frame), frame["race_id"].nunique())
 
     train_frame, test_frame = split_by_date(frame, args.split_date)
     train_inner, val_inner = _split_train_val(train_frame, args.val_fraction)
     feature_cols = get_feature_columns(train_inner)
     LOGGER.info(
         "Train=%d Val=%d Test=%d  features=%d",
-        len(train_inner), len(val_inner), len(test_frame), len(feature_cols),
+        len(train_inner),
+        len(val_inner),
+        len(test_frame),
+        len(feature_cols),
     )
 
     median = train_inner[feature_cols].median()
@@ -220,18 +250,25 @@ def main():
     LOGGER.info("══════════════ v_lgbm (LGBMRanker) ══════════════")
     lgbm_model = HorseRacingRanker()
     lgbm_model.fit(
-        X_train=train_inner[feature_cols], y_train=y_train, groups_train=g_train,
-        X_val=val_inner[feature_cols], y_val=y_val, groups_val=g_val,
+        X_train=train_inner[feature_cols],
+        y_train=y_train,
+        groups_train=g_train,
+        X_val=val_inner[feature_cols],
+        y_val=y_val,
+        groups_val=g_val,
     )
     lgbm_scores_test = lgbm_model.model.predict(X_test)
     lgbm_test_probs = lgbm_model.predict_probabilities(
-        test_frame[feature_cols], g_test,
+        test_frame[feature_cols],
+        g_test,
     )
     lgbm_test_brier = _trainer_brier(lgbm_test_probs, g_test, y_test)
     lgbm_top1 = _top1_accuracy(lgbm_scores_test, g_test, y_test)
     LOGGER.info(
         "v_lgbm :: top1=%.4f brier=%.4f T=%.3f",
-        lgbm_top1, lgbm_test_brier, lgbm_model.temperature,
+        lgbm_top1,
+        lgbm_test_brier,
+        lgbm_model.temperature,
     )
 
     # ── v_catboost: option 4 candidate ────────────────────────────
@@ -241,7 +278,8 @@ def main():
     cat_temp, cat_val_brier = _tune_temperature(cat_val_scores, g_val, y_val)
     LOGGER.info(
         "v_catboost val temperature tuned: T=%.3f val_brier=%.4f",
-        cat_temp, cat_val_brier,
+        cat_temp,
+        cat_val_brier,
     )
     cat_scores_test = cat_model.predict(X_test.values)
     cat_metrics = evaluate("v_catboost", cat_scores_test, g_test, y_test, cat_temp)

@@ -21,9 +21,7 @@ def test_filter_predictions_by_sport(authed, api_url):
 
 
 def test_filter_predictions_by_confidence(authed, api_url):
-    resp = authed.get(
-        f"{api_url}/api/v1/predictions?min_confidence=0.6", timeout=10
-    )
+    resp = authed.get(f"{api_url}/api/v1/predictions?min_confidence=0.6", timeout=10)
     assert resp.status_code == 200
     predictions = resp.json()
     if isinstance(predictions, list):
@@ -51,11 +49,7 @@ def test_prediction_probabilities_sum_to_one(authed, api_url):
     if isinstance(predictions, dict):
         predictions = predictions.get("items", [])
     for pred in predictions:
-        total = (
-            pred.get("probability_home", 0)
-            + pred.get("probability_draw", 0)
-            + pred.get("probability_away", 0)
-        )
+        total = pred.get("probability_home", 0) + pred.get("probability_draw", 0) + pred.get("probability_away", 0)
         if total > 0:
             assert abs(total - 1.0) < 0.01, f"Probabilities don't sum to 1: {total}"
 

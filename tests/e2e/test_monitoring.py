@@ -1,6 +1,7 @@
 """E2E: Monitoring stack health checks."""
 
 import os
+
 import pytest
 import requests
 

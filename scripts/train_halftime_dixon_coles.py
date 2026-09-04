@@ -78,7 +78,8 @@ def main():
         help="Where to write the model artifact (model.bin).",
     )
     parser.add_argument(
-        "--log-level", default="INFO",
+        "--log-level",
+        default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
     args = parser.parse_args()
@@ -115,10 +116,7 @@ def main():
 
     model = DixonColesPredictor(DIXON_COLES_CONFIG)
     result = model.train(train_df, val_df=val_df)
-    LOGGER.info("Train result: %s", {
-        k: v for k, v in result.items()
-        if k not in ("team_attack", "team_defense")
-    })
+    LOGGER.info("Train result: %s", {k: v for k, v in result.items() if k not in ("team_attack", "team_defense")})
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     model_path = args.output_dir / "model.bin"

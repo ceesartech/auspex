@@ -57,7 +57,10 @@ def derive_multigrade_target(finish_position: pd.Series) -> np.ndarray:
 
 
 def top_k_hit_rate(
-    scores: np.ndarray, groups: np.ndarray, y_topk: np.ndarray, k: int,
+    scores: np.ndarray,
+    groups: np.ndarray,
+    y_topk: np.ndarray,
+    k: int,
 ) -> float:
     """Per-race: are the model's k highest-score entrants exactly
     the k actual top-finishers? Returns mean over races of
@@ -67,8 +70,8 @@ def top_k_hit_rate(
     n = 0
     for size in groups:
         size = int(size)
-        race_scores = scores[cursor:cursor + size]
-        race_actual = y_topk[cursor:cursor + size]
+        race_scores = scores[cursor : cursor + size]
+        race_actual = y_topk[cursor : cursor + size]
         cursor += size
         if race_actual.sum() == 0:
             # Race with fewer than k actual top finishers (rare
@@ -85,7 +88,9 @@ def top_k_hit_rate(
 
 
 def brier_on_target(
-    race_probs: list, groups: np.ndarray, y_target: np.ndarray,
+    race_probs: list,
+    groups: np.ndarray,
+    y_target: np.ndarray,
 ) -> float:
     """Per-entrant Brier with race_probs being a list of np arrays
     (one per race, from predict_probabilities) and y_target a flat
@@ -95,7 +100,7 @@ def brier_on_target(
     cursor = 0
     for race_arr, size in zip(race_probs, groups):
         size = int(size)
-        actuals = y_target[cursor:cursor + size].astype(np.float64)
+        actuals = y_target[cursor : cursor + size].astype(np.float64)
         cursor += size
         if actuals.sum() == 0:
             continue
@@ -104,8 +109,7 @@ def brier_on_target(
     return total / n if n else float("inf")
 
 
-def train_variant(label: str, frame: pd.DataFrame, split_date: str,
-                  variant: str, val_fraction: float) -> dict:
+def train_variant(label: str, frame: pd.DataFrame, split_date: str, variant: str, val_fraction: float) -> dict:
     """Train + score one variant. Returns the trained model + test
     arrays needed for downstream market evaluation.
 
@@ -115,12 +119,8 @@ def train_variant(label: str, frame: pd.DataFrame, split_date: str,
     rankers trained against their market's truth (top-2 / top-3
     finishers) for a market-appropriate Brier comparison."""
     sys.path.insert(0, "/app/services/ml-models/src")
-    from predictors.horse_racing_ranker import (
-        HorseRacingRanker, HorseRacingRankerConfig,
-    )
-    from utils.horse_racing_data import (
-        get_feature_columns, group_array, split_by_date,
-    )
+    from predictors.horse_racing_ranker import HorseRacingRanker, HorseRacingRankerConfig
+    from utils.horse_racing_data import get_feature_columns, group_array, split_by_date
 
     sys.path.insert(0, "/app/scripts")
     from train_horse_racing_win import _split_train_val
@@ -155,14 +155,15 @@ def train_variant(label: str, frame: pd.DataFrame, split_date: str,
     # downstream evaluation — get_feature_columns is generic and
     # would otherwise let them leak into X_train as features
     # (gives NDCG=1.0 at iteration 1, fake-perfect metrics).
-    feature_cols = [
-        c for c in feature_cols
-        if c not in {"_is_win", "_is_place", "_is_show"}
-    ]
+    feature_cols = [c for c in feature_cols if c not in {"_is_win", "_is_place", "_is_show"}]
     LOGGER.info(
         "%s: train_rows=%d val_rows=%d test_rows=%d features=%d label_gain=%s",
-        label, len(train_inner), len(val_inner), len(test_frame),
-        len(feature_cols), config.label_gain,
+        label,
+        len(train_inner),
+        len(val_inner),
+        len(test_frame),
+        len(feature_cols),
+        config.label_gain,
     )
 
     X_train = train_inner[feature_cols]
@@ -170,10 +171,7 @@ def train_variant(label: str, frame: pd.DataFrame, split_date: str,
     g_train = group_array(train_inner)
 
     X_val = val_inner[feature_cols] if not val_inner.empty else None
-    y_val = (
-        val_inner["target"].to_numpy(dtype=np.int64)
-        if not val_inner.empty else None
-    )
+    y_val = val_inner["target"].to_numpy(dtype=np.int64) if not val_inner.empty else None
     g_val = group_array(val_inner) if not val_inner.empty else None
 
     X_test = test_frame[feature_cols]
@@ -181,8 +179,12 @@ def train_variant(label: str, frame: pd.DataFrame, split_date: str,
 
     model = HorseRacingRanker(config=config)
     model.fit(
-        X_train=X_train, y_train=y_train, groups_train=g_train,
-        X_val=X_val, y_val=y_val, groups_val=g_val,
+        X_train=X_train,
+        y_train=y_train,
+        groups_train=g_train,
+        X_val=X_val,
+        y_val=y_val,
+        groups_val=g_val,
     )
 
     scores = model.model.predict(X_test[model.feature_names].fillna(X_train.median()))
@@ -198,7 +200,9 @@ def train_variant(label: str, frame: pd.DataFrame, split_date: str,
 
 
 def evaluate_market(
-    result: dict, target_col: str, label_for_log: str,
+    result: dict,
+    target_col: str,
+    label_for_log: str,
 ) -> dict:
     """Evaluate one model on one market (win/place/show)."""
     test_frame = result["test_frame"]
@@ -212,7 +216,10 @@ def evaluate_market(
     brier = brier_on_target(probs, groups, y_market)
     LOGGER.info(
         "%s :: market=%s  topK_hit=%.4f  brier=%.4f",
-        result["label"], label_for_log, hit_rate, brier,
+        result["label"],
+        label_for_log,
+        hit_rate,
+        brier,
     )
     return {"hit_rate": hit_rate, "brier": brier}
 
@@ -223,7 +230,8 @@ def main():
     parser.add_argument("--split-date", default="2026-05-15")
     parser.add_argument("--val-fraction", type=float, default=0.15)
     parser.add_argument(
-        "--log-level", default="INFO",
+        "--log-level",
+        default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
     args = parser.parse_args()
@@ -242,7 +250,8 @@ def main():
     frame = load_training_frame(database_url=args.database_url)
     LOGGER.info(
         "Loaded %d rows across %d races.",
-        len(frame), frame["race_id"].nunique() if "race_id" in frame else 0,
+        len(frame),
+        frame["race_id"].nunique() if "race_id" in frame else 0,
     )
 
     # Pre-compute per-market binary targets on the FULL frame so both
@@ -254,7 +263,10 @@ def main():
 
     results = {
         name: train_variant(
-            name, frame, args.split_date, variant=name,
+            name,
+            frame,
+            args.split_date,
+            variant=name,
             val_fraction=args.val_fraction,
         )
         for name in ("win_binary", "multi_grade", "place_binary", "show_binary")
@@ -266,10 +278,7 @@ def main():
     # win-binary baseline (the current production shape) PLUS the
     # multi-grade attempt. Dedicated models are the only ones with
     # native softmax calibration on their market.
-    win_market = {
-        name: evaluate_market(results[name], "_is_win", "WIN")
-        for name in ("win_binary", "multi_grade")
-    }
+    win_market = {name: evaluate_market(results[name], "_is_win", "WIN") for name in ("win_binary", "multi_grade")}
     place_market = {
         name: evaluate_market(results[name], "_is_place", "PLACE")
         for name in ("win_binary", "multi_grade", "place_binary")
@@ -290,12 +299,18 @@ def main():
         winner_name, winner = leaderboard[0]
         LOGGER.info(
             "%s leader: %-13s brier=%.4f hitK=%.4f",
-            market_label, winner_name, winner["brier"], winner["hit_rate"],
+            market_label,
+            winner_name,
+            winner["brier"],
+            winner["hit_rate"],
         )
         for name, m in leaderboard[1:]:
             LOGGER.info(
                 "         %-13s brier=%.4f (Δ%+.4f vs leader) hitK=%.4f",
-                name, m["brier"], m["brier"] - winner["brier"], m["hit_rate"],
+                name,
+                m["brier"],
+                m["brier"] - winner["brier"],
+                m["hit_rate"],
             )
     return 0
 

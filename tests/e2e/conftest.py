@@ -2,8 +2,9 @@
 
 import os
 import time
-import pytest
+
 import psycopg2
+import pytest
 import redis as redis_lib
 import requests
 

@@ -96,7 +96,12 @@ class TestParseGeocodeResult:
         out = geo.parse_geocode_result(
             {
                 "results": [
-                    {"latitude": -22.9519, "longitude": -43.2105, "timezone": "America/Sao_Paulo", "country_code": "BR"},
+                    {
+                        "latitude": -22.9519,
+                        "longitude": -43.2105,
+                        "timezone": "America/Sao_Paulo",
+                        "country_code": "BR",
+                    },
                     {"latitude": 0.0, "longitude": 0.0},  # Second hit ignored.
                 ]
             }

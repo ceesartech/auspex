@@ -2,8 +2,8 @@
 """Seed the local database with realistic development data."""
 
 import os
-import sys
 import random
+import sys
 from datetime import datetime, timedelta, timezone
 
 import psycopg2
@@ -36,20 +36,28 @@ def connect():
 
 def seed_leagues(cur):
     leagues = list({(t[2], t[1]) for t in TEAMS})
-    execute_values(cur, """
+    execute_values(
+        cur,
+        """
         INSERT INTO leagues (league_name, country, sport_type)
         VALUES %s
         ON CONFLICT DO NOTHING
-    """, [(name, country, "soccer") for name, country in leagues])
+    """,
+        [(name, country, "soccer") for name, country in leagues],
+    )
     print(f"  Seeded {len(leagues)} leagues")
 
 
 def seed_teams(cur):
-    execute_values(cur, """
+    execute_values(
+        cur,
+        """
         INSERT INTO teams (team_name, country, league_name)
         VALUES %s
         ON CONFLICT DO NOTHING
-    """, [(name, country, league) for name, country, league in TEAMS])
+    """,
+        [(name, country, league) for name, country, league in TEAMS],
+    )
     print(f"  Seeded {len(TEAMS)} teams")
 
 
@@ -77,27 +85,40 @@ def seed_matches(cur, count: int = 100):
         elif outcome == "draw":
             away_goals = home_goals
 
-        rows.append((
-            home[0], away[0], match_date.date(), status,
-            outcome, home_goals, away_goals,
-        ))
+        rows.append(
+            (
+                home[0],
+                away[0],
+                match_date.date(),
+                status,
+                outcome,
+                home_goals,
+                away_goals,
+            )
+        )
 
-    execute_values(cur, """
+    execute_values(
+        cur,
+        """
         INSERT INTO matches
           (home_team_id, away_team_id, match_date, status,
            actual_outcome, home_goals, away_goals)
         VALUES %s
         ON CONFLICT DO NOTHING
-    """, rows)
+    """,
+        rows,
+    )
     print(f"  Seeded {count} matches")
 
 
 def seed_predictions(cur):
-    cur.execute("""
+    cur.execute(
+        """
         SELECT match_id FROM matches
         WHERE status IN ('finished','scheduled')
         LIMIT 80
-    """)
+    """
+    )
     match_ids = [r[0] for r in cur.fetchall()]
 
     rows = []
@@ -107,18 +128,29 @@ def seed_predictions(cur):
         ph, pd, pa = [p / total for p in probs]
         outcome = OUTCOMES[probs.index(max(probs))]
         confidence = max(probs) / total
-        rows.append((
-            match_id, outcome, round(ph, 4), round(pd, 4), round(pa, 4),
-            round(confidence, 4), "ensemble_v1.0",
-        ))
+        rows.append(
+            (
+                match_id,
+                outcome,
+                round(ph, 4),
+                round(pd, 4),
+                round(pa, 4),
+                round(confidence, 4),
+                "ensemble_v1.0",
+            )
+        )
 
-    execute_values(cur, """
+    execute_values(
+        cur,
+        """
         INSERT INTO predictions
           (match_id, predicted_outcome, probability_home, probability_draw,
            probability_away, confidence, model_version)
         VALUES %s
         ON CONFLICT DO NOTHING
-    """, rows)
+    """,
+        rows,
+    )
     print(f"  Seeded {len(rows)} predictions")
 
 
@@ -126,38 +158,51 @@ def seed_model_performance(cur):
     rows = []
     for days_ago in range(30, 0, -1):
         eval_date = datetime.now(timezone.utc) - timedelta(days=days_ago)
-        rows.append((
-            eval_date, "ensemble_v1.0", "ensemble", 7,
-            random.randint(50, 200),  # total
-            random.randint(25, 130),  # correct
-            round(random.uniform(0.52, 0.68), 4),   # accuracy
-            round(random.uniform(0.9, 1.1), 4),     # log_loss
-            round(random.uniform(0.18, 0.26), 4),   # brier
-            round(random.uniform(-0.05, 0.12), 4),  # roi
-            round(random.uniform(0.60, 0.80), 4),   # avg_confidence
-            round(random.uniform(0.02, 0.08), 4),   # calibration_error
-        ))
+        rows.append(
+            (
+                eval_date,
+                "ensemble_v1.0",
+                "ensemble",
+                7,
+                random.randint(50, 200),  # total
+                random.randint(25, 130),  # correct
+                round(random.uniform(0.52, 0.68), 4),  # accuracy
+                round(random.uniform(0.9, 1.1), 4),  # log_loss
+                round(random.uniform(0.18, 0.26), 4),  # brier
+                round(random.uniform(-0.05, 0.12), 4),  # roi
+                round(random.uniform(0.60, 0.80), 4),  # avg_confidence
+                round(random.uniform(0.02, 0.08), 4),  # calibration_error
+            )
+        )
 
-    execute_values(cur, """
+    execute_values(
+        cur,
+        """
         INSERT INTO model_performance_logs
           (evaluation_date, model_version, model_type, evaluation_period_days,
            total_predictions, correct_predictions, accuracy, log_loss,
            brier_score_avg, roi, avg_confidence, calibration_error)
         VALUES %s
         ON CONFLICT DO NOTHING
-    """, rows)
+    """,
+        rows,
+    )
     print(f"  Seeded {len(rows)} model performance records")
 
 
 def seed_user(cur):
     import hashlib
+
     # Simple demo user (password: "demo1234")
     pw_hash = hashlib.sha256(b"demo1234").hexdigest()
-    cur.execute("""
+    cur.execute(
+        """
         INSERT INTO users (username, email, password_hash, bankroll, timezone)
         VALUES ('demo', 'demo@betting-system.local', %s, 1000.00, 'America/Denver')
         ON CONFLICT (email) DO NOTHING
-    """, (pw_hash,))
+    """,
+        (pw_hash,),
+    )
     print("  Seeded demo user  (demo / demo1234)")
 
 
