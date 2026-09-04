@@ -92,7 +92,7 @@ def main():
         return 1
 
     sys.path.insert(0, "/app/services/ml-models/src")
-    from predictors.model_config import DIXON_COLES_CONFIG
+    from predictors.model_config import dixon_coles_config_pinned_to_legacy_fit
     from predictors.poisson_models import DixonColesPredictor
     from utils.training_data import load_training_frame
 
@@ -114,7 +114,13 @@ def main():
     val_df = frame.iloc[cutoff:].copy()
     LOGGER.info("Train=%d Val=%d", len(train_df), len(val_df))
 
-    model = DixonColesPredictor(DIXON_COLES_CONFIG)
+    # NOT DIXON_COLES_CONFIG: see model_config.dixon_coles_config_pinned_to_legacy_fit.
+    # The refit knobs were measured on the FULL-TIME over-2.5 walk-forward only.
+    # Halftime goals average ~0.6/match against full-time's ~2.65, so a
+    # 20-effective-match shrinkage prior is a materially stronger shrink here
+    # than the value that was measured — and this artifact never passes the
+    # promote gate. Pinned until a halftime A/B exists.
+    model = DixonColesPredictor(dixon_coles_config_pinned_to_legacy_fit("dixon_coles_ht_soccer"))
     result = model.train(train_df, val_df=val_df)
     LOGGER.info("Train result: %s", {k: v for k, v in result.items() if k not in ("team_attack", "team_defense")})
 

@@ -35,6 +35,18 @@ sidecars still read fine):
                baseline monotone. It resets only when the fingerprint family
                changes, because a Brier from another frame is not a bar this
                one can be held to.
+  derived      the DERIVED-market guard metric for the run: the held-out Brier
+               of the over-2.5 market the Dixon-Coles scoreline derives, paired
+               against that same frame's constant base rate (see
+               modal_bundles.derived_market_guard). served_brier covers only the
+               ENSEMBLE's 1x2, and the Dixon-Coles carries ~4.55% of that blend
+               — so a completely broken DC moves the gated number by less than
+               its own tolerance while every derived market serves garbage.
+
+ADDITIVE, ALWAYS. Every field beyond the original shape is added, never
+renamed, and every reader must treat ABSENCE as UNKNOWN — not as "fine". Every
+sidecar in production today predates `derived`; none of them may be read as
+having passed the derived guard, and none of them may crash a reader.
 """
 
 from __future__ import annotations
@@ -119,8 +131,24 @@ def history_entries(doc: Optional[dict]) -> list[dict]:
             "n": doc.get("n"),
             "trained_at": doc.get("trained_at"),
             "fingerprint": incumbent_fingerprint(doc),
+            "derived": derived_metric(doc),
         }
     ]
+
+
+def derived_metric(doc: Optional[dict]) -> Optional[dict]:
+    """The run's derived-market guard metric ({market, selection, n, brier,
+    baseline_brier, base_rate, delta, se}), or None.
+
+    None means UNKNOWN, and unknown is not a pass: every sidecar written before
+    this field existed lacks it, so a caller that treats None as "the derived
+    guard was satisfied" reintroduces exactly the blind spot the field was
+    added to close. modal_bundles.derived_market_guard(None) returns an explicit
+    (None, "NOT checked") verdict for this reason."""
+    if not isinstance(doc, dict):
+        return None
+    block = doc.get("derived")
+    return block if isinstance(block, dict) and block else None
 
 
 def champion_entry(doc: Optional[dict]) -> Optional[dict]:
@@ -189,12 +217,20 @@ def build_payload(
     run_id: str,
     fingerprint: Optional[dict] = None,
     previous: Optional[dict] = None,
+    derived: Optional[dict] = None,
 ) -> dict:
     """The sidecar doc for a bundle we are promoting. `previous` is the incumbent
     doc being replaced — its history is carried forward (capped at HISTORY_LIMIT)
     with this run appended, and its champion (the best comparable run ever, which
     never ages out of the window) is carried forward or beaten, so next week's
-    gate scores against a monotone bar instead of just last week's number."""
+    gate scores against a monotone bar instead of just last week's number.
+
+    `derived` is the run's derived-market guard metric (None for every bundle
+    that derives nothing, and for any artifact trained before it existed). It is
+    recorded for the record and for drift-watching; it is NOT part of the
+    champion/baseline arithmetic, because the guard is a floor against a
+    constant, not a second thing to optimise. Champion selection stays keyed on
+    served_brier alone so this addition cannot change which run is the bar."""
     entry: dict[str, Any] = {
         "ensemble_name": ensemble_name,
         "served_brier": served_brier,
@@ -203,8 +239,9 @@ def build_payload(
         "run_id": run_id,
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "fingerprint": fingerprint,
+        "derived": derived,
     }
-    run_summary = {k: entry[k] for k in ("run_id", "served_brier", "kept", "n", "trained_at", "fingerprint")}
+    run_summary = {k: entry[k] for k in ("run_id", "served_brier", "kept", "n", "trained_at", "fingerprint", "derived")}
 
     history = list(history_entries(previous))
     history.append(run_summary)
@@ -235,7 +272,12 @@ def write_sidecar(models_dir: str, payload: dict) -> Path:
     p = sidecar_path(models_dir, payload["ensemble_name"])
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(payload, indent=2))
-    logger.info("Wrote incumbent sidecar %s (served_brier=%s)", p, payload.get("served_brier"))
+    logger.info(
+        "Wrote incumbent sidecar %s (served_brier=%s, derived=%s)",
+        p,
+        payload.get("served_brier"),
+        (payload.get("derived") or {}).get("brier", "not checked"),
+    )
     return p
 
 
@@ -269,6 +311,9 @@ def mirror_to_db(database_url: Optional[str], payload: dict) -> None:
                                 "kept": payload["kept"],
                                 "run_id": payload["run_id"],
                                 "fingerprint": payload.get("fingerprint"),
+                                # Additive; None for bundles that derive nothing
+                                # and for runs predating the derived guard.
+                                "derived": payload.get("derived"),
                             }
                         ),
                         payload.get("n"),

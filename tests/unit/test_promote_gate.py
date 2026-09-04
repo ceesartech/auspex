@@ -79,9 +79,15 @@ def make_bundle_dir(
     status: str = "ok",
     kept: bool = False,
     with_report: bool = True,
+    derived: dict | None = None,
 ) -> Path:
     """A fake modal-incoming/<run>/<bundle>/ tree: gate.json + the sibling
-    training_report.json the fingerprint is derived from + a model dir."""
+    training_report.json the fingerprint is derived from + a model dir.
+
+    `derived` is the DERIVED-market guard block train_all_models nests inside
+    holdout_test (and train_modal therefore copies verbatim into gate.json).
+    Default None = the shape every artifact trained before the guard existed
+    has, which must gate on 1x2 alone."""
     d = incoming / bundle
     (d / f"ensemble_{bundle}" / "1.0.0").mkdir(parents=True)
     (d / f"ensemble_{bundle}" / "1.0.0" / "model.bin").write_text("{}")
@@ -92,6 +98,8 @@ def make_bundle_dir(
         "raw": {"brier": brier},
         "calibrated": {"brier": None if brier is None else brier - 0.01},
     }
+    if derived is not None:
+        gate["derived"] = derived
     (d / "gate.json").write_text(json.dumps({"status": status, "bundle": bundle, "run_id": RUN, "gate": gate}))
     if with_report:
         (d / "training_report.json").write_text(
@@ -672,3 +680,316 @@ def test_recovery_is_skipped_when_no_incoming_root_is_known(tmp_path):
     fp, why = pull.recover_incumbent_fingerprint(None, "soccer_match_result", {"run_id": "run-a"})
     assert fp is None
     assert why
+
+
+# ---------------------------------------------------------------------------
+# E. The DERIVED-MARKET guard.
+#
+# The gate above scores the ENSEMBLE's headline 1x2 only. Soccer also serves
+# ~15 markets DERIVED from the Dixon-Coles scoreline, and the Dixon-Coles
+# carries ~4.55% of the blend's weight — so a completely broken DC moves the
+# gated number by less than the gate's own tolerance and sails through. That is
+# exactly how a pre-corpus 175-team artifact kept serving for a month across
+# four rejected retrains while every derived market ran on a constant prior.
+#
+# So there is a second gated number, and it is a GUARD rather than a second
+# optimisation target: a challenger whose derived over-2.5 held-out Brier is
+# measurably worse than that same held-out frame's constant base rate is
+# rejected even when its 1x2 passes. Absence of the number is UNKNOWN ("not
+# checked"), never a pass — every sidecar and artifact in production today
+# predates the field.
+# ---------------------------------------------------------------------------
+
+
+def derived_block(delta: float, se: float = 0.0007, n: int = 3522, brier: float = 0.2526, **extra) -> dict:
+    """The block train_all_models nests at holdout_test['derived']. `delta` is
+    the PAIRED mean of (derived row Brier - constant row Brier): positive =
+    worse than a constant."""
+    block = {
+        "market": "over_under",
+        "selection": "over_2.5",
+        "n": n,
+        "brier": brier,
+        "baseline_brier": round(brier - delta, 6),
+        "base_rate": 0.5236,
+        "delta": delta,
+        "se": se,
+        "reconciled": True,
+    }
+    block.update(extra)
+    return block
+
+
+# The numbers below are the audit's own: at n=3522 with se=0.0007 the paired
+# margin is min(1.96*0.0007, gate_tolerance(3522)) = min(0.00137, 0.009) =
+# 0.00137, so +0.0029 (the served artifact's real gap to a constant) is a
+# rejection and +0.0005 is noise.
+WORSE_THAN_CONSTANT = 0.0029
+INSIDE_NOISE = 0.0005
+
+
+def test_guard_verdicts_are_pass_fail_or_unknown():
+    ok, reason = mb.derived_market_guard(derived_block(WORSE_THAN_CONSTANT))
+    assert ok is False and "WORSE" in reason and "constant" in reason
+
+    ok, reason = mb.derived_market_guard(derived_block(INSIDE_NOISE))
+    assert ok is True and "PASSED" in reason
+
+    # Unknown is never a pass, and never a crash.
+    for absent in (None, {}, "nope", 3):
+        ok, reason = mb.derived_market_guard(absent)
+        assert ok is None and "NOT checked" in reason
+
+
+def test_guard_is_unknown_when_the_block_is_incomplete_or_tiny():
+    ok, reason = mb.derived_market_guard({"market": "over_under", "selection": "over_2.5", "n": 3522})
+    assert ok is None and "incomplete" in reason
+
+    ok, reason = mb.derived_market_guard(derived_block(WORSE_THAN_CONSTANT, n=50))
+    assert ok is None and "too small" in reason and "n=50" in reason
+
+
+def test_a_model_better_on_1x2_but_worse_than_a_constant_on_over25_is_rejected(models_dir, caplog):
+    """The headline test. The challenger WINS the 1x2 comparison outright, and
+    is still rejected because the market it derives is worse than a constant."""
+    fp = fingerprint(30000, 4500)
+    seed_incumbent(models_dir, SOCCER_ENSEMBLE, [entry("r1", 0.5950, 4500, fp)])
+    make_bundle_dir(
+        incoming_of(models_dir),
+        SOCCER,
+        brier=0.5900,  # a clear 1x2 win
+        rows=30000,
+        holdout_n=4500,
+        derived=derived_block(WORSE_THAN_CONSTANT),
+    )
+    with caplog.at_level("ERROR"):
+        summary = pull.gate_and_stage(RUN, str(models_dir), shadow=True, database_url=None, paired_fn=boom)
+
+    row = row_for(summary, SOCCER)
+    assert row["decision"] == "reject"
+    assert row["comparison"] == "scalar"  # the 1x2 path ran and passed
+    assert "1x2 gate passed" in row["reason"]
+    assert "WORSE than the held-out frame's own constant base rate" in row["reason"]
+    assert "no business" in row["reason"]
+    assert row["derived_guard"]["ok"] is False
+    assert row["derived_metric"]["selection"] == "over_2.5"
+    assert summary["promoted"] == 0
+    assert summary["derived_guard_failed"] == [SOCCER]
+    assert any("WORSE" in r.getMessage() for r in caplog.records)
+    # and it is on the page, not just in the log
+    assert "derived-market guard FAILED" in pages[-1] and SOCCER in pages[-1]
+
+
+def test_the_guard_does_not_reject_a_model_that_beats_the_constant(models_dir):
+    fp = fingerprint(30000, 4500)
+    seed_incumbent(models_dir, SOCCER_ENSEMBLE, [entry("r1", 0.5950, 4500, fp)])
+    make_bundle_dir(
+        incoming_of(models_dir),
+        SOCCER,
+        brier=0.5900,
+        rows=30000,
+        holdout_n=4500,
+        derived=derived_block(-0.0060),
+    )
+    summary = pull.gate_and_stage(RUN, str(models_dir), shadow=True, database_url=None, paired_fn=boom)
+    row = row_for(summary, SOCCER)
+    assert row["decision"] == "promote"
+    assert row["derived_guard"]["ok"] is True
+    assert summary["derived_guard_failed"] == []
+    assert "derived-market guard FAILED" not in pages[-1]
+
+
+def test_the_guard_also_vetoes_a_seed_promote(models_dir):
+    """No incumbent is not a licence to serve a market you lose to a constant
+    on — the seed path is a promote path like any other."""
+    make_bundle_dir(
+        incoming_of(models_dir),
+        SOCCER,
+        brier=0.5900,
+        rows=30000,
+        holdout_n=4500,
+        derived=derived_block(WORSE_THAN_CONSTANT),
+    )
+    summary = pull.gate_and_stage(RUN, str(models_dir), shadow=True, database_url=None, paired_fn=boom)
+    row = row_for(summary, SOCCER)
+    assert row["decision"] == "reject" and row["derived_guard"]["ok"] is False
+    assert "no incumbent yet" in row["reason"]  # the 1x2 verdict is preserved verbatim
+
+
+def test_a_legacy_artifact_with_no_derived_metric_still_gates_on_1x2_alone(models_dir):
+    """Every artifact and sidecar in production predates the field. Absence must
+    gate exactly as before — and must be reported as 'not checked', not 'fine'."""
+    seed_incumbent(models_dir, ENSEMBLE, [entry("r1", 0.5052, 128, fingerprint(1000, 128))])
+    make_bundle_dir(incoming_of(models_dir), BUNDLE, brier=0.5000, rows=1005, holdout_n=128)
+    summary = pull.gate_and_stage(RUN, str(models_dir), shadow=True, database_url=None, paired_fn=boom)
+
+    row = row_for(summary, BUNDLE)
+    assert row["decision"] == "promote"
+    assert row["derived_metric"] is None
+    assert row["derived_guard"] == {"ok": None, "reason": row["derived_guard"]["reason"]}
+    assert row["derived_guard"]["ok"] is None
+    assert "NOT checked" in row["derived_guard"]["reason"]
+    assert "1x2 gate passed" not in row["reason"]  # untouched by the guard
+    assert summary["derived_guard_failed"] == []
+    # the digest renders with no derived metric anywhere
+    assert pages[-1].startswith("🤖 Modal retrain ")
+
+
+def test_a_legacy_challenger_is_not_rescued_by_a_failing_1x2(models_dir):
+    """Absence of the guard number never turns a 1x2 rejection into a promote."""
+    seed_incumbent(models_dir, ENSEMBLE, [entry("r1", 0.5052, 128, fingerprint(1000, 128))])
+    make_bundle_dir(incoming_of(models_dir), BUNDLE, brier=0.7000, rows=1005, holdout_n=128)
+    summary = pull.gate_and_stage(RUN, str(models_dir), shadow=True, database_url=None, paired_fn=boom)
+    row = row_for(summary, BUNDLE)
+    assert row["decision"] == "reject" and row["derived_guard"]["ok"] is None
+
+
+def test_promote_decisions_json_stays_backward_compatible_with_the_new_fields(models_dir):
+    seed_incumbent(models_dir, ENSEMBLE, [entry("r1", 0.5052, 128, fingerprint(1000, 128))])
+    make_bundle_dir(
+        incoming_of(models_dir), BUNDLE, brier=0.5000, rows=1005, holdout_n=128, derived=derived_block(INSIDE_NOISE)
+    )
+    summary = pull.gate_and_stage(RUN, str(models_dir), shadow=True, database_url=None, paired_fn=boom)
+    written = json.loads((incoming_of(models_dir) / "promote_decisions.json").read_text())
+    assert written == summary
+    legacy_keys = {
+        "bundle",
+        "ensemble_name",
+        "challenger_brier",
+        "incumbent_brier",
+        "kept_calibration",
+        "n",
+        "decision",
+        "reason",
+        "comparison",
+        "baseline_brier",
+        "baseline_run_id",
+        "challenger_fingerprint",
+        "incumbent_fingerprint",
+        "paired",
+        "needs_manual",
+    }
+    assert legacy_keys <= set(written["decisions"][0])  # nothing renamed
+    assert {"derived_metric", "derived_guard"} <= set(written["decisions"][0])  # only added
+    assert {"run_id", "shadow", "promoted", "decisions", "needs_manual"} <= set(written)
+
+
+# ── E2. the sidecar round-trip ───────────────────────────────────────
+
+
+def test_the_derived_metric_round_trips_through_the_store(tmp_path):
+    block = derived_block(INSIDE_NOISE)
+    payload = mstore.build_payload(
+        ENSEMBLE,
+        served_brier=0.5900,
+        kept=False,
+        n=4500,
+        run_id=RUN,
+        fingerprint=fingerprint(30000, 4500),
+        previous=None,
+        derived=block,
+    )
+    assert payload["derived"] == block
+    assert payload["history"][-1]["derived"] == block
+    assert payload["champion"]["derived"] == block
+
+    mstore.write_sidecar(str(tmp_path), payload)
+    doc = mstore.read_incumbent(str(tmp_path), ENSEMBLE)
+    assert mstore.derived_metric(doc) == block
+    # and the guard reads the stored block the same way it reads a fresh one
+    assert mstore.read_incumbent_brier(str(tmp_path), ENSEMBLE) == 0.5900
+    assert mb.derived_market_guard(mstore.derived_metric(doc))[0] is True
+
+
+def test_a_sidecar_without_the_field_reads_as_unknown_not_fine(tmp_path):
+    payload = mstore.build_payload(
+        ENSEMBLE, served_brier=0.5900, kept=False, n=4500, run_id=RUN, fingerprint=fingerprint(30000, 4500)
+    )
+    assert payload["derived"] is None
+    mstore.write_sidecar(str(tmp_path), payload)
+
+    # ...and the true legacy shape: a doc that never had the key at all.
+    legacy = json.loads((tmp_path / ENSEMBLE / mstore.SIDECAR_NAME).read_text())
+    legacy.pop("derived")
+    legacy.pop("history")
+    legacy.pop("champion")
+    (tmp_path / ENSEMBLE / mstore.SIDECAR_NAME).write_text(json.dumps(legacy))
+
+    doc = mstore.read_incumbent(str(tmp_path), ENSEMBLE)
+    assert mstore.derived_metric(doc) is None
+    assert mb.derived_market_guard(mstore.derived_metric(doc))[0] is None
+    # the legacy projection still works and simply carries no derived block
+    assert mstore.history_entries(doc)[0]["derived"] is None
+    assert mstore.best_comparable_brier(doc, fingerprint(30000, 4500)) == (0.5900, RUN)
+
+
+def test_the_champion_is_still_chosen_on_1x2_alone(tmp_path):
+    """The guard is a floor, not a second optimisation target: it must not move
+    which run is the baseline."""
+    fp = fingerprint(30000, 4500)
+    first = mstore.build_payload(
+        ENSEMBLE, served_brier=0.5900, kept=False, n=4500, run_id="r1", fingerprint=fp, derived=derived_block(-0.02)
+    )
+    second = mstore.build_payload(
+        ENSEMBLE,
+        served_brier=0.5800,
+        kept=False,
+        n=4500,
+        run_id="r2",
+        fingerprint=fp,
+        previous=first,
+        derived=derived_block(INSIDE_NOISE),
+    )
+    assert second["champion"]["run_id"] == "r2"  # better 1x2 wins, worse derived and all
+
+
+def test_the_promoted_sidecar_carries_the_run_s_derived_metric(models_dir):
+    block = derived_block(INSIDE_NOISE)
+    make_bundle_dir(
+        incoming_of(models_dir), BUNDLE, brier=0.5000, rows=1005, holdout_n=128, derived=block
+    )  # no incumbent → seed promote
+    pull.gate_and_stage(RUN, str(models_dir), shadow=False, database_url=None, paired_fn=boom)
+    doc = json.loads((models_dir / "staging" / ENSEMBLE / mstore.SIDECAR_NAME).read_text())
+    assert mstore.derived_metric(doc) == block
+
+
+# ── E3. the digest ───────────────────────────────────────────────────
+
+
+def test_the_digest_renders_with_and_without_the_derived_metric(models_dir):
+    make_bundle_dir(incoming_of(models_dir), BUNDLE, brier=0.5000, rows=1005, holdout_n=128)
+    make_bundle_dir(
+        incoming_of(models_dir),
+        SOCCER,
+        brier=0.5900,
+        rows=30000,
+        holdout_n=4500,
+        derived=derived_block(WORSE_THAN_CONSTANT),
+    )
+    summary = pull.gate_and_stage(RUN, str(models_dir), shadow=True, database_url=None, paired_fn=boom)
+
+    page = pages[-1]
+    assert page.startswith("🤖 Modal retrain ")
+    assert "would promote 1/2" in page
+    assert f"kept incumbent for {SOCCER}" in page
+    assert f"derived-market guard FAILED for {SOCCER}" in page
+    assert summary["derived_guard_failed"] == [SOCCER]
+
+
+def test_the_digest_survives_a_decision_row_written_without_the_field(models_dir, monkeypatch):
+    """Forward/backward compatibility: an older decide_bundle (or a hand-edited
+    promote_decisions row) emits no derived_guard key at all. The digest must
+    render, not KeyError."""
+    real = pull.decide_bundle
+
+    def without_guard(*args, **kwargs):
+        row = real(*args, **kwargs)
+        row.pop("derived_guard", None)
+        row.pop("derived_metric", None)
+        return row
+
+    monkeypatch.setattr(pull, "decide_bundle", without_guard)
+    make_bundle_dir(incoming_of(models_dir), BUNDLE, brier=0.5000, rows=1005, holdout_n=128)
+    summary = pull.gate_and_stage(RUN, str(models_dir), shadow=True, database_url=None, paired_fn=boom)
+    assert summary["derived_guard_failed"] == []
+    assert pages[-1].startswith("🤖 Modal retrain ") and "would promote 1/1" in pages[-1]

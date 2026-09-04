@@ -1,6 +1,6 @@
 """Model configuration system."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Dict, List
 
@@ -214,15 +214,42 @@ POISSON_CONFIG = ModelConfig(
     training_config={},
 )
 
+# The SOCCER FULL-TIME Dixon-Coles config, and the only one the 2026-09 refit
+# was measured on. Anything else that wants a Dixon-Coles takes the pinned copy
+# below (dixon_coles_config_pinned_to_legacy_fit) rather than this object.
+#
+# NOTE: there is deliberately no "home_advantage" key here, so
+# PoissonMatchPredictor.__init__ falls back to its hard-coded 0.25. With
+# per_league_baselines on, the fitted home/away baselines make that a
+# fallback-only value for soccer. It stays LIVE in the pinned copy — which is
+# how a SOCCER constant still reaches the NHL Dixon-Coles against
+# league_avg_goals ~3.10. That is the deferred NHL defect, tracked separately.
 DIXON_COLES_CONFIG = ModelConfig(
     name="dixon_coles",
     model_type=ModelType.DIXON_COLES,
     prediction_task=PredictionTask.MATCH_OUTCOME,
     version="1.0.0",
     hyperparameters={
-        "max_goals": 6,
+        # 6 truncated real scoreline mass (market_derivation.MAX_GOALS_DERIVE
+        # has been 10 for a while; this only ever bit the model's own 1x2).
+        "max_goals": 10,
         "rho_init": -0.13,
-        "time_decay": 0.0018,
+        # Per-day exponential recency weight inside the MLE (730-day
+        # half-life). NOT the closed GBM recency/horizon lever — see
+        # PoissonMatchPredictor._time_weights.
+        "time_decay": 0.00095,
+        # Shrinkage prior toward strength 1.0, in effective matches. The
+        # old 0.001 was inert against weighted counts of order 30-500;
+        # ~20 makes a thin-history team fall back to its LEAGUE baseline
+        # and is what gets the fit converging (~91 iterations vs never).
+        "regularization": 20.0,
+        # Fit home/away baselines per league instead of forcing one
+        # global level across 41 competitions whose goals-per-match run
+        # 2.222 (Primera Division AR) to 3.094 (Eredivisie).
+        "per_league_baselines": True,
+        # Effective matches of shrinkage toward the global weighted means,
+        # so thin (Copa Libertadores n=16) and brand-new leagues stay safe.
+        "league_shrinkage": 200.0,
         "max_iterations": 500,
         "convergence_threshold": 1e-5,
     },
@@ -232,6 +259,58 @@ DIXON_COLES_CONFIG = ModelConfig(
     metrics=["accuracy", "log_loss", "ranked_probability_score"],
     training_config={},
 )
+
+# ── Dixon-Coles fits that are NOT the validated soccer full-time one ──────────
+#
+# DIXON_COLES_CONFIG is SHARED. Three scripts build a Dixon-Coles straight from
+# it and write the artifact themselves:
+#     scripts/train_hockey_dixon_coles.py       -> dixon_coles_nhl
+#     scripts/train_halftime_dixon_coles.py     -> dixon_coles_ht_soccer
+#     scripts/train_second_half_dixon_coles.py  -> dixon_coles_h2_soccer
+# None of the three goes through training/train_all_models.py, so neither the
+# 1x2 promote gate nor the derived-market guard ever sees them — whatever they
+# fit is what serves.
+#
+# The four refit knobs above (max_goals 10, a LIVE time_decay, regularization as
+# a 20-effective-match prior, per_league_baselines) were measured on exactly one
+# object: the soccer FULL-TIME over-2.5 walk-forward. Nothing about hockey goals
+# or halftime goals was measured anywhere, and the tuned values do not obviously
+# transfer — a 20-effective-match prior is a materially stronger shrink against
+# halftime's ~0.6 goals/match than against full-time's ~2.65. So those three
+# trainers are pinned back to the pre-refit values until each is separately
+# measured and gated.
+#
+# What this deliberately does NOT do: fix the deferred NHL defect. That artifact
+# carries max_goals=6 and home_advantage=0.25 against league_avg_goals ~3.10,
+# truncating ~3.4% of per-side mass and feeding 8 live NHL markets. It is real,
+# it is tracked separately, and raising max_goals here would ship an unmeasured
+# NHL refit under cover of a soccer change.
+#
+# What it CANNOT pin: the scale-gauge correction in PoissonMatchPredictor.train
+# (normalise attack only). That is a correctness fix to a shared fitting routine,
+# not a tuning knob, so every Poisson-family model picks it up on its next
+# retrain — see that method's docstring for the full blast radius.
+LEGACY_DIXON_COLES_HYPERPARAMETERS: Dict[str, Any] = {
+    "max_goals": 6,
+    "time_decay": 0.0,
+    "regularization": 0.001,
+    "per_league_baselines": False,
+}
+
+
+def dixon_coles_config_pinned_to_legacy_fit(name: str = "dixon_coles") -> ModelConfig:
+    """DIXON_COLES_CONFIG with the 2026-09 soccer refit knobs pinned OFF.
+
+    Use this from any trainer whose artifact was not measured by
+    scripts/ab_soccer_dixon_coles_refit.py. Passing a distinct ``name``
+    keeps the artifact's embedded config self-describing.
+    """
+    return replace(
+        DIXON_COLES_CONFIG,
+        name=name,
+        hyperparameters={**DIXON_COLES_CONFIG.hyperparameters, **LEGACY_DIXON_COLES_HYPERPARAMETERS},
+    )
+
 
 ENSEMBLE_CONFIG = ModelConfig(
     name="ensemble_match_outcome",

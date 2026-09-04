@@ -43,6 +43,20 @@ GATE (per bundle, keyed by ensemble_name; lower Brier = better):
         decided by the broken scalar comparison, and never decided on rows one
         of the two models trained on.
 
+DERIVED-MARKET GUARD (second gated number, applied AFTER the above):
+  The Brier gated above is the ENSEMBLE's headline 1x2 only. Soccer also serves
+  ~15 markets DERIVED from the Dixon-Coles scoreline, and the Dixon-Coles is
+  ~4.55% of the blend — so a completely broken DC moves the gated number by less
+  than its own tolerance and passes. That is how a pre-corpus 175-team artifact
+  kept serving for a month through four rejected retrains while the derived
+  markets ran on a constant prior.
+  So a challenger whose derived over-2.5 held-out Brier is measurably WORSE than
+  that same held-out frame's constant base rate is REJECTED even when its 1x2
+  passes (modal_bundles.derived_market_guard). It is a floor, not a second
+  optimisation target — nothing is promoted for scoring well on it. A bundle
+  that derives nothing, or an artifact predating the metric, is reported as
+  "not checked" and gated on 1x2 alone; absence is never read as a pass.
+
 --shadow gates + reports but writes NOTHING into staging (the bootstrap run: pull,
 gate, eyeball promote_decisions.json vs live Brier, then let a real run swap).
 
@@ -73,6 +87,8 @@ from modal_bundles import (  # noqa: E402
     BUNDLE_TO_ENSEMBLE,
     HISTORY_LIMIT,
     MIN_PAIRED_N,
+    derived_market_guard,
+    derived_metric,
     fingerprint_from_report,
     fingerprints_comparable,
     gate_tolerance,
@@ -425,8 +441,11 @@ def decide_bundle(
     ensemble_name = BUNDLE_TO_ENSEMBLE[bundle]
     gate = _read_gate(bundle_dir)
     status = gate.get("status", "ok")
-    brier, kept, n = served_brier(gate.get("gate") or gate)
+    inner = gate.get("gate") or gate
+    brier, kept, n = served_brier(inner)
     challenger_fp = _challenger_fingerprint(bundle_dir, gate)
+    derived = derived_metric(inner)
+    guard_ok, guard_reason = derived_market_guard(derived)
 
     incumbent_doc = mstore.read_incumbent(production, ensemble_name)
     incumbent = mstore.read_incumbent_brier(production, ensemble_name)
@@ -498,6 +517,17 @@ def decide_bundle(
             if not ok:
                 reason += " — kept incumbent"
 
+    # The derived-market guard vetoes an otherwise-passing promote. Applied
+    # last and to EVERY promote path (scalar, paired, seed, ungated): a model
+    # that cannot beat a constant on a market it derives has no business
+    # serving that market, whatever its 1x2 Brier says. guard_ok is None when
+    # there is no number — then nothing is vetoed and the reason records that
+    # the check did not run, so "not checked" never reads as "passed".
+    if decision == "promote" and guard_ok is False:
+        decision = "reject"
+        reason = f"1x2 gate passed ({reason}) BUT {guard_reason} — kept incumbent"
+        logger.error("[gate] %s: %s", bundle, reason)
+
     return {
         "bundle": bundle,
         "ensemble_name": ensemble_name,
@@ -515,6 +545,8 @@ def decide_bundle(
         "incumbent_fingerprint": incumbent_fp,
         "paired": paired,
         "needs_manual": needs_manual,
+        "derived_metric": derived,
+        "derived_guard": {"ok": guard_ok, "reason": guard_reason},
     }
 
 
@@ -561,17 +593,21 @@ def gate_and_stage(
                         run_id=run_id,
                         fingerprint=row["challenger_fingerprint"],
                         previous=mstore.read_incumbent(production, ensemble_name),
+                        derived=row.get("derived_metric"),
                     )
                     mstore.write_sidecar(str(staging), payload)
                     mstore.mirror_to_db(database_url, payload)
 
     manual = [d["bundle"] for d in decisions if d.get("needs_manual")]
+    # .get() throughout: a decision row from an older writer has no derived_guard.
+    guard_failed = [d["bundle"] for d in decisions if (d.get("derived_guard") or {}).get("ok") is False]
     summary = {
         "run_id": run_id,
         "shadow": shadow,
         "promoted": promoted,
         "decisions": decisions,
         "needs_manual": manual,
+        "derived_guard_failed": guard_failed,
     }
     # Drop the decision log where an operator can find it: into staging on a real
     # run (rides to production), into incoming on a shadow run.
@@ -584,6 +620,8 @@ def gate_and_stage(
     head = f"Modal retrain {run_id}{' (SHADOW)' if shadow else ''}: {verb} {promoted}/{len(decisions)}"
     if rejects:
         head += f"; kept incumbent for {', '.join(rejects)}"
+    if guard_failed:
+        head += f"; ⚠️ derived-market guard FAILED for {', '.join(guard_failed)} (worse than a constant on over 2.5)"
     if manual:
         head += f"; ⚠️ MANUAL DECISION NEEDED for {', '.join(manual)} (frames not comparable, paired re-score failed)"
         logger.error(

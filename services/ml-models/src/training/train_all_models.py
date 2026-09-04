@@ -1,6 +1,7 @@
 """Training orchestrator for model retraining."""
 
 import argparse
+import inspect
 import json
 import logging
 import os
@@ -79,7 +80,12 @@ from predictors.model_config import (
 )
 from predictors.model_registry import ModelRegistry
 from predictors.neural_network import NeuralNetworkMatchPredictor
-from predictors.poisson_models import DixonColesPredictor, HockeyPoissonPredictor, PoissonMatchPredictor
+from predictors.poisson_models import (
+    LEAGUE_COLUMN_CANDIDATES,
+    DixonColesPredictor,
+    HockeyPoissonPredictor,
+    PoissonMatchPredictor,
+)
 from predictors.xgboost_model import XGBoostMatchPredictor
 from training.calibration import ProbabilityCalibrator
 from utils.training_data import (
@@ -505,6 +511,7 @@ class TrainingOrchestrator:
             return spec.name in requested or type_alias in requested
 
         team_cols_present = "home_team" in train_df.columns
+        league_col_present = any(column in train_df.columns for column in LEAGUE_COLUMN_CANDIDATES)
 
         for spec in bundle.base_models:
             if not should_train(spec):
@@ -515,6 +522,32 @@ class TrainingOrchestrator:
                     spec.name,
                 )
                 continue
+            # A Poisson-family model configured for per-league baselines MUST
+            # get a league column. Without one it would still train — silently,
+            # on a single global baseline — and ship an artifact that looks fine
+            # and is level-biased per league.
+            #
+            # This RAISES rather than skipping, and the reason is worth spelling
+            # out: skipping is the quieter failure, not the safer one. Nothing
+            # downstream notices an absent member. The ensemble's
+            # MIN_SURVIVING_WEIGHT_FRACTION guard only fires for members that are
+            # IN self.models and fail at predict time — a member that was never
+            # trained is not in self.weights, so it contributes nothing to
+            # attempted_weight and no blend reads as degraded. The chain from
+            # there is: no dixon_coles_* in trained_models -> the derived-market
+            # guard has nothing to score -> it reports "not checked" (by design,
+            # so legacy artifacts still gate) -> the bundle promotes on its 1x2
+            # Brier -> scripts/precompute_predictions.py finds no DC member and
+            # writes ZERO rows for all ~15 derived soccer markets. A
+            # misconfigured frame must stop the run, not silently delete a
+            # sport's derived markets.
+            if spec.config.hyperparameters.get("per_league_baselines") and not league_col_present:
+                raise ValueError(
+                    f"{spec.name}: per_league_baselines is on but the training frame carries none of "
+                    f"{LEAGUE_COLUMN_CANDIDATES}. Add the league column to the loader query "
+                    "(see utils/training_data.DEFAULT_TRAINING_QUERY) and retrain — refusing to fit a "
+                    "silently global-baseline artifact."
+                )
             # Poisson-family models ignore `features` and read team
             # columns directly; pass None for those.
             features_for_model = None if spec.needs_team_columns else features
@@ -822,6 +855,149 @@ def _raw_holdout_brier(ensemble: Any, df: pd.DataFrame, target: str) -> Optional
         return None
 
 
+# ── The DERIVED-market held-out guard metric ─────────────────────────────────
+# `holdout_test` above scores the ENSEMBLE's headline market only (soccer 1x2).
+# But soccer serves ~15 further markets DERIVED from the Dixon-Coles scoreline,
+# and the Dixon-Coles carries ~4.55% of the blend's weight — so a Dixon-Coles
+# that has gone completely wrong shifts the gated 1x2 number by less than the
+# promote-gate's own tolerance and is INVISIBLE to it. That is precisely how a
+# pre-corpus 175-team artifact kept serving for a month across four rejected
+# retrains while every derived market ran on what amounted to a constant prior.
+#
+# So the report carries a second held-out number for the derived over-2.5
+# market, scored on the SAME held-out test split and paired against that split's
+# own constant base rate. scripts/modal_bundles.derived_market_guard turns it
+# into a promote/reject GUARD. It is not a second optimisation target: nothing
+# is promoted for scoring well here, and a bundle that produces no number is
+# gated on 1x2 alone (reported as "not checked", never as a pass).
+DERIVED_GUARD_MARKET = "over_under"
+DERIVED_GUARD_SELECTION = "over_2.5"
+DERIVED_GUARD_LINE = 2.5
+
+
+def _derived_over25_holdout(
+    trained_models: Dict[str, BaseModel],
+    ensemble: Any,
+    df: Optional[pd.DataFrame],
+) -> Optional[Dict[str, Any]]:
+    """Held-out Brier of the DERIVED over-2.5 market vs the same frame's
+    constant base rate, or None when this bundle derives nothing.
+
+    Reuses the serve path's own derivation
+    (predictors.market_derivation.derive_from_lambdas, driven by
+    DixonColesPredictor.lambdas_for_match + rho, reconciled to an ensemble 1x2)
+    rather than reimplementing the scoreline→market maths.
+
+    ONE KNOWN DIVERGENCE from production, stated rather than papered over: the
+    IPF target here is `ensemble.predict_proba(rows)` on the held-out training
+    frame, which carries home_team/away_team. Production builds its ensemble
+    frame purely from the features_cache JSONB plus feature__ mirrors
+    (scripts/precompute_predictions.py), and no feature key supplies a team
+    name — so there the Dixon-Coles and Poisson members fall to their
+    unknown-team constant and the served 1x2 differs from the gated one by
+    roughly those members' blend weight times the team-aware/constant gap. That
+    is a production gap worth its own ticket (the serve path should pass the
+    team columns through), not something this guard should paper over by
+    measuring a model nobody serves. What the guard asserts is unaffected by
+    it: the target is one shared input, identical for every scoreline it
+    reconciles, and the comparison is against a constant on the same rows.
+
+    The baseline is deliberately the STRICTEST honest constant: the base rate of
+    the held-out rows themselves, which no model gets to see. Beating a constant
+    fitted in hindsight on your own test set is a low bar, and a derived market
+    that cannot clear it is not a market — it is noise with a price attached.
+
+    Returns {market, selection, n, brier, baseline_brier, base_rate, delta, se,
+    reconciled}. `delta` is the mean PAIRED difference (derived − constant) over
+    the same rows and `se` its paired standard error, which is what makes the
+    guard's noise margin meaningful. None on anything missing or malformed —
+    absence is reported as "not checked", never as a pass."""
+    if df is None or getattr(df, "empty", True):
+        return None
+    dc = None
+    for name, model in (trained_models or {}).items():
+        if name.startswith("dixon_coles_") and hasattr(model, "lambdas_for_match"):
+            dc = model
+            break
+    if dc is None or not getattr(dc, "is_fitted", False):
+        return None
+    needed = {"home_team", "away_team", "home_score", "away_score"}
+    if not needed.issubset(set(getattr(df, "columns", []))):
+        logger.warning("Derived-market guard skipped: frame is missing %s", sorted(needed - set(df.columns)))
+        return None
+
+    try:
+        from predictors.market_derivation import derive_from_lambdas
+
+        rows = df.dropna(subset=["home_score", "away_score"])
+        n = int(len(rows))
+        if n == 0:
+            return None
+
+        # Reconcile each scoreline matrix to the ensemble's 1x2, the same IPF
+        # step scripts/precompute_predictions.py applies — though not to a
+        # byte-identical target, see the divergence noted in the docstring.
+        # Best-effort: if the ensemble cannot score the frame we still gate the
+        # raw Dixon-Coles derivation, and say which of the two was measured.
+        targets = None
+        try:
+            proba = ensemble.predict_proba(rows) if ensemble is not None else None
+            if proba is not None and getattr(proba, "ndim", 0) == 2 and proba.shape == (n, 3):
+                targets = np.asarray(proba, dtype=float)
+        except Exception as exc:  # noqa: BLE001 — falls back to the unreconciled matrix
+            logger.warning("Derived-market guard: 1x2 reconciliation unavailable (%s) — scoring raw DC", exc)
+
+        rho = float(getattr(dc, "rho", 0.0) or 0.0)
+        home = rows["home_team"].tolist()
+        away = rows["away_team"].tolist()
+        # Pass the league through when the fitted model accepts one and the
+        # frame carries the identifier it was trained on. That is what the
+        # serve path does, and it is what turns an unseen team from a global
+        # constant into that LEAGUE's prior — so scoring without it would
+        # measure a model production does not serve. LEAGUE_COLUMN_CANDIDATES
+        # is the same precedence the Poisson family fits on.
+        league_col = next((c for c in LEAGUE_COLUMN_CANDIDATES if c in rows.columns), None)
+        pass_league = league_col is not None and "league" in inspect.signature(dc.lambdas_for_match).parameters
+        leagues: List[Any] = rows[league_col].tolist() if pass_league else [None] * n
+
+        probs = np.empty(n, dtype=float)
+        for i in range(n):
+            extra = {"league": leagues[i]} if pass_league else {}
+            h_lam, a_lam = dc.lambdas_for_match(home[i], away[i], **extra)
+            markets = derive_from_lambdas(
+                h_lam,
+                a_lam,
+                rho,
+                target_1x2=(tuple(targets[i]) if targets is not None else None),
+            )
+            probs[i] = float(markets[DERIVED_GUARD_MARKET][DERIVED_GUARD_SELECTION])
+
+        total = rows["home_score"].astype(float).values + rows["away_score"].astype(float).values
+        y = (total > DERIVED_GUARD_LINE).astype(float)
+        base_rate = float(y.mean())
+
+        model_rows = (probs - y) ** 2
+        const_rows = (base_rate - y) ** 2
+        delta_rows = model_rows - const_rows
+        se = float(delta_rows.std(ddof=1) / np.sqrt(n)) if n > 1 else float("inf")
+        return {
+            "market": DERIVED_GUARD_MARKET,
+            "selection": DERIVED_GUARD_SELECTION,
+            "n": n,
+            "brier": round(float(model_rows.mean()), 6),
+            "baseline_brier": round(float(const_rows.mean()), 6),
+            "base_rate": round(base_rate, 6),
+            "mean_prob": round(float(probs.mean()), 6),
+            "delta": round(float(delta_rows.mean()), 6),
+            "se": round(se, 6),
+            "reconciled": targets is not None,
+            "baseline": "constant = the held-out frame's own over-2.5 base rate",
+        }
+    except Exception as exc:  # noqa: BLE001 — a missing number must read as "not checked", not crash the run
+        logger.warning("Derived-market guard metric could not be computed: %s", exc, exc_info=True)
+        return None
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -872,6 +1048,36 @@ def main(argv: Optional[list[str]] = None) -> int:
         holdout = _raw_holdout_brier(orchestrator.trained_models.get(bundle.ensemble_name), test_df, target)
         if holdout:
             logger.info("HELD-OUT RAW (%s): %s", bundle.ensemble_name, json.dumps(holdout))
+
+    # SECOND gated number: the derived over-2.5 market vs the held-out frame's
+    # own constant base rate. Nested inside holdout_test so it rides into the
+    # Modal run's gate.json (train_modal copies holdout_test verbatim) with no
+    # change to the artifact contract. Absent for every bundle that derives
+    # nothing, which the gate reads as "not checked" rather than "fine".
+    derived = _derived_over25_holdout(
+        orchestrator.trained_models,
+        orchestrator.trained_models.get(bundle.ensemble_name),
+        test_df,
+    )
+    if derived:
+        logger.info("HELD-OUT DERIVED (%s): %s", bundle.ensemble_name, json.dumps(derived))
+        if derived["delta"] > 0:
+            logger.error(
+                "Derived %s/%s held-out Brier %.5f is WORSE than the frame's constant base rate %.5f "
+                "(delta %+.5f ± %.5f, n=%d) — the promote-gate will reject this bundle unless the gap "
+                "is inside paired noise.",
+                derived["market"],
+                derived["selection"],
+                derived["brier"],
+                derived["baseline_brier"],
+                derived["delta"],
+                derived["se"],
+                derived["n"],
+            )
+        # holdout can be None when neither the calibration gate nor the raw
+        # fallback produced a number; the derived guard must still be published.
+        holdout = dict(holdout or {})
+        holdout["derived"] = derived
 
     onnx_paths: Dict[str, str] = {}
     if args.export_onnx:

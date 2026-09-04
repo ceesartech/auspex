@@ -192,3 +192,103 @@ def paired_decision(delta: float, se: float, n) -> tuple[bool, str]:
         f"paired ΔBrier {delta:+.5f} ± {se:.5f} (n={n}) {verb} margin {margin:.5f} "
         f"= min(1.96·SE {ci:.5f}, tol {tol:.5f})"
     )
+
+
+# ── The DERIVED-MARKET guard ─────────────────────────────────────────────────
+# The served-Brier gate above scores the ENSEMBLE's headline market (soccer
+# 1x2). That is not the whole of what the artifact serves: soccer's ~15
+# additional markets (over/under, BTTS, correct score, …) are DERIVED from the
+# Dixon-Coles scoreline, and the Dixon-Coles carries ~4.55% of the blend's
+# weight. A completely broken DC therefore moves the ensemble Brier by less
+# than the gate's own tolerance and sails through — which is exactly how a
+# pre-corpus 175-team artifact kept serving for a month across four rejected
+# retrains while every derived market ran on what was effectively a constant
+# prior.
+#
+# So a second, INDEPENDENT number is gated: the held-out Brier of the derived
+# over-2.5 market, paired against the SAME held-out frame's constant base rate.
+# It is a GUARD, not a second optimisation target — nothing is promoted for
+# scoring well on it. A model that cannot beat a constant on a market it
+# derives has no business serving that market, and that is the only thing this
+# check asserts.
+#
+# Everything about it fails OPEN-BUT-LOUD in the unknown direction: a bundle
+# that derives nothing (every non-soccer bundle), an artifact trained before
+# this metric existed, or a held-out frame too small to decide on all return
+# UNKNOWN, and the bundle is then gated on its 1x2 Brier exactly as before.
+# Absence is never read as "fine"; it is reported as "not checked".
+DERIVED_GUARD_MARKET = "over_under"
+DERIVED_GUARD_SELECTION = "over_2.5"
+DERIVED_GUARD_MIN_N = MIN_PAIRED_N  # same floor as any other paired decision
+
+
+def _as_number(value):
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def derived_metric(gate) -> dict | None:
+    """The derived-market block out of a bundle's gate.json `gate` / training
+    report `holdout_test` dict, or None when there isn't one.
+
+    train_all_models writes it at holdout_test['derived'], which rides into
+    gate.json for free because train_modal copies holdout_test verbatim."""
+    if not isinstance(gate, dict):
+        return None
+    block = gate.get("derived")
+    return block if isinstance(block, dict) and block else None
+
+
+def derived_market_guard(derived) -> tuple[bool | None, str]:
+    """Verdict on a challenger's derived over-2.5 Brier vs the constant base
+    rate of the same held-out frame.
+
+    Returns (ok, reason):
+      True   — at least as good as the constant (within paired noise): serve it.
+      False  — measurably WORSE than a constant on a market it derives. The
+               bundle is REJECTED even when its ensemble 1x2 Brier passes,
+               because 1x2 is not the only thing this artifact serves.
+      None   — UNKNOWN (no metric recorded, or too few held-out rows to decide).
+               The caller gates on the 1x2 number alone and says so. Unknown is
+               never reported as a pass.
+
+    The comparison reuses paired_decision(), so the bar is identical to the one
+    the scalar/paired ensemble paths use: worse by more than
+    min(1.96·SE, gate_tolerance(n)) is worse, anything inside that is noise. The
+    delta is genuinely paired — train_all_models scores the derived probability
+    and the constant on the same rows — so the SE is the SE of the difference,
+    not of two independent means."""
+    if not isinstance(derived, dict) or not derived:
+        return None, "no derived-market metric on this artifact — gated on the 1x2 Brier alone (NOT checked)"
+
+    delta = _as_number(derived.get("delta"))
+    se = _as_number(derived.get("se"))
+    n = derived.get("n")
+    n = int(n) if isinstance(n, (int, float)) and not isinstance(n, bool) else None
+    label = f"{derived.get('market') or '?'}/{derived.get('selection') or '?'}"
+
+    if delta is None or se is None or n is None:
+        return None, f"derived {label} metric is incomplete (delta/se/n missing) — gated on the 1x2 Brier alone"
+    if n < DERIVED_GUARD_MIN_N:
+        return None, (
+            f"derived {label} held-out set too small (n={n} < {DERIVED_GUARD_MIN_N}) to decide — "
+            "gated on the 1x2 Brier alone"
+        )
+
+    ok, verdict = paired_decision(delta, se, n)
+    brier = _as_number(derived.get("brier"))
+    base = _as_number(derived.get("baseline_brier"))
+    numbers = ""
+    if brier is not None and base is not None:
+        numbers = f" (brier {brier:.5f} vs constant {base:.5f})"
+    if ok:
+        return True, f"derived {label} guard PASSED{numbers}: {verdict}"
+    return False, (
+        f"derived {label} Brier is WORSE than the held-out frame's own constant base rate{numbers}: "
+        f"{verdict} — a model that cannot beat a constant on a market it derives has no business "
+        "serving that market"
+    )

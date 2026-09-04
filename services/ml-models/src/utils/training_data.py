@@ -153,6 +153,14 @@ TARGET_COLUMN = "match_outcome"
 # Columns that exist on the frame but should never be used as model
 # inputs — either identifiers, outcome-leaking columns, or the raw
 # features dict that we flatten elsewhere.
+#
+# league_id is a special case: it is excluded from the GBM feature set
+# (it is an identifier, not a feature) but the frame MUST keep carrying
+# it, because the Poisson family reads it directly off the frame to fit
+# per-league scoring baselines — see
+# predictors/poisson_models.LEAGUE_COLUMN_CANDIDATES and the guard in
+# training/train_all_models.py. Dropping it from the query would silently
+# collapse 41 leagues back onto one global baseline.
 NON_FEATURE_COLUMNS = {
     "match_id",
     "match_date",

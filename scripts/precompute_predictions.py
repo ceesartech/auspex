@@ -57,6 +57,12 @@ def list_upcoming(database_url: str, days: int) -> list[dict]:
                        m.match_date,
                        ht.name AS home_team,
                        at.name AS away_team,
+                       -- league_id is the key the Dixon-Coles artifacts'
+                       -- per-league baselines are fitted on (every
+                       -- training query in scripts/ and
+                       -- utils/training_data selects the same column);
+                       -- l.name stays for the alert text.
+                       m.league_id::text AS league_id,
                        l.name AS league
                 FROM matches m
                 JOIN teams ht ON ht.id = m.home_team_id
@@ -406,6 +412,24 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                         if prefixed not in filled:
                             filled[prefixed] = filled[k]
 
+                    # IDENTITY COLUMNS FOR THE SCORELINE MEMBERS. `filled` is
+                    # built purely from features_cache, but the ensemble's
+                    # Poisson and Dixon-Coles members look up team strengths by
+                    # NAME (PoissonMatchPredictor.predict_proba falls back to
+                    # np.array([""] * len(X)) when the column is absent) and
+                    # league baselines by league key. Without these three
+                    # columns those members emitted their unknown-team constant
+                    # for EVERY live match while the weight optimiser had given
+                    # them ~9-10% of the blend on the strength of their
+                    # team-AWARE validation scores — so a tenth of every served
+                    # 1x2 probability was a constant, independent of how many
+                    # teams the artifact actually knows. Added AFTER the
+                    # median-fill above, which would otherwise replace these
+                    # non-numeric values with feature medians.
+                    filled["home_team"] = m["home_team"]
+                    filled["away_team"] = m["away_team"]
+                    filled["league_id"] = m.get("league_id")
+
                     proba = ensemble.predict_proba(pd.DataFrame([filled]))[0]
                     if not np.all(np.isfinite(proba)):
                         logger.info(
@@ -445,7 +469,11 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                 dc = ensemble.models.get("dixon_coles_soccer_match_result") if derive_from_lambdas else None
                 if dc is not None and getattr(dc, "is_fitted", False):
                     try:
-                        h_lam, a_lam = dc.lambdas_for_match(m["home_team"], m["away_team"])
+                        h_lam, a_lam = dc.lambdas_for_match(
+                            m["home_team"],
+                            m["away_team"],
+                            league=m.get("league_id"),
+                        )
                         markets = derive_from_lambdas(
                             h_lam,
                             a_lam,
@@ -464,6 +492,7 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                         ht_h_lam, ht_a_lam = ht_dc_model.lambdas_for_match(
                             m["home_team"],
                             m["away_team"],
+                            league=m.get("league_id"),
                         )
                         ht_P = build_dc_matrix(
                             ht_h_lam,
@@ -493,6 +522,7 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                         h2_h_lam, h2_a_lam = second_half_dc_model.lambdas_for_match(
                             m["home_team"],
                             m["away_team"],
+                            league=m.get("league_id"),
                         )
                         h2_P = build_dc_matrix(
                             h2_h_lam,

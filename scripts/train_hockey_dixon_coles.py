@@ -112,7 +112,7 @@ def main():
         return 1
 
     sys.path.insert(0, "/app/services/ml-models/src")
-    from predictors.model_config import DIXON_COLES_CONFIG
+    from predictors.model_config import dixon_coles_config_pinned_to_legacy_fit
     from predictors.poisson_models import DixonColesPredictor
     from utils.training_data import load_training_frame
 
@@ -134,7 +134,18 @@ def main():
     val_df = frame.iloc[cutoff:].copy()
     LOGGER.info("Train=%d Val=%d", len(train_df), len(val_df))
 
-    model = DixonColesPredictor(DIXON_COLES_CONFIG)
+    # NOT DIXON_COLES_CONFIG. That object carries the 2026-09 SOCCER refit
+    # knobs (max_goals 10, a live time_decay, regularization as a
+    # 20-effective-match prior, per-league baselines), and not one hockey
+    # number was measured for any of them. This artifact also bypasses
+    # train_all_models entirely, so no promote gate and no derived-market
+    # guard would ever see the result — it would just start serving 8 NHL
+    # markets. Pinned to the pre-refit values until an NHL-specific A/B
+    # exists. (The separately-tracked NHL defect — max_goals=6 and
+    # home_advantage=0.25 against league_avg_goals ~3.10, truncating ~3.4%
+    # of per-side mass — is deliberately NOT fixed here for the same
+    # reason: it needs its own measurement, not a drive-by.)
+    model = DixonColesPredictor(dixon_coles_config_pinned_to_legacy_fit("dixon_coles_nhl"))
     result = model.train(train_df, val_df=val_df)
     LOGGER.info(
         "Train result: %s",

@@ -91,10 +91,22 @@ models:
     model_type: dixon_coles
     prediction_task: match_outcome
     version: "1.0.0"
+    # Mirror of predictors/model_config.py:DIXON_COLES_CONFIG (that module
+    # is what training actually reads). This is the SOCCER FULL-TIME config
+    # and the only Dixon-Coles the 2026-09 refit was measured on. The NHL /
+    # halftime / second-half trainers take the pinned copy instead
+    # (model_config.dixon_coles_config_pinned_to_legacy_fit) because they
+    # bypass train_all_models and therefore both promote gates.
+    # No home_advantage key here either: the 0.25 default in
+    # PoissonMatchPredictor is what reaches the pinned copies, which is the
+    # separately-tracked NHL defect (0.25 against league_avg_goals ~3.10).
     hyperparameters:
-      max_goals: 6
+      max_goals: 10
       rho_init: -0.13
-      time_decay: 0.0018
+      time_decay: 0.00095      # per day; 730-day half-life
+      regularization: 20.0     # shrinkage prior, in effective matches
+      per_league_baselines: true
+      league_shrinkage: 200.0  # effective matches of shrink to the global mean
       max_iterations: 500
       convergence_threshold: 1.0e-5
 
