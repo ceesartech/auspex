@@ -71,3 +71,124 @@ def served_brier(gate: dict):
     cal = (gate.get("calibrated") or {}).get("brier")
     brier = cal if (kept and cal is not None) else raw
     return brier, kept, gate.get("n")
+
+
+# ── Frame fingerprint: are two Brier numbers even comparable? ─────────────────
+# train_all_models splits 70/15/15 BY ROW RATIO, so a bundle's held-out test set
+# is simply the tail of whatever frame THAT run loaded. When the frame changes
+# shape (the 2026-08-06 soccer corpus grew ~7x when the all-league loader
+# landed), the incumbent's stored Brier and the challenger's are computed on
+# different populations and comparing them is meaningless — it rejected the
+# better soccer model four weeks running. So every promoted metric carries a
+# fingerprint of the frame it was scored on, and the gate only takes the scalar
+# path when the two fingerprints are comparable.
+# How far the frame may grow between two runs and still leave their held-out
+# tails comparable. The tail is the LAST 15% of the frame, so a frame that
+# grows by 1/0.85 = 1.176x has a tail that starts after the previous frame
+# ENDED: the two test sets are then completely DISJOINT, and comparing their
+# Brier scalars is exactly the defect this fingerprint exists to catch. 1.10
+# keeps ~39% of the old tail inside the new one; anything looser is a promise
+# the number cannot keep.
+FINGERPRINT_ROW_BAND = 1.10
+HISTORY_LIMIT = 8  # K: runs of served-Brier history kept per ensemble (~2 months weekly)
+MIN_PAIRED_N = 100  # fewest shared rows a paired re-scoring may decide on
+PAIRED_Z = 1.96  # two-sided 95% on the paired-delta SE
+
+
+def _norm_date(value):
+    """ISO date/datetime (or None) → 'YYYY-MM-DD'. The fingerprint compares the
+    corpus START date as a scope key, so sub-day precision is noise."""
+    if value is None:
+        return None
+    text = str(value)
+    return text[:10] if len(text) >= 10 else text
+
+
+def fingerprint_from_report(report) -> dict | None:
+    """Frame fingerprint from a bundle's training_report.json, using the fields
+    train_all_models already writes: data_quality {rows, date_min, date_max} and
+    holdout_test {n}. Returns None when the report carries no row count (nothing
+    to compare on) — the caller must then treat comparability as UNKNOWN, never
+    as 'matches'."""
+    if not isinstance(report, dict):
+        return None
+    dq = report.get("data_quality") or {}
+    holdout = report.get("holdout_test") or {}
+    rows = dq.get("rows")
+    if rows is None:
+        return None
+    try:
+        rows = int(rows)
+    except (TypeError, ValueError):
+        return None
+    n = holdout.get("n")
+    return {
+        "rows": rows,
+        "date_min": _norm_date(dq.get("date_min")),
+        "date_max": _norm_date(dq.get("date_max")),
+        "holdout_n": int(n) if isinstance(n, (int, float)) else None,
+        # Population keys: a frame with a different feature set or a different
+        # number of target classes is a different modelling problem, and its
+        # Brier is not on the same scale — comparing the scalars would be the
+        # same class of error as comparing across disjoint test sets. These
+        # are the scope fields train_all_models already writes; a fuller key
+        # (the loader's league/competition set) would need a change to
+        # services/ml-models/src/utils/training_data.py's data_quality.
+        "feature_count": dq.get("feature_count"),
+        "target_classes": dq.get("target_classes"),
+    }
+
+
+def _within_band(a, b) -> bool:
+    """True when a and b are within FINGERPRINT_ROW_BAND of each other."""
+    if not a or not b or a <= 0 or b <= 0:
+        return False
+    ratio = float(b) / float(a)
+    return (1.0 / FINGERPRINT_ROW_BAND) <= ratio <= FINGERPRINT_ROW_BAND
+
+
+def fingerprints_comparable(a, b) -> bool:
+    """Can two served-Brier numbers be compared as scalars?
+
+    Only when they were scored on frames of the same SHAPE: the same corpus
+    start date (a moved date_min means the loader's scope changed), the same
+    feature count and target-class count, and row + held-out counts within
+    FINGERPRINT_ROW_BAND. A missing fingerprint (a legacy sidecar written
+    before this gate existed) is NOT comparable — unknown must fail closed into
+    the paired path, not silently reuse the broken comparison. So is a missing
+    held-out count on either side: "how many rows was this Brier averaged
+    over" is half of what makes two Briers comparable, and ignoring it when it
+    is absent is guessing."""
+    if not isinstance(a, dict) or not isinstance(b, dict) or not a or not b:
+        return False
+    if a.get("date_min") != b.get("date_min"):
+        return False
+    for key in ("feature_count", "target_classes"):
+        if a.get(key) != b.get(key):
+            return False
+    if not _within_band(a.get("rows"), b.get("rows")):
+        return False
+    if not _within_band(a.get("holdout_n"), b.get("holdout_n")):
+        return False
+    return True
+
+
+def paired_decision(delta: float, se: float, n) -> tuple[bool, str]:
+    """Promote verdict from a PAIRED re-scoring of challenger vs incumbent on one
+    shared set of rows. `delta` is mean(challenger row Brier - incumbent row
+    Brier) — negative is better — and `se` its paired standard error.
+
+    Promote iff the challenger is neither statistically worse (delta within
+    PAIRED_Z * SE of zero) NOR worse than the n-scaled tolerance the scalar path
+    uses. The SE term is what makes this honest at large n (a real 0.002
+    regression is caught); the tolerance term is what stops a tiny-n bundle,
+    where PAIRED_Z * SE can be 0.05, from waving a clearly worse model through."""
+    ci = PAIRED_Z * float(se)
+    tol = gate_tolerance(n)
+    margin = min(ci, tol)
+    ok = float(delta) <= margin
+    verb = "<=" if ok else ">"
+    return ok, (
+        f"paired ΔBrier {delta:+.5f} ± {se:.5f} (n={n}) {verb} margin {margin:.5f} "
+        f"= min(1.96·SE {ci:.5f}, tol {tol:.5f})"
+    )

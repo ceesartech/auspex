@@ -249,6 +249,9 @@ def test_consensus_devigs_three_books_exactly():
         "market_type": "1x2",
         "line": None,
         "opposite_line": None,
+        # the consensus obeys the same freshness bound as the price queries:
+        # a gap cap measured against books that stopped quoting is not a cap
+        "max_age_hours": rg.MAX_ODDS_AGE_HOURS,
     }
 
 
@@ -310,6 +313,7 @@ def test_consensus_parses_line_out_of_display_selection():
         "market_type": "over_under",
         "line": 2.5,
         "opposite_line": 2.5,
+        "max_age_hours": rg.MAX_ODDS_AGE_HOURS,
     }
     assert got == pytest.approx(0.5081960244750942, abs=1e-12)
 
@@ -323,6 +327,7 @@ def test_consensus_accepts_bare_selection_plus_explicit_line():
         "market_type": "asian_handicap",
         "line": -0.5,
         "opposite_line": 0.5,
+        "max_age_hours": rg.MAX_ODDS_AGE_HOURS,
     }
 
 

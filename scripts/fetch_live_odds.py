@@ -16,9 +16,32 @@ The script:
   2. For each returned event, looks up the matching match in our
      `matches` table by (home_team_name, away_team_name, match_date)
      scoped to the event's sport.
-  3. Inserts one row per (bookmaker × market × selection [× line]) into
-     the odds table with is_opening=false, is_live=false. Duplicate rows
-     within the same window are skipped via the NOT EXISTS guard.
+  3. Upserts one row per (bookmaker × market × selection [× line]) into
+     the `odds` table with is_opening=false, is_live=false: a key is
+     INSERTed the first time it is seen, then UPDATEd in place — price and
+     `timestamp` — every time the book moves it, and its `last_seen_at` is
+     stamped on EVERY observation whether the price moved or not. `odds`
+     therefore holds the CURRENT price, `odds_snapshots` holds the price
+     HISTORY (one row per move), and the is_opening=true row (written by
+     scripts/promote_raw.py) is the opening line and is never touched.
+     A quote seen AFTER kickoff can only create a key that does not exist
+     yet: it never overwrites a pre-match price, because `odds` is read as
+     the pre-match/closing line by the training frames.
+  4. Sanity-checks every bookmaker against the rest of the same payload and
+     drops that book's whole block for the match when its handicap line AND
+     its moneyline both put the other team on top — the side-swap canary,
+     see detect_side_swapped_books.
+
+WHY `odds` is a CURRENT-price table (2026-09 prod audit, defect 1): it used
+to keep the FIRST price ever seen for a key forever, behind a NOT EXISTS
+guard, so every recommendation was priced off a quote that averaged 178h
+(1x2) / 89h (asian_handicap) / 149h (over_under) / 197h (mma) old. 48% of
+settled soccer 1x2 recs failed their own 5% EV gate at the price actually
+available when they were written, average claimed EV fell 0.132 -> 0.079,
+realized ROI was +4.4% rather than the +14.1% claimed, and vw_rec_clv was
+measuring first-seen staleness instead of closing-line value. Readers that
+want history read odds_snapshots; readers that want "what is bettable now"
+read odds.
 
 Sport keys (https://the-odds-api.com/sports-odds-data/sports-apis.html):
     soccer_*                     27+ soccer leagues
@@ -39,6 +62,7 @@ import os
 import sys
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
+from statistics import median
 
 import psycopg2
 import requests
@@ -225,6 +249,47 @@ KNOWN_MARKET_KEYS: dict[str, set[str]] = {
     "mma": {"h2h"},
 }
 
+# insert_odds_row outcomes. Callers count rows WRITTEN (ODDS_WRITTEN) and
+# report the split in the per-run summary. ODDS_UNCHANGED means "the book
+# still shows this price": the row's last_seen_at is stamped even though
+# nothing was rewritten. ODDS_POST_COMMENCE means an existing PRE-MATCH row
+# was deliberately left alone because the match has already started.
+ODDS_INSERTED = "inserted"
+ODDS_UPDATED = "updated"
+ODDS_UNCHANGED = "unchanged"
+ODDS_POST_COMMENCE = "post_commence_protected"
+ODDS_WRITTEN = frozenset({ODDS_INSERTED, ODDS_UPDATED})
+
+# Markets where the two sides of one group carry OPPOSITE signed lines, so a
+# bookmaker whose home/away sides are transposed in the feed shows up as a
+# sign flip against the rest of the market. These are exactly the market_type
+# values map_outcome produces for the-odds-api "spreads" key (soccer ->
+# asian_handicap; nhl/nba/nfl -> spread). Totals (over_under / total) are
+# deliberately excluded: over and under legitimately share one positive line,
+# so a sign test there would fire on every book.
+HANDICAP_MARKET_TYPES: frozenset[str] = frozenset({"asian_handicap", "spread"})
+
+# The two-or-three-way match-winner markets map_outcome produces from the
+# "h2h" key (soccer -> 1x2, everything else -> moneyline). A real side swap
+# transposes these prices too, which is what the canary corroborates against.
+MONEYLINE_MARKET_TYPES: frozenset[str] = frozenset({"1x2", "moneyline"})
+
+# How many OTHER bookmakers must have priced the handicap before their median
+# counts as a consensus worth rejecting a book against. Below this we keep the
+# book: with one peer there is no way to tell which of the two is swapped.
+MIN_SIDE_SWAP_PEERS = 2
+
+# How lopsided a book's moneyline must be before its FAVOURITE counts as
+# stated, measured as the de-vigged (p_home - p_away) margin — not p_home
+# against 0.5, because a 3-way soccer market routinely prices a real home
+# favourite below 0.5 once the draw takes its share. Corroboration needs this
+# margin on both sides with OPPOSITE signs: a real transposition moves both
+# markets (the 2026-08 BetUS runs had "the h2h prices swapped too"), while a
+# genuine cross-book disagreement about who gives the handicap happens on
+# pick'em games, where every book prices the two sides within a whisker of
+# each other. 0.04 = a 4-point disagreement about who is the better team.
+SIDE_SWAP_H2H_MARGIN = 0.04
+
 
 def sport_for_key(sport_key: str) -> str | None:
     """Return the auspex sport label for a the-odds-api sport key, or
@@ -321,21 +386,137 @@ def find_match_id(cur, sport: str, home_team: str, away_team: str, commence_time
     return None
 
 
-def insert_odds_row(
-    cur, match_id: str, bookmaker: str, market_type: str, selection: str, odds_decimal: float, line: float | None
-) -> bool:
-    """Idempotent insert — skip if same row already exists."""
-    cur.execute(
-        """
-        INSERT INTO odds (match_id, bookmaker, market_type, selection,
-                          odds_decimal, line, is_opening, is_live)
-        SELECT %s, %s, %s, %s, %s, %s, false, false
-        WHERE NOT EXISTS (
-            SELECT 1 FROM odds
-            WHERE match_id = %s AND bookmaker = %s
+# The row identity every statement in insert_odds_row matches on, and
+# byte-for-byte the key migration 024 makes unique — so the writer can never
+# permit a row the index would reject. Both flags go through
+# COALESCE(..., false) rather than `= false` because both columns are NULLable
+# (DEFAULT false, no NOT NULL): a legacy NULL would otherwise be invisible to
+# the UPDATE *and* to the INSERT's guard and get shadow-duplicated. is_live is
+# in the key because a live-odds feed (nothing writes one today) would be a
+# different price series that must neither block nor clobber the pre-match one.
+_ODDS_KEY_SQL = """
+              match_id = %s AND bookmaker = %s
               AND market_type = %s AND selection = %s
               AND COALESCE(line, -1) = COALESCE(%s, -1)
-              AND is_opening = false
+              AND COALESCE(is_opening, false) = false
+              AND COALESCE(is_live, false) = false
+"""
+
+
+def insert_odds_row(
+    cur,
+    match_id: str,
+    bookmaker: str,
+    market_type: str,
+    selection: str,
+    odds_decimal: float,
+    line: float | None,
+    pre_match: bool = True,
+) -> str:
+    """Upsert the CURRENT price for one (match, bookmaker, market, selection,
+    line) key. Returns ODDS_INSERTED / ODDS_UPDATED / ODDS_UNCHANGED /
+    ODDS_POST_COMMENCE — callers count what was actually written.
+
+    The non-opening row for a key is UPDATED in place when the book's price
+    moved; it is NOT skipped forever as it was before the 2026-09 audit (see
+    the module docstring: recommendations were being priced off quotes up to
+    8 days stale). The is_opening=true row is the OPENING line — other code
+    reads it as such — so every statement here is scoped to the non-opening,
+    non-live row and the opening row is never touched. Price history is not
+    lost: every move is appended to odds_snapshots by insert_snapshot_row.
+
+    TWO timestamps, because they answer different questions:
+      * `timestamp`   — when this PRICE last changed. Advanced only on a move,
+                        which is what the cross-book feature builders and the
+                        API's price views have always read it as.
+      * `last_seen_at`— when we last SAW the book quote it, stamped on every
+                        observation whether or not the price moved. This is
+                        the freshness signal the recommendation guard ages off
+                        (scripts/generate_recommendations.MAX_ODDS_AGE_HOURS):
+                        a book that pulls a market leaves its last price
+                        behind forever, and only an unconditional stamp can
+                        tell "still on offer" from "frozen since Tuesday".
+    Requires migration 024 (adds the NULLable last_seen_at column). Readers
+    COALESCE it back to `timestamp`, so rows written before the migration
+    simply read as older than they are — the safe direction.
+
+    `pre_match=False` means the fixture has already kicked off. An in-play
+    quote must never REPLACE the pre-match price: `odds` is read as the
+    closing/pre-match line by the training frames and feature builders
+    (services/ml-models/src/utils/training_data.py, scripts/compute_features*),
+    so overwriting it with a live number injects post-kickoff information into
+    a model input. A post-commence observation therefore leaves an existing
+    row completely alone (returning ODDS_POST_COMMENCE) and only ever INSERTs
+    a key that does not exist yet — which is what keeps
+    scripts/backfill_historical_odds.py, whose snapshots are deliberately
+    taken at/after commence, writing exactly the rows it always did.
+
+    Implemented as UPDATE-then-INSERT-if-no-rows rather than a real
+    `ON CONFLICT` upsert because the `odds` table has NO unique constraint on
+    this key (see services/data-ingestion/db/migrations/024_odds_current_price.sql:
+    one can only be added once prod is verified duplicate-free, which cannot be
+    checked from here). The statements are equivalent under the single serial
+    writer the ingest DAG runs. A concurrent second writer racing between them
+    would raise a duplicate only if that migration's unique index got created —
+    which is the loud failure we want, not a silent second "current" price.
+
+    The comparison rounds to the column's own scale (DECIMAL(10,4)); without
+    that, a price like 1.9090909 would differ from the stored 1.9091 on every
+    cycle and churn the timestamp forever.
+    """
+    key_params = (match_id, bookmaker, market_type, selection, line)
+
+    if not pre_match:
+        # The match has started. Never touch an existing pre-match row —
+        # not its price, not even its last_seen_at (a live quote is not
+        # evidence that the pre-match price is still on offer).
+        cur.execute(
+            f"""
+            SELECT 1 FROM odds
+            WHERE {_ODDS_KEY_SQL}
+            LIMIT 1
+            """,
+            key_params,
+        )
+        if cur.fetchone() is not None:
+            return ODDS_POST_COMMENCE
+    else:
+        cur.execute(
+            f"""
+            UPDATE odds
+               SET odds_decimal = ROUND(%s::numeric, 4),
+                   timestamp = NOW(),
+                   last_seen_at = NOW()
+             WHERE {_ODDS_KEY_SQL}
+               AND odds_decimal IS DISTINCT FROM ROUND(%s::numeric, 4)
+            """,
+            (odds_decimal, *key_params, odds_decimal),
+        )
+        if (cur.rowcount or 0) > 0:
+            return ODDS_UPDATED
+
+        # Same price as last cycle: the row is not rewritten, but the book IS
+        # still quoting it, and that is exactly what the freshness guard needs
+        # to know. Only last_seen_at moves.
+        cur.execute(
+            f"""
+            UPDATE odds
+               SET last_seen_at = NOW()
+             WHERE {_ODDS_KEY_SQL}
+            """,
+            key_params,
+        )
+        if (cur.rowcount or 0) > 0:
+            return ODDS_UNCHANGED
+
+    cur.execute(
+        f"""
+        INSERT INTO odds (match_id, bookmaker, market_type, selection,
+                          odds_decimal, line, is_opening, is_live, last_seen_at)
+        SELECT %s, %s, %s, %s, %s, %s, false, false, NOW()
+        WHERE NOT EXISTS (
+            SELECT 1 FROM odds
+            WHERE {_ODDS_KEY_SQL}
         )
         """,
         (
@@ -345,14 +526,10 @@ def insert_odds_row(
             selection,
             odds_decimal,
             line,
-            match_id,
-            bookmaker,
-            market_type,
-            selection,
-            line,
+            *key_params,
         ),
     )
-    return cur.rowcount > 0
+    return ODDS_INSERTED if (cur.rowcount or 0) > 0 else ODDS_UNCHANGED
 
 
 def insert_snapshot_row(
@@ -360,10 +537,13 @@ def insert_snapshot_row(
 ) -> bool:
     """Append to odds_snapshots when the price CHANGED vs the key's latest
     snapshot (or none exists yet). This is the CLV capture path (audit doc
-    §2.2): the `odds` table deliberately keeps only the first-seen price
-    (its readers average across books), so closing-line movement is
-    recorded here instead — bounded growth, one row per actual price move,
-    read only by vw_rec_clv / vw_clv_summary."""
+    §2.2): `odds` carries ONE row per key — the current price (insert_odds_row
+    overwrites it in place) — so the price HISTORY lives here instead. Bounded
+    growth, one row per actual price move, read only by vw_rec_clv /
+    vw_clv_summary. NOTE: this table stays append-only precisely because its
+    readers need the time series; adding history rows to `odds` would silently
+    turn every AVG(odds_decimal) reader from "average across BOOKS" into
+    "average across books AND time" (migration 022's design note)."""
     cur.execute(
         """
         INSERT INTO odds_snapshots (match_id, bookmaker, market_type, selection, line, odds_decimal)
@@ -636,6 +816,189 @@ def _match_event(cur, sport: str, event: dict, unmatched_log: list | None = None
     return match_id, home, away
 
 
+def _book_home_handicap_lines(event: dict, sport: str, home: str, away: str) -> dict[str, float]:
+    """Each bookmaker's representative signed HOME handicap line in one payload.
+
+    Routed through map_outcome so the set of handicap markets can never drift
+    from what actually gets stored (and so totals are excluded for free). A
+    book quoting several handicap lines for the same match is represented by
+    their median. Books with no handicap price are absent from the result.
+    """
+    lines: dict[str, float] = {}
+    for bm in event.get("bookmakers", []):
+        bookmaker_name = bm.get("title") or bm.get("key") or "unknown"
+        points: list[float] = []
+        for market in bm.get("markets", []):
+            market_key = market.get("key")
+            for outcome in market.get("outcomes", []):
+                point = outcome.get("point")
+                if point is None:
+                    continue
+                try:
+                    point_f = float(point)
+                except (TypeError, ValueError):
+                    continue
+                market_type, selection, keep_line = map_outcome(
+                    sport, market_key, outcome.get("name", ""), home, away, point_f
+                )
+                if keep_line and selection == "home" and market_type in HANDICAP_MARKET_TYPES:
+                    points.append(point_f)
+        if points:
+            lines[bookmaker_name] = float(median(points))
+    return lines
+
+
+def _book_home_h2h_margins(event: dict, sport: str, home: str, away: str) -> dict[str, float]:
+    """Each bookmaker's de-vigged (p_home - p_away) margin on the match-winner
+    market in one payload — positive when that book makes HOME the better team.
+
+    Routed through map_outcome for the same reason as the handicap lines: the
+    market set can never drift from what actually gets stored. Normalised over
+    whatever selections the book quotes (2-way, or 3-way with the draw), so the
+    margin is comparable across books and across sports; the DIFFERENCE is used
+    rather than p_home alone because a 3-way market gives a genuine home
+    favourite well under 0.5. Books with no usable h2h block, or with a
+    non-positive price, are absent from the result.
+    """
+    margins: dict[str, float] = {}
+    for bm in event.get("bookmakers", []):
+        bookmaker_name = bm.get("title") or bm.get("key") or "unknown"
+        prices: dict[str, float] = {}
+        for market in bm.get("markets", []):
+            market_key = market.get("key")
+            for outcome in market.get("outcomes", []):
+                market_type, selection, _keep_line = map_outcome(
+                    sport, market_key, outcome.get("name", ""), home, away, None
+                )
+                if market_type not in MONEYLINE_MARKET_TYPES or selection is None:
+                    continue
+                try:
+                    price = float(outcome.get("price"))
+                except (TypeError, ValueError):
+                    continue
+                if price > 0.0:
+                    prices[selection] = price
+        if "home" not in prices or "away" not in prices:
+            continue
+        overround = sum(1.0 / price for price in prices.values())
+        if overround > 0.0:
+            margins[bookmaker_name] = (1.0 / prices["home"] - 1.0 / prices["away"]) / overround
+    return margins
+
+
+def detect_side_swapped_books(event: dict, sport: str, home: str, away: str) -> dict[str, dict]:
+    """Bookmakers in this payload whose HOME/AWAY sides look transposed.
+
+    Returns {bookmaker: {line, line_consensus, peers, h2h, h2h_consensus}} for
+    every book that fails BOTH tests against the rest of the same payload:
+
+      1. its signed HOME handicap line has the OPPOSITE sign to the median of
+         at least MIN_SIDE_SWAP_PEERS other books, both being non-zero; and
+      2. its de-vigged moneyline margin (p_home - p_away) has the OPPOSITE
+         sign to the peer median, both being at least SIDE_SWAP_H2H_MARGIN in
+         size — i.e. the book and the market disagree about which team is
+         better, not merely about the price.
+
+    Never raises. A book with no peers, a zero line (pick'em), a zero
+    consensus, or no corroborating h2h block is KEPT — and a book that fails
+    (1) without (2) is logged at WARNING as "suspected but not corroborated"
+    so the base rate stays observable.
+
+    WHY corroboration (2026-09 prod audit, defect 2 + review): the sign test
+    alone cannot tell a transposed feed from a legitimate cross-book
+    disagreement about which side gives the handicap, and that disagreement is
+    structural on the team-sport `spread` market — an NHL puck line is always
+    ±1.5 and its sign is just "who is the favourite", so on a near-even game a
+    minority book genuinely posting home +1.5 against peers at -1.5 is
+    indistinguishable from a swap. A magnitude threshold does not separate them
+    either (both a swap and a pick'em disagreement are a full 2-3 point gap).
+    What DOES separate them is the moneyline: a real transposition flips both
+    markets — the audit's own evidence for the 2026-08 BetUS runs is that "the
+    h2h prices were swapped too" — while a pick'em disagreement comes with two
+    books pricing the moneyline within a whisker of each other.
+
+    WHY at all (2026-09 prod audit, defect 2): two whole BetUS ingest runs
+    (2026-08-09 and 2026-08-22) carried soccer asian-handicap lines whose sign
+    opposed the rest of the market. BetUS's home line opposed the same-minute
+    median of >= 2 other books in 14/1296 snapshots while BetOnline (5,773),
+    LowVig (5,749), Bovada (2,664) and MyBookie (911) did it exactly zero
+    times, so this is an upstream feed defect, not a mapping bug (_team_side
+    matches team names exactly and yields None — row skipped — on any
+    mismatch, never a swapped side). Those bad quotes then persisted as their
+    own line key forever under the old first-seen rule and were picked as
+    "best price": the resulting recs won 38 of 47 near-even-money handicaps
+    (+67% ROI) on lines the book never offered, which was the entire positive
+    contribution to the settled book.
+    """
+    lines = _book_home_handicap_lines(event, sport, home, away)
+    h2h = _book_home_h2h_margins(event, sport, home, away)
+    flagged: dict[str, dict] = {}
+    for book, own in lines.items():
+        peers = [value for other, value in lines.items() if other != book]
+        if len(peers) < MIN_SIDE_SWAP_PEERS:
+            continue
+        consensus = float(median(peers))
+        if own == 0.0 or consensus == 0.0:
+            continue
+        if (own > 0.0) == (consensus > 0.0):
+            continue
+
+        own_p = h2h.get(book)
+        peer_ps = [value for other, value in h2h.items() if other != book]
+        peer_p = float(median(peer_ps)) if peer_ps else None
+        corroborated = (
+            own_p is not None
+            and peer_p is not None
+            and abs(own_p) >= SIDE_SWAP_H2H_MARGIN
+            and abs(peer_p) >= SIDE_SWAP_H2H_MARGIN
+            and (own_p > 0.0) != (peer_p > 0.0)
+        )
+        if not corroborated:
+            logger.warning(
+                "SIDE-SWAP SUSPECTED BUT NOT CORROBORATED: %s home line %+.2f opposes the median %+.2f "
+                "of %d other book(s) on %s vs %s, but its moneyline does not disagree with the market "
+                "about which team is better (book p_home-p_away=%s, peers %s) — keeping the book. A "
+                "genuine cross-book disagreement about who gives the handicap looks exactly like this.",
+                book,
+                own,
+                consensus,
+                len(peers),
+                home,
+                away,
+                "unknown" if own_p is None else f"{own_p:+.3f}",
+                "unknown" if peer_p is None else f"{peer_p:+.3f}",
+            )
+            continue
+
+        flagged[book] = {
+            "line": own,
+            "line_consensus": consensus,
+            "peers": len(peers),
+            "h2h_margin": own_p,
+            "h2h_margin_consensus": peer_p,
+        }
+    return flagged
+
+
+def is_pre_match(cur, match_id: str) -> bool:
+    """Has this fixture NOT started yet?
+
+    One cheap lookup per event, used to keep a post-kickoff (in-play) quote
+    from overwriting the pre-match price — see insert_odds_row's `pre_match`.
+    A match_id we cannot find (or a NULL match_date) answers False, the
+    conservative direction: unknown means "do not overwrite".
+    """
+    cur.execute(
+        """
+        SELECT 1 FROM matches
+        WHERE id = %s AND match_date > NOW()
+        LIMIT 1
+        """,
+        (match_id,),
+    )
+    return cur.fetchone() is not None
+
+
 def insert_event_odds(
     cur,
     match_id: str,
@@ -644,15 +1007,64 @@ def insert_event_odds(
     home: str,
     away: str,
     unknown_markets: set | None = None,
+    stats: dict | None = None,
 ) -> int:
-    """Insert every representable odds row from one event payload. The bulk
+    """Write every representable odds row from one event payload. The bulk
     /odds response and the per-event additional-markets response share the
     same bookmakers → markets → outcomes shape, so both feed through here.
     Unhandled market keys are collected into `unknown_markets` for one-time
-    logging. Returns the number of rows inserted."""
+    logging.
+
+    A bookmaker flagged by the side-swap canary is dropped WHOLE for this
+    match — every market, not just the signed-line one, and neither the odds
+    rows nor the snapshots are written. The canary only fires when the book
+    disagrees with the market about the favourite on BOTH the handicap and the
+    moneyline, which is evidence that the book's home/away sides are
+    transposed in this payload; keeping its 1x2 prices after proving that
+    would move the phantom-price bug from asian_handicap into soccer 1x2, one
+    of the two live team-sport streams (scripts/rec_gating.py). The drop is
+    logged at ERROR level per (bookmaker, match) and counted; it never raises
+    and never happens silently.
+
+    Post-kickoff quotes never overwrite a pre-match price (in-play prices are
+    what `odds` must not be polluted with — see insert_odds_row); they can only
+    create keys that do not exist yet, which is the historical-backfill path.
+
+    Returns the number of rows WRITTEN (inserted + price-updated). When
+    `stats` is given, the ODDS_INSERTED / ODDS_UPDATED / ODDS_UNCHANGED /
+    ODDS_POST_COMMENCE split and "side_swap_rejections" are accumulated into
+    it for the run summary.
+    """
     inserted = 0
+    pre_match = is_pre_match(cur, match_id)
+    swapped = detect_side_swapped_books(event, sport, home, away)
+    for book, detail in sorted(swapped.items()):
+        logger.error(
+            "SIDE-SWAP CANARY: dropping ALL %s prices for match %s (%s vs %s) — its home line "
+            "%+.2f opposes the median %+.2f of %d other book(s) in the same payload, AND its "
+            "moneyline makes the other team better (p_home-p_away=%+.3f vs peers %+.3f). The book's "
+            "home/away sides look transposed in the feed (the 2026-08 BetUS incident); nothing "
+            "from it is ingested for this match.",
+            book,
+            match_id,
+            home,
+            away,
+            detail["line"],
+            detail["line_consensus"],
+            detail["peers"],
+            detail["h2h_margin"],
+            detail["h2h_margin_consensus"],
+        )
+        if stats is not None:
+            stats["side_swap_rejections"] = stats.get("side_swap_rejections", 0) + 1
+
     for bm in event.get("bookmakers", []):
         bookmaker_name = bm.get("title") or bm.get("key") or "unknown"
+        if bookmaker_name in swapped:
+            # Proven transposed for this match: not one market of it is
+            # trustworthy, and a swapped 1x2 price is exactly the outlier that
+            # wins a best-price pick.
+            continue
         for market in bm.get("markets", []):
             market_key = market.get("key")
             if unknown_markets is not None and market_key and market_key not in KNOWN_MARKET_KEYS.get(sport, set()):
@@ -669,7 +1081,7 @@ def insert_event_odds(
                 if price is None:
                     continue
                 line = point_f if keep_line else None
-                if insert_odds_row(
+                status = insert_odds_row(
                     cur,
                     match_id,
                     bookmaker_name,
@@ -677,10 +1089,18 @@ def insert_event_odds(
                     selection,
                     float(price),
                     line,
-                ):
+                    pre_match=pre_match,
+                )
+                if status in ODDS_WRITTEN:
                     inserted += 1
+                if stats is not None:
+                    stats[status] = stats.get(status, 0) + 1
                 # CLV time-series capture — independent of the odds-table
-                # dedup so price MOVEMENT is recorded (closing line).
+                # current-price upsert, so every price MOVE keeps its own row
+                # (the closing line is read from here). Post-commence captures
+                # are kept: odds_snapshots is a time series and its readers
+                # bound themselves by captured_at (migration 022's vw_rec_clv
+                # requires captured_at < match_date).
                 insert_snapshot_row(
                     cur,
                     match_id,
@@ -699,14 +1119,16 @@ def process_event(
     event: dict,
     unmatched_log: list | None = None,
     unknown_markets: set | None = None,
+    stats: dict | None = None,
 ) -> int:
-    """Resolve an event to a fixture and insert its bulk-market odds rows.
-    Returns rows inserted (0 if the event can't be matched). Kept as the
-    single-call entry point used by backfill_historical_odds.py."""
+    """Resolve an event to a fixture and write its bulk-market odds rows.
+    Returns rows written — inserted or price-updated — (0 if the event can't
+    be matched). Kept as the single-call entry point used by
+    backfill_historical_odds.py."""
     match_id, home, away = _match_event(cur, sport, event, unmatched_log=unmatched_log)
     if not match_id:
         return 0
-    return insert_event_odds(cur, match_id, event, sport, home, away, unknown_markets=unknown_markets)
+    return insert_event_odds(cur, match_id, event, sport, home, away, unknown_markets=unknown_markets, stats=stats)
 
 
 def fetch_event_markets(
@@ -764,11 +1186,31 @@ def run(
     max_additional_events: int | None = None,
     quota_floor: int = 0,
 ) -> dict[str, int]:
+    # odds_rows_inserted / additional_rows_inserted count rows WRITTEN by each
+    # path (a first insert or a price update — both change what the recs engine
+    # will read). odds_rows_new / _updated / _unchanged are the run-wide split
+    # across both paths, so a run where every price is already current shows
+    # written=0 with unchanged>0 rather than looking like a dead fetch.
+    # odds_rows_post_commence counts pre-match rows an in-play quote was NOT
+    # allowed to overwrite; a number that climbs on the live path means the
+    # feed is listing started matches, which is expected and harmless.
     results = {
         "events_seen": 0,
         "events_matched": 0,
         "odds_rows_inserted": 0,
         "additional_rows_inserted": 0,
+        "odds_rows_new": 0,
+        "odds_rows_updated": 0,
+        "odds_rows_unchanged": 0,
+        "odds_rows_post_commence": 0,
+        "side_swap_rejections": 0,
+    }
+    stats: dict[str, int] = {
+        ODDS_INSERTED: 0,
+        ODDS_UPDATED: 0,
+        ODDS_UNCHANGED: 0,
+        ODDS_POST_COMMENCE: 0,
+        "side_swap_rejections": 0,
     }
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -797,7 +1239,9 @@ def run(
                     match_id, home, away = _match_event(cur, sport, event, unmatched_log=unmatched)
                     if not match_id:
                         continue
-                    inserted = insert_event_odds(cur, match_id, event, sport, home, away, unknown_markets=unknown)
+                    inserted = insert_event_odds(
+                        cur, match_id, event, sport, home, away, unknown_markets=unknown, stats=stats
+                    )
                     if inserted > 0:
                         results["events_matched"] += 1
                         results["odds_rows_inserted"] += inserted
@@ -815,7 +1259,7 @@ def run(
                                 payload, remaining = res
                                 if payload:
                                     results["additional_rows_inserted"] += insert_event_odds(
-                                        cur, match_id, payload, sport, home, away, unknown_markets=unknown
+                                        cur, match_id, payload, sport, home, away, unknown_markets=unknown, stats=stats
                                     )
                                 if quota_floor and remaining is not None:
                                     try:
@@ -844,6 +1288,12 @@ def run(
                 if unknown:
                     logger.info("%s: skipped unhandled market keys %s", sport_key, sorted(unknown))
                 conn.commit()
+
+    results["odds_rows_new"] = stats[ODDS_INSERTED]
+    results["odds_rows_updated"] = stats[ODDS_UPDATED]
+    results["odds_rows_unchanged"] = stats[ODDS_UNCHANGED]
+    results["odds_rows_post_commence"] = stats[ODDS_POST_COMMENCE]
+    results["side_swap_rejections"] = stats["side_swap_rejections"]
     return results
 
 
@@ -909,12 +1359,24 @@ def main(argv=None):
         quota_floor=args.quota_floor,
     )
     logger.info(
-        "Done. events_seen=%d events_matched=%d odds_rows_inserted=%d additional_rows_inserted=%d",
+        "Done. events_seen=%d events_matched=%d odds_rows_written=%d additional_rows_written=%d "
+        "(new=%d price_updated=%d unchanged=%d post_commence_protected=%d) side_swap_rejections=%d",
         results["events_seen"],
         results["events_matched"],
         results["odds_rows_inserted"],
         results["additional_rows_inserted"],
+        results["odds_rows_new"],
+        results["odds_rows_updated"],
+        results["odds_rows_unchanged"],
+        results["odds_rows_post_commence"],
+        results["side_swap_rejections"],
     )
+    if results["side_swap_rejections"]:
+        logger.error(
+            "%d bookmaker payload(s) rejected whole by the side-swap canary this run — "
+            "see the SIDE-SWAP CANARY lines above.",
+            results["side_swap_rejections"],
+        )
     return 0
 
 

@@ -72,6 +72,93 @@ ODDS_TO_PREDICTION: dict[str, str] = {
 LINED_MARKETS = {"over_under", "asian_handicap", "team_total", "over_under_ht"}
 
 
+# ── Odds freshness guard (audit 2026-09) ──────────────────────────────────
+#
+# The bound itself and its SQL live in scripts/rec_gating.py — the money-path
+# policy module the generators (and the gate's own consensus query) all
+# import, so "too old to bet on" has exactly ONE definition. Read the comment
+# on rec_gating.MAX_ODDS_AGE_HOURS for the evidence (prod prices averaging
+# 178 h old; 48% of settled soccer 1x2 recs failing their own EV gate at the
+# real price), what is measured (odds.last_seen_at, stamped on every
+# observation by the ingest — NOT `timestamp`, which advances only on a price
+# MOVE) and why the number is what it is (the odds DAG's 90-minute cadence).
+#
+# Re-exported here because the six sibling generators already import their
+# shared helpers from this module; the value is rec_gating's.
+MAX_ODDS_AGE_HOURS: float = rec_gating.MAX_ODDS_AGE_HOURS
+
+# Suppression-counter key for the guard. One key across all seven
+# generators, and deliberately NOT prefixed with the market the way gate
+# rejections are: a cold price is a property of the odds feed, not a
+# decision about a stream, and one grep over the DAG logs should find every
+# generator that went dark on it.
+STALE_ODDS_REASON: str = "stale_odds"
+
+# risk_factors is a JSON LIST of short string tags in every generator (the
+# API exposes the JSONB column as-is; see services/api/src/models/
+# database_models.py), so the age of the quote we priced is recorded as one
+# more tag rather than by changing the column's shape. Written at rec time
+# so CLV can be audited afterwards without re-deriving which quote was used
+# — the whole point of vw_rec_clv was undermined by not knowing this.
+ODDS_AGE_TAG_PREFIX: str = "odds_age_hours"
+
+# Age of an `odds` row in hours, computed DB-side so the comparison can
+# never straddle an app-vs-database clock skew.
+ODDS_AGE_HOURS_SQL: str = rec_gating.ODDS_AGE_HOURS_SQL
+ODDS_AGE_SELECT_SQL: str = f"{ODDS_AGE_HOURS_SQL} AS odds_age_hours"
+
+# DISTINCT ON tie-break that prefers a FRESH quote over a merely bigger
+# one. Without it the best-price pick is won forever by whichever book
+# stopped quoting at the highest number, and the guard below would then
+# suppress a selection that other books are still pricing. NULLS LAST so a
+# row with no timestamp never outranks a real quote. Takes one positional
+# parameter: the age bound in hours.
+FRESH_FIRST_ORDER_SQL: str = f"({ODDS_AGE_HOURS_SQL} <= %s) DESC NULLS LAST"
+
+
+def odds_age_hours(row) -> float | None:
+    """Age in hours of an odds row selected with ODDS_AGE_SELECT_SQL.
+
+    Returns None when the row carries no usable age (column absent, NULL
+    `timestamp`, unparseable value). Never raises — is_stale_odds decides
+    what an unknown age means."""
+    if row is None:
+        return None
+    value = row.get("odds_age_hours")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def is_stale_odds(age_hours, max_age_hours: float = MAX_ODDS_AGE_HOURS) -> bool:
+    """True when a quote is too old to price a recommendation with.
+
+    Unknown age (None) is STALE: "we cannot measure it" is not "it is
+    fresh", the same rule rec_gating.passes_gate applies to unknown inputs.
+    Never raises."""
+    if age_hours is None:
+        return True
+    try:
+        return float(age_hours) > float(max_age_hours)
+    except (TypeError, ValueError):
+        return True
+
+
+def odds_age_tag(age_hours) -> str:
+    """The risk_factors tag recording how old the priced quote was."""
+    if age_hours is None:
+        return f"{ODDS_AGE_TAG_PREFIX}:unknown"
+    return f"{ODDS_AGE_TAG_PREFIX}:{float(age_hours):.2f}"
+
+
+def with_odds_age(risks: list[str], age_hours) -> list[str]:
+    """A rec's risk_factors list with the priced quote's age appended."""
+    return [*risks, odds_age_tag(age_hours)]
+
+
 # ── Pure helpers (unit-tested in test_recommendation_math.py) ─────────────
 
 
@@ -252,18 +339,28 @@ def load_market_predictions(cur, match_id: str) -> dict[str, dict]:
     return out
 
 
-def best_odds(cur, match_id: str) -> list[dict]:
+def best_odds(cur, match_id: str, max_age_hours: float = MAX_ODDS_AGE_HOURS) -> list[dict]:
     """Best (highest) pre-match decimal price per (market_type, selection,
-    line), with the bookmaker offering it."""
+    line), with the bookmaker offering it and the quote's age in hours.
+
+    The pick is "best price among the quotes that are still warm": the
+    fresh-first tie-break runs BEFORE odds_decimal DESC, so a book that
+    stopped quoting can no longer win the selection with a price it no
+    longer offers. Cold rows are still returned when nothing warm exists,
+    so the caller can count the selection as stale instead of silently
+    seeing nothing."""
     cur.execute(
-        """
+        f"""
         SELECT DISTINCT ON (market_type, selection, COALESCE(line, -1))
-               market_type, selection, line, bookmaker, odds_decimal
+               market_type, selection, line, bookmaker, odds_decimal,
+               {ODDS_AGE_SELECT_SQL}
         FROM odds
         WHERE match_id = %s AND is_live = false
-        ORDER BY market_type, selection, COALESCE(line, -1), odds_decimal DESC
+        ORDER BY market_type, selection, COALESCE(line, -1),
+                 {FRESH_FIRST_ORDER_SQL},
+                 odds_decimal DESC
         """,
-        (match_id,),
+        (match_id, max_age_hours),
     )
     return list(cur.fetchall())
 
@@ -327,18 +424,20 @@ def recommend_for_match(
     bankroll: float,
     ev_threshold: float,
     prob_floor: float,
+    max_odds_age_hours: float = MAX_ODDS_AGE_HOURS,
 ) -> tuple[int, dict[str, int]]:
     """Generate + persist value bets for one match.
 
     Returns (rows_inserted, suppressed_by_reason) — the second element
     counts candidates the per-stream gate (scripts/rec_gating.py) refused,
-    keyed "<bet_type>:<reason>", so run() can log ONE loud summary of the
-    volume we chose not to bet."""
+    keyed "<bet_type>:<reason>", plus the candidates the freshness guard
+    refused under STALE_ODDS_REASON, so run() can log ONE loud summary of
+    the volume we chose not to bet."""
     suppressed: dict[str, int] = {}
     preds = load_market_predictions(cur, match_id)
     if not preds:
         return 0, suppressed
-    odds_rows = best_odds(cur, match_id)
+    odds_rows = best_odds(cur, match_id, max_odds_age_hours)
     if not odds_rows:
         return 0, suppressed
 
@@ -353,6 +452,15 @@ def recommend_for_match(
         probs = preds[ptype]["probabilities"]
         odds_decimal = float(row["odds_decimal"])
         if odds_decimal <= 1.0:
+            continue
+        # FRESHNESS GUARD (audit 2026-09). best_odds already preferred the
+        # warmest quote for this selection, so reaching the bound here means
+        # EVERY book's price for it has gone cold — we cannot claim this
+        # price was available, so no rec is written and the refusal is
+        # counted rather than silently dropped.
+        age_hours = odds_age_hours(row)
+        if is_stale_odds(age_hours, max_odds_age_hours):
+            suppressed[STALE_ODDS_REASON] = suppressed.get(STALE_ODDS_REASON, 0) + 1
             continue
         line = float(row["line"]) if row["line"] is not None else None
 
@@ -422,7 +530,11 @@ def recommend_for_match(
                 "kelly_stake": kelly_stake,
                 "rec_stake": rec_stake,
                 "reasoning": reasoning,
-                "risk": json.dumps(_risk_factors(p_raw, odds_decimal)),
+                # odds_at_recommendation is `odds_decimal` — the price the
+                # freshness guard accepted above — and the age it was
+                # accepted at rides along in risk_factors so CLV can be
+                # audited without re-deriving which quote was used.
+                "risk": json.dumps(with_odds_age(_risk_factors(p_raw, odds_decimal), age_hours)),
             },
         )
         written += 1

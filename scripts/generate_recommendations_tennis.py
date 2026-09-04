@@ -39,7 +39,19 @@ from psycopg2.extras import RealDictCursor
 sys.path.insert(0, os.path.dirname(__file__))
 
 import rec_gating  # noqa: E402
-from generate_recommendations import confidence_rating, expected_value, get_bankroll, kelly_fraction  # noqa: E402
+from generate_recommendations import (  # noqa: E402
+    FRESH_FIRST_ORDER_SQL,
+    MAX_ODDS_AGE_HOURS,
+    ODDS_AGE_SELECT_SQL,
+    STALE_ODDS_REASON,
+    confidence_rating,
+    expected_value,
+    get_bankroll,
+    is_stale_odds,
+    kelly_fraction,
+    odds_age_hours,
+    with_odds_age,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("generate_recommendations_tennis")
@@ -88,19 +100,25 @@ EMITTED_BET_TYPES: tuple[str, ...] = ("moneyline",)
 # ── Per-market price + prob alignment ──────────────────────────────
 
 
-def best_odds_for_market(cur, match_id: str, market_type: str) -> list[dict]:
+def best_odds_for_market(cur, match_id: str, market_type: str, max_age_hours: float = MAX_ODDS_AGE_HOURS) -> list[dict]:
     """Best (highest) pre-match decimal odds per selection. Tennis
     moneyline has no line, so this is a simpler version of the
-    NBA/NFL helpers — no target_line filter."""
+    NBA/NFL helpers — no target_line filter.
+
+    Each row also carries the quote's age in hours, and the fresh-first
+    tie-break runs BEFORE odds_decimal DESC so a book that stopped quoting
+    can no longer win the selection with a price it no longer offers (audit
+    2026-09)."""
     cur.execute(
-        """
+        f"""
         SELECT DISTINCT ON (selection)
-               selection, line, bookmaker, odds_decimal
+               selection, line, bookmaker, odds_decimal,
+               {ODDS_AGE_SELECT_SQL}
         FROM odds
         WHERE match_id = %s AND market_type = %s AND NOT is_live
-        ORDER BY selection, odds_decimal DESC
+        ORDER BY selection, {FRESH_FIRST_ORDER_SQL}, odds_decimal DESC
         """,
-        (match_id, market_type),
+        (match_id, market_type, max_age_hours),
     )
     return list(cur.fetchall())
 
@@ -221,10 +239,12 @@ def recommend_for_match(
     ev_threshold: float,
     prob_floor: float,
     suppressed: dict[str, int] | None = None,
+    max_odds_age_hours: float = MAX_ODDS_AGE_HOURS,
 ) -> int:
     """Emit gated value bets for one match. `suppressed` accumulates the
-    per-reason counts of candidates the gate rejected so run() can log the
-    summary — silence is the failure mode we are guarding against."""
+    per-reason counts of candidates the gate rejected — and the ones the
+    odds-freshness guard rejected, under STALE_ODDS_REASON — so run() can
+    log the summary; silence is the failure mode we are guarding against."""
     if suppressed is None:
         suppressed = {}
     preds = load_tennis_predictions(cur, match_id)
@@ -248,9 +268,18 @@ def recommend_for_match(
         labels = TENNIS_LABELS[market]
         probs = pred["probabilities"]
 
-        for offer in best_odds_for_market(cur, match_id, market):
+        for offer in best_odds_for_market(cur, match_id, market, max_odds_age_hours):
             selection = offer["selection"]
             if selection not in labels:
+                continue
+            # FRESHNESS GUARD (audit 2026-09). best_odds_for_market already
+            # preferred the warmest quote for this selection, so reaching the
+            # bound here means every book's price for it has gone cold. A
+            # price we cannot claim was available cannot price a rec, and the
+            # refusal is counted rather than silently dropped.
+            age_hours = odds_age_hours(offer)
+            if is_stale_odds(age_hours, max_odds_age_hours):
+                suppressed[STALE_ODDS_REASON] = suppressed.get(STALE_ODDS_REASON, 0) + 1
                 continue
             raw_prob = float(probs.get(selection, 0.0))
             if raw_prob < prob_floor:
@@ -295,7 +324,10 @@ def recommend_for_match(
                 "kelly_stake": k,
                 "rec_stake": stake,
                 "reasoning": reasoning,
-                "risk": json.dumps(_risk_factors(prob, odds_decimal)),
+                # odds_at_recommendation is `odds_decimal`, the price the
+                # freshness guard accepted; its age rides along in
+                # risk_factors so CLV can be audited after the fact.
+                "risk": json.dumps(with_odds_age(_risk_factors(prob, odds_decimal), age_hours)),
             }
             insert_recommendation(cur, rec)
             inserted += 1

@@ -116,7 +116,10 @@ class TestClosingLineForMatchSQL:
         result = gr_nfl.closing_line_for_match(FakeCursor(), "match-id", "spread")
         assert result == -7.0
         assert "selection = 'home'" in captured["sql"]
-        assert captured["params"] == ("match-id", "spread")
+        # the target line is averaged over lines still being QUOTED: a book
+        # that moves its line leaves the abandoned one behind as its own key
+        # forever (audit 2026-09).
+        assert captured["params"] == ("match-id", "spread", gr_nfl.MAX_ODDS_AGE_HOURS)
 
     def test_total_query_omits_selection_filter(self):
         captured = {}

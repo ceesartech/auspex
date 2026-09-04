@@ -8,6 +8,12 @@ module and asks it two questions before writing a row to
     2. If it is, does this individual pick sit inside the stream's bounds
        (max price, max claimed edge, max model-vs-market disagreement)?
 
+It also owns MAX_ODDS_AGE_HOURS — how old a quote may be before it can no
+longer price a bet. That belongs here for the same reason the caps do (it is a
+money-path policy, and one number is the only safe number), and because the
+consensus this module builds for the gap cap has to obey exactly the same
+bound as the price queries in the generators.
+
 Why this exists (see docs/SYSTEM_AUDIT_AND_ROADMAP.md — the 2026-09 prod
 audit): several streams were shipping recommendations from models with *no
 measurable skill* (MMA and tennis moneyline both scored worse than the
@@ -53,6 +59,52 @@ MAX_STAKE_FRACTION: float = 0.025
 # Below this many books pricing the same market group we report None (unknown),
 # and a gate carrying a max_gap treats unknown as a reject.
 MIN_CONSENSUS_BOOKS: int = 3
+
+# ── Odds freshness bound (audit 2026-09, defect 1) ────────────────────────
+#
+# THE one definition of "too old to bet on". It lives here, in the module
+# every generator already imports, because it is a money-path policy exactly
+# like the caps above — and because the consensus query BELOW has to obey the
+# same bound as the price queries in generate_recommendations*.py. (It cannot
+# live there and be imported here: generate_recommendations imports this
+# module, so the arrow only points one way.)
+#
+# Why it exists: the `odds` table holds ONE row per (match, bookmaker, market,
+# selection, line) and is refreshed in place by scripts/fetch_live_odds.py, so
+# a book that stops quoting leaves its last price behind forever. "Best price"
+# then means "the highest number anyone ever showed", not "the best price you
+# can take now". The 2026-09 audit measured live recommendation prices
+# averaging 178 h old on soccer 1x2, 149 h on over_under, 89 h on
+# asian_handicap and 197 h on MMA — 48% of settled soccer 1x2 recs FAILED the
+# 5% EV gate at the price actually available when they were written (mean
+# claimed EV 0.132 -> 0.079, realised ROI +14.1% -> +4.4%).
+#
+# WHAT is measured: `last_seen_at` — when the ingest last SAW the book quote
+# this price, stamped on every observation (migration 024). NOT `timestamp`,
+# which advances only when the price MOVED: a book that pulled its market 23 h
+# after its last tick would read as fresh off that column, which is the whole
+# failure this bound exists to stop. Rows written before migration 024 have a
+# NULL last_seen_at and fall back to `timestamp`, i.e. they read as older than
+# they are — the safe direction, and self-healing after one ingest cycle.
+#
+# Why 6 hours: the odds DAG runs every 90 minutes
+# (services/data-ingestion/dags/fetch_live_odds.py) and refreshes every
+# configured sport on every run, so a book still on offer is re-seen ~4x
+# within the bound. 6 h therefore survives two consecutively failed DAG runs
+# (each of which already retries once) before it starts refusing live markets,
+# and refuses every case in the finding above by a factor of 15-30. Widening
+# it to keep a stream alive is not a fix — it is the bug.
+#
+# Markets we only ingest opt-in (btts / double_chance / draw_no_bet and the HT
+# family need fetch_live_odds --additional-markets) fail this bound whenever
+# that flag is not part of the running schedule. That is intended: those are
+# exactly the prices the audit found rotting in the table.
+MAX_ODDS_AGE_HOURS: float = 6.0
+
+# Age of an `odds` row in hours, computed DB-side so the comparison can never
+# straddle an app-vs-database clock skew. "timestamp" is quoted because it is
+# also a type name in Postgres. Requires migration 024 (last_seen_at).
+ODDS_AGE_HOURS_SQL: str = 'EXTRACT(EPOCH FROM (NOW() - COALESCE(odds.last_seen_at, odds."timestamp"))) / 3600.0'
 
 # Matches a trailing signed line on a display selection: 'over_2.5' -> 2.5,
 # 'home_-0.5' -> -0.5. The generators embed the line in the selection they
@@ -274,7 +326,15 @@ OVERLAPPING_MARKETS: dict[str, tuple[frozenset[str], float]] = {
     "double_chance": (frozenset({"1x", "12", "x2"}), 2.0),
 }
 
-_CONSENSUS_SQL = """
+# The consensus obeys the SAME freshness bound as the price queries in the
+# generators. Without it a rec is priced on a fresh quote but gated against a
+# stale consensus — including books that stopped pricing the match — so the
+# max_gap cap could pass a pick it should refuse (or refuse one it should
+# pass). Books that fall out of the bound simply stop counting, and if that
+# takes the group below MIN_CONSENSUS_BOOKS the answer is None ("we cannot see
+# the market"), which passes_gate treats as a reject: fail closed, never
+# silently thin.
+_CONSENSUS_SQL = f"""
     SELECT DISTINCT ON (bookmaker, lower(selection), line)
            bookmaker, selection, line, odds_decimal
     FROM odds
@@ -283,6 +343,7 @@ _CONSENSUS_SQL = """
       AND (line IS NOT DISTINCT FROM %(line)s
            OR line IS NOT DISTINCT FROM %(opposite_line)s)
       AND is_live = false
+      AND {ODDS_AGE_HOURS_SQL} <= %(max_age_hours)s
     ORDER BY bookmaker, lower(selection), line, timestamp DESC NULLS LAST
 """
 
@@ -301,6 +362,7 @@ def market_consensus_prob(
     market_type: str,
     selection: str,
     line: float | None = None,
+    max_age_hours: float = MAX_ODDS_AGE_HOURS,
 ) -> float | None:
     """De-vigged multi-book consensus probability for one selection.
 
@@ -317,11 +379,16 @@ def market_consensus_prob(
     -0.5 usually also quotes +0.5) and are dropped here rather than de-vigged
     against the wrong price.
 
+    Only quotes seen within `max_age_hours` count: the gap cap is a money-path
+    safety cap, so it must be measured against the market as it is NOW, not
+    against books that stopped pricing the match days ago (audit 2026-09,
+    defect 1).
+
     Returns None — meaning "we cannot see the market" — when fewer than
     MIN_CONSENSUS_BOOKS books price the group. A book is skipped when it prices
     fewer than 2 selections in the group (nothing to de-vig against), quotes a
-    non-positive price, or — for an overlapping market — does not quote the
-    whole selection set.
+    non-positive price, is stale, or — for an overlapping market — does not
+    quote the whole selection set.
 
     `cur` is a psycopg2 RealDictCursor-style cursor; exactly one query is run.
     """
@@ -337,6 +404,7 @@ def market_consensus_prob(
             "market_type": market,
             "line": resolved_line,
             "opposite_line": opposite_line,
+            "max_age_hours": max_age_hours,
         },
     )
     rows = cur.fetchall() or []

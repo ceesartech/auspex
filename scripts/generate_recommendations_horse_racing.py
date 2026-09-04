@@ -56,7 +56,17 @@ from psycopg2.extras import RealDictCursor
 # math; horse racing doesn't need a different formulation.
 sys.path.insert(0, os.path.dirname(__file__))
 import rec_gating  # noqa: E402
-from generate_recommendations import confidence_rating, expected_value, get_bankroll, kelly_fraction  # noqa: E402
+from generate_recommendations import (  # noqa: E402
+    MAX_ODDS_AGE_HOURS,
+    STALE_ODDS_REASON,
+    confidence_rating,
+    expected_value,
+    get_bankroll,
+    is_stale_odds,
+    kelly_fraction,
+    odds_age_hours,
+    with_odds_age,
+)
 from telegram_notify import Alert, enqueue_alerts  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
@@ -111,6 +121,28 @@ RANKER_TOP_N: Optional[int] = 3
 # entrants we happened to predict.
 SUPPRESSED_WIN_FIELD_SIZES = range(5, 8)
 SUPPRESSED_WIN_FIELD_REASON = "win:field_5_7_runners"
+
+
+# ── Odds freshness (audit 2026-09) ─────────────────────────────────
+#
+# Racing is held to the SAME bound as the team sports
+# (generate_recommendations.MAX_ODDS_AGE_HOURS) but cannot use the same SQL:
+# its prices are not in the `odds` table at all (module docstring), they are
+# the metadata->'bookmaker_odds' array on race_entrants. Each entry carries
+# an `updated` string from the upstream feed, but it is unvalidated,
+# unparsed and its timezone is undocumented, so it is NOT the signal to
+# trust. The entrant row's own updated_at is: load_racing_api.upsert_entrant
+# rewrites metadata (`metadata || EXCLUDED.metadata`) and sets
+# `updated_at = NOW()` on EVERY racecard pass — changed prices or not — and
+# that pass runs on the 15-minute auspex_pipeline tick. So this is a
+# last-CONFIRMED time, exactly like the odds.last_seen_at the team sports age
+# off (see the note on rec_gating.MAX_ODDS_AGE_HOURS) — and NOT like
+# odds."timestamp", which only advances when a price MOVES. Racing could
+# justify a far tighter bound than the team sports need; it shares the 6 h one
+# anyway, because one number for "too old to bet on" is worth more than a
+# per-sport optimum, and at 24 racecard cycles of slack the bound still only
+# fires when the feed has stopped covering the race entirely.
+ENTRANT_ODDS_AGE_SELECT_SQL = "EXTRACT(EPOCH FROM (NOW() - e.updated_at)) / 3600.0 AS odds_age_hours"
 
 
 # ── Best-of-N pricing across bookmakers ────────────────────────────
@@ -220,7 +252,11 @@ def list_upcoming_races(cur, days: int) -> list[dict]:
 def load_race_candidates(cur, race_id: str) -> list[dict]:
     """Per-entrant pricing + prediction context for one race. Returns
     list of {entrant_id, prediction_id, confidence, bookmaker_odds,
-    horse_name, model_name, ranker_confidence}.
+    horse_name, model_name, ranker_confidence, odds_age_hours}.
+
+    odds_age_hours is how long ago the feed last confirmed this entrant's
+    price array (see ENTRANT_ODDS_AGE_SELECT_SQL); recommend_for_race
+    refuses to price a bet off a cold one.
 
     The DISTINCT ON + ORDER BY (entrant_id, precedence) picks the
     highest-precedence available model per entrant for the
@@ -244,7 +280,8 @@ def load_race_candidates(cur, race_id: str) -> list[dict]:
             bookmaker_odds,
             horse_name,
             model_name,
-            ranker_confidence
+            ranker_confidence,
+            odds_age_hours
         FROM (
             SELECT
                 e.id::text          AS entrant_id,
@@ -254,6 +291,7 @@ def load_race_candidates(cur, race_id: str) -> list[dict]:
                 h.name              AS horse_name,
                 rp.model_name       AS model_name,
                 rrk.confidence      AS ranker_confidence,
+                {ENTRANT_ODDS_AGE_SELECT_SQL},
                 {case_sql}          AS precedence
             FROM race_entrants e
             JOIN race_predictions rp ON rp.entrant_id = e.id
@@ -424,6 +462,7 @@ def recommend_for_race(
     ev_threshold: float,
     prob_floor: float,
     suppressed: Optional[dict[str, int]] = None,
+    max_odds_age_hours: float = MAX_ODDS_AGE_HOURS,
 ) -> list[Alert]:
     """Generate (and DB-insert) value-bet recs for one race; return
     the matching Alert objects ready for Redis. Returns [] when the
@@ -432,7 +471,9 @@ def recommend_for_race(
     `suppressed` (when given) is a caller-owned counter that this
     function increments per gate-rejection reason, keyed
     "<bet_type>:<reason>", so run() can log ONE loud summary of the
-    volume the per-stream gate (scripts/rec_gating.py) refused.
+    volume the per-stream gate (scripts/rec_gating.py) refused. Picks
+    refused by the odds-freshness guard land in the same counter under the
+    shared STALE_ODDS_REASON key.
 
     Hybrid filter (RANKER_TOP_N): when the LambdaMART ranker has
     scored this race, narrow the candidate set to the top-N entrants
@@ -503,6 +544,31 @@ def recommend_for_race(
         if not best:
             continue
         odds_decimal = best["decimal"]
+        # FRESHNESS GUARD (audit 2026-09). A price the feed has not
+        # confirmed inside the bound is not a price we can claim was
+        # available, so it may not become a rec — win OR place, since the
+        # place leg is derived from this same win quote.
+        #
+        # Unknown age is treated differently here than in the team-sport
+        # generators, where an odds row with no timestamp is a broken row
+        # and is refused. race_entrants.updated_at is DEFAULT NOW() and set
+        # explicitly on every upsert, so it cannot be NULL for a row this
+        # query returned: a candidate with no age means the caller supplied
+        # rows this projection did not build. Refusing those would take the
+        # whole racing book off the board over a code shape rather than
+        # over a stale price, so we log loudly and carry on; a REPORTED age
+        # past the bound is refused and counted.
+        age_hours = odds_age_hours(cand)
+        if age_hours is None:
+            logger.warning(
+                "Race %s entrant %s: candidate row carries no odds age — "
+                "the freshness guard cannot run on this pick",
+                race_id,
+                cand["entrant_id"],
+            )
+        elif is_stale_odds(age_hours, max_odds_age_hours):
+            counts[STALE_ODDS_REASON] = counts.get(STALE_ODDS_REASON, 0) + 1
+            continue
         ev = expected_value(prob, odds_decimal)
         if ev < ev_threshold:
             continue
@@ -564,7 +630,10 @@ def recommend_for_race(
             "kelly_stake": k,
             "rec_stake": stake,
             "reasoning": reasoning,
-            "risk": json.dumps(_risk_factors(prob, odds_decimal, field_size)),
+            # odds_at_recommendation is `odds_decimal`, the price the
+            # freshness guard accepted; its age rides along in risk_factors
+            # so CLV can be audited after the fact.
+            "risk": json.dumps(with_odds_age(_risk_factors(prob, odds_decimal, field_size), age_hours)),
         }
         if win_allowed:
             insert_recommendation(cur, rec)
@@ -634,7 +703,7 @@ def recommend_for_race(
                                 f"@ {place_odds:.2f} → EV {ev_place:+.1%}, "
                                 f"stake ${stake_place:.2f}.{place_capped_note}"
                             ),
-                            "risk": json.dumps(_risk_factors(prob, odds_decimal, field_size)),
+                            "risk": json.dumps(with_odds_age(_risk_factors(prob, odds_decimal, field_size), age_hours)),
                         },
                     )
 

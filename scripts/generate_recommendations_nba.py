@@ -54,7 +54,20 @@ from psycopg2.extras import RealDictCursor
 sys.path.insert(0, os.path.dirname(__file__))
 
 import rec_gating  # noqa: E402
-from generate_recommendations import confidence_rating, expected_value, get_bankroll, kelly_fraction  # noqa: E402
+from generate_recommendations import (  # noqa: E402
+    FRESH_FIRST_ORDER_SQL,
+    MAX_ODDS_AGE_HOURS,
+    ODDS_AGE_HOURS_SQL,
+    ODDS_AGE_SELECT_SQL,
+    STALE_ODDS_REASON,
+    confidence_rating,
+    expected_value,
+    get_bankroll,
+    is_stale_odds,
+    kelly_fraction,
+    odds_age_hours,
+    with_odds_age,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("generate_recommendations_nba")
@@ -122,7 +135,9 @@ EMITTED_BET_TYPES: tuple[str, ...] = ("moneyline", "spread", "total")
 # ── Per-market price + prob alignment ──────────────────────────────
 
 
-def closing_line_for_match(cur, match_id: str, market_type: str) -> float | None:
+def closing_line_for_match(
+    cur, match_id: str, market_type: str, max_age_hours: float = MAX_ODDS_AGE_HOURS
+) -> float | None:
     """Most-recent pre-match line offered (averaged across books) for
     the spread or total market on this match. Returns None if no odds
     landed — used to decide whether we can recommend a spread/total
@@ -143,6 +158,14 @@ def closing_line_for_match(cur, match_id: str, market_type: str) -> float | None
         "market_type = %s",
         "NOT is_live",
         "line IS NOT NULL",
+        # FRESHNESS (audit 2026-09). `line` is part of the odds key, so a book
+        # that MOVES its line leaves the abandoned one behind as its own row
+        # forever. Averaging those drags the target toward lines nobody
+        # offers, and best_odds_for_market then admits any price within +/-0.5
+        # of it — pairing a fresh price with a model probability conditioned
+        # on a line the market has left. Average only lines still being
+        # quoted; when none are, return None and the caller skips the market.
+        f"{ODDS_AGE_HOURS_SQL} <= %s",
     ]
     if selection_filter:
         where_clauses.append(selection_filter)
@@ -152,7 +175,7 @@ def closing_line_for_match(cur, match_id: str, market_type: str) -> float | None
         FROM odds
         WHERE {' AND '.join(where_clauses)}
         """,
-        (match_id, market_type),
+        (match_id, market_type, max_age_hours),
     )
     row = cur.fetchone()
     if row is None or row.get("avg_line") is None:
@@ -160,35 +183,48 @@ def closing_line_for_match(cur, match_id: str, market_type: str) -> float | None
     return float(row["avg_line"])
 
 
-def best_odds_for_market(cur, match_id: str, market_type: str, target_line: float | None) -> list[dict]:
+def best_odds_for_market(
+    cur,
+    match_id: str,
+    market_type: str,
+    target_line: float | None,
+    max_age_hours: float = MAX_ODDS_AGE_HOURS,
+) -> list[dict]:
     """Best (highest) pre-match decimal odds per selection at (or very
     near) the target_line. For moneyline, target_line is None → any
     line passes. For spread/total, we filter to lines within ±0.5 of
     the closing line — books occasionally differ by a half point and
-    we still trust the model's edge there."""
+    we still trust the model's edge there.
+
+    Each row also carries the quote's age in hours, and the fresh-first
+    tie-break runs BEFORE odds_decimal DESC so a book that stopped quoting
+    can no longer win the selection with a price it no longer offers (audit
+    2026-09; see generate_recommendations.MAX_ODDS_AGE_HOURS)."""
     if target_line is None:
         cur.execute(
-            """
+            f"""
             SELECT DISTINCT ON (selection)
-                   selection, line, bookmaker, odds_decimal
+                   selection, line, bookmaker, odds_decimal,
+                   {ODDS_AGE_SELECT_SQL}
             FROM odds
             WHERE match_id = %s AND market_type = %s AND NOT is_live
-            ORDER BY selection, odds_decimal DESC
+            ORDER BY selection, {FRESH_FIRST_ORDER_SQL}, odds_decimal DESC
             """,
-            (match_id, market_type),
+            (match_id, market_type, max_age_hours),
         )
     else:
         cur.execute(
-            """
+            f"""
             SELECT DISTINCT ON (selection)
-                   selection, line, bookmaker, odds_decimal
+                   selection, line, bookmaker, odds_decimal,
+                   {ODDS_AGE_SELECT_SQL}
             FROM odds
             WHERE match_id = %s AND market_type = %s AND NOT is_live
               AND line IS NOT NULL
               AND ABS(line - %s) <= 0.5
-            ORDER BY selection, odds_decimal DESC
+            ORDER BY selection, {FRESH_FIRST_ORDER_SQL}, odds_decimal DESC
             """,
-            (match_id, market_type, target_line),
+            (match_id, market_type, target_line, max_age_hours),
         )
     return list(cur.fetchall())
 
@@ -289,10 +325,12 @@ def recommend_for_match(
     ev_threshold: float,
     prob_floor: float,
     suppressed: dict[str, int] | None = None,
+    max_odds_age_hours: float = MAX_ODDS_AGE_HOURS,
 ) -> int:
     """Emit gated value bets for one match. `suppressed` accumulates the
-    per-reason counts of candidates the gate rejected so run() can log the
-    summary — silence is the failure mode we are guarding against."""
+    per-reason counts of candidates the gate rejected — and the ones the
+    odds-freshness guard rejected, under STALE_ODDS_REASON — so run() can
+    log the summary; silence is the failure mode we are guarding against."""
     if suppressed is None:
         suppressed = {}
     preds = load_nba_predictions(cur, match_id)
@@ -319,16 +357,25 @@ def recommend_for_match(
         # any offered price.
         target_line = None
         if market in ("spread", "total"):
-            target_line = closing_line_for_match(cur, match_id, market)
+            target_line = closing_line_for_match(cur, match_id, market, max_odds_age_hours)
             if target_line is None:
                 # No closing line on file — the model was trained
                 # conditional on the line, so we can't recommend
                 # bets without one. Skip the market.
                 continue
 
-        for offer in best_odds_for_market(cur, match_id, market, target_line):
+        for offer in best_odds_for_market(cur, match_id, market, target_line, max_odds_age_hours):
             selection = offer["selection"]
             if selection not in labels:
+                continue
+            # FRESHNESS GUARD (audit 2026-09). best_odds_for_market already
+            # preferred the warmest quote for this selection, so reaching the
+            # bound here means every book's price for it has gone cold. A
+            # price we cannot claim was available cannot price a rec, and the
+            # refusal is counted rather than silently dropped.
+            age_hours = odds_age_hours(offer)
+            if is_stale_odds(age_hours, max_odds_age_hours):
+                suppressed[STALE_ODDS_REASON] = suppressed.get(STALE_ODDS_REASON, 0) + 1
                 continue
             raw_prob = float(probs.get(selection, 0.0))
             if raw_prob < prob_floor:
@@ -383,7 +430,10 @@ def recommend_for_match(
                 "kelly_stake": k,
                 "rec_stake": stake,
                 "reasoning": reasoning,
-                "risk": json.dumps(_risk_factors(prob, odds_decimal)),
+                # odds_at_recommendation is `odds_decimal`, the price the
+                # freshness guard accepted; its age rides along in
+                # risk_factors so CLV can be audited after the fact.
+                "risk": json.dumps(with_odds_age(_risk_factors(prob, odds_decimal), age_hours)),
             }
             insert_recommendation(cur, rec)
             inserted += 1

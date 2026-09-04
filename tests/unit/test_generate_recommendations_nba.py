@@ -152,7 +152,10 @@ class TestClosingLineForMatchSQL:
         assert result == -5.0
         # And the SQL pinned to home selection.
         assert "selection = 'home'" in captured["sql"]
-        assert captured["params"] == ("match-id", "spread")
+        # the target line is averaged over lines still being QUOTED: a book
+        # that moves its line leaves the abandoned one behind as its own key
+        # forever (audit 2026-09).
+        assert captured["params"] == ("match-id", "spread", gr_nba.MAX_ODDS_AGE_HOURS)
 
     def test_total_query_omits_selection_filter(self):
         # Totals: line is identical on both sides (218.5 for over AND
