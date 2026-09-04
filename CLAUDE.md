@@ -54,7 +54,9 @@ docker compose cp /tmp/q.sql postgres:/tmp/q.sql >/dev/null 2>&1
 docker compose exec -T postgres sh -c 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -f /tmp/q.sql'"
 
 # Airflow (3.3 — api-server + scheduler + dag-processor; DAG code uses airflow.sdk imports):
-docker compose exec -T airflow-scheduler airflow dags list-runs -d <dag> -o plain
+# NB: dag_id is POSITIONAL in Airflow 3.3 (the old -d flag errors out), and
+# `-o plain` interleaves structlog lines — use -o json and parse.
+docker compose exec -T airflow-scheduler airflow dags list-runs <dag_id> -o json
 ```
 
 **Deploy = push to `main`.** CI builds `ghcr.io/ceesartech/auspex/{api,airflow,frontend}` and
