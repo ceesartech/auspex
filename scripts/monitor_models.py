@@ -29,7 +29,8 @@ the consensus model's calibration is monitored too.
 Persistence: each run writes every slice's calibration report to
 `model_performance_logs` (JSONB `metrics`) so calibration is a
 trackable TIME SERIES, not just a per-run alert — you can chart ECE /
-Brier drift over weeks. The Telegram drift alerting is unchanged.
+Brier drift over weeks. Since 2026-09-21 the stored `mce` ignores buckets
+under MIN_BUCKET_N_FOR_MCE; `mce_raw` and `mce_min_bucket_n` sit beside it.
 
 Usage (inside the api container):
 
@@ -42,18 +43,27 @@ Usage (inside the api container):
     # Custom thresholds (e.g. tighter ECE for a market with more data)
     python /app/scripts/monitor_models.py --ece-alert 0.07
 
-The script is wired into the auspex_pipeline DAG (every 15 min) so
-drift surfaces on the same cadence as the rest of the pipeline.
+The script runs from its own hourly DAG (dags/monitor_models_dag.py). An
+identical set of alert-severity findings pages at most once per
+_PAGE_DEDUP_TTL_SECONDS (Redis SETNX, fail-open), so a persisting condition
+is a daily page rather than an hourly one.
+
+Every paged line names its slice and n. Findings on slices below
+DriftThresholds.min_n_to_page graded predictions, or on streams that
+scripts/rec_gating.py has switched OFF, are downgraded to warn (still
+computed, logged and persisted — just not paged) with the reason in the
+message.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import sys
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -76,17 +86,186 @@ for _p in ("/app/services/ml-models/src", _ML_MODELS_SRC):
         sys.path.insert(0, _p)
 
 from calibration_metrics import (  # noqa: E402
+    MIN_BUCKET_N_FOR_MCE,
     CalibrationReport,
     DriftFinding,
     DriftThresholds,
     calibration_report,
     detect_drift,
+    maximum_calibration_error,
 )
 from telegram_notify import Alert, send_telegram_digest  # noqa: E402
 from utils.training_data import preseason_exclusion_sql  # noqa: E402
 
+try:  # rec_gating is a sibling script; the monitor must keep working without it.
+    import rec_gating  # noqa: E402
+except Exception as _exc:  # noqa: BLE001
+    rec_gating = None  # type: ignore[assignment]
+    logging.getLogger("monitor_models").warning("rec_gating unavailable (%s) — no gated-stream downgrade", _exc)
+
 # Only count graded rows for games that were actually played for real.
 NOT_PRESEASON_SQL = preseason_exclusion_sql("m")
+
+# The monitor keys slices by predictions.prediction_type; rec_gating keys
+# streams by betting_recommendations.bet_type. They coincide except where a
+# generator renames the market on the way out (see each generator's
+# insert). Keyed by (sport, prediction_type) because the same
+# prediction_type means different streams in different sports.
+_PREDICTION_TYPE_TO_BET_TYPE = {
+    ("soccer", "match_result"): "1x2",
+    ("nhl", "spread"): "puck_line",  # generate_recommendations_nhl.py writes bet_type 'puck_line'
+    # NHL regulation (stored as prediction_type 'match_result') has no rec
+    # stream — the NHL generator skips it by design — so it deliberately has
+    # no entry here and resolves to the sport default.
+}
+
+# A Telegram message is chunked above ~3,900 chars, and a partially
+# delivered chunked page would look like success (sent > 0) while the
+# alerts in the failed chunk went nowhere. Cap the page so it can never
+# chunk; the full list is always in the run log and the markdown report.
+_MAX_PAGE_LINES = 12
+
+# How many outcomes a pick is chosen from — the input to the 2-way
+# break-even check. NEVER inferred from the stored probability vector:
+# multi-line markets keep every line in one JSONB (asian_handicap carries
+# 51 keys, over_under 12) yet each pick is a 2-way bet, so a shape-based
+# count would silently switch the break-even check OFF for a live money
+# stream. Unknown types fall back to the vector count only when it says
+# "more than 2", which errs toward NOT paging "unprofitable" on a market we
+# have not classified — and logs so the map gets extended.
+_N_CLASSES_BY_TYPE = {
+    "match_result": 3,
+    "match_result_ht": 3,
+    "double_chance": 3,
+    "correct_score": 13,
+    "winning_margin": 7,
+    "total_goals": 7,
+    "ht_ft_double_result": 9,
+    "result_btts": 6,
+    "result_over_under": 6,
+    "clean_sheet": 4,
+    "win_to_nil": 4,
+}
+_TWO_WAY_MULTI_LINE = frozenset({"asian_handicap", "over_under", "team_total", "over_under_ht"})
+
+# A persisting condition should page once a day, not once an hour. The
+# monitor DAG runs hourly; without this the 2026-09-21 findings would have
+# paged 24 times for the same ten numbers.
+_PAGE_DEDUP_TTL_SECONDS = 23 * 3600
+
+
+def n_classes_for(prediction_type: str, vector_count: Optional[int]) -> int:
+    if prediction_type in _TWO_WAY_MULTI_LINE:
+        return 2
+    if prediction_type in _N_CLASSES_BY_TYPE:
+        return _N_CLASSES_BY_TYPE[prediction_type]
+    if vector_count and vector_count > 2:
+        logger.warning(
+            "prediction_type %r is not in _N_CLASSES_BY_TYPE; using its %d-key vector as the class count "
+            "(break-even check skipped) — add it to the map",
+            prediction_type,
+            vector_count,
+        )
+        return int(vector_count)
+    return 2
+
+
+def _stream_is_gated(sport: str, prediction_type: str) -> bool:
+    """True when scripts/rec_gating.py has the recommendation stream for this
+    slice switched OFF. Findings on a gated stream are real — that is usually
+    why it is gated — but they must not page every hour; detect_drift
+    downgrades them to warn so the model is still measured back to life
+    from the persisted time series. Fails OPEN (not gated) so a rec_gating
+    problem can never silence a real page."""
+    if rec_gating is None:
+        return False
+    try:
+        bet_type = _PREDICTION_TYPE_TO_BET_TYPE.get((sport, prediction_type), prediction_type)
+        return not rec_gating.gate_for(sport, bet_type).enabled
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gated-stream lookup failed for %s/%s (%s) — treating as not gated", sport, prediction_type, exc)
+        return False
+
+
+# ── Page dedup ───────────────────────────────────────────────────────
+#
+# One key PER FINDING (sport:market:model:metric), not per alert set: a
+# set-level key re-pages whenever an unrelated finding appears or clears,
+# and a single metric flapping around its threshold would page once per
+# distinct subset. A new condition pages immediately; a persisting one
+# pages at most once per TTL.
+#
+# Keys are marked ONLY AFTER a successful Telegram send. Marking before
+# the send (the first draft did) turns any transient send failure into
+# 23 hours of silence with a log line falsely claiming "already paged" —
+# the hourly rerun used to be the retry, and it must stay one. The DAG is
+# max_active_runs=1, so read-then-mark has no race.
+#
+# Every Redis problem fails OPEN (page): a duplicate page is a nuisance, a
+# swallowed one is the failure mode this repo is built to avoid. That
+# includes a Redis that accepts TCP but never answers — the client here
+# carries socket timeouts precisely so it cannot hang the monitor.
+
+
+def _dedup_client(redis_url: Optional[str] = None):
+    url = redis_url or os.environ.get("REDIS_URL")
+    if not url:
+        return None
+    try:
+        from redis import Redis  # type: ignore
+
+        return Redis.from_url(url, decode_responses=True, socket_connect_timeout=2, socket_timeout=2)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("drift page dedup client unavailable (%s) — paging without dedup", exc)
+        return None
+
+
+def _page_key(f: DriftFinding) -> str:
+    return f"auspex:drift_page:{f.sport}:{f.market}:{f.model_name or '-'}:{f.metric}"
+
+
+def select_new_alerts(findings: list[DriftFinding], *, redis_url: Optional[str] = None) -> list[DriftFinding]:
+    """The alert-severity findings that have NOT been paged within the TTL.
+    Read-only: nothing is marked here. Fails open (every alert is 'new')."""
+    alerts = [f for f in findings if f.severity == "alert"]
+    if not alerts:
+        return []
+    client = _dedup_client(redis_url)
+    if client is None:
+        return alerts
+    try:
+        flags = client.mget([_page_key(f) for f in alerts])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("drift page dedup read failed (%s) — paging everything", exc)
+        return alerts
+    return [f for f, seen in zip(alerts, flags) if not seen]
+
+
+def mark_paged(findings: list[DriftFinding], *, redis_url: Optional[str] = None) -> int:
+    """Record a SUCCESSFUL page for each alert-severity finding. Call this
+    only after send_telegram_digest reported at least one message sent.
+    Returns the number of keys written (0 when Redis is unavailable)."""
+    alerts = [f for f in findings if f.severity == "alert"]
+    client = _dedup_client(redis_url)
+    if client is None or not alerts:
+        return 0
+    stamp = datetime.now(timezone.utc).isoformat()
+    written = 0
+    for f in alerts:
+        try:
+            client.set(_page_key(f), stamp, ex=_PAGE_DEDUP_TTL_SECONDS)
+            written += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("drift page dedup mark failed for %s (%s)", _page_key(f), exc)
+            break
+    return written
+
+
+def page_fingerprint(findings: list[DriftFinding]) -> str:
+    """Short stable id of the alert set, for log lines only."""
+    keys = sorted({_page_key(f) for f in findings if f.severity == "alert"})
+    return hashlib.sha1("|".join(keys).encode()).hexdigest()[:16]
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("monitor_models")
@@ -136,7 +315,10 @@ _DEDUPED_GRADED_PREDICTIONS_SQL = f"""        SELECT DISTINCT ON (p.match_id, p.
                p.prediction_type,
                p.model_name,
                (p.probabilities->>p.predicted_outcome)::float AS picked_prob,
-               (p.is_correct)::int AS correct
+               (p.is_correct)::int AS correct,
+               (CASE WHEN jsonb_typeof(p.probabilities) = 'object'
+                     THEN (SELECT COUNT(*) FROM jsonb_object_keys(p.probabilities))
+                     ELSE 0 END)::int AS n_classes
         FROM predictions p
         JOIN matches m ON m.id = p.match_id
         JOIN leagues l ON l.id = m.league_id
@@ -163,13 +345,19 @@ def fetch_slices(cur, days: int, min_samples: int) -> list[dict]:
 
     model_name comes from the surviving (newest) row, so a slice is
     attributed to the version actually serving.
+
+    n_classes is the modal number of outcomes in the slice's probability
+    vectors (2 for moneyline/spread/total/BTTS, 3 for 1X2, 13 for correct
+    score). detect_drift needs it because the 52.4% accuracy floor is a
+    2-way break-even that is meaningless for k-way picks.
     """
     cur.execute(
         f"""
         SELECT sport,
                prediction_type,
                model_name,
-               COUNT(*) AS n
+               COUNT(*) AS n,
+               MODE() WITHIN GROUP (ORDER BY n_classes) AS n_classes
         FROM (
 {_DEDUPED_GRADED_PREDICTIONS_SQL}
         ) d
@@ -304,6 +492,12 @@ def persist_reports(cur, summary: list[dict], days: int) -> int:
         report = s["report"]
         metrics = asdict(report)
         metrics["prediction_type"] = s["prediction_type"]
+        # `mce` changed meaning on 2026-09-21 (buckets under
+        # MIN_BUCKET_N_FOR_MCE no longer count). Store the floor and the raw
+        # all-buckets maximum alongside it so the time series is
+        # self-describing across the boundary and both are queryable.
+        metrics["mce_min_bucket_n"] = MIN_BUCKET_N_FOR_MCE
+        metrics["mce_raw"] = maximum_calibration_error(report.buckets, min_bucket_n=0)
         cur.execute(
             """
             INSERT INTO model_performance_logs
@@ -362,6 +556,15 @@ def render_report(slices: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _finding_label(f: DriftFinding) -> str:
+    """'<Sport Market> [model] (n=N)' — the same prefix on every rendering
+    of a finding, so a number is never shown without the slice it belongs
+    to. The model is shown only when it disambiguates (horse racing's
+    ranker and consensus are both 'win')."""
+    model = f" [{f.model_name}]" if f.model_name else ""
+    return f"{display_market(f.sport, f.market)}{model} (n={f.n if f.n else '?'})"
+
+
 def render_findings(findings: list[DriftFinding]) -> str:
     """Per-finding bullet list, grouped by severity. Returned empty
     string if no findings — caller checks before appending."""
@@ -374,12 +577,12 @@ def render_findings(findings: list[DriftFinding]) -> str:
         parts.append("")
         parts.append("**ALERTS** (paged):")
         for f in alerts:
-            parts.append(f"- {display_market(f.sport, f.market)}: {f.message}")
+            parts.append(f"- {_finding_label(f)}: {f.message}")
     if warns:
         parts.append("")
         parts.append("**Warnings** (logged):")
         for f in warns:
-            parts.append(f"- {display_market(f.sport, f.market)}: {f.message}")
+            parts.append(f"- {_finding_label(f)}: {f.message}")
     return "\n".join(parts)
 
 
@@ -397,8 +600,13 @@ def build_alert(findings: list[DriftFinding]) -> Optional[Alert]:
 
     # Build a representative summary line. Multiple alerts collapse
     # into one Alert so we don't spam the channel — the body lists
-    # each one.
-    body_lines = [f"⚠️ {f.message}" for f in alerts]
+    # each one. EVERY line names its slice and n: the 2026-09-21 page
+    # was ten bare "MCE 0.923 >= 0.250" lines with no sport, market or
+    # sample size, and could not be acted on as written.
+    ordered = sorted(alerts, key=lambda f: (f.sport, f.market, f.model_name, f.metric))
+    body_lines = [f"⚠️ {_finding_label(f)}: {f.message}" for f in ordered[:_MAX_PAGE_LINES]]
+    if len(ordered) > _MAX_PAGE_LINES:
+        body_lines.append(f"… +{len(ordered) - _MAX_PAGE_LINES} more alert(s) — full list in the monitor run log")
     label = "Model drift" if len(alerts) > 1 else f"Drift: {display_market(alerts[0].sport, alerts[0].market)}"
 
     return Alert(
@@ -406,7 +614,7 @@ def build_alert(findings: list[DriftFinding]) -> Optional[Alert]:
         league_name="System",
         home_team="model_monitor",
         away_team="",
-        match_date=datetime.utcnow(),
+        match_date=datetime.now(timezone.utc),
         market_label=label,
         predicted_outcome="drift_detected",
         confidence=1.0,
@@ -488,7 +696,9 @@ def run(database_url: str, days: int, min_samples: int, thresholds: DriftThresho
     summary: list[dict] = []
     all_findings: List[DriftFinding] = []
 
-    with psycopg2.connect(database_url) as conn:
+    # connect_timeout: a Postgres that accepts TCP but never answers must not
+    # hang the monitor (see the DAG's `timeout 9m` for the outer bound).
+    with psycopg2.connect(database_url, connect_timeout=10) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             slices = fetch_slices(cur, days, min_samples)
             slices += fetch_horse_racing_slices(cur, days, min_samples)
@@ -507,6 +717,12 @@ def run(database_url: str, days: int, min_samples: int, thresholds: DriftThresho
                     market=s["prediction_type"],
                     report=report,
                     thresholds=thresholds,
+                    # Horse-racing slices carry no n_classes (per-entrant
+                    # binary pairs); the accuracy floor is skipped for
+                    # racing inside detect_drift anyway.
+                    n_classes=n_classes_for(s["prediction_type"], s.get("n_classes")),
+                    stream_gated=_stream_is_gated(s["sport"], s["prediction_type"]),
+                    model_name=s["model_name"],
                 )
                 summary.append(
                     {
@@ -540,17 +756,49 @@ def run(database_url: str, days: int, min_samples: int, thresholds: DriftThresho
         md += "\n" + render_findings(all_findings)
     print(md)
 
-    alert_message = build_alert(all_findings)
+    alerts = [f for f in all_findings if f.severity == "alert"]
     sent = 0
-    if alert_message is not None:
-        sent = send_telegram_digest([alert_message], header="Model monitoring — drift alert")
-        logger.info("Drift alert dispatched (sent=%d messages)", sent)
+    suppressed = False
+    send_failed = False
+    if alerts:
+        new_alerts = select_new_alerts(all_findings)
+        if not new_alerts:
+            suppressed = True
+            logger.info(
+                "Drift alert NOT re-paged: every alert in set %s was paged within the last %dh",
+                page_fingerprint(all_findings),
+                _PAGE_DEDUP_TTL_SECONDS // 3600,
+            )
+        else:
+            # The page carries EVERY current alert (context), but only a
+            # not-yet-paged one triggers it. Keys are marked only on success.
+            alert_message = build_alert(all_findings)
+            sent = send_telegram_digest([alert_message], header="Model monitoring — drift alert")
+            if sent > 0:
+                marked = mark_paged(all_findings)
+                logger.info(
+                    "Drift alert dispatched (sent=%d messages, %d new, %d dedup keys)", sent, len(new_alerts), marked
+                )
+            elif os.environ.get("ENABLE_TELEGRAM_NOTIFICATIONS", "false").lower() == "true":
+                # Telegram is ON and nothing went out: that is a delivery
+                # failure, not a quiet hour. Say so at ERROR and let main()
+                # fail the task so Airflow's failure hook pages instead.
+                send_failed = True
+                logger.error(
+                    "Drift alert SEND FAILED with %d alert(s) pending (set %s) — nothing marked, will retry next run",
+                    len(alerts),
+                    page_fingerprint(all_findings),
+                )
+            else:
+                logger.info("Drift alert built but Telegram is disabled (sent=0); nothing marked")
 
     return {
         "slices": len(summary),
-        "alerts": sum(1 for f in all_findings if f.severity == "alert"),
+        "alerts": len(alerts),
         "warnings": sum(1 for f in all_findings if f.severity == "warn"),
         "telegram_messages": sent,
+        "telegram_suppressed_duplicate": suppressed,
+        "telegram_send_failed": send_failed,
     }
 
 
@@ -597,6 +845,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     counts = run(args.database_url, args.days, args.min_samples, thresholds)
     logger.info("Done. %s", counts)
+    if counts.get("telegram_send_failed"):
+        # A drift alert existed and could not be delivered. Exit non-zero so
+        # the Airflow task fails and its failure hook pages — a green task
+        # with a lost page is exactly the silent failure to avoid.
+        return 1
     return 0
 
 

@@ -31,13 +31,41 @@ References:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import List, Sequence
+from dataclasses import dataclass, replace
+from typing import List, Optional, Sequence
 
 # Default bucket count. 10 = 10% wide bins, the standard. Higher
 # counts (e.g. 20) give finer-grained reliability diagrams but
 # require more data per bin to be statistically meaningful.
 DEFAULT_BUCKETS = 10
+
+# MCE is the WORST bucket's |predicted - actual|, so a bucket holding one
+# prediction has an MCE of either ~0 or ~1 depending on a single coin flip.
+# On 2026-09-21 the drift page carried "MCE 0.923" for the horse-racing
+# consensus (ECE 0.004 — beautifully calibrated): its 0.9-1.0 bucket held
+# exactly ONE entrant, which lost. Soccer BTTS "MCE 0.705" was one match in
+# the 0.7-0.8 bucket. A bucket below this many predictions says nothing
+# about calibration and is excluded from the maximum.
+MIN_BUCKET_N_FOR_MCE = 20
+
+# A 10-bin calibration read (ECE / MCE) on fewer predictions than this is
+# noise. The 2026-09-21 page carried "ECE 0.218" for NFL totals on n=30
+# (two weeks of games — buckets of 23, 5 and 2). Review simulated a
+# PERFECTLY calibrated 2-way model (outcomes drawn from the model's own p,
+# 4,000 trials) and asked how often ECE >= 0.10 fires anyway:
+#   picks ~U(0.50, 0.75):  n=100 11.6% | n=150 3.8% | n=200 1.1% | n=400 0.1%
+#   picks ~U(0.35, 0.95):  n=100 34.6% |             n=200 4.2%
+# so a floor of 100 only moved the false pages from n=30 to n=100. 200 is
+# where a healthy model stops paging. This floor applies ONLY to the
+# bin-based metrics: accuracy has its own binomial bound and Brier its own
+# guard, and an NFL slice (~65 games per 30-day window) must still be able
+# to page on a real accuracy or Brier failure. Findings under the floor are
+# still computed, logged and persisted — downgraded to warn, not dropped.
+MIN_N_TO_PAGE = 200
+BIN_BASED_METRICS = frozenset({"ece", "mce"})
+
+# One-sided 95% z for the accuracy break-even test below.
+_Z_95_ONE_SIDED = 1.64
 
 
 @dataclass(frozen=True)
@@ -155,16 +183,36 @@ def expected_calibration_error(buckets: Sequence[Bucket], total_n: int) -> float
     return sum((b.n / total_n) * abs(b.mean_predicted - b.mean_actual) for b in buckets)
 
 
-def maximum_calibration_error(buckets: Sequence[Bucket]) -> float:
+def worst_bucket(buckets: Sequence[Bucket], min_bucket_n: int = MIN_BUCKET_N_FOR_MCE) -> Optional[Bucket]:
+    """The bucket with the largest |predicted - actual| gap among those
+    holding at least `min_bucket_n` predictions, or None when no bucket
+    qualifies. Exposed separately from the MCE number so an alert can say
+    WHICH bucket is wrong ("0.6-0.7, n=54: predicted 0.548, actual 0.444")
+    instead of a bare figure the reader cannot act on."""
+    eligible = [b for b in buckets if b.n >= min_bucket_n]
+    if not eligible:
+        return None
+    return max(eligible, key=lambda b: abs(b.mean_predicted - b.mean_actual))
+
+
+def maximum_calibration_error(buckets: Sequence[Bucket], min_bucket_n: int = MIN_BUCKET_N_FOR_MCE) -> float:
     """MCE: worst single bucket's calibration gap. Catches local
     miscalibration (e.g., a model that's well-calibrated overall but
     catastrophically wrong in its highest-confidence bucket) that
     ECE's weighted average could smooth over. The 0.80 NBA cap was
     set because the spread model's MCE was ~0.21 — caller can
-    monitor whether retraining narrows this."""
-    if not buckets:
+    monitor whether retraining narrows this.
+
+    Buckets with fewer than `min_bucket_n` predictions are ignored (see
+    MIN_BUCKET_N_FOR_MCE for why); pass min_bucket_n=0 to get the raw
+    all-buckets maximum. Returns 0.0 when no bucket qualifies — there is
+    then no evidence of local miscalibration, which is different from
+    evidence of good calibration; callers that care should also look at
+    the population-weighted ECE."""
+    worst = worst_bucket(buckets, min_bucket_n)
+    if worst is None:
         return 0.0
-    return max(abs(b.mean_predicted - b.mean_actual) for b in buckets)
+    return abs(worst.mean_predicted - worst.mean_actual)
 
 
 # ── Aggregate ────────────────────────────────────────────────────────
@@ -228,7 +276,15 @@ class DriftThresholds:
     brier_drift_alert: float = 0.05
     # Hit rate dropping below break-even on a 2-class market is an
     # automatic alert (the strategy can no longer profit at any vig).
+    # ONLY applied when detect_drift is told n_classes == 2: a 3-way
+    # 1X2 pick at 48% or a 13-way correct-score pick at 12% is doing
+    # fine, and the 2026-09-21 page reported both as "unprofitable".
     accuracy_floor: float = 0.524  # -110 break-even
+    # Below this many graded predictions a slice's findings are still
+    # computed and logged but downgraded from alert to warn (not paged).
+    min_n_to_page: int = MIN_N_TO_PAGE
+    # Buckets smaller than this do not count toward MCE.
+    min_bucket_n_for_mce: int = MIN_BUCKET_N_FOR_MCE
 
 
 @dataclass(frozen=True)
@@ -243,6 +299,35 @@ class DriftFinding:
     current: float
     threshold: float
     message: str
+    # Graded predictions behind the finding. Every rendering of a finding
+    # MUST show it: the 2026-09-21 page listed ten bare numbers with no
+    # sport, market or n, and eight of them were single-bucket or
+    # small-sample noise that the n alone would have exposed. Defaults to
+    # 0 so constructors that predate the field (the constant-prior canary)
+    # keep working; 0 renders as "n=?" downstream.
+    n: int = 0
+    # Which model produced the slice. Two slices can share (sport, market)
+    # — horse racing's ranker and consensus are both 'win' — and must not
+    # render as one line or collapse into one dedup key.
+    model_name: str = ""
+
+
+def _downgrade(
+    findings: List[DriftFinding], reason: str, only_metrics: Optional[frozenset] = None
+) -> List[DriftFinding]:
+    """Turn alert-severity findings into warns, appending WHY, so the
+    information survives in the markdown report and the persisted time
+    series but nobody gets paged for it. The reason is part of the message
+    on purpose — a downgrade that leaves no trace is a silent failure.
+    `only_metrics` restricts the downgrade to those metrics (the n floor
+    applies to the bin-based ones only); None means every finding."""
+    out: List[DriftFinding] = []
+    for f in findings:
+        if f.severity == "alert" and (only_metrics is None or f.metric in only_metrics):
+            out.append(replace(f, severity="warn", message=f"{f.message} ({reason})"))
+        else:
+            out.append(f)
+    return out
 
 
 def detect_drift(
@@ -252,13 +337,31 @@ def detect_drift(
     report: CalibrationReport,
     thresholds: DriftThresholds,
     baseline_brier: float = 0.25,
+    n_classes: int = 2,
+    stream_gated: bool = False,
+    model_name: str = "",
 ) -> List[DriftFinding]:
     """Compare a CalibrationReport against thresholds, return a list
     of DriftFindings (empty if everything passes). Each finding is
     independent — a single market can fail multiple metrics at once
     and we report all of them so the operator sees the full picture
-    rather than just the first violation."""
+    rather than just the first violation.
+
+    `n_classes` is how many outcomes the market has (2 for moneyline /
+    spread / total / BTTS, 3 for 1X2, 13 for correct score, ...). The
+    accuracy floor is a 2-way break-even and is applied ONLY when it is 2.
+    `stream_gated` says the recommendation stream for this market is
+    switched off in scripts/rec_gating.py; findings on a gated stream are
+    real (that is usually WHY it is gated) but must not page every hour —
+    they are downgraded to warn so the model can still be measured back to
+    life from the persisted time series.
+
+    Two more downgrades happen at the end, both leaving their reason in
+    the message: a slice with fewer than thresholds.min_n_to_page graded
+    predictions, and a gated stream."""
     findings: List[DriftFinding] = []
+
+    n = report.n
 
     # ECE
     if report.ece >= thresholds.ece_alert:
@@ -271,6 +374,7 @@ def detect_drift(
                 current=report.ece,
                 threshold=thresholds.ece_alert,
                 message=f"ECE {report.ece:.3f} >= {thresholds.ece_alert:.3f} — model significantly miscalibrated",
+                n=n,
             )
         )
     elif report.ece >= thresholds.ece_warn:
@@ -283,32 +387,56 @@ def detect_drift(
                 current=report.ece,
                 threshold=thresholds.ece_warn,
                 message=f"ECE {report.ece:.3f} >= {thresholds.ece_warn:.3f} — calibration drifting",
+                n=n,
             )
         )
 
-    # MCE
-    if report.mce >= thresholds.mce_alert:
+    # MCE — recomputed here over qualifying buckets only, so a report
+    # built with the raw all-buckets maximum (or by an older caller) is
+    # judged on the same footing. Naming the bucket is what makes the
+    # number actionable.
+    worst = worst_bucket(report.buckets, thresholds.min_bucket_n_for_mce) if report.buckets else None
+    if worst is not None:
+        mce = abs(worst.mean_predicted - worst.mean_actual)
+    elif report.buckets:
+        # Buckets exist but none reaches the size floor: that is NO evidence
+        # of local miscalibration, not evidence of it. Falling back to the
+        # stored raw maximum here would re-admit the single-entrant page.
+        mce = 0.0
+    else:
+        # No bucket detail at all (a hand-built report) — judge the stored
+        # number as-is; there is nothing to filter.
+        mce = report.mce
+    where = (
+        f" [bucket {worst.lower:.1f}-{worst.upper:.1f}, n={worst.n}: "
+        f"predicted {worst.mean_predicted:.3f}, actual {worst.mean_actual:.3f}]"
+        if worst is not None
+        else ""
+    )
+    if mce >= thresholds.mce_alert:
         findings.append(
             DriftFinding(
                 sport=sport,
                 market=market,
                 metric="mce",
                 severity="alert",
-                current=report.mce,
+                current=mce,
                 threshold=thresholds.mce_alert,
-                message=f"MCE {report.mce:.3f} >= {thresholds.mce_alert:.3f} — worst-bucket gap too wide",
+                message=f"MCE {mce:.3f} >= {thresholds.mce_alert:.3f} — worst-bucket gap too wide{where}",
+                n=n,
             )
         )
-    elif report.mce >= thresholds.mce_warn:
+    elif mce >= thresholds.mce_warn:
         findings.append(
             DriftFinding(
                 sport=sport,
                 market=market,
                 metric="mce",
                 severity="warn",
-                current=report.mce,
+                current=mce,
                 threshold=thresholds.mce_warn,
-                message=f"MCE {report.mce:.3f} >= {thresholds.mce_warn:.3f} — worst bucket drifting",
+                message=f"MCE {mce:.3f} >= {thresholds.mce_warn:.3f} — worst bucket drifting{where}",
+                n=n,
             )
         )
 
@@ -327,6 +455,7 @@ def detect_drift(
                     f"Brier {report.brier_score:.3f} is {brier_drift:+.3f} above baseline "
                     f"{baseline_brier:.3f} — model predictions less accurate"
                 ),
+                n=n,
             )
         )
     elif brier_drift >= thresholds.brier_drift_warn:
@@ -341,6 +470,7 @@ def detect_drift(
                 message=(
                     f"Brier {report.brier_score:.3f} is {brier_drift:+.3f} above baseline " f"{baseline_brier:.3f}"
                 ),
+                n=n,
             )
         )
 
@@ -357,21 +487,54 @@ def detect_drift(
     # field is normal, not "unprofitable" — so skip the floor there
     # (ECE/MCE/Brier still apply). Profitability for racing is judged by
     # realized recs ROI (the accuracy widget), not per-entrant hit rate.
-    if sport != "horse_racing" and report.accuracy < thresholds.accuracy_floor and report.n >= 30:
-        # Require >= 30 samples to avoid tripping on a 0/5 fluke.
+    # The comment above has said "3-class doesn't apply" since this was
+    # written, but the code only ever excluded horse racing — so the 2026-09-21
+    # page reported soccer 1X2 at 48% and correct score at 12% as
+    # "unprofitable". n_classes now enforces it.
+    # A raw point estimate would page a genuinely profitable model on a
+    # large fraction of days (review: a true-55% model reads below 52.4% on
+    # 31% of draws at n=100, 21% at n=200, 14% at n=400). So the ALERT needs
+    # the one-sided 95% upper bound to sit below break-even — "even giving
+    # the model the benefit of the doubt it is unprofitable" — and a point
+    # estimate below the floor whose bound is not is a warn.
+    if n_classes == 2 and sport != "horse_racing" and report.accuracy < thresholds.accuracy_floor and report.n >= 30:
+        acc = report.accuracy
+        se = math.sqrt(max(acc * (1.0 - acc), 1e-12) / report.n)
+        upper = acc + _Z_95_ONE_SIDED * se
+        confident = upper < thresholds.accuracy_floor
         findings.append(
             DriftFinding(
                 sport=sport,
                 market=market,
                 metric="accuracy",
-                severity="alert",
-                current=report.accuracy,
+                severity="alert" if confident else "warn",
+                current=acc,
                 threshold=thresholds.accuracy_floor,
                 message=(
-                    f"Accuracy {report.accuracy:.1%} < {thresholds.accuracy_floor:.1%} "
-                    f"break-even — strategy unprofitable at -110 vig"
+                    f"Accuracy {acc:.1%} < {thresholds.accuracy_floor:.1%} break-even "
+                    f"(95% upper bound {upper:.1%}) — "
+                    + (
+                        "strategy unprofitable at -110 vig even at the top of its confidence interval"
+                        if confident
+                        else "below break-even but within noise at this n"
+                    )
                 ),
+                n=n,
             )
+        )
+
+    findings = [replace(f, model_name=model_name) for f in findings]
+
+    # Downgrades, each leaving its reason in the message. A gated stream
+    # is checked first so a small gated slice names the more useful reason.
+    # The n floor is scoped to the bin-based metrics (see MIN_N_TO_PAGE).
+    if stream_gated:
+        findings = _downgrade(findings, "recommendation stream is gated off — logged, not paged")
+    if report.n < thresholds.min_n_to_page:
+        findings = _downgrade(
+            findings,
+            f"n={report.n} < {thresholds.min_n_to_page} for a binned read — logged, not paged",
+            only_metrics=BIN_BASED_METRICS,
         )
 
     return findings

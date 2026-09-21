@@ -47,5 +47,14 @@ with DAG(
 
     monitor_models = BashOperator(
         task_id="monitor_models",
-        bash_command=f"{DOCKER_EXEC} python /app/scripts/monitor_models.py --days 30",
+        # `timeout 9m` bounds the process WHERE IT RUNS: execution_timeout only
+        # SIGTERMs the host-side compose client, and a killed `docker exec`
+        # client does not stop the exec'd process, so a hung monitor would
+        # otherwise keep running in the container with a new one stacked on
+        # top every hour.
+        bash_command=f"{DOCKER_EXEC} timeout 9m python /app/scripts/monitor_models.py --days 30",
+        # max_active_runs=1 means a hung run (e.g. a Redis that accepts TCP
+        # but never answers) would queue every later hourly run behind it
+        # silently. Bound it so a hang becomes a FAILED task instead.
+        execution_timeout=timedelta(minutes=10),
     )

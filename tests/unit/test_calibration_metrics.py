@@ -218,7 +218,9 @@ class TestDetectDrift:
         assert findings == []
 
     def test_high_ece_alerts(self):
-        report = self._report(ece=0.15)
+        # n=400: a binned read pages only at/above MIN_N_TO_PAGE (a healthy
+        # model at n=100 trips ECE>=0.10 ~12% of the time — see the constant).
+        report = self._report(ece=0.15, n=400)
         findings = cm.detect_drift(
             sport="nba",
             market="moneyline",
@@ -244,8 +246,9 @@ class TestDetectDrift:
 
     def test_mce_alerts_independently_of_ece(self):
         # A model could have low ECE (weighted-average ok) but high
-        # MCE (worst bucket terrible). MCE catches that.
-        report = self._report(ece=0.02, mce=0.30)
+        # MCE (worst bucket terrible). MCE catches that. n=400 so the
+        # binned-read floor does not downgrade it.
+        report = self._report(ece=0.02, mce=0.30, n=400)
         findings = cm.detect_drift(
             sport="nba",
             market="moneyline",
@@ -257,8 +260,10 @@ class TestDetectDrift:
         assert not any(f.metric == "ece" for f in findings)
 
     def test_accuracy_below_breakeven_alerts(self):
-        # Hit rate 45% can't profit at -110 vig → alert.
-        report = self._report(accuracy=0.45, n=100)
+        # Hit rate 45% can't profit at -110 vig → alert. At n=400 its
+        # one-sided 95% upper bound (~49.1%) is still under break-even; at
+        # n=100 it would be ~53.2% and only warn (within noise).
+        report = self._report(accuracy=0.45, n=400)
         findings = cm.detect_drift(
             sport="nba",
             market="moneyline",
@@ -345,3 +350,211 @@ class TestDriftThresholds:
         assert t.ece_warn < t.ece_alert
         assert t.mce_warn < t.mce_alert
         assert t.brier_drift_warn < t.brier_drift_alert
+
+
+# ---------------------------------------------------------------------------
+# The 2026-09-21 drift page: ten unlabeled findings, eight of them artifacts
+# of thresholds that ignored bucket size, sample size and class count.
+# Each class below reproduces one of those shapes from the real numbers.
+# ---------------------------------------------------------------------------
+
+
+def _b(lo, hi, n, pred, actual):
+    return cm.Bucket(lower=lo, upper=hi, n=n, mean_predicted=pred, mean_actual=actual)
+
+
+# The horse-racing consensus buckets exactly as persisted that day: ECE 0.005,
+# and an "MCE 0.880/0.923" that was one entrant in the top bucket.
+HORSE_BUCKETS = [
+    _b(0.0, 0.1, 11437, 0.053, 0.051),
+    _b(0.1, 0.2, 4232, 0.134, 0.137),
+    _b(0.2, 0.3, 882, 0.233, 0.252),
+    _b(0.3, 0.4, 112, 0.345, 0.348),
+    _b(0.4, 0.5, 119, 0.442, 0.437),
+    _b(0.5, 0.6, 54, 0.548, 0.444),
+    _b(0.6, 0.7, 70, 0.658, 0.614),
+    _b(0.7, 0.8, 33, 0.726, 0.636),
+    _b(0.8, 0.9, 8, 0.833, 1.000),
+    _b(0.9, 1.0, 1, 0.923, 0.000),
+]
+
+
+class TestMceIgnoresTinyBuckets:
+    def test_raw_mce_is_the_single_entrant_bucket(self):
+        assert cm.maximum_calibration_error(HORSE_BUCKETS, min_bucket_n=0) == pytest.approx(0.923)
+
+    def test_filtered_mce_is_the_worst_bucket_with_enough_data(self):
+        # 0.5-0.6 (n=54): |0.548 - 0.444| = 0.104 — below the 0.15 warn line.
+        assert cm.maximum_calibration_error(HORSE_BUCKETS) == pytest.approx(0.104, abs=1e-9)
+        assert cm.maximum_calibration_error(HORSE_BUCKETS) < cm.DriftThresholds().mce_warn
+
+    def test_worst_bucket_names_the_bucket(self):
+        worst = cm.worst_bucket(HORSE_BUCKETS)
+        assert worst is not None
+        assert (worst.lower, worst.upper, worst.n) == (0.5, 0.6, 54)
+
+    def test_no_qualifying_bucket_means_no_evidence_not_a_page(self):
+        tiny = [_b(0.7, 0.8, 1, 0.704, 0.0), _b(0.8, 0.9, 3, 0.829, 0.666)]  # the soccer BTTS tail
+        assert cm.worst_bucket(tiny) is None
+        assert cm.maximum_calibration_error(tiny) == 0.0
+
+    def test_default_report_uses_the_filtered_mce(self):
+        # Same buckets built from raw pairs: 25 well-calibrated rows plus ONE
+        # confident miss must not produce an MCE alert.
+        predicted = [0.5] * 25 + [0.95]
+        actual = [1, 0] * 12 + [1] + [0]
+        report = cm.calibration_report(predicted, actual)
+        assert report.mce < 0.15
+        assert cm.maximum_calibration_error(report.buckets, min_bucket_n=0) > 0.9
+
+
+class TestDetectDriftScopesTheAccuracyFloor:
+    def _report(self, *, n=1102, accuracy=0.48, buckets=None):
+        return cm.CalibrationReport(
+            n=n, accuracy=accuracy, brier_score=0.2, log_loss=0.5, ece=0.02, mce=0.05, buckets=buckets or []
+        )
+
+    def _accuracy_findings(self, **kw):
+        findings = cm.detect_drift(
+            sport=kw.pop("sport", "soccer"),
+            market=kw.pop("market", "match_result"),
+            report=self._report(**{k: v for k, v in kw.items() if k in ("n", "accuracy", "buckets")}),
+            thresholds=cm.DriftThresholds(),
+            n_classes=kw.get("n_classes", 2),
+        )
+        return [f for f in findings if f.metric == "accuracy"]
+
+    def test_three_way_pick_at_48pct_is_not_unprofitable(self):
+        assert self._accuracy_findings(accuracy=0.480, n_classes=3) == []
+
+    def test_thirteen_way_correct_score_at_12pct_is_not_unprofitable(self):
+        assert self._accuracy_findings(market="correct_score", accuracy=0.123, n_classes=13) == []
+
+    def test_two_way_pick_below_break_even_still_alerts(self):
+        found = self._accuracy_findings(sport="mma", market="moneyline", accuracy=0.488, n_classes=2)
+        assert len(found) == 1 and found[0].severity == "alert"
+
+    def test_horse_racing_stays_exempt_regardless_of_class_count(self):
+        assert self._accuracy_findings(sport="horse_racing", market="win", accuracy=0.093, n_classes=2) == []
+
+
+class TestDetectDriftDowngrades:
+    def _report(self, n, ece=0.218, buckets=None):
+        return cm.CalibrationReport(
+            n=n, accuracy=0.567, brier_score=0.25, log_loss=0.6, ece=ece, mce=0.653, buckets=buckets or []
+        )
+
+    def test_every_finding_carries_n(self):
+        findings = cm.detect_drift(
+            sport="nfl", market="total", report=self._report(n=300), thresholds=cm.DriftThresholds()
+        )
+        assert findings and all(f.n == 300 for f in findings)
+
+    def test_small_slice_is_downgraded_with_the_reason_in_the_message(self):
+        # NFL totals on n=30: ECE 0.218 is an alert-level number on a sample
+        # that cannot support a 10-bin read.
+        findings = cm.detect_drift(
+            sport="nfl", market="total", report=self._report(n=30), thresholds=cm.DriftThresholds()
+        )
+        assert findings, "the finding must still exist — it is logged and persisted"
+        assert all(f.severity == "warn" for f in findings)
+        assert all("n=30 < 200" in f.message and "not paged" in f.message for f in findings)
+
+    def test_slice_at_the_floor_pages(self):
+        findings = cm.detect_drift(
+            sport="nfl", market="total", report=self._report(n=200), thresholds=cm.DriftThresholds()
+        )
+        assert any(f.severity == "alert" for f in findings)
+
+    def test_gated_stream_is_downgraded_with_the_reason_in_the_message(self):
+        findings = cm.detect_drift(
+            sport="mma",
+            market="moneyline",
+            report=self._report(n=500),
+            thresholds=cm.DriftThresholds(),
+            stream_gated=True,
+        )
+        assert findings and all(f.severity == "warn" for f in findings)
+        assert all("gated off" in f.message for f in findings)
+
+    def test_downgrade_floor_is_a_threshold_knob(self):
+        thr = cm.DriftThresholds(min_n_to_page=10)
+        findings = cm.detect_drift(sport="nfl", market="total", report=self._report(n=30), thresholds=thr)
+        assert any(f.severity == "alert" for f in findings)
+
+    def test_mce_finding_names_the_bucket_and_uses_the_filtered_value(self):
+        # A big bad bucket alerts and says where; a single-row 0.92 gap does not.
+        buckets = [_b(0.5, 0.6, 400, 0.55, 0.52), _b(0.6, 0.7, 300, 0.65, 0.35), _b(0.9, 1.0, 1, 0.923, 0.0)]
+        report = cm.CalibrationReport(
+            n=701, accuracy=0.6, brier_score=0.2, log_loss=0.5, ece=0.05, mce=0.923, buckets=buckets
+        )
+        findings = cm.detect_drift(sport="soccer", market="btts", report=report, thresholds=cm.DriftThresholds())
+        mce = [f for f in findings if f.metric == "mce"]
+        assert len(mce) == 1 and mce[0].severity == "alert"
+        assert mce[0].current == pytest.approx(0.30, abs=1e-9)
+        assert "bucket 0.6-0.7, n=300" in mce[0].message
+
+    def test_legacy_constructor_without_n_still_works(self):
+        f = cm.DriftFinding(
+            sport="soccer", market="1x2", metric="canary", severity="alert", current=1.0, threshold=5.0, message="x"
+        )
+        assert f.n == 0
+
+
+class TestReviewFindings:
+    """Pinned from the adversarial review of the first draft."""
+
+    def _report(self, *, n, accuracy=0.6, ece=0.02, mce=0.05, buckets=None):
+        return cm.CalibrationReport(
+            n=n, accuracy=accuracy, brier_score=0.24, log_loss=0.6, ece=ece, mce=mce, buckets=buckets or []
+        )
+
+    def test_accuracy_below_floor_but_within_noise_is_a_warn_not_a_page(self):
+        # A true-55% model reads 51.5% on a quarter of days at n=100; its
+        # one-sided 95% upper bound (~59.7%) is nowhere near "unprofitable".
+        findings = cm.detect_drift(
+            sport="nba", market="spread", report=self._report(n=100, accuracy=0.515), thresholds=cm.DriftThresholds()
+        )
+        acc = [f for f in findings if f.metric == "accuracy"]
+        assert len(acc) == 1 and acc[0].severity == "warn"
+        assert "within noise" in acc[0].message and "upper bound" in acc[0].message
+
+    def test_accuracy_confidently_below_floor_pages(self):
+        findings = cm.detect_drift(
+            sport="mma", market="moneyline", report=self._report(n=400, accuracy=0.45), thresholds=cm.DriftThresholds()
+        )
+        acc = [f for f in findings if f.metric == "accuracy"]
+        assert len(acc) == 1 and acc[0].severity == "alert"
+
+    def test_n_floor_does_not_silence_accuracy_on_an_nfl_sized_slice(self):
+        # ~65 NFL games per 30-day window can never reach 200; a real
+        # accuracy failure there must still page. Only ECE/MCE are floored.
+        findings = cm.detect_drift(
+            sport="nfl",
+            market="total",
+            report=self._report(n=65, accuracy=0.40, ece=0.218),
+            thresholds=cm.DriftThresholds(),
+        )
+        by_metric = {f.metric: f for f in findings}
+        assert by_metric["accuracy"].severity == "alert"
+        assert by_metric["ece"].severity == "warn" and "binned read" in by_metric["ece"].message
+
+    def test_all_tiny_buckets_means_no_mce_finding_even_with_a_raw_high_mce(self):
+        tiny = [_b(0.7, 0.8, 1, 0.704, 0.0), _b(0.8, 0.9, 3, 0.829, 0.666)]
+        findings = cm.detect_drift(
+            sport="soccer",
+            market="btts",
+            report=self._report(n=1102, mce=0.705, buckets=tiny),
+            thresholds=cm.DriftThresholds(),
+        )
+        assert [f for f in findings if f.metric == "mce"] == []
+
+    def test_model_name_is_stamped_on_every_finding(self):
+        findings = cm.detect_drift(
+            sport="horse_racing",
+            market="win",
+            report=self._report(n=16948, ece=0.12),
+            thresholds=cm.DriftThresholds(),
+            model_name="lightgbm_ranker_v1",
+        )
+        assert findings and all(f.model_name == "lightgbm_ranker_v1" for f in findings)
