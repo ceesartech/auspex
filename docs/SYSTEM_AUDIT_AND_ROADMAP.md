@@ -211,7 +211,8 @@ memory; this section makes it repo-canonical.
 | Weather features (Visual Crossing) | **CLOSED at current corpus** (2026-06-05) | All 5 sport-market combos DROP at ΔBrier ≤ −0.005 despite VC beating Open-Meteo and consistent ECE improvement | Corpus reaches 5–10× (only achievable via the §3.6 backfill). Note §6: the VC subscription itself should be cancelled meanwhile — **a deliberate reversal of the June "keep refreshing" decision** |
 | Cross-book odds-dispersion features | **SHIPPED** where it works | NFL total −0.0110 / ML −0.0154, NBA spread −0.0061, NHL puck_line −0.0186 / total −0.0231 ΔBrier. Soccer 1x2 tested + dropped (2-book structure too thin); tennis/MMA odds too sparse | Pattern needs ~20+ books' disagreement |
 | Horse-racing ML ranker | **Ceiling reached** | Brier ~0.105 vs consensus 0.0831 — structural. All five follow-up levers tested and neutral/negative. Productive output: hybrid recs path (shipped) | Different data (sectional times) or framing (direct prob regression) |
-| Horse 40+ longshot calibration | CLOSED | Bias non-stationary; isotonic on graded history +0.0007 worse; recs engine emits zero recs in those buckets anyway | — |
+| Horse 40+ longshot calibration | CLOSED | Bias non-stationary; isotonic on graded history +0.0007 worse; recs engine emits zero recs in those buckets anyway. **Corrected 2026-09-21:** on the 365-day corpus (n=159k) the June "overconfident favourites" reading has the WRONG SIGN — favourites are *under*-priced (0.5+ buckets +4 to +9 pts), longshots over-priced (−0.4 pt); the June −10.6 pt gap at 40–50% was a small-sample read (n=734) | — |
+| Horse-racing consensus de-vig method (proportional → power / Shin) | **CLOSED — correct but below gate** (2026-09-21) | `scripts/ab_horse_racing_devig.py`, 365 d, n=159,488 entrants / 16,101 races, race-clustered SE. Proportional de-vig of a 10–58 % overround book is the mechanism behind the monitor's favourite-longshot bias: gaps +0.013 (20–30 %) → +0.090 (70 %+). Power de-vig flattens every bucket to \|gap\| ≤ 0.023, ECE 0.0050 → 0.0013, MCE 0.10 → 0.04, ΔBrier **−0.00011 ± 0.00003**, Δlog-loss −0.00052 ± 0.00010, same sign in every quarter, top-1 identical (order-preserving). Shin ≈ same Brier, worse at 70 %+. Money: settled-rec replay changes 28 of 298 kept recs; at-SP replay ROI CIs all straddle zero for all three methods. The gain is calibration-only and 10× short of the −0.001 harness rule (50× short of §4.3) | Adopt power de-vig *when* the single-book "consensus" is replaced by a multi-book one (§2.3 / rec_gating note) — it is the right method and costs nothing, but it is not a standalone accuracy lever |
 | NFL spread | Parked | Cross-book didn't transfer; needs new data (paid odds archive / QB-injury infra / 5+ seasons) | New data source |
 | Tennis/MMA neural nets | **FIXED — stale memory** | Retrain of 2026-07-05 trains NN successfully for both (tennis val_acc 0.605, in-ensemble at weight 0.333). NN ≈ GBM accuracy; value is diversity only | Removing NN + torch is a defensible image-size play (§5.4): retrain with `--skip-models neural_network`, verify held-out delta ≈ 0 |
 | Training-frame horizon (refit on train+val instead of the 70/15/15 ratio cut) | **CLOSED — no win** (2026-09-03) | Paired walk-forward on a fixed 2026-03-15..08-31 test window, n=4,026: LightGBM ΔBrier **−0.00029 ± 0.00071**, XGBoost −0.00034 ± 0.00073, 50/50 blend −0.00020 ± 0.00059. No cohort clears (top-5 −0.00263 ± 0.00206). The ratio split leaves essentially nothing on the table for 1x2. Tennis cross-check also fails (+0.00077 ± 0.00177, n=910) | A frame whose newest 30% is materially different in kind, not just recency |
@@ -978,6 +979,39 @@ with the growth-rate driver (WAL) eliminated.
 > both-finished with identical scores) or it silently double-counts real
 > matches, and it must join on match_date::date + scoreline, because only 5 of
 > them collide on exact timestamp.
+
+> **Update (2026-09-21) — DRIFT PAGE MADE ACTIONABLE (62a2d74); the one
+> real signal in it investigated and closed.** The hourly monitor paged ten
+> unlabeled lines ("MCE 0.923 >= 0.250", "Accuracy 12.5% < 52.4%") every
+> hour. Causes: `build_alert` dropped sport/market, MCE was the worst of
+> ten bins with no minimum n (n=1 bins page), the 52.4 % break-even floor
+> was applied to 3–51-way markets, gated-off streams paged, and dedup keyed
+> the whole set. Shipped: every line names market/model/n; MCE needs a
+> bucket of n ≥ 20; ECE/MCE only page at n ≥ 200; accuracy pages only when
+> the one-sided 95 % binomial bound is below the floor and only for 2-way
+> markets; gated streams downgrade to warn; per-finding Redis keys marked
+> only after a successful send; a failed send fails the task. Real run
+> after deploy: 0 alerts, 4 warnings.
+> The surviving signal — horse_racing/win [market_consensus_v1] bucket
+> 0.6–0.7 predicted 0.640 vs actual 0.821 (n=28) — was investigated with
+> `scripts/ab_horse_racing_devig.py` (§4 registry row). Verdict: (i) the
+> MAGNITUDE is a September blip — live favourites ≥ 0.5 by month: Jun
+> +0.004, Jul +0.009, Aug −0.006, Sep +0.156 (n=67); a 2σ bucket out of
+> ~20 scanned hourly; (ii) underneath it there IS a structural favourite-
+> longshot bias, and its mechanism is proportional de-vigging of a
+> single-book price with a 10–58 % overround; power de-vig removes it
+> (ECE 0.0050 → 0.0013) for ΔBrier −0.00011 ± 0.00003 — real, stable, and
+> an order of magnitude below the ship gate; (iii) no measurable money
+> effect on the rec stream. Not shipped; adopt with the multi-book consensus.
+> Side finding worth knowing: the consensus is scored ONCE from the first
+> racecard price and never refreshed while `morning_line_odds` keeps being
+> overwritten to the off; the last pre-race price would be ΔBrier −0.0015
+> ± 0.00015 better on live rows (−0.0025 in the last 30 d). Settled win
+> recs that still show EV at that later price returned +46.5 % flat
+> (n=298) against −7.0 % for the 794 that don't — a closing-line-value
+> signal racing has no capture for. Re-scoring alone would NOT harvest it:
+> against a single book the refreshed consensus equals the price and EV is
+> zero by construction, so this too lands on the multi-book consensus item.
 
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
