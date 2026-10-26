@@ -1128,6 +1128,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    # The promote gate's exact "never seen by the incumbent" set: the match ids
+    # this ensemble trained AND validated on, next to its artifact so the file
+    # rides into production with it (scripts/modal_bundles.SEEN_IDS_FILENAME).
+    write_seen_ids(output_dir / bundle.ensemble_name, train_df, val_df)
     (output_dir / "training_report.json").write_text(
         json.dumps(report, indent=2, default=_json_default),
         encoding="utf-8",
@@ -1144,6 +1148,32 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     print(json.dumps(report, indent=2, default=_json_default))
     return 0
+
+
+SEEN_IDS_FILENAME = "seen_match_ids.json.gz"  # mirrored in scripts/modal_bundles.py
+
+
+def write_seen_ids(ensemble_dir: Path, *frames: pd.DataFrame) -> Optional[Path]:
+    """Write the sorted union of `match_id` over `frames` (train + val) as
+    gzipped JSON. Returns the path, or None when the frames carry no match_id
+    (logged loudly: the gate then falls back to its date cutoff)."""
+    import gzip
+
+    ids: set = set()
+    for f in frames:
+        if f is None or f.empty:
+            continue
+        if "match_id" not in f.columns:
+            logger.error("No match_id column — cannot record seen ids for %s; the gate will use dates", ensemble_dir)
+            return None
+        ids.update(str(m) for m in f["match_id"].dropna())
+    ensemble_dir = Path(ensemble_dir)
+    ensemble_dir.mkdir(parents=True, exist_ok=True)
+    path = ensemble_dir / SEEN_IDS_FILENAME
+    with gzip.open(path, "wt", encoding="utf-8") as fh:
+        json.dump({"match_ids": sorted(ids), "n": len(ids)}, fh)
+    logger.info("Recorded %d train+val match ids at %s", len(ids), path)
+    return path
 
 
 def _export_onnx(

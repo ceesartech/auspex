@@ -993,3 +993,61 @@ def test_the_digest_survives_a_decision_row_written_without_the_field(models_dir
     summary = pull.gate_and_stage(RUN, str(models_dir), shadow=True, database_url=None, paired_fn=boom)
     assert summary["derived_guard_failed"] == []
     assert pages[-1].startswith("🤖 Modal retrain ") and "would promote 1/1" in pages[-1]
+
+
+# ── Which held-out rows has the incumbent never seen? (2026-10-26) ─────────
+
+
+def test_recorded_seen_ids_decide_membership_exactly_whatever_the_dates():
+    import pandas as pd
+    from modal_bundles import unseen_by_incumbent
+
+    dates = [pd.Timestamp("2025-01-01", tz="UTC"), pd.Timestamp("2026-10-25", tz="UTC")]
+    mask, basis = unseen_by_incumbent(["a", "b"], dates, cutoff=pd.Timestamp("2026-01-01", tz="UTC"), seen_ids={"b"})
+    # "a" is old but the incumbent never trained on it; "b" is recent but it did.
+    assert mask == [True, False]
+    assert "recorded train+val ids" in basis
+
+
+def test_legacy_line_required_incumbent_counts_late_priced_games_as_unseen():
+    import pandas as pd
+    from modal_bundles import unseen_by_incumbent
+
+    cutoff = pd.Timestamp("2026-10-25", tz="UTC")
+    dates = [
+        pd.Timestamp("2026-02-01", tz="UTC"),
+        pd.Timestamp("2026-02-02", tz="UTC"),
+        pd.Timestamp("2026-10-26", tz="UTC"),
+    ]
+    mask, basis = unseen_by_incumbent(["backfilled", "old", "new"], dates, cutoff=cutoff, late_odds_ids={"backfilled"})
+    assert mask == [True, False, True]
+    assert "first odds row" in basis
+
+
+def test_without_any_rule_nothing_counts_as_unseen():
+    from modal_bundles import unseen_by_incumbent
+
+    mask, basis = unseen_by_incumbent(["a"], [None], cutoff=None)
+    assert mask == [False] and basis == "no rule available"
+
+
+def test_seen_ids_round_trip_from_trainer_to_gate(tmp_path):
+    import importlib
+    import sys as _sys
+
+    import pandas as pd
+
+    ml_src = str(Path(__file__).resolve().parents[2] / "services" / "ml-models" / "src")
+    if ml_src not in _sys.path:
+        _sys.path.insert(0, ml_src)
+    tam = importlib.import_module("training.train_all_models")
+    import modal_bundles
+
+    assert tam.SEEN_IDS_FILENAME == modal_bundles.SEEN_IDS_FILENAME
+    train = pd.DataFrame({"match_id": ["m1", "m2"]})
+    val = pd.DataFrame({"match_id": ["m3"]})
+    tam.write_seen_ids(tmp_path / "ensemble_x", train, val)
+    assert pull.read_seen_ids(tmp_path / "ensemble_x") == {"m1", "m2", "m3"}
+    assert pull.read_seen_ids(tmp_path / "missing") is None
+    # a frame without match_id records nothing (the gate falls back to dates)
+    assert tam.write_seen_ids(tmp_path / "ensemble_y", pd.DataFrame({"x": [1]})) is None

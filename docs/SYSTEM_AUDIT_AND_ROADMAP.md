@@ -1154,6 +1154,29 @@ with the growth-rate driver (WAL) eliminated.
 > calibrator; NBA total was the only one of 13 production ensembles serving
 > one, an isotonic step map (registry: calibration row). Temperature scaling +
 > a paired noise-floor gate shipped (`1662be9`); the next retrain replaces it.
+> **Retrain on the repaired data** (`manual__2026-10-26T15:44`, fresh dump
+> 15:22 UTC): 9/13 promoted — soccer, NHL moneyline/regulation/puck
+> line/total, NBA and NFL moneyline, tennis, MMA — and none kept a calibrator
+> under the new gate. The scalar Brier "gains" for NBA ML (0.449 → 0.380) and
+> NFL ML (0.463 → 0.439) compare test tails of different composition (the old
+> tail held 2025-26 games on default odds); they are not accuracy deltas.
+> NBA spread/total and NFL spread/total went to MANUAL: their frames gained the
+> newly priced 2025-26 season INSIDE the incumbents' date range, so the
+> date-cutoff shared set shrank to two days. A manual paired re-score on the
+> challenger's held-out rows the incumbent never saw found none distinguishable
+> (NBA spread +0.0003 ± 0.0027 n=724; NBA total +0.0019 ± 0.0039 n=702, the
+> incumbent serving 18 distinct probabilities from its isotonic map against
+> 699; NFL spread −0.0024 ± 0.0039 n=93; NFL total −0.0003 ± 0.0143 n=93). The
+> manual production swap was refused by this session's permission policy, so
+> the GATE was fixed instead: the trainer records each ensemble's train+val
+> match ids (`seen_match_ids.json.gz`) and the paired path scores rows outside
+> that set; for legacy incumbents of line-required frames (NBA/NFL
+> spread/total), games first priced after the incumbent trained count as
+> unseen. Dry-run on prod with today's challengers: the gate now PROMOTES NBA
+> spread and NBA total itself (n=722 / 700); NFL spread/total stay at n=93 <
+> 100 and should clear with another week of games. The next scheduled retrain
+> (Sun 2026-11-01 04:00 UTC) therefore retires the NBA-total isotonic map
+> without a hand-made swap; until then NBA total keeps serving it (recs gated).
 > **AWAITING OPERATOR APPROVAL (destructive or mutating):**
 > 1. Replace the 2022-25 NBA/NFL/NHL v1 odds rows: `backfill_historical_odds.py
 >    --mode replace --confirm-replace` per sport-season (archives every replaced
@@ -1164,6 +1187,8 @@ with the growth-rate driver (WAL) eliminated.
 > 3. Regrade NHL regulation predictions graded against 'draw'.
 > 4. Optionally flag the existing in-play rows `is_live = true` (reversible);
 >    not required for correctness now that every reader filters them.
+> 5. Optionally promote NBA/NFL spread/total now rather than at the Sunday
+>    retrain (evidence above; production backup first, as swap_production does).
 
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
