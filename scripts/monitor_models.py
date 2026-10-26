@@ -716,6 +716,12 @@ FEATURE_CANARY_STUCK = 0.90  # both windows at/above this = standing defect (war
 # (sport, feature_set, compute_features module, feature key, label). The
 # default is read from the module's own NEUTRAL_DEFAULTS so the canary can
 # never drift from what the feature builder actually writes.
+#
+# NHL starting-goalie features are deliberately NOT probed: upcoming games
+# serve the goalie default BY DESIGN (2026-10-25: a probable-starter
+# projection picked the real starter 65.7% of the time but did not improve
+# held-out Brier on any market — scripts/ab_nhl_projected_goalie.py), so the
+# probe would warn on every run about an accepted state.
 FEATURE_CANARY_PROBES: list[tuple[str, str, str, str, str]] = [
     ("soccer", "baseline", "compute_features", "odds_home", "1x2 odds"),
     ("soccer", "baseline", "compute_features", "home_roll_points", "team form"),
@@ -724,7 +730,6 @@ FEATURE_CANARY_PROBES: list[tuple[str, str, str, str, str]] = [
     ("nfl", "nfl_baseline", "compute_features_nfl", "odds_home_ml", "moneyline odds"),
     ("nfl", "nfl_baseline", "compute_features_nfl", "home_roll_pts_scored", "team form"),
     ("nhl", "nhl_baseline", "compute_features_nhl", "odds_home_ml", "moneyline odds"),
-    ("nhl", "nhl_baseline", "compute_features_nhl", "home_goalie_roll_save_pct", "starting goalie"),
     ("nhl", "nhl_baseline", "compute_features_nhl", "home_roll_corsi_for_5v5", "5v5 form"),
     ("tennis", "tennis_baseline", "compute_features_tennis", "odds_home_ml", "moneyline odds"),
     ("mma", "mma_baseline", "compute_features_mma", "odds_home_ml", "moneyline odds"),
