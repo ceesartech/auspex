@@ -21,7 +21,8 @@ class EnsemblePredictor(BaseModel):
         self.models: Dict[str, BaseModel] = {}
         self.weights: Dict[str, float] = {}
         self.calibrators: Dict[str, Any] = {}
-        # Isotonic calibrator fit on the BLENDED ensemble output (the
+        # Calibrator (temperature scaling since 2026-10-25; legacy artifacts
+        # may still carry an isotonic map) fit on the BLENDED ensemble output (the
         # served probability). None until fit_calibrator() runs at the
         # end of training; applied automatically in predict_proba and
         # round-tripped through save()/load() via the metadata JSON.
@@ -152,7 +153,7 @@ class EnsemblePredictor(BaseModel):
         proba = self.predict_proba(X)
         return np.argmax(proba, axis=1)
 
-    def fit_calibrator(self, y_proba: np.ndarray, y_true: np.ndarray, method: str = "isotonic") -> None:
+    def fit_calibrator(self, y_proba: np.ndarray, y_true: np.ndarray, method: str = "temperature") -> None:
         """Fit the post-blend calibrator on validation ensemble output.
         Pass the RAW blended probabilities (predict_proba(..., apply_calibration=False))
         and the encoded validation labels."""

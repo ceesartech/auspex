@@ -1,8 +1,17 @@
 """Probability calibration for model outputs.
 
-Fits a per-class isotonic (or Platt) map on a held-out validation set and
-applies it to predicted probabilities so served confidences match reality
-(if the model says 60% for many events, ~60% should occur).
+Fits a calibration map on a held-out validation set and applies it to
+predicted probabilities so served confidences match reality (if the model
+says 60% for many events, ~60% should occur). Three methods:
+
+  temperature  one scalar T for the whole probability vector, p_c ∝ p_c^(1/T).
+               Smooth, order-preserving, cannot invent steps or extremes —
+               the method the ensemble self-gate uses since 2026-10-25.
+  isotonic     per-class step function. Kept for diagnostics only: on a
+               ~500-row val set it produced a 34-knot step map for NBA total
+               that served 22 distinct probabilities and an overconfident
+               P(over)≈0.13-0.25 cluster live (audit §7, 2026-10-25).
+  platt        per-class sigmoid on the logit.
 
 The fitted maps are stored as plain arrays (isotonic step-function knots)
 rather than sklearn objects, so the calibrator round-trips through JSON
@@ -19,17 +28,22 @@ logger = logging.getLogger(__name__)
 
 
 class ProbabilityCalibrator:
-    """Per-class probability calibration (isotonic or Platt/sigmoid)."""
+    """Probability calibration (temperature, isotonic or Platt/sigmoid)."""
+
+    METHODS = ("temperature", "isotonic", "platt")
 
     def __init__(self, method: str = "isotonic"):
         """
         Args:
-            method: 'isotonic' or 'platt' (sigmoid).
+            method: 'temperature', 'isotonic' or 'platt' (sigmoid).
         """
+        if method not in self.METHODS:
+            raise ValueError(f"unknown calibration method {method!r}; expected one of {self.METHODS}")
         self.method = method
         # class index -> serializable params:
         #   isotonic: {"x": [...knot x...], "y": [...knot y...]}
         #   platt:    {"a": slope, "b": intercept}
+        #   temperature: one entry under key -1: {"t": T, "n_classes": k}
         self.params: Dict[int, Dict[str, Any]] = {}
         self.is_fitted = False
 
@@ -51,6 +65,13 @@ class ProbabilityCalibrator:
         y_true = np.asarray(y_true)
         n_classes = y_proba.shape[1] if y_proba.ndim > 1 else 2
         self.params = {}
+
+        if self.method == "temperature":
+            t = fit_temperature(_as_matrix(y_proba), y_true)
+            self.params = {-1: {"t": float(t), "n_classes": int(n_classes)}}
+            self.is_fitted = True
+            logger.info("Fitted temperature calibrator: T=%.4f over %d classes", t, n_classes)
+            return
 
         for c in range(n_classes):
             p = self._class_proba(y_proba, c)
@@ -85,6 +106,9 @@ class ProbabilityCalibrator:
         """Apply calibration; returns probabilities normalized to sum to 1."""
         if not self.is_fitted:
             raise ValueError("Calibrator not fitted")
+
+        if self.method == "temperature":
+            return apply_temperature(_as_matrix(y_proba), float(self.params[-1]["t"]))
 
         n_classes = len(self.params)
         n_samples = y_proba.shape[0] if y_proba.ndim > 1 else len(y_proba)
@@ -153,6 +177,62 @@ class ProbabilityCalibrator:
         return {"ece": ece_total / n_classes, "mce": mce_total}
 
 
+def _as_matrix(y_proba: np.ndarray) -> np.ndarray:
+    """(n,) positive-class vector -> (n, 2) [1-p, p]; (n, k) passes through."""
+    y_proba = np.asarray(y_proba, dtype=float)
+    if y_proba.ndim == 1:
+        return np.column_stack([1.0 - y_proba, y_proba])
+    return y_proba
+
+
+def apply_temperature(y_proba: np.ndarray, t: float) -> np.ndarray:
+    """p_c ∝ p_c^(1/T), renormalised. T > 1 softens, T < 1 sharpens, T = 1 is identity."""
+    logp = np.log(np.clip(np.asarray(y_proba, dtype=float), 1e-12, 1.0)) / float(t)
+    logp -= logp.max(axis=1, keepdims=True)
+    e = np.exp(logp)
+    return e / e.sum(axis=1, keepdims=True)
+
+
+def fit_temperature(y_proba: np.ndarray, y_true: np.ndarray, lo: float = 0.25, hi: float = 4.0) -> float:
+    """The T in [lo, hi] minimising multiclass log-loss of apply_temperature(y_proba, T).
+
+    Golden-section search on a 1-D, smooth objective (log-loss in T is unimodal
+    for this family), so no optimiser dependency. The bounds keep a degenerate
+    val set from producing an absurd map; a T at a bound is logged by the
+    caller's gate metrics, never silently trusted."""
+    y = np.asarray(y_true).astype(int)
+    idx = np.arange(len(y))
+
+    def nll(t: float) -> float:
+        p = apply_temperature(y_proba, t)
+        return float(-np.mean(np.log(np.clip(p[idx, y], 1e-12, 1.0))))
+
+    g = (np.sqrt(5.0) - 1.0) / 2.0
+    a, b = np.log(lo), np.log(hi)  # search in log T: symmetric for sharpen/soften
+    c, d = b - g * (b - a), a + g * (b - a)
+    fc, fd = nll(np.exp(c)), nll(np.exp(d))
+    for _ in range(80):
+        if fc < fd:
+            b, d, fd = d, c, fc
+            c = b - g * (b - a)
+            fc = nll(np.exp(c))
+        else:
+            a, c, fc = c, d, fd
+            d = a + g * (b - a)
+            fd = nll(np.exp(d))
+        if b - a < 1e-6:
+            break
+    return float(np.exp(0.5 * (a + b)))
+
+
+def brier_rows(y_proba: np.ndarray, y_true: np.ndarray) -> np.ndarray:
+    """Per-row multiclass Brier (sum of squares vs one-hot) — the paired unit."""
+    y_true = np.asarray(y_true)
+    onehot = np.zeros_like(y_proba, dtype=float)
+    onehot[np.arange(len(y_true)), y_true.astype(int)] = 1.0
+    return np.sum((y_proba - onehot) ** 2, axis=1)
+
+
 def brier_multiclass(y_proba: np.ndarray, y_true: np.ndarray) -> float:
     """Multiclass Brier score: mean squared error of the one-hot vs proba.
     Lower is better. Used to compare raw vs calibrated on the held-out test."""
@@ -162,4 +242,10 @@ def brier_multiclass(y_proba: np.ndarray, y_true: np.ndarray) -> float:
     return float(np.mean(np.sum((y_proba - onehot) ** 2, axis=1)))
 
 
-__all__: List[str] = ["ProbabilityCalibrator", "brier_multiclass"]
+__all__: List[str] = [
+    "ProbabilityCalibrator",
+    "apply_temperature",
+    "brier_multiclass",
+    "brier_rows",
+    "fit_temperature",
+]

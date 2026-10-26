@@ -694,6 +694,16 @@ class TrainingOrchestrator:
 
         return {"n": int(len(df)), "raw": _m(raw), "calibrated": _m(cal)}
 
+    # Calibration self-gate thresholds (house rule §4.3, applied 2026-10-25).
+    # The old gate kept a calibrator on ANY held-out Brier drop > 1e-4, which
+    # let isotonic switch on for NBA total on a -0.0019 "win" at n=536 — inside
+    # the noise floor — while MCE worsened 0.27 -> 0.38; it then served a
+    # 22-value step function live. A calibrator is a model-side change like
+    # any other: it must clear the ship gate AND the paired noise floor.
+    CALIBRATION_MIN_GATE_N = 500
+    CALIBRATION_MAX_DELTA = -0.005  # ΔBrier (calibrated - raw) must be at most this
+    CALIBRATION_Z = 1.96  # ...and the upper 95% bound of the paired delta below zero
+
     def _fit_and_gate_calibrator(
         self,
         ensemble: "EnsemblePredictor",
@@ -703,13 +713,14 @@ class TrainingOrchestrator:
         ensemble_name: str,
         result: Dict[str, Any],
     ) -> None:
-        """Fit the isotonic calibrator on raw ensemble VAL output, then
-        keep it only if it lowers Brier on the held-out TEST set. Encoding
-        mirrors EnsemblePredictor.train (LabelEncoder.fit_transform) so
-        calibrator class indices align with predict_proba columns. On any
-        failure or a non-improving gate, the calibrator is dropped and the
-        ensemble serves RAW probabilities (no regression vs before)."""
+        """Fit a TEMPERATURE calibrator on raw ensemble VAL output, then keep it
+        only if it lowers held-out TEST Brier by at least CALIBRATION_MAX_DELTA
+        with the paired upper 95% bound below zero. Encoding mirrors
+        EnsemblePredictor.train (LabelEncoder.fit_transform) so class indices
+        align with predict_proba columns. On any failure or a non-clearing gate
+        the calibrator is dropped and the ensemble serves RAW probabilities."""
         from sklearn.preprocessing import LabelEncoder
+        from training.calibration import brier_rows
 
         try:
             raw = ensemble.predict_proba(val_df, apply_calibration=False)
@@ -723,28 +734,47 @@ class TrainingOrchestrator:
                 )
                 return
 
-            ensemble.fit_calibrator(raw, y_enc)
+            ensemble.fit_calibrator(raw, y_enc, method="temperature")
+            temperature = float(ensemble.calibrator.params[-1]["t"])
 
-            # Gate: keep the calibrator only with (a) enough held-out test
-            # rows to trust the comparison and (b) a real Brier improvement.
-            # MIN_GATE_N guards against a coin-flip "win" on a tiny test set
-            # (e.g. NFL n=143, where isotonic's Brier edge is within noise
-            # and its MCE blows up) — below it we default to serving raw.
-            MIN_GATE_N = 500
-            decision: Dict[str, Any] = {"kept": True, "reason": "no held-out test set to gate on"}
+            decision: Dict[str, Any] = {
+                "kept": False,
+                "method": "temperature",
+                "temperature": round(temperature, 4),
+                "reason": "no held-out test set to gate on — serving raw",
+            }
             if test_df is not None and not test_df.empty and target in test_df.columns:
                 metrics = self._holdout_metrics(ensemble, test_df, target)
                 if metrics is not None:
-                    enough = metrics["n"] >= MIN_GATE_N
-                    improves = metrics["calibrated"]["brier"] < metrics["raw"]["brier"] - 1e-4
-                    keep = enough and improves
+                    raw_t = ensemble.predict_proba(test_df, apply_calibration=False)
+                    cal_t = ensemble.calibrator.calibrate(raw_t)
+                    y_t = LabelEncoder().fit(val_df[target].values).transform(test_df[target].values)
+                    d = brier_rows(cal_t, y_t) - brier_rows(raw_t, y_t)
+                    delta = float(d.mean())
+                    se = float(d.std(ddof=1) / np.sqrt(len(d))) if len(d) > 1 else float("inf")
+                    upper = delta + self.CALIBRATION_Z * se
+                    enough = metrics["n"] >= self.CALIBRATION_MIN_GATE_N
+                    clears = delta <= self.CALIBRATION_MAX_DELTA and upper < 0.0
+                    keep = enough and clears
                     if not enough:
-                        reason = f"held-out test too small (n={metrics['n']} < {MIN_GATE_N}) — serving raw"
-                    elif improves:
-                        reason = "calibration lowers held-out Brier"
+                        reason = (
+                            f"held-out test too small (n={metrics['n']} < {self.CALIBRATION_MIN_GATE_N}) — serving raw"
+                        )
+                    elif clears:
+                        reason = f"temperature T={temperature:.3f} clears the gate: ΔBrier {delta:+.5f} ± {se:.5f}"
                     else:
-                        reason = "calibration does NOT improve held-out Brier — serving raw"
-                    decision = {"kept": keep, "reason": reason, **metrics}
+                        reason = (
+                            f"temperature T={temperature:.3f} does NOT clear the gate (ΔBrier {delta:+.5f} ± {se:.5f}; "
+                            f"needs <= {self.CALIBRATION_MAX_DELTA} with the 95% upper bound < 0) — serving raw"
+                        )
+                    decision = {
+                        **decision,
+                        "kept": keep,
+                        "reason": reason,
+                        "paired_delta": round(delta, 6),
+                        "paired_se": round(se, 6),
+                        **metrics,
+                    }
 
             if not decision["kept"]:
                 ensemble.calibrator = None  # serve raw
