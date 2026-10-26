@@ -166,6 +166,162 @@ def reconcile_matrix_to_1x2(
     return P / s if s > 0 else P
 
 
+# Market-anchored totals (audit §7, 2026-10-25). The Dixon-Coles scoreline is
+# reconciled to the ensemble 1x2, but its TOTALS shape comes only from the
+# team/league goal rates — and live, the derived over-2.5 scored +0.0108 ±
+# 0.0043 Brier WORSE than the closing over/under market (n=1,302). When a real
+# market over/under-2.5 price exists, the matrix is additionally anchored to it:
+# IPF alternates between the 1x2 partition (target: the ensemble's 1x2,
+# unchanged) and the over/under-2.5 partition (target: the de-vigged market),
+# which converges to the minimum-KL matrix that matches BOTH marginals while
+# preserving the within-cell scoreline shape. Every other derived market
+# (other lines, BTTS, team totals, correct score, handicaps) then moves
+# consistently with that one market input instead of being read off a
+# totals-blind shape.
+OU_ANCHOR_LINE: float = 2.5
+# A de-vigged 2-way price is never this extreme for a real soccer match; a
+# target outside this band means bad odds, and anchoring to it would distort
+# every derived market — the caller falls back to the 1x2-only reconcile.
+OU_ANCHOR_MIN_P: float = 0.05
+OU_ANCHOR_MAX_P: float = 0.95
+
+
+def valid_ou_anchor(p_over: Optional[float]) -> bool:
+    """Is ``p_over`` a usable market P(over 2.5) anchor? Finite and inside
+    [OU_ANCHOR_MIN_P, OU_ANCHOR_MAX_P]; ``None`` (no market) is not."""
+    if p_over is None:
+        return False
+    try:
+        p = float(p_over)
+    except (TypeError, ValueError):
+        return False
+    return bool(np.isfinite(p)) and OU_ANCHOR_MIN_P <= p <= OU_ANCHOR_MAX_P
+
+
+OU_ANCHOR_METHODS: Tuple[str, ...] = ("tilt", "step")
+
+
+def _tilt_theta(total_dist: np.ndarray, target_over: float, line: float) -> float:
+    """theta such that the total-goals distribution reweighted by exp(theta*k)
+    puts ``target_over`` of its mass above ``line``. Monotone in theta, so a
+    bracketed bisection is exact to float precision; an unreachable target
+    (no mass on one side of the line) returns the bracket end."""
+    k = np.arange(total_dist.shape[0], dtype=float)
+    k_c = k - k.mean()  # centring keeps exp() far from overflow
+    above = k > line
+    lo, hi = -10.0, 10.0
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        w = total_dist * np.exp(mid * k_c)
+        tot = w.sum()
+        frac = w[above].sum() / tot if tot > 0 else 0.0
+        if frac < target_over:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def reconcile_matrix_to_1x2_and_totals(
+    P: np.ndarray,
+    target_1x2: Optional[Sequence[float]],
+    target_over: Optional[float],
+    line: float = OU_ANCHOR_LINE,
+    method: str = "tilt",
+    iters: int = 500,
+    tol: float = 1e-10,
+) -> np.ndarray:
+    """Rescale a scoreline matrix so its 1x2 marginals match ``target_1x2`` AND
+    its P(total goals > ``line``) matches ``target_over``.
+
+    Alternates a totals step and the 1x2 region scaling until both marginals
+    are within ``tol``. Two totals steps are available:
+
+    * ``"tilt"`` (default) — multiply every cell by ``exp(theta * (i + j))``
+      with theta solved so P(over) hits the target. For a Poisson scoreline
+      this is exactly "scale both goal rates by a common factor", so the
+      total-goals distribution stays smooth and every line, BTTS, team total
+      and parity market moves the way a goal-rate change moves it.
+    * ``"step"`` — classic IPF over the over/under partition (scale all
+      over-``line`` cells by one factor, all under cells by another): the
+      minimum-KL solution for the two marginals, but it puts a kink between
+      2 and 3 total goals that biases parity (odd/even) — measured in
+      scripts/ab_soccer_ou_anchor.py, kept for comparison.
+
+    * ``target_over`` invalid or ``None`` (see :func:`valid_ou_anchor`) ->
+      exactly :func:`reconcile_matrix_to_1x2` (current behaviour).
+    * ``target_1x2`` ``None`` -> the matrix's own 1x2 is held fixed while the
+      totals are anchored.
+    * The 1x2 step runs LAST, so the headline 1x2 is always matched exactly;
+      the totals marginal is matched to ``tol`` whenever the constraints are
+      jointly feasible (they are for any matrix with mass in all six
+      result x totals cells, which every Dixon-Coles matrix has). For a
+      degenerate matrix the loop stops at ``iters`` with the 1x2 exact and the
+      totals as close as the support allows.
+    """
+    if not valid_ou_anchor(target_over):
+        if target_1x2 is None:
+            P = np.asarray(P, dtype=float)
+            s = P.sum()
+            return P / s if s > 0 else P.astype(float, copy=True)
+        return reconcile_matrix_to_1x2(P, target_1x2)
+
+    P = np.asarray(P, dtype=float).copy()
+    s = P.sum()
+    if s <= 0:
+        return P
+    P /= s
+    mg = P.shape[0]
+    i_idx, j_idx = np.indices((mg, mg))
+    regions = [i_idx > j_idx, i_idx == j_idx, i_idx < j_idx]  # home, draw, away
+    over = (i_idx + j_idx) > line
+    totals = [over, ~over]
+
+    if target_1x2 is None:
+        tgt_1x2 = np.array([P[m].sum() for m in regions])
+    else:
+        tgt_1x2 = np.asarray(target_1x2, dtype=float)
+    tsum = tgt_1x2.sum()
+    if not np.all(np.isfinite(tgt_1x2)) or tsum <= 0:
+        return P
+    tgt_1x2 = tgt_1x2 / tsum
+    assert target_over is not None  # valid_ou_anchor() above guarantees a finite float
+    p_over = float(target_over)
+    tgt_tot = np.array([p_over, 1.0 - p_over])
+
+    if method not in OU_ANCHOR_METHODS:
+        raise ValueError(f"unknown totals anchor method {method!r}; expected one of {OU_ANCHOR_METHODS}")
+    T = i_idx + j_idx
+
+    def _scale(masks, targets) -> None:
+        cur = np.array([P[m].sum() for m in masks])
+        for k, m in enumerate(masks):
+            if cur[k] > 0:
+                P[m] *= targets[k] / cur[k]
+
+    def _tilt() -> None:
+        dist = np.bincount(T.ravel(), weights=P.ravel(), minlength=int(T.max()) + 1)
+        theta = _tilt_theta(dist, p_over, line)
+        P[...] = P * np.exp(theta * (T - T.mean()))
+        s_ = P.sum()
+        if s_ > 0:
+            P[...] = P / s_
+
+    for _ in range(iters):
+        if method == "tilt":
+            _tilt()
+        else:
+            _scale(totals, tgt_tot)
+        _scale(regions, tgt_1x2)
+        err_tot = abs(float(P[over].sum()) - p_over)
+        err_1x2 = max(abs(float(P[m].sum()) - tgt_1x2[k]) for k, m in enumerate(regions))
+        if err_tot < tol and err_1x2 < tol:
+            break
+
+    s = P.sum()
+    return P / s if s > 0 else P
+
+
 def derive_soccer_markets(P: np.ndarray, top_n_scores: int = 12) -> Dict[str, Dict[str, float]]:
     """Derive the full soccer market catalog from a normalized scoreline matrix.
 
@@ -643,6 +799,8 @@ def derive_from_lambdas(
     rho: float = 0.0,
     *,
     target_1x2: Optional[Sequence[float]] = None,
+    target_over_25: Optional[float] = None,
+    ou_anchor_method: str = "tilt",
     sport: str = "soccer",
     max_goals: int = MAX_GOALS_DERIVE,
     **kwargs,
@@ -652,8 +810,16 @@ def derive_from_lambdas(
     ``target_1x2`` is the ensemble's ``(home, draw, away)`` — when provided the
     matrix is reconciled to it before derivation so every market's 1x2 split
     matches the headline prediction.
+
+    ``target_over_25`` is the de-vigged MARKET P(total goals > 2.5). When it is
+    a valid anchor (:func:`valid_ou_anchor`) the matrix is reconciled to the
+    1x2 and to it jointly (:func:`reconcile_matrix_to_1x2_and_totals`);
+    otherwise behaviour is exactly the 1x2-only reconcile. Pass only a REAL
+    market price — never a NEUTRAL_DEFAULTS placeholder.
     """
     P = build_dc_matrix(home_lambda, away_lambda, rho, max_goals=max_goals)
-    if target_1x2 is not None:
+    if valid_ou_anchor(target_over_25):
+        P = reconcile_matrix_to_1x2_and_totals(P, target_1x2, target_over_25, method=ou_anchor_method)
+    elif target_1x2 is not None:
         P = reconcile_matrix_to_1x2(P, target_1x2)
     return derive_markets(sport, P, **kwargs)

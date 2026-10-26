@@ -25,6 +25,8 @@ from predictors.market_derivation import (
     derive_soccer_htft_markets,
     derive_soccer_markets,
     reconcile_matrix_to_1x2,
+    reconcile_matrix_to_1x2_and_totals,
+    valid_ou_anchor,
 )
 
 
@@ -175,6 +177,89 @@ class TestReconciliation:
         P[1, 1] = 0.4  # draw — no away-win mass at all
         P2 = reconcile_matrix_to_1x2(P, (0.5, 0.3, 0.2))
         assert np.isfinite(P2).all()
+
+
+@pytest.mark.unit
+class TestTotalsAnchoredReconciliation:
+    """1x2 + over/under-2.5 joint IPF (audit §7 2026-10-25 item 4)."""
+
+    T1X2 = (0.55, 0.25, 0.20)
+
+    def _marginals(self, P):
+        m = derive_soccer_markets(P)
+        return m["1x2"], m["over_under"]["over_2.5"]
+
+    @pytest.mark.parametrize("p_over", [0.30, 0.45, 0.524, 0.62, 0.80])
+    def test_hits_both_marginals(self, p_over):
+        P = build_dc_matrix(1.45, 1.05, rho=-0.1)
+        P2 = reconcile_matrix_to_1x2_and_totals(P, self.T1X2, p_over)
+        one_x_two, over = self._marginals(P2)
+        assert abs(one_x_two["home"] - 0.55) < 1e-9
+        assert abs(one_x_two["draw"] - 0.25) < 1e-9
+        assert abs(one_x_two["away"] - 0.20) < 1e-9
+        assert abs(over - p_over) < 1e-8
+        assert abs(P2.sum() - 1.0) < 1e-12
+        assert P2.min() >= 0.0
+
+    def test_preserves_shape_within_joint_cell(self):
+        # Two cells in the SAME (home win, over 2.5) cell keep their ratio.
+        P = build_dc_matrix(1.6, 1.0, rho=-0.1)
+        P2 = reconcile_matrix_to_1x2_and_totals(P, self.T1X2, 0.40)
+        assert abs(P[3, 0] / P[2, 1] - P2[3, 0] / P2[2, 1]) < 1e-9
+
+    def test_no_market_is_exactly_1x2_reconcile(self):
+        P = build_dc_matrix(1.4, 1.2, rho=-0.08)
+        ref = reconcile_matrix_to_1x2(P, self.T1X2)
+        for missing in (None, float("nan"), "abc", 0.0, 1.0, 0.99, 0.01):
+            got = reconcile_matrix_to_1x2_and_totals(P, self.T1X2, missing)
+            assert np.allclose(got, ref, atol=1e-15)
+
+    def test_no_1x2_target_holds_matrix_1x2(self):
+        P = build_dc_matrix(1.4, 1.2, rho=-0.08)
+        own = derive_soccer_markets(P)["1x2"]
+        P2 = reconcile_matrix_to_1x2_and_totals(P, None, 0.60)
+        one_x_two, over = self._marginals(P2)
+        for k in ("home", "draw", "away"):
+            assert abs(one_x_two[k] - own[k]) < 1e-9
+        assert abs(over - 0.60) < 1e-8
+
+    def test_anchor_moves_consistent_markets(self):
+        # Raising P(over 2.5) must raise every other "more goals" market.
+        P = build_dc_matrix(1.4, 1.1, rho=-0.1)
+        lo = derive_soccer_markets(reconcile_matrix_to_1x2_and_totals(P, self.T1X2, 0.40))
+        hi = derive_soccer_markets(reconcile_matrix_to_1x2_and_totals(P, self.T1X2, 0.65))
+        assert hi["over_under"]["over_1.5"] > lo["over_under"]["over_1.5"]
+        assert hi["over_under"]["over_3.5"] > lo["over_under"]["over_3.5"]
+        assert hi["btts"]["yes"] > lo["btts"]["yes"]
+        assert hi["team_total"]["home_over_1.5"] > lo["team_total"]["home_over_1.5"]
+        # ...while the 1x2-determined markets do not move.
+        assert abs(hi["double_chance"]["1X"] - lo["double_chance"]["1X"]) < 1e-9
+        assert abs(hi["draw_no_bet"]["home"] - lo["draw_no_bet"]["home"]) < 1e-9
+
+    def test_degenerate_matrix_does_not_crash(self):
+        P = np.zeros((4, 4))
+        P[1, 0] = 0.7  # home win, under
+        P[1, 1] = 0.3  # draw, under — no over mass anywhere
+        P2 = reconcile_matrix_to_1x2_and_totals(P, (0.5, 0.3, 0.2), 0.5, iters=50)
+        assert np.isfinite(P2).all()
+        assert abs(P2.sum() - 1.0) < 1e-12
+        zero = reconcile_matrix_to_1x2_and_totals(np.zeros((3, 3)), (0.5, 0.3, 0.2), 0.5)
+        assert np.isfinite(zero).all()
+
+    def test_valid_ou_anchor(self):
+        assert valid_ou_anchor(0.524)
+        assert not valid_ou_anchor(None)
+        assert not valid_ou_anchor(float("inf"))
+        assert not valid_ou_anchor(0.02)
+        assert not valid_ou_anchor(0.97)
+
+    def test_derive_from_lambdas_anchors_when_market_given(self):
+        m = derive_from_lambdas(1.5, 1.0, -0.1, target_1x2=(0.5, 0.3, 0.2), target_over_25=0.58)
+        assert abs(m["1x2"]["home"] - 0.5) < 1e-9
+        assert abs(m["over_under"]["over_2.5"] - 0.58) < 1e-8
+        plain = derive_from_lambdas(1.5, 1.0, -0.1, target_1x2=(0.5, 0.3, 0.2), target_over_25=None)
+        ref = derive_from_lambdas(1.5, 1.0, -0.1, target_1x2=(0.5, 0.3, 0.2))
+        assert plain == ref
 
 
 @pytest.mark.unit
