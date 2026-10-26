@@ -11,12 +11,27 @@ canonical source for finished NHL games. We use two endpoints:
         takeaways, PIM) and the period-by-period linescore (used to
         derive regulation scores and OT/SO tiebreak flags).
 
-Idempotent: matches.{home_team_id, away_team_id, match_date} is the
-upsert key for matches, and (match_id, team_id) is unique on
-nhl_match_stats. Re-running picks up missing games and overwrites
-stat rows for games already loaded.
+  * /score/{YYYY-MM-DD}
+        Live mode (--recent-days): the games that went final on a date.
+
+Fixture identity (2026-10): every game is first ATTACHED to an existing
+fixture — same club under any spelling (accent-insensitive, so ESPN's
+'Montreal Canadiens' row matches the API's 'Montréal'), kickoff within
+FIXTURE_TOLERANCE_HOURS, or the same NHL game id — and its stats are
+keyed to that fixture's own team ids. Before this, the 2025-26 load
+minted a second row for every ESPN-created fixture whose kickoff or team
+row differed, and the live season got no stats at all. Only historical
+games with no fixture are inserted (upsert key home/away/match_date);
+--attach-only (the live pipeline task) never inserts. (match_id, team_id)
+is unique on nhl_match_stats, so re-runs overwrite stat rows in place.
 
 Usage:
+    # Live pipeline tick: attach stats for games final in the last 3 days
+    python scripts/load_nhl_historical.py --recent-days 3 --attach-only
+
+    # Current season to date, attach-only, dry run first
+    python scripts/load_nhl_historical.py --seasons current --attach-only --dry-run
+
     # Single season (good for sanity checks)
     python scripts/load_nhl_historical.py --seasons 2024-2025
 
@@ -36,8 +51,9 @@ import logging
 import os
 import sys
 import time
+import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 
 import psycopg2
 import requests
@@ -104,6 +120,181 @@ FINAL_STATES = {"FINAL", "OFF", "OFFICIAL"}
 # to hammer them. ~3 req/s is the working number used by the nhl-api
 # Python clients in the wild.
 REQUEST_DELAY_SEC = 0.3
+
+# How far an NHL-API startTimeUTC may sit from an existing fixture's
+# match_date and still be "the same game". ESPN and the NHL API normally
+# agree to the minute; the slack covers a realigned kickoff, while staying
+# well under the ~24 h gap between two genuine meetings of the same pair
+# (the 2020-21 schedule had back-to-back same-opponent games).
+FIXTURE_TOLERANCE_HOURS = 12.0
+
+# main() exits non-zero when at least this many games needed stats and
+# none could be loaded — the systemic-breakage signal (see main()).
+SYSTEMIC_FAILURE_MIN_GAMES = 3
+
+
+def strip_accents(text: str) -> str:
+    """'Montréal' -> 'Montreal'. NFKD-decompose and drop combining marks."""
+    return "".join(ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch))
+
+
+def team_match_key(name: str | None) -> str:
+    """Accent- and case-insensitive team key. ESPN ingests 'Montreal
+    Canadiens' while the NHL API's placeName is 'Montréal', so the two
+    feeds created two `teams` rows that exact normalized_name matching can
+    never join (UNIQUE(normalized_name, sport) keeps them apart)."""
+    if not name:
+        return ""
+    return " ".join(strip_accents(name).lower().replace(".", " ").split())
+
+
+def current_nhl_season(today: date) -> str:
+    """Season string the NHL is in on `today`. A season opens in October and
+    its playoffs end in June; July-September belongs to the season about to
+    start (preseason games are filtered out by gameType anyway)."""
+    start = today.year if today.month >= 7 else today.year - 1
+    return f"{start}-{start + 1}"
+
+
+def resolve_season_arg(value: str | None, today: date | None = None) -> str | None:
+    """'current' -> the live season string; anything else passes through."""
+    if value is None:
+        return None
+    if value.strip().lower() == "current":
+        return current_nhl_season(today or datetime.now(timezone.utc).date())
+    return value
+
+
+def season_from_api(season_int: int | str | None) -> str | None:
+    """20262027 -> '2026-2027' (the NHL API's season id, back to ours)."""
+    s = str(season_int or "")
+    if len(s) != 8 or not s.isdigit():
+        return None
+    return f"{s[:4]}-{s[4:]}"
+
+
+def _as_utc(dt: datetime) -> datetime:
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def choose_fixture(
+    candidates: list[dict],
+    match_dt: datetime,
+    nhl_game_id: int | None,
+    tolerance_hours: float = FIXTURE_TOLERANCE_HOURS,
+) -> dict | None:
+    """Pick the existing `matches` row an NHL-API game belongs to.
+
+    `candidates` are rows already restricted to the right (home, away)
+    team-id sets; each carries `match_date`, `status` and `external_ids`.
+    A row that already holds this NHL game id wins outright. Otherwise the
+    row closest in time within `tolerance_hours` wins; ties prefer a row
+    that is already finished, then one carrying an ESPN id (the live
+    fixture), so a stale 'scheduled' placeholder never beats the real game.
+    A row already claimed by a DIFFERENT NHL game id is never chosen.
+    Returns None when nothing is close enough — the caller decides whether
+    that means "insert" (historical backfill) or "report and skip" (live)."""
+    if nhl_game_id is not None:
+        for c in candidates:
+            ext = c.get("external_ids") or {}
+            if str(ext.get("nhl", "")) == str(nhl_game_id):
+                return c
+    target = _as_utc(match_dt)
+    best: tuple | None = None
+    best_row: dict | None = None
+    for c in candidates:
+        md = c.get("match_date")
+        if md is None:
+            continue
+        gap_h = abs((_as_utc(md) - target).total_seconds()) / 3600.0
+        if gap_h > tolerance_hours:
+            continue
+        ext = c.get("external_ids") or {}
+        if ext.get("nhl") and nhl_game_id is not None and str(ext["nhl"]) != str(nhl_game_id):
+            continue
+        rank = (gap_h, 0 if c.get("status") == "finished" else 1, 0 if "espn" in ext else 1)
+        if best is None or rank < best:
+            best, best_row = rank, c
+    return best_row
+
+
+def load_team_alias_ids(cur) -> dict[str, set[str]]:
+    """{team_match_key: {team ids}} over every NHL team row, so one NHL-API
+    team resolves to all rows that are the same club under another
+    spelling (the ESPN 'Montreal Canadiens' vs NHL 'Montréal Canadiens')."""
+    cur.execute("SELECT id::text AS id, name FROM teams WHERE sport = 'nhl'")
+    out: dict[str, set[str]] = {}
+    for r in cur.fetchall():
+        out.setdefault(team_match_key(r["name"]), set()).add(r["id"])
+    return out
+
+
+def lookup_team_by_nhl_api_id(cur, nhl_team_id: int | None) -> dict | None:
+    """The NHL-API-owned teams row for an API team id (stamped by
+    ensure_nhl_team). Used when a payload lacks placeName/commonName,
+    which is the case for the /score/{date} feed."""
+    if nhl_team_id is None:
+        return None
+    cur.execute(
+        """
+        SELECT id::text AS id, name FROM teams
+        WHERE sport = 'nhl' AND (external_ids->>'nhl_api_id')::bigint = %s
+        ORDER BY updated_at DESC NULLS LAST
+        LIMIT 1
+        """,
+        (int(nhl_team_id),),
+    )
+    return cur.fetchone()
+
+
+def find_existing_fixture(
+    cur,
+    home_ids: set[str],
+    away_ids: set[str],
+    match_dt: datetime,
+    nhl_game_id: int | None,
+    tolerance_hours: float = FIXTURE_TOLERANCE_HOURS,
+) -> dict | None:
+    """Existing NHL fixture for this game, if any — see choose_fixture."""
+    window = timedelta(hours=max(tolerance_hours, 1.0))
+    gid = None if nhl_game_id is None else str(nhl_game_id)
+    cur.execute(
+        """
+        SELECT m.id::text AS id, m.home_team_id::text AS home_team_id,
+               m.away_team_id::text AS away_team_id, m.match_date, m.status,
+               m.home_score, m.away_score, m.external_ids
+        FROM matches m
+        WHERE (m.home_team_id::text = ANY(%s) AND m.away_team_id::text = ANY(%s)
+               AND m.match_date BETWEEN %s AND %s)
+           OR (%s::text IS NOT NULL AND m.external_ids->>'nhl' = %s::text)
+        """,
+        (list(home_ids), list(away_ids), _as_utc(match_dt) - window, _as_utc(match_dt) + window, gid, gid),
+    )
+    return choose_fixture(list(cur.fetchall()), match_dt, nhl_game_id, tolerance_hours)
+
+
+def attach_to_fixture(cur, fixture: dict, game: dict, metadata: dict) -> None:
+    """Stamp NHL identity + loader metadata on an EXISTING fixture.
+
+    Additive only: external_ids gains the 'nhl' key, metadata gains the
+    loader's keys without overwriting what the ESPN path already wrote
+    (existing keys win), and scores/status are filled only when the row
+    has no result yet — fetch_upcoming --results owns those otherwise."""
+    home_score = (game.get("homeTeam") or {}).get("score")
+    away_score = (game.get("awayTeam") or {}).get("score")
+    cur.execute(
+        """
+        UPDATE matches
+           SET external_ids = COALESCE(external_ids, '{}'::jsonb) || %s,
+               metadata = %s::jsonb || COALESCE(metadata, '{}'::jsonb),
+               status = CASE WHEN home_score IS NULL AND %s::int IS NOT NULL THEN 'finished' ELSE status END,
+               home_score = COALESCE(home_score, %s),
+               away_score = COALESCE(away_score, %s),
+               updated_at = NOW()
+         WHERE id = %s
+        """,
+        (Json({"nhl": str(game.get("id"))}), Json(metadata), home_score, home_score, away_score, fixture["id"]),
+    )
 
 
 @dataclass(frozen=True)
@@ -346,6 +537,19 @@ def ensure_nhl_team(cur, team_payload: dict, league_id: str) -> str | None:
     return row["id"] if row else None
 
 
+def build_match_metadata(game: dict, reg_home: int, reg_away: int, reg_winner: str) -> dict:
+    """matches.metadata keys this loader owns (regulation score + final
+    period type for the regulation/OT markets, game type, NHL game id)."""
+    return {
+        "regulation_home_score": reg_home,
+        "regulation_away_score": reg_away,
+        "regulation_winner": reg_winner,
+        "period_type_final": (game.get("gameOutcome") or {}).get("lastPeriodType") or "REG",
+        "game_type": "playoff" if game.get("gameType") == GAME_TYPE_PLAYOFF else "regular",
+        "nhl_game_id": game.get("id"),
+    }
+
+
 def upsert_match(
     cur,
     game: dict,
@@ -370,18 +574,8 @@ def upsert_match(
 
     home_score = (game.get("homeTeam") or {}).get("score")
     away_score = (game.get("awayTeam") or {}).get("score")
-    period_type = (game.get("gameOutcome") or {}).get("lastPeriodType") or "REG"
     venue = (game.get("venue") or {}).get("default")
-    game_type = "playoff" if game.get("gameType") == GAME_TYPE_PLAYOFF else "regular"
-
-    metadata = {
-        "regulation_home_score": reg_home,
-        "regulation_away_score": reg_away,
-        "regulation_winner": reg_winner,
-        "period_type_final": period_type,
-        "game_type": game_type,
-        "nhl_game_id": game.get("id"),
-    }
+    metadata = build_match_metadata(game, reg_home, reg_away, reg_winner)
 
     cur.execute(
         """
@@ -498,21 +692,43 @@ def upsert_team_stats(cur, match_id: str, team_id: str, stats: TeamGameStats, op
     )
 
 
-def already_loaded_game_ids(cur, season: str) -> set[int]:
-    """Return NHL game IDs already in nhl_match_stats for this season.
-    Used to skip re-fetching boxscores on resumed runs."""
+def already_loaded_game_ids(cur, game_ids: list[int]) -> set[int]:
+    """NHL game ids (of `game_ids`) whose fixture already carries stats.
+    Keyed on the game id, not the season string, because an attached ESPN
+    fixture's season label is ESPN's, not the loader's. Used to skip
+    re-fetching on resumed runs and on every live tick."""
+    if not game_ids:
+        return set()
     cur.execute(
         """
         SELECT DISTINCT (m.external_ids->>'nhl')::bigint AS nhl_id
         FROM matches m
         JOIN nhl_match_stats s ON s.match_id = m.id
-        JOIN leagues l ON l.id = m.league_id
-        WHERE l.sport = 'nhl' AND m.season = %s
-          AND m.external_ids ? 'nhl'
+        WHERE m.external_ids->>'nhl' = ANY(%s)
         """,
-        (season,),
+        ([str(g) for g in game_ids],),
     )
     return {row["nhl_id"] for row in cur.fetchall() if row.get("nhl_id") is not None}
+
+
+def discover_recent_games(days: int, today: date | None = None) -> dict[int, dict]:
+    """{game_id: game} for regular-season + playoff games that went FINAL
+    on any of the last `days` UTC dates (today included), via the per-date
+    /score feed: one request per day instead of 32 club schedules, cheap
+    enough for the 15-minute pipeline tick."""
+    today = today or datetime.now(timezone.utc).date()
+    games: dict[int, dict] = {}
+    for back in range(days + 1):
+        d = today - timedelta(days=back)
+        payload = get_json(f"{NHL_API}/score/{d.isoformat()}")
+        for g in (payload or {}).get("games") or []:
+            if g.get("gameType") not in (GAME_TYPE_REGULAR, GAME_TYPE_PLAYOFF):
+                continue
+            if (g.get("gameState") or "").upper() not in FINAL_STATES:
+                continue
+            if g.get("id") is not None:
+                games.setdefault(int(g["id"]), g)
+    return games
 
 
 def discover_games(season_str: str) -> dict[int, dict]:
@@ -545,95 +761,165 @@ def discover_games(season_str: str) -> dict[int, dict]:
 GAME_LOG_INTERVAL = 100
 
 
-def load_season(database_url: str, season_str: str, refetch: bool) -> dict[str, int]:
-    counts = {"games_seen": 0, "games_loaded": 0, "games_skipped": 0, "games_failed": 0}
-    logger.info("=== season %s: discovering games ===", season_str)
-    games = discover_games(season_str)
-    counts["games_seen"] = len(games)
+def _resolve_team(cur, team_payload: dict, league_id: str) -> dict | None:
+    """NHL-API team payload -> {id, name} of the loader-owned teams row.
+    Club-schedule payloads carry placeName/commonName (ensure_nhl_team can
+    create/refresh the row); /score payloads only carry the API id."""
+    if (team_payload.get("placeName") or {}).get("default") and (team_payload.get("commonName") or {}).get("default"):
+        tid = ensure_nhl_team(cur, team_payload, league_id)
+        if tid:
+            place = team_payload["placeName"]["default"]
+            common = team_payload["commonName"]["default"]
+            return {"id": str(tid), "name": f"{place} {common}"}
+    return lookup_team_by_nhl_api_id(cur, team_payload.get("id"))
+
+
+def _alias_ids(aliases: dict[str, set[str]], team: dict) -> set[str]:
+    return set(aliases.get(team_match_key(team["name"]), set())) | {team["id"]}
+
+
+def load_games(
+    database_url: str,
+    games: dict[int, dict],
+    label: str,
+    refetch: bool,
+    attach_only: bool,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    """Load right-rail stats for `games` and attach them to fixtures.
+
+    Every game is first matched against EXISTING fixtures (same club under
+    any spelling, kickoff within FIXTURE_TOLERANCE_HOURS, or the same NHL
+    game id). A match is attached to and its stats are keyed to THAT
+    fixture's own team ids, so the ESPN-created live-season rows get the
+    stats the feature builder reads. Only when nothing matches does the
+    historical path insert a new fixture; with attach_only (the live job)
+    an unmatched game is logged as an error and skipped — the live job
+    must never mint a second row for a game ESPN already owns."""
+    counts = {
+        "games_seen": len(games),
+        "games_loaded": 0,
+        "games_attached": 0,
+        "games_inserted": 0,
+        "games_skipped": 0,
+        "games_unmatched": 0,
+        "games_failed": 0,
+    }
     if not games:
-        logger.info("=== season %s: no games discovered, skipping ===", season_str)
+        logger.info("=== %s: no finished games discovered ===", label)
         return counts
 
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             league_id = ensure_nhl_league(cur)
-            already = set() if refetch else already_loaded_game_ids(cur, season_str)
+            already = set() if refetch else already_loaded_game_ids(cur, list(games))
+            aliases = load_team_alias_ids(cur)
             total = len(games)
-            logger.info(
-                "=== season %s: %d games to consider (%d already loaded) ===",
-                season_str,
-                total,
-                len(already),
-            )
+            logger.info("=== %s: %d games to consider (%d already loaded) ===", label, total, len(already))
 
-            for processed, (gid, game) in enumerate(games.items(), start=1):
+            for processed, (gid, game) in enumerate(sorted(games.items()), start=1):
                 if gid in already:
                     counts["games_skipped"] += 1
                 else:
-                    rr = get_json(f"{NHL_API}/gamecenter/{gid}/right-rail")
-                    if rr is None:
+                    try:
+                        _load_one_game(cur, conn, gid, game, league_id, aliases, attach_only, dry_run, counts)
+                    except Exception as e:  # noqa: BLE001 — one bad game shouldn't kill the run
+                        conn.rollback()
+                        logger.error("game %s failed: %s", gid, e)
                         counts["games_failed"] += 1
-                    else:
-                        try:
-                            home_stats = parse_team_game_stats(rr, "homeValue")
-                            away_stats = parse_team_game_stats(rr, "awayValue")
-                            reg_home, reg_away, reg_winner = regulation_outcome(
-                                home_stats.period_scores, away_stats.period_scores
-                            )
-                            home_team_id = ensure_nhl_team(cur, game["homeTeam"], league_id)
-                            away_team_id = ensure_nhl_team(cur, game["awayTeam"], league_id)
-                            if not (home_team_id and away_team_id):
-                                counts["games_failed"] += 1
-                            else:
-                                match_id = upsert_match(
-                                    cur,
-                                    game,
-                                    league_id,
-                                    home_team_id,
-                                    away_team_id,
-                                    reg_home,
-                                    reg_away,
-                                    reg_winner,
-                                    season_str,
-                                )
-                                if not match_id:
-                                    counts["games_failed"] += 1
-                                else:
-                                    upsert_team_stats(cur, match_id, home_team_id, home_stats, away_stats)
-                                    upsert_team_stats(cur, match_id, away_team_id, away_stats, home_stats)
-                                    counts["games_loaded"] += 1
-                                    # Commit per game so a crash mid-season leaves a
-                                    # usable partial backfill instead of an aborted
-                                    # transaction.
-                                    conn.commit()
-                        except Exception as e:  # noqa: BLE001 — one bad game shouldn't kill the season
-                            logger.warning("game %s failed: %s", gid, e)
-                            counts["games_failed"] += 1
 
                 # Heartbeat so a long silent loop looks like progress
-                # instead of a hang. Fires on the interval and on the
-                # final game so the season-end count is always visible.
+                # instead of a hang.
                 if processed % GAME_LOG_INTERVAL == 0 or processed == total:
-                    logger.info(
-                        "season %s: processed %d/%d (loaded=%d skipped=%d failed=%d)",
-                        season_str,
-                        processed,
-                        total,
-                        counts["games_loaded"],
-                        counts["games_skipped"],
-                        counts["games_failed"],
-                    )
-
+                    logger.info("%s: processed %d/%d %s", label, processed, total, counts)
+            if dry_run:
+                conn.rollback()
     return counts
+
+
+def _load_one_game(cur, conn, gid, game, league_id, aliases, attach_only, dry_run, counts) -> None:
+    try:
+        match_dt = datetime.fromisoformat(game["startTimeUTC"].replace("Z", "+00:00"))
+    except (KeyError, ValueError):
+        counts["games_failed"] += 1
+        return
+    home = _resolve_team(cur, game.get("homeTeam") or {}, league_id)
+    away = _resolve_team(cur, game.get("awayTeam") or {}, league_id)
+    if not (home and away):
+        logger.error("game %s: NHL team ids not resolvable (%s / %s)", gid, game.get("homeTeam"), game.get("awayTeam"))
+        counts["games_failed"] += 1
+        return
+    fixture = find_existing_fixture(cur, _alias_ids(aliases, home), _alias_ids(aliases, away), match_dt, gid)
+    if fixture is None and attach_only:
+        logger.error(
+            "game %s (%s @ %s, %s): no existing fixture to attach to — skipped (attach-only)",
+            gid,
+            away["name"],
+            home["name"],
+            match_dt.isoformat(),
+        )
+        counts["games_unmatched"] += 1
+        return
+
+    rr = get_json(f"{NHL_API}/gamecenter/{gid}/right-rail")
+    if rr is None:
+        counts["games_failed"] += 1
+        return
+    home_stats = parse_team_game_stats(rr, "homeValue")
+    away_stats = parse_team_game_stats(rr, "awayValue")
+    reg_home, reg_away, reg_winner = regulation_outcome(home_stats.period_scores, away_stats.period_scores)
+
+    if fixture is not None:
+        attach_to_fixture(cur, fixture, game, build_match_metadata(game, reg_home, reg_away, reg_winner))
+        match_id, home_tid, away_tid = fixture["id"], fixture["home_team_id"], fixture["away_team_id"]
+        counts["games_attached"] += 1
+    else:
+        season_str = season_from_api(game.get("season")) or current_nhl_season(match_dt.date())
+        match_id = upsert_match(
+            cur, game, league_id, home["id"], away["id"], reg_home, reg_away, reg_winner, season_str
+        )
+        if not match_id:
+            counts["games_failed"] += 1
+            return
+        home_tid, away_tid = home["id"], away["id"]
+        counts["games_inserted"] += 1
+
+    upsert_team_stats(cur, match_id, home_tid, home_stats, away_stats)
+    upsert_team_stats(cur, match_id, away_tid, away_stats, home_stats)
+    counts["games_loaded"] += 1
+    # Commit per game so a crash mid-season leaves a usable partial
+    # backfill instead of an aborted transaction (dry runs roll back).
+    if dry_run:
+        conn.rollback()
+    else:
+        conn.commit()
+
+
+def load_season(
+    database_url: str, season_str: str, refetch: bool, attach_only: bool = False, dry_run: bool = False
+) -> dict[str, int]:
+    logger.info("=== season %s: discovering games ===", season_str)
+    return load_games(database_url, discover_games(season_str), f"season {season_str}", refetch, attach_only, dry_run)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument(
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument(
         "--seasons",
-        required=True,
-        help="Comma-separated season strings (e.g. 2024-2025,2023-2024).",
+        help="Comma-separated season strings (e.g. 2024-2025,2023-2024), or 'current'.",
     )
+    src.add_argument(
+        "--recent-days",
+        type=int,
+        help="Live mode: games that went final on the last N UTC days (per-date /score feed).",
+    )
+    p.add_argument(
+        "--attach-only",
+        action="store_true",
+        help="Never insert a new fixture: attach stats to existing rows only (the live job).",
+    )
+    p.add_argument("--dry-run", action="store_true", help="Match and fetch, report counts, write nothing.")
     p.add_argument(
         "--refetch",
         action="store_true",
@@ -648,10 +934,33 @@ def main(argv: list[str] | None = None) -> int:
     if not args.database_url:
         logger.error("DATABASE_URL not set and --database-url not provided")
         return 2
-    seasons = [s.strip() for s in args.seasons.split(",") if s.strip()]
-    for season in seasons:
-        counts = load_season(args.database_url, season, args.refetch)
-        logger.info("season %s: %s", season, counts)
+    runs: list[dict[str, int]] = []
+    if args.recent_days is not None:
+        counts = load_games(
+            args.database_url,
+            discover_recent_games(args.recent_days),
+            f"last {args.recent_days}d",
+            args.refetch,
+            args.attach_only,
+            args.dry_run,
+        )
+        logger.info("recent %dd: %s", args.recent_days, counts)
+        runs.append(counts)
+    else:
+        seasons = [resolve_season_arg(s.strip()) for s in args.seasons.split(",") if s.strip()]
+        for season in seasons:
+            counts = load_season(args.database_url, season, args.refetch, args.attach_only, args.dry_run)
+            logger.info("season %s: %s", season, counts)
+            runs.append(counts)
+    # Loud failure for the systemic case: several games needed loading and
+    # NONE could be loaded (team map, fixture identity or the API broken).
+    # One stubborn game is logged at ERROR above every tick but does not
+    # fail the pipeline — a transient right-rail miss would otherwise page.
+    needed = sum(c["games_seen"] - c["games_skipped"] for c in runs)
+    loaded = sum(c["games_loaded"] for c in runs)
+    if needed >= SYSTEMIC_FAILURE_MIN_GAMES and loaded == 0 and not args.dry_run:
+        logger.error("%d finished NHL games needed stats and none were loaded", needed)
+        return 1
     return 0
 
 

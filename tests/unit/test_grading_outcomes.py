@@ -45,6 +45,11 @@ class TestNhlRegulation:
         assert go.nhl_regulation_outcome({"regulation_winner": "tie"}) == "tie"
         assert go.nhl_regulation_outcome({"regulation_winner": "away"}) == "away"
 
+    def test_legacy_draw_reads_as_tie(self):
+        # The ESPN results path wrote 'draw' until 2026-10; the model's
+        # label for a regulation tie is 'tie'.
+        assert go.nhl_regulation_outcome({"regulation_winner": "draw"}) == "tie"
+
     def test_missing_field_returns_none(self):
         # Older NHL rows that haven't been backfilled with regulation
         # split don't have the field. Returning None leaves is_correct

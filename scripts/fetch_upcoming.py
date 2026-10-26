@@ -1041,7 +1041,7 @@ _EXTRA_TIME_TOKENS = ("/OT", "/SO", "/2OT", "OVERTIME", "SHOOTOUT", "AET", "PEN"
 def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_context: dict | None = None) -> bool:
     """Record one completed competition (state == 'post'). Grading needs:
     scores + status='finished' (all sports), and for NHL additionally
-    metadata.regulation_winner ('draw' when the game went past regulation
+    metadata.regulation_winner ('tie' when the game went past regulation
     — grading_outcomes.nhl_regulation_outcome reads it). ESPN's status
     detail ('Final/OT', 'Final/SO') tells us that.
 
@@ -1069,7 +1069,12 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
 
     result_meta: dict = {"result_detail": detail or "FINAL", "result_source": "espn_scoreboard"}
     if cfg.sport == "nhl":
-        result_meta["regulation_winner"] = "draw" if went_extra else ("home" if home_score > away_score else "away")
+        # 'tie', not 'draw': the regulation model's labels, its training
+        # query (regulation_winner IN ('home','tie','away')), the NHL loader
+        # and the DB outcome trigger all use 'tie'. Writing 'draw' (until
+        # 2026-10) graded every correct tie pick as a miss and silently
+        # dropped every live-season regulation tie from the training frame.
+        result_meta["regulation_winner"] = "tie" if went_extra else ("home" if home_score > away_score else "away")
 
     home_id = ensure_team(cur, cfg, home_name, league_id)
     away_id = ensure_team(cur, cfg, away_name, league_id)

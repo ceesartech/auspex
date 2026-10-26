@@ -360,6 +360,7 @@ NHL_REGULATION_TRAINING_QUERY = f"""
         CASE m.metadata->>'regulation_winner'
             WHEN 'home' THEN 0
             WHEN 'tie'  THEN 1
+            WHEN 'draw' THEN 1
             WHEN 'away' THEN 2
         END AS nhl_regulation,
         (SELECT AVG(o.odds_decimal) FROM odds o
@@ -397,7 +398,9 @@ NHL_REGULATION_TRAINING_QUERY = f"""
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
       AND m.metadata ? 'regulation_winner'
-      AND m.metadata->>'regulation_winner' IN ('home', 'tie', 'away')
+      -- 'draw' is the ESPN results path's pre-2026-10 spelling of a
+      -- regulation tie; excluding it dropped every live-season tie.
+      AND m.metadata->>'regulation_winner' IN ('home', 'tie', 'draw', 'away')
       -- Preseason is a different game and carries no market; excluded
       -- via the shared predicate. Unmarked (pre-backfill) rows stay in.
       AND {MATCH_NOT_PRESEASON_SQL}

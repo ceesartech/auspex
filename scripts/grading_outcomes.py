@@ -131,8 +131,13 @@ def nhl_regulation_outcome(metadata: dict) -> Optional[str]:
     """NHL regulation 3-class: read metadata.regulation_winner.
     'tie' covers regulation-tied games (decided in OT/SO). Returns
     None if the loader hasn't backfilled regulation_winner — caller
-    leaves the prediction ungraded rather than guessing."""
-    return (metadata or {}).get("regulation_winner")
+    leaves the prediction ungraded rather than guessing.
+
+    'draw' is read as 'tie': the ESPN results path wrote 'draw' until
+    2026-10, which the regulation model (labels home/tie/away) can never
+    predict, so every correct tie pick on those rows graded as a miss."""
+    winner = (metadata or {}).get("regulation_winner")
+    return "tie" if winner == "draw" else winner
 
 
 def nhl_moneyline_outcome(home_score: int, away_score: int) -> Optional[str]:
