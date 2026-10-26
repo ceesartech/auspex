@@ -220,6 +220,9 @@ memory; this section makes it repo-canonical.
 | "More leagues" vs "more recent" (soccer) | **RESOLVED — corpus was the lever** (2026-09-03) | Restricting the refit to the 6 original leagues is WORSE by +0.00350 ± 0.00135; the gain shipped on 2026-08-06 came from breadth, not recency | — |
 | MMA corpus backfill as an accuracy fix | **CLOSED — insufficient alone** (2026-09-03) | The 18-month corpus hole and OOD serve features are real, but a walk-forward over the loader era, where every fighter history IS complete, still shows no skill; clamping the stale features on the live model does not recover accuracy (0.471). The binding constraint is that the model has never seen a market price | Only alongside real odds in the training frame |
 | Tennis "max odds ≤ 2.0" rescue gate | **CLOSED — not a model edge** (2026-09-03) | After de-duplicating the fixture-identity bug it is +8% flat ROI, CI [−4%, +20%], statistically identical to a no-model control ("bet every consensus favourite at the best of ~22 books" = +5.9%), and the entire effect is one month | Re-measure once tennis has market inputs and settles honestly |
+| Soccer 1x2 pre-match feature families (rest/congestion, Elo, venue-specific form, 10/20-match + EWMA form, season-to-date table, draw propensity, H2H, discipline, cross-book micro-structure, calendar, rolling shots/SoT/corners, rolling xG, totals form) | **CLOSED — market is the ceiling** (2026-10-25) | `scripts/ab_soccer_feature_screen.py` on the full prod frame: 138,773 matches 2012–2026 with 1x2 odds, fixed test 2024–26 n=23,784 (SE ≈ 0.0001–0.0002 per family, 40× tighter than the audit's n≈3.5k). De-vigged average-odds market Brier **0.59496**; LR on market logits −0.00031 ± 0.00012; a prod-like GBM (odds + 5-match form + match_stats diffs) +0.00004 ± 0.00024 vs the raw market. Every family \|ΔBrier\| ≤ 0.00033: best is cross-book micro-structure −0.00023 ± 0.00011 (7/8 seasons negative), all 60 features together −0.00033 ± 0.00019 — 15–50× under the gate. Elo −0.00007, rest −0.00007, venue form −0.00002, H2H +0.00002 | Nothing form-shaped. Only information the closing price does not already carry (confirmed line-ups / injuries, or a sharper price than the books' average) can move soccer 1x2 |
+| Soccer over-2.5 features beyond the market total price | **CLOSED** (2026-10-25) | Same harness, 39,435 matches with O/U odds (2019–26), test n=14,746: market O/U price Brier 0.48294 (−0.0176 ± 0.0014 vs the constant base rate the derived-market guard uses); totals form −0.00027 ± 0.00013, xG / shots / rest / season / weather / micro all within ±0.0003 of the price; no GBM beats the price. **The open finding is the inverse:** a model that sees only 1x2 odds (what the Dixon-Coles path has without a totals price) scores +0.00095 ± 0.00058 historically and the served derived O/U is **+0.0108 ± 0.0043 worse than the closing O/U market live** (n=1,302, 2026-07..10) | Lever is the §7 2026-10-25 item 4: a second IPF constraint anchoring the scoreline matrix to the market O/U 2.5 (and BTTS where priced), not more features |
+| Soccer favourite–longshot bias of the proportional de-vig | **MEASURED — calibration, not a standalone edge** (2026-10-25) | Realized minus implied by implied band, stable in 2012–19 AND 2020–26: 0.7–0.8 → +0.035 / +0.029 (z 5.3 / 4.0), 0.8+ → +0.030 / +0.038, <0.10 → −0.013 / −0.017 (z −3.6 / −4.1). Flat-stake at the average price: <0.10 implied −24% / −29%, 0.1–0.2 −8% / −10%, favourites ≈ −1 to +1%. At the best (Max) price, p ≥ 0.6 returns **+0.47% ± 0.39%** (n=27,574; by year −1.8% .. +2.9%) → the vig eats it. Live confirmation on 5,262 closing selections (~9 books): 0.6–0.8 bands realized 0.68 / 0.81 vs proportional 0.64 / 0.74 vs power de-vig 0.665 / 0.774 | Adopt power de-vig in `rec_gating.market_consensus_prob` (same conclusion as racing); never emit soccer 1x2 recs above ~3.5 — the long-odds bands are where the EV gate selects on model noise (live post-gating book: odds ≥ 5 n=44 −25.5%) |
 
 ### 4.3 Validation methodology (house rules)
 
@@ -1012,6 +1015,75 @@ with the growth-rate driver (WAL) eliminated.
 > signal racing has no capture for. Re-scoring alone would NOT harvest it:
 > against a single book the refreshed consensus equals the price and EV is
 > zero by construction, so this too lands on the multi-book consensus item.
+
+> **Update (2026-10-25) — MODEL / ACCURACY CHECK + STATISTICAL FEATURE
+> SCREEN (analysis only; nothing shipped).** Live, deduped (newest row per
+> match+market), paired against the de-vigged closing consensus from
+> `odds_snapshots` on the SAME matches, 2026-07-13..10-25, multiclass Brier,
+> positive = model worse: soccer 1x2 **+0.0020 ± 0.0016** (n=1,754; monthly
+> Jul +0.005, Aug +0.003, Sep +0.001, Oct +0.001 — the model IS the market);
+> soccer over-2.5 **+0.0108 ± 0.0043** (n=1,302); tennis +0.033 ± 0.017
+> (n=290); MMA +0.125 ± 0.030 (n=138, market 72% accurate vs model 46%); NHL
+> moneyline +0.0185 ± 0.0109 (n=181), NHL regulation +0.035 ± 0.010 (n=139);
+> NBA moneyline +0.024 ± 0.024 (n=38); NFL moneyline −0.0025 ± 0.0136
+> (n=104). Model-vs-market disagreement is NOT predictive in any sport
+> (realized ≈ market in every disagreement bucket), and every EV-rule
+> variant replayed at closing best prices (model EV ≥ 5%, odds caps, 50/50
+> shrink to market, pure price-shopping) has an ROI SE of 6–20 pp at this n —
+> no rule can be ranked yet. The post-gating book since 2026-09-04 is soccer
+> only: n=304, +246 on 4,412 (+5.6%, SE ≈ 9 pp); its 1x2 recs sit at odds
+> 3–5 (n=124, +13%) and ≥ 5 (n=44, −25.5%).
+> **Feature screen (13 families, §4 rows above): soccer 1x2 is at the
+> market's ceiling** — nothing pre-match moves it by more than 0.0003 Brier
+> on n=23,784, and the prod-like GBM adds +0.00004 over the raw de-vigged
+> price. Treat "add a soccer feature" as closed unless it is line-up /
+> injury information.
+> **Data and serving defects found (these ARE the model levers):**
+> (1) **The 2025-26 season carries no odds for NBA (1,398/1,401), NFL
+> (286/286) or NHL (1,390/1,396)** — the 2026-09 backfill loaded games
+> without `backfill_historical_odds.py`, so 17–25% of each training frame,
+> and the most recent season, trains on NEUTRAL_DEFAULT market features
+> (NHL 2020-21 and 2021-22 — 2,353 games — are also odds-less). Tennis is
+> 99% default odds (27,243/27,517) and MMA 92% (1,783/1,928): no market
+> input at all. (2) **Cross-book dispersion is train/serve skewed 4–5×:**
+> training-era std features came from one historical snapshot per game-day
+> with books at different staleness (NBA spread_std 1.5–1.6, NHL 0.29–0.33,
+> NFL total_std 0.86–0.96; the odds-less 2025-26 rows show 5.3 / 2.9) while
+> the live current-price table is synchronized (NBA 0.35, NHL 0.13, NFL
+> 0.29). The shipped cross-book wins were validated on a dispersion signal
+> the serve path does not reproduce. (3) **NHL goalie features are at their
+> 0.905 default for 100% of 2026-27 games** (50% in the training era) — the
+> goalie backfill is not running for the live season; nothing paged. (4) NBA
+> total, the one challenger the promote gate keeps, emits an overconfident
+> under cluster live (15 of 110 games at P(over) ≈ 0.25; 9 went over).
+> (5) 62 of 243 upcoming soccer fixtures (25%) sit on default odds — known
+> and gated, recorded here as the baseline for a default-rate canary.
+> **Ranked recommendations (none executed):**
+> 1. `backfill_historical_odds.py` for 2025-26 across NBA/NFL/NHL (+ NHL
+>    2020-22), recompute features, retrain through the promote gate — a data
+>    completeness fix on the strongest feature, not a lever to re-test.
+> 2. Fix NHL goalie population for the live season; add a per-sport
+>    "features at NEUTRAL_DEFAULT" rate to `monitor_models` with a page when
+>    it jumps (the silent-failure class this system keeps meeting).
+> 3. Rebuild the cross-book dispersion features from synchronized snapshots
+>    (odds_snapshots since 2026-07 is the live-equivalent definition) or
+>    normalize by book count, then re-validate the shipped NFL/NBA/NHL
+>    cross-book members on that definition.
+> 4. Soccer derived markets: add a totals constraint to
+>    `reconcile_matrix_to_1x2` (IPF on 1x2 × over/under-2.5 regions, market
+>    O/U where priced, BTTS optional). Expected: closes the +0.0108 live gap
+>    on the 2.5 line by construction and moves BTTS / team totals / correct
+>    score consistently. Validate with an `ab_soccer_dixon_coles_refit`-style
+>    harness before shipping; this is what could un-gate over_under.
+> 5. Power de-vig in `rec_gating.market_consensus_prob` and a soccer 1x2
+>    `max_odds` of ~3.5 (registry row above).
+> 6. Tennis: a `load_tennis_odds.py` from tennis-data.co.uk (B365/PS/Avg/Max
+>    closing odds, ATP+WTA, 2001+) joined on player name + date — the first
+>    market input for the one gated 1v1 stream that has a free source.
+> 7. Hold the NBA-total promote until item 1 lands and the under cluster is
+>    explained.
+> Harness: `scripts/ab_soccer_feature_screen.py` (export SQL in its
+> docstring; the live comparison SQL is in the same file's notes).
 
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
