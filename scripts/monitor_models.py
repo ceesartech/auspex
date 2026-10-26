@@ -689,6 +689,191 @@ def constant_prior_canary(cur) -> List[DriftFinding]:
     ]
 
 
+# ── Neutral-default feature canary (audit §7, 2026-10-25) ─────────────
+#
+# Every compute_features_*.py replaces a missing input with a NEUTRAL_DEFAULT
+# so the model always gets a finite row. That is the right serving behaviour
+# and the wrong failure mode: when an upstream feed breaks, the features go
+# flat, the model converges to its prior, and nothing errors. The 2026-10-25
+# audit found three of these at once — the whole 2025-26 NBA/NFL/NHL season
+# without odds, NHL goalie features at their default for every live game, and
+# 25% of upcoming soccer fixtures on default odds.
+#
+# Absolute thresholds would page forever (tennis odds are structurally absent
+# whenever the-odds-api does not list the tournament; NBA books list a game
+# about a day out), so the canary compares each probe's default rate over the
+# last FEATURE_CANARY_RECENT_DAYS against its own trailing baseline and pages
+# on a JUMP. A probe stuck at default in BOTH windows is a standing defect: it
+# is reported as a warning on every run until fixed, never paged hourly.
+FEATURE_CANARY_RECENT_DAYS = 3
+FEATURE_CANARY_BASELINE_DAYS = 28
+FEATURE_CANARY_AHEAD_HOURS = 12  # include fixtures kicking off soon: odds should exist by then
+FEATURE_CANARY_MIN_N = 15
+FEATURE_CANARY_JUMP = 0.25  # recent - baseline default rate that pages
+FEATURE_CANARY_MIN_RATE = 0.50  # ...and only when the recent rate is at least this
+FEATURE_CANARY_STUCK = 0.90  # both windows at/above this = standing defect (warn)
+
+# (sport, feature_set, compute_features module, feature key, label). The
+# default is read from the module's own NEUTRAL_DEFAULTS so the canary can
+# never drift from what the feature builder actually writes.
+FEATURE_CANARY_PROBES: list[tuple[str, str, str, str, str]] = [
+    ("soccer", "baseline", "compute_features", "odds_home", "1x2 odds"),
+    ("soccer", "baseline", "compute_features", "home_roll_points", "team form"),
+    ("nba", "nba_baseline", "compute_features_nba", "odds_home_ml", "moneyline odds"),
+    ("nba", "nba_baseline", "compute_features_nba", "home_roll_pts_scored", "team form"),
+    ("nfl", "nfl_baseline", "compute_features_nfl", "odds_home_ml", "moneyline odds"),
+    ("nfl", "nfl_baseline", "compute_features_nfl", "home_roll_pts_scored", "team form"),
+    ("nhl", "nhl_baseline", "compute_features_nhl", "odds_home_ml", "moneyline odds"),
+    ("nhl", "nhl_baseline", "compute_features_nhl", "home_goalie_roll_save_pct", "starting goalie"),
+    ("nhl", "nhl_baseline", "compute_features_nhl", "home_roll_corsi_for_5v5", "5v5 form"),
+    ("tennis", "tennis_baseline", "compute_features_tennis", "odds_home_ml", "moneyline odds"),
+    ("mma", "mma_baseline", "compute_features_mma", "odds_home_ml", "moneyline odds"),
+]
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+
+
+def _neutral_default(module_name: str, key: str) -> Optional[float]:
+    """NEUTRAL_DEFAULTS[key] from scripts/<module_name>.py, loaded by path
+    (scripts/ is not a package). None when the module or key is missing."""
+    import importlib.util
+
+    mod = sys.modules.get(f"_canary_{module_name}")
+    if mod is None:
+        spec = importlib.util.spec_from_file_location(f"_canary_{module_name}", _SCRIPTS_DIR / f"{module_name}.py")
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[f"_canary_{module_name}"] = mod
+        spec.loader.exec_module(mod)
+    value = getattr(mod, "NEUTRAL_DEFAULTS", {}).get(key)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+_FEATURE_DEFAULT_RATE_SQL = """
+    WITH f AS (
+        SELECT DISTINCT ON (fc.match_id)
+               fc.match_id,
+               m.match_date,
+               (fc.features->>%(key)s)::float AS v
+        FROM features_cache fc
+        JOIN matches m ON m.id = fc.match_id
+        JOIN leagues l ON l.id = m.league_id
+        WHERE l.sport = %(sport)s
+          AND fc.feature_set = %(feature_set)s
+          AND m.match_date >= NOW() - (%(baseline_days)s || ' days')::interval
+          AND m.match_date <= NOW() + (%(ahead_hours)s || ' hours')::interval
+        ORDER BY fc.match_id, fc.computed_at DESC
+    )
+    SELECT
+        COUNT(*) FILTER (WHERE match_date >= NOW() - (%(recent_days)s || ' days')::interval) AS n_recent,
+        COUNT(*) FILTER (WHERE match_date >= NOW() - (%(recent_days)s || ' days')::interval
+                           AND (v IS NULL OR ABS(v - %(default)s) < 1e-9)) AS d_recent,
+        COUNT(*) FILTER (WHERE match_date < NOW() - (%(recent_days)s || ' days')::interval) AS n_base,
+        COUNT(*) FILTER (WHERE match_date < NOW() - (%(recent_days)s || ' days')::interval
+                           AND (v IS NULL OR ABS(v - %(default)s) < 1e-9)) AS d_base
+    FROM f
+"""
+
+
+def classify_default_rate(
+    n_recent: int, d_recent: int, n_base: int, d_base: int
+) -> tuple[Optional[str], float, Optional[float]]:
+    """Pure decision for one probe: (severity | None, recent_rate, baseline_rate).
+
+    alert  the recent default rate JUMPED by >= FEATURE_CANARY_JUMP over the
+           baseline and is itself >= FEATURE_CANARY_MIN_RATE (a feed broke);
+    warn   both windows sit at/above FEATURE_CANARY_STUCK (a standing defect
+           nobody has fixed), or a jump on a baseline too thin to trust;
+    None   otherwise, or when the recent window is too small to say."""
+    recent = (d_recent / n_recent) if n_recent else 0.0
+    base = (d_base / n_base) if n_base else None
+    if n_recent < FEATURE_CANARY_MIN_N:
+        return None, recent, base
+    if base is None or n_base < FEATURE_CANARY_MIN_N:
+        return ("warn" if recent >= FEATURE_CANARY_STUCK else None), recent, base
+    if recent - base >= FEATURE_CANARY_JUMP and recent >= FEATURE_CANARY_MIN_RATE:
+        return "alert", recent, base
+    if recent >= FEATURE_CANARY_STUCK and base >= FEATURE_CANARY_STUCK:
+        return "warn", recent, base
+    return None, recent, base
+
+
+def feature_default_canary(cur) -> List[DriftFinding]:
+    """Default-rate findings for every FEATURE_CANARY_PROBES entry. Never raises:
+    a probe that cannot be evaluated becomes a warn finding naming why, so a
+    broken canary is visible instead of silently passing."""
+    findings: List[DriftFinding] = []
+    for sport, feature_set, module_name, key, label in FEATURE_CANARY_PROBES:
+        try:
+            default = _neutral_default(module_name, key)
+            if default is None:
+                raise LookupError(f"{module_name}.NEUTRAL_DEFAULTS has no numeric {key!r}")
+            cur.execute(
+                _FEATURE_DEFAULT_RATE_SQL,
+                {
+                    "sport": sport,
+                    "feature_set": feature_set,
+                    "key": key,
+                    "default": default,
+                    "recent_days": str(FEATURE_CANARY_RECENT_DAYS),
+                    "baseline_days": str(FEATURE_CANARY_BASELINE_DAYS + FEATURE_CANARY_RECENT_DAYS),
+                    "ahead_hours": str(FEATURE_CANARY_AHEAD_HOURS),
+                },
+            )
+            row = cur.fetchone()
+            severity, recent, base = classify_default_rate(
+                int(row["n_recent"]), int(row["d_recent"]), int(row["n_base"]), int(row["d_base"])
+            )
+        except Exception as exc:  # noqa: BLE001 — the canary must report, not crash the monitor
+            logger.warning("feature-default canary %s/%s failed: %s", sport, key, exc)
+            findings.append(
+                DriftFinding(
+                    sport=sport,
+                    market=f"features:{key}",
+                    metric="default_rate",
+                    severity="warn",
+                    current=float("nan"),
+                    threshold=FEATURE_CANARY_MIN_RATE,
+                    message=f"FEATURE CANARY could not evaluate {sport} {label} ({key}): {exc}",
+                    model_name=feature_set,
+                )
+            )
+            continue
+        logger.info(
+            "feature-default canary %s %s (%s): recent %.0f%% (n=%d) vs baseline %s",
+            sport,
+            label,
+            key,
+            100 * recent,
+            int(row["n_recent"]),
+            "n/a" if base is None else f"{100 * base:.0f}% (n={int(row['n_base'])})",
+        )
+        if severity is None:
+            continue
+        base_txt = "no baseline" if base is None else f"{base:.0%} over the prior {FEATURE_CANARY_BASELINE_DAYS}d"
+        kind = "JUMPED to" if severity == "alert" else "is STUCK at"
+        findings.append(
+            DriftFinding(
+                sport=sport,
+                market=f"features:{key}",
+                metric="default_rate",
+                severity=severity,
+                current=round(recent, 4),
+                threshold=FEATURE_CANARY_MIN_RATE if severity == "alert" else FEATURE_CANARY_STUCK,
+                n=int(row["n_recent"]),
+                model_name=feature_set,
+                message=(
+                    f"FEATURE CANARY: {sport} {label} ({key}) {kind} its NEUTRAL_DEFAULT on {recent:.0%} of "
+                    f"fixtures in the last {FEATURE_CANARY_RECENT_DAYS}d (+{FEATURE_CANARY_AHEAD_HOURS}h ahead), "
+                    f"{base_txt}. The model is predicting from its prior for those games — check the feed "
+                    f"behind {module_name}.py."
+                ),
+            )
+        )
+    return findings
+
+
 # ── Orchestration ────────────────────────────────────────────────────
 
 
@@ -740,6 +925,9 @@ def run(database_url: str, days: int, min_samples: int, thresholds: DriftThresho
             # predictions, so it fires within one tick of a serve-path
             # regression instead of weeks later.
             all_findings.extend(constant_prior_canary(cur))
+            # Neutral-default feature canary: catches a broken upstream feed
+            # (odds, goalies, 5v5) while predictions still look normal.
+            all_findings.extend(feature_default_canary(cur))
 
             # Persist the calibration time series (best-effort — must not
             # break the drift-alert path below).
