@@ -206,7 +206,7 @@ memory; this section makes it repo-canonical.
 
 | Lever | Verdict | Evidence | Revisit condition |
 |-------|---------|----------|-------------------|
-| Probability calibration (team sports) | **CLOSED — no win** (2026-06-10) | Held-out ECE already 0.02–0.05 across soccer/NBA/NHL/tennis/MMA; isotonic overfit small val sets (MCE blowups); only NFL ML overconfident (0.148) but n=143 untrustworthy. Self-gating calibration infra **shipped** (`train_all_models.py` `_fit_and_gate_calibrator`, MIN_GATE_N=500): auto-enables per sport only if it beats held-out Brier — currently serves raw everywhere, correctly | A model drifts overconfident on ≥500 held-out rows (the gate will catch it automatically); use temperature scaling, not isotonic |
+| Probability calibration (team sports) | **CLOSED — no win** (2026-06-10) | Held-out ECE already 0.02–0.05 across soccer/NBA/NHL/tennis/MMA; isotonic overfit small val sets (MCE blowups); only NFL ML overconfident (0.148) but n=143 untrustworthy. Self-gating calibration infra **shipped** (`train_all_models.py` `_fit_and_gate_calibrator`, MIN_GATE_N=500): auto-enables per sport only if it beats held-out Brier — currently serves raw everywhere, correctly | A model drifts overconfident on ≥500 held-out rows (the gate will catch it automatically); use temperature scaling, not isotonic **2026-10-26:** the gate had kept ISOTONIC for NBA total on a −0.0019 held-out gain (n=536, inside noise; MCE 0.27 → 0.38) and served a 34-knot step function live (22 distinct probabilities, an overconfident P(over) 0.13–0.25 cluster). The gate now fits TEMPERATURE scaling and keeps it only past paired ΔBrier ≤ −0.005 with the 95% upper bound < 0 (`1662be9`) |
 | Soccer rolling match_stats features | **CLOSED — no win** (2026-06-15) | Full-ensemble retrain flat: held-out Brier 0.5946→0.59645. The A/B "-0.0029 win" was inside the Brier noise floor (SE ≈0.009 at n=3519). Features remain in `compute_features.py` (accuracy-neutral, keeps train/serve parity) | Only alongside a categorically stronger signal (xG) |
 | Weather features (Visual Crossing) | **CLOSED at current corpus** (2026-06-05) | All 5 sport-market combos DROP at ΔBrier ≤ −0.005 despite VC beating Open-Meteo and consistent ECE improvement | Corpus reaches 5–10× (only achievable via the §3.6 backfill). Note §6: the VC subscription itself should be cancelled meanwhile — **a deliberate reversal of the June "keep refreshing" decision** |
 | Cross-book odds-dispersion features | **SHIPPED** where it works | NFL total −0.0110 / ML −0.0154, NBA spread −0.0061, NHL puck_line −0.0186 / total −0.0231 ΔBrier. Soccer 1x2 tested + dropped (2-book structure too thin); tennis/MMA odds too sparse | Pattern needs ~20+ books' disagreement |
@@ -222,7 +222,10 @@ memory; this section makes it repo-canonical.
 | Tennis "max odds ≤ 2.0" rescue gate | **CLOSED — not a model edge** (2026-09-03) | After de-duplicating the fixture-identity bug it is +8% flat ROI, CI [−4%, +20%], statistically identical to a no-model control ("bet every consensus favourite at the best of ~22 books" = +5.9%), and the entire effect is one month | Re-measure once tennis has market inputs and settles honestly |
 | Soccer 1x2 pre-match feature families (rest/congestion, Elo, venue-specific form, 10/20-match + EWMA form, season-to-date table, draw propensity, H2H, discipline, cross-book micro-structure, calendar, rolling shots/SoT/corners, rolling xG, totals form) | **CLOSED — market is the ceiling** (2026-10-25) | `scripts/ab_soccer_feature_screen.py` on the full prod frame: 138,773 matches 2012–2026 with 1x2 odds, fixed test 2024–26 n=23,784 (SE ≈ 0.0001–0.0002 per family, 40× tighter than the audit's n≈3.5k). De-vigged average-odds market Brier **0.59496**; LR on market logits −0.00031 ± 0.00012; a prod-like GBM (odds + 5-match form + match_stats diffs) +0.00004 ± 0.00024 vs the raw market. Every family \|ΔBrier\| ≤ 0.00033: best is cross-book micro-structure −0.00023 ± 0.00011 (7/8 seasons negative), all 60 features together −0.00033 ± 0.00019 — 15–50× under the gate. Elo −0.00007, rest −0.00007, venue form −0.00002, H2H +0.00002 | Nothing form-shaped. Only information the closing price does not already carry (confirmed line-ups / injuries, or a sharper price than the books' average) can move soccer 1x2 |
 | Soccer over-2.5 features beyond the market total price | **CLOSED** (2026-10-25) | Same harness, 39,435 matches with O/U odds (2019–26), test n=14,746: market O/U price Brier 0.48294 (−0.0176 ± 0.0014 vs the constant base rate the derived-market guard uses); totals form −0.00027 ± 0.00013, xG / shots / rest / season / weather / micro all within ±0.0003 of the price; no GBM beats the price. **The open finding is the inverse:** a model that sees only 1x2 odds (what the Dixon-Coles path has without a totals price) scores +0.00095 ± 0.00058 historically and the served derived O/U is **+0.0108 ± 0.0043 worse than the closing O/U market live** (n=1,302, 2026-07..10) | Lever is the §7 2026-10-25 item 4: a second IPF constraint anchoring the scoreline matrix to the market O/U 2.5 (and BTTS where priced), not more features |
-| Soccer favourite–longshot bias of the proportional de-vig | **MEASURED — calibration, not a standalone edge** (2026-10-25) | Realized minus implied by implied band, stable in 2012–19 AND 2020–26: 0.7–0.8 → +0.035 / +0.029 (z 5.3 / 4.0), 0.8+ → +0.030 / +0.038, <0.10 → −0.013 / −0.017 (z −3.6 / −4.1). Flat-stake at the average price: <0.10 implied −24% / −29%, 0.1–0.2 −8% / −10%, favourites ≈ −1 to +1%. At the best (Max) price, p ≥ 0.6 returns **+0.47% ± 0.39%** (n=27,574; by year −1.8% .. +2.9%) → the vig eats it. Live confirmation on 5,262 closing selections (~9 books): 0.6–0.8 bands realized 0.68 / 0.81 vs proportional 0.64 / 0.74 vs power de-vig 0.665 / 0.774 | Adopt power de-vig in `rec_gating.market_consensus_prob` (same conclusion as racing); never emit soccer 1x2 recs above ~3.5 — the long-odds bands are where the EV gate selects on model noise (live post-gating book: odds ≥ 5 n=44 −25.5%) |
+| Soccer favourite–longshot bias of the proportional de-vig | **MEASURED — calibration, not a standalone edge** (2026-10-25) | Realized minus implied by implied band, stable in 2012–19 AND 2020–26: 0.7–0.8 → +0.035 / +0.029 (z 5.3 / 4.0), 0.8+ → +0.030 / +0.038, <0.10 → −0.013 / −0.017 (z −3.6 / −4.1). Flat-stake at the average price: <0.10 implied −24% / −29%, 0.1–0.2 −8% / −10%, favourites ≈ −1 to +1%. At the best (Max) price, p ≥ 0.6 returns **+0.47% ± 0.39%** (n=27,574; by year −1.8% .. +2.9%) → the vig eats it. Live confirmation on 5,262 closing selections (~9 books): 0.6–0.8 bands realized 0.68 / 0.81 vs proportional 0.64 / 0.74 vs power de-vig 0.665 / 0.774 | **SHIPPED 2026-10-26 (`1c6e307`):** power de-vig in `rec_gating.market_consensus_prob` and soccer 1x2 `max_odds` 8.0 → **5.0**. Not 3.5 as first floated: the bias condemns implied < 0.20 (odds above ~5) in both eras, while the 3–5 band is flat-to-positive (live post-gating odds 3–5: n=124, +13%; ≥ 5: n=44, −25.5%) |
+| Historical odds backfill v1 (one snapshot per game-day at 03:00 UTC the next day) | **DEFECT — replaced by v2** (2026-10-26) | The historical endpoint returns in-progress events with IN-PLAY prices; the insert path's in-play guard compares against NOW() so it never fired; a ±2-day name match took the first hit; the first snapshot to reach a key won. Same-game comparison against v2 strictly-pre-game snapshots: NBA Jan–Mar 2025 v1 Brier 0.385 vs v2 0.402, **v1 − v2 = −0.0167 ± 0.0050** (n=616) — a "closing" line cannot beat the pre-game consensus by 3.3 SE without in-play information; 11% of games differ by > 10 pts. NFL 2024-25 v1 is stale instead (+0.0083 ± 0.0047, n=285). Cross-book line dispersion: v1 seasons 0.8–1.6, v2 0.22–0.24, live 0.12–0.20 | 2022-25 NBA/NFL/NHL still carry v1 rows: `backfill_historical_odds.py --mode replace --confirm-replace` (archives to CSV first) awaits operator approval and ~67k credits of November quota |
+| Soccer derived markets anchored to the market over/under 2.5 | **SHIPPED** (2026-10-26, `d2ccd32`) | `scripts/ab_soccer_ou_anchor.py`, monthly walk-forward 2019-07..2026-10, n=40,279, month-clustered SE, anchored − 1x2-only reconcile: over 2.5 **−0.00543 ± 0.00053** (team-aware base; −0.0088 identity-blind), better in all 8 years; over 1.5 −0.0032, over 3.5 −0.0047, BTTS −0.0037, correct score −0.0008, DC/DNB/AH±0.5 exactly 0. Live served-path check (n=966): over 2.5 −0.0061 ± 0.0041, no market worse than z 0.76. One cell degrades on the identity-blind base only (home win-to-nil +0.00074 ± 0.00024) and improves live; accepted | `("soccer","over_under")` rec gate stays OFF — a Brier win is not an ROI win. BTTS anchoring needs a BTTS feed |
+| NHL probable starting goalie at serve time | **CLOSED — no gain** (2026-10-26) | `scripts/ab_nhl_projected_goalie.py`: "most starts in the last 7, rest the No. 1 on the 2nd night of a back-to-back" picks the real starter 65.7% (13,123 team-games; last-starter rule 47.0%). Paired ΔBrier on 1,300 held-out games vs default goalie features: ML −0.0009 ± 0.0011, regulation −0.0005 ± 0.0014, puck line −0.0024 ± 0.0018, total **+0.0012 ± 0.0007**; even the TRUE starter does no better. Shipped behind `NHL_GOALIE_MODE=actual_or_projected`, default off | A confirmed-starter feed (lines posted ~90 min pre-game) |
 
 ### 4.3 Validation methodology (house rules)
 
@@ -1054,7 +1057,7 @@ with the growth-rate driver (WAL) eliminated.
 > the serve path does not reproduce. (3) **NHL goalie features are at their
 > 0.905 default for 100% of 2026-27 games** (50% in the training era) — the
 > goalie backfill is not running for the live season; nothing paged. (4) NBA
-> total, the one challenger the promote gate keeps, emits an overconfident
+> total (corrected 2026-10-26: its CALIBRATION gate kept an isotonic map) emits an overconfident
 > under cluster live (15 of 110 games at P(over) ≈ 0.25; 9 went over).
 > (5) 62 of 243 upcoming soccer fixtures (25%) sit on default odds — known
 > and gated, recorded here as the baseline for a default-rate canary.
@@ -1084,6 +1087,83 @@ with the growth-rate driver (WAL) eliminated.
 >    explained.
 > Harness: `scripts/ab_soccer_feature_screen.py` (export SQL in its
 > docstring; the live comparison SQL is in the same file's notes).
+
+> **Update (2026-10-26) — THE 2026-10-25 RECOMMENDATIONS EXECUTED, plus two
+> defects found while doing them.** Deployed at `d3836f4` (CI green; every
+> auspex_pipeline task succeeding since 11:46 UTC).
+> **Recommendation 1 + 3 (odds backfill, cross-book skew) — the cause was the
+> backfill itself.** The v1 historical backfill snapshotted the NEXT day at
+> 03:00 UTC, after most games started; the historical endpoint returns
+> in-progress events with IN-PLAY prices, and the insert path's in-play guard
+> compares against NOW(), so it never fired (registry row "Historical odds
+> backfill v1"). Same-game check against strictly-pre-game snapshots: NBA
+> Jan–Mar 2025 v1 beats the real pre-game consensus by 0.0167 ± 0.0050 Brier
+> (n=616), i.e. leakage; NFL 2024-25 v1 is stale instead (+0.0083 ± 0.0047).
+> `backfill_historical_odds.py` v2 (`ae1f359`) clusters start times into ≤ 3 h
+> groups, snapshots 10 min before each group, accepts only events commencing
+> AFTER the snapshot and only for that group's games, caches raw responses
+> under /app/backups/odds_hist_cache, and keeps a 15k quota floor. Loaded
+> additively on prod (no existing row touched): NFL 2025-26 269/270 games
+> (136 in-play events rejected, 17,548 rows), NBA 2025-26 1,320/1,327 (305
+> rejected, 85,972 rows), NHL 2025-26 1,389/1,390 (238 rejected, 91,242 rows),
+> NHL 2020-22 2,352/2,353 (784 rejected, 223,890 rows); ~47.9k credits incl.
+> 7.4k cache-only staging, 19.7k left for the live fetch until the Nov 1 reset.
+> Cross-book line dispersion on the clean data: NBA spread std 0.222, NFL total
+> std 0.242 (v1 seasons 0.8–1.6; live 0.12–0.20) — the "4–5× skew" was v1
+> contamination, not a feature-definition problem.
+> **Defect found while recomputing — in-play prices in every live-era fixture
+> (`fafbc29`).** fetch_live_odds never overwrote a pre-match price after
+> kickoff but still INSERTED unseen keys, and in-play markets mint keys
+> constantly: NBA 44/44, NFL 105/105, NHL 187/188, soccer 1,716/1,889, tennis
+> 394/430 finished live-era fixtures carried in-play rows (tennis incl. 1,600
+> in-play moneyline rows). Serving never saw them; every training frame and
+> post-game recompute did (a recompute moved live NBA spread dispersion 0.35 →
+> 4.97). Fixed twice over: the live path no longer inserts after kickoff (only
+> the v2 backfill opts in), and `utils.training_data.prematch_odds()` rewrites
+> every training query and every feature-builder odds query to read rows first
+> seen before kickoff (a static test fails on any unwrapped query).
+> **Recommendation 2 (NHL data + canary).** The live 2026-27 season had ZERO
+> nhl_match_stats rows; 2025-26 had no starting goalies and no 5v5. The NHL
+> loader now attaches stats to the existing ESPN fixture (accent-insensitive
+> club name ± 12 h, or the NHL game id) instead of inserting by exact kickoff,
+> which had created 2 duplicate 2025-26 fixtures via "Montréal"/"Montreal";
+> a new `enrich_nhl_stats` DAG task keeps the live season current. Prod: 181/181
+> live games attached (362 stats + goalie + 5v5 rows), 2025-26 goalies and 5v5
+> backfilled (2,788 rows each). Regulation ties are now stored as 'tie' — the
+> ESPN path wrote 'draw', a label the home/tie/away model can never predict, so
+> every correct tie pick graded as a miss and all 58 live ties were dropped from
+> training (`46d0152`; this also means the 2026-10-25 NHL regulation-vs-market
+> comparison covered decisive games only). The probable-starter projection is
+> CLOSED (registry). The neutral-default canary is live in the hourly monitor
+> (`39c2164`), pages on a ≥ 25-pt jump over a 28-day baseline, and is quiet.
+> **Recommendation 4 (soccer derived O/U) — SHIPPED** (registry row): 57 of
+> 540 live O/U predictions in the first hours carried a market anchor (≥ 3
+> fresh books required); the rest serve the old reconcile.
+> **Recommendation 5 — SHIPPED** at max_odds 5.0, not 3.5 (registry row); no
+> soccer rec at odds ≥ 5 since deploy.
+> **Recommendation 6 (tennis odds) — BLOCKED on a manual download.**
+> `scripts/load_tennis_odds.py` + `ab_tennis_market_odds.py` are merged
+> (precision-gated name matching, additive, tagged for rollback), but
+> tennis-data.co.uk answers every automated request with a Cloudflare 403 and
+> the loader does not work around it. Download the ATP+WTA 2022–2026 workbooks
+> from tennis-data.co.uk/alldata.php into one directory, then run
+> `load_tennis_odds.py --files-dir <dir> --dry-run`, the real load, and
+> `compute_features_tennis.py --all-finished --force`.
+> **Recommendation 7 (NBA total) — root cause was the CALIBRATOR, not a
+> promote.** "kept" in held_out_metrics means the calibration gate kept its
+> calibrator; NBA total was the only one of 13 production ensembles serving
+> one, an isotonic step map (registry: calibration row). Temperature scaling +
+> a paired noise-floor gate shipped (`1662be9`); the next retrain replaces it.
+> **AWAITING OPERATOR APPROVAL (destructive or mutating):**
+> 1. Replace the 2022-25 NBA/NFL/NHL v1 odds rows: `backfill_historical_odds.py
+>    --mode replace --confirm-replace` per sport-season (archives every replaced
+>    row to /app/backups/odds_archive_*.csv first). ~67k credits → after the
+>    Nov 1 quota reset.
+> 2. Merge the duplicate Montreal team rows (ESPN `b8284384…` onto history
+>    `a6b6fabf…`, 27 fixtures) and the 2 duplicate 2025-26 NHL fixtures.
+> 3. Regrade NHL regulation predictions graded against 'draw'.
+> 4. Optionally flag the existing in-play rows `is_live = true` (reversible);
+>    not required for correctness now that every reader filters them.
 
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
