@@ -1223,11 +1223,19 @@ with the growth-rate driver (WAL) eliminated.
 > earlier today was REMOVED: an odds replace re-stamps every game's first-priced
 > time and would have counted games the incumbent trained on as unseen.
 > (4) **Tennis source.** tennis-data.co.uk is the legitimate free source (same
-> author as football-data.co.uk, which the soccer loaders use); the 403 is a
-> Cloudflare bot check on every non-browser client, from the VM too. Options:
-> download the yearly ATP/WTA workbooks in a browser (preferred: both tours,
-> Pinnacle/B365/Avg), or Kaggle's CC0 "ATP Tennis 2000–2025 daily" mirror (ATP
-> only, a single odds pair, needs a Kaggle API token and a loader adapter).
+> author as football-data.co.uk, which the soccer loaders use). The 403 is a
+> site-owner Cloudflare FIREWALL block ("Sorry, you have been blocked"), not a
+> bot challenge: it hits browsers too, and every client tried (operator, dev
+> machine, VM) is in the US, consistent with a geographic rule. Do not route
+> around it. Options:
+> ask the site owner for access or the files; backfill tennis from the-odds-api
+> historical endpoint with the v2 backfill (the same provider live tennis odds
+> come from, so train/serve parity; covers only the tournaments it lists, which
+> is also all we can serve odds for); or Kaggle's CC0 "ATP Tennis 2000–2025
+> daily" mirror (ATP only, a single odds pair, needs a Kaggle API token).
+> Plan agreed 2026-10-26: run `scripts/ops/replace_v1_odds_after_reset.sh` on
+> Nov 1 after the operator raises the odds-api plan; the four held bundles are
+> left to the Nov 1 scheduled retrain under the fixed gate.
 
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
