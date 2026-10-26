@@ -441,6 +441,7 @@ def run(
                             event["home_team"],
                             event["away_team"],
                             record_snapshots=False,
+                            allow_post_commence_insert=True,
                         )
                     conn.commit()
     finally:

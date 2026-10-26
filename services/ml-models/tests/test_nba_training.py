@@ -120,10 +120,15 @@ class TestLineAsFeatureFiltering:
         # filter that drops no-odds matches.
         assert "JOIN LATERAL" in NBA_SPREAD_TRAINING_QUERY
         assert "spread.home_line IS NOT NULL" in NBA_SPREAD_TRAINING_QUERY
-        # And NOT a LEFT JOIN — that would let nulls through.
-        spread_block = NBA_SPREAD_TRAINING_QUERY.split("JOIN LATERAL (")[1].split("ON")[1]
-        # The first ON after the spread LATERAL is the filter condition
-        assert "IS NOT NULL" in spread_block.split("\n")[0]
+        # And NOT a LEFT JOIN — that would let nulls through. (Located by the
+        # lateral's own alias: the odds reads inside it are wrapped by
+        # prematch_odds(), so "the first ON after JOIN LATERAL" is no longer
+        # the lateral's condition.)
+        q = NBA_SPREAD_TRAINING_QUERY
+        close = q.index(") spread ON spread.home_line IS NOT NULL")
+        opener = q.rfind("JOIN LATERAL (", 0, close)
+        assert opener != -1
+        assert not q[:opener].rstrip().endswith("LEFT")
 
     def test_total_query_requires_real_line(self):
         assert "JOIN LATERAL" in NBA_TOTAL_TRAINING_QUERY

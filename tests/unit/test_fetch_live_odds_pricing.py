@@ -307,19 +307,29 @@ class TestPostCommenceProtection:
         assert cur.rows[0]["timestamp"] == 5 and cur.rows[0]["last_seen_at"] == 5
         assert cur.updates == [] and cur.inserts == []
 
-    def test_started_match_can_still_create_a_missing_key(self):
-        # This is the historical-backfill path: scripts/backfill_historical_odds.py
-        # deliberately snapshots at/after commence, and those rows are the only
-        # closing lines we have for finished games.
+    def test_started_match_never_mints_a_new_key_from_an_in_play_quote(self):
+        # 2026-10-25: in-play markets create new keys constantly (moved lines,
+        # in-play-only books); inserting them polluted almost every finished
+        # live-era fixture's odds with in-play prices.
         cur = FakeCursor([], started=True)
-        assert _upsert(cur, 2.10, pre_match=False) == flo.ODDS_INSERTED
+        assert _upsert(cur, 2.10, pre_match=False) == flo.ODDS_POST_COMMENCE
+        assert cur.current_rows() == [] and cur.inserts == []
+
+    def test_the_historical_backfill_may_create_a_missing_key_on_opt_in(self):
+        # scripts/backfill_historical_odds.py v2 proves each event was quoted
+        # BEFORE kickoff, then opts in for the finished fixture.
+        cur = FakeCursor([], started=True)
+        status = flo.insert_odds_row(
+            cur, MATCH, "BookA", "1x2", "home", 2.10, None, pre_match=False, allow_post_commence_insert=True
+        )
+        assert status == flo.ODDS_INSERTED
         assert len(cur.current_rows()) == 1
 
     def test_insert_event_odds_asks_the_database_whether_it_kicked_off(self):
         event = _event({"BookA": [_h2h_market()]})
         cur = FakeCursor([], started=True)
         stats: dict = {}
-        flo.insert_event_odds(cur, MATCH, event, "soccer", HOME, AWAY, stats=stats)
+        flo.insert_event_odds(cur, MATCH, event, "soccer", HOME, AWAY, stats=stats, allow_post_commence_insert=True)
         assert cur.statements[0][0].startswith("SELECT 1 FROM matches"), "one kickoff lookup per event"
         assert stats[flo.ODDS_INSERTED] == 3
 

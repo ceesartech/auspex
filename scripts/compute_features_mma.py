@@ -59,10 +59,22 @@ import argparse
 import json
 import logging
 import os
+import sys
+from pathlib import Path
 from typing import Optional
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
+# Pre-kickoff odds rewrite (and the preseason predicate) live ONCE in
+# services/ml-models/src/utils/training_data.py; put that tree on sys.path the
+# same way compute_features_nba/nfl/nhl.py do.
+_ML_MODELS_SRC = str(Path(__file__).resolve().parent.parent / "services" / "ml-models" / "src")
+for _p in ("/app/services/ml-models/src", _ML_MODELS_SRC):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from utils.training_data import prematch_odds  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("compute_features_mma")
@@ -210,14 +222,16 @@ def fetch_closing_odds(cur, match_id: str) -> dict:
     """Pull the most-recent pre-fight odds row per (market_type,
     selection). MMA registers 'moneyline' only in v1."""
     cur.execute(
-        """
+        prematch_odds(
+            """
         SELECT DISTINCT ON (market_type, selection)
                market_type, selection, line, odds_decimal
         FROM odds
         WHERE match_id = %s AND is_live = false
           AND market_type = 'moneyline'
         ORDER BY market_type, selection, timestamp DESC NULLS LAST
-        """,
+        """
+        ),
         (match_id,),
     )
     out: dict[str, float] = {}

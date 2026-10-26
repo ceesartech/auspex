@@ -412,6 +412,7 @@ def insert_odds_row(
     odds_decimal: float,
     line: float | None,
     pre_match: bool = True,
+    allow_post_commence_insert: bool = False,
 ) -> str:
     """Upsert the CURRENT price for one (match, bookmaker, market, selection,
     line) key. Returns ODDS_INSERTED / ODDS_UPDATED / ODDS_UNCHANGED /
@@ -446,10 +447,15 @@ def insert_odds_row(
     (services/ml-models/src/utils/training_data.py, scripts/compute_features*),
     so overwriting it with a live number injects post-kickoff information into
     a model input. A post-commence observation therefore leaves an existing
-    row completely alone (returning ODDS_POST_COMMENCE) and only ever INSERTs
-    a key that does not exist yet — which is what keeps
-    scripts/backfill_historical_odds.py, whose snapshots are deliberately
-    taken at/after commence, writing exactly the rows it always did.
+    row completely alone (returning ODDS_POST_COMMENCE) — and, since
+    2026-10-25, does not INSERT a new key either. In-play markets mint new keys
+    constantly (every moved line, every book that only quotes in-play); the old
+    "insert if missing" rule put in-play prices into almost every finished
+    live-era fixture (NBA 44/44, NFL 105/105, tennis incl. 1,600 in-play
+    moneyline rows), where every training frame and post-game recompute read
+    them. Only scripts/backfill_historical_odds.py passes
+    allow_post_commence_insert=True: its fixtures are finished by definition,
+    and its v2 matcher already proves each event was quoted BEFORE kickoff.
 
     Implemented as UPDATE-then-INSERT-if-no-rows rather than a real
     `ON CONFLICT` upsert because the `odds` table has NO unique constraint on
@@ -469,7 +475,10 @@ def insert_odds_row(
     if not pre_match:
         # The match has started. Never touch an existing pre-match row —
         # not its price, not even its last_seen_at (a live quote is not
-        # evidence that the pre-match price is still on offer).
+        # evidence that the pre-match price is still on offer) — and never
+        # mint a new key from an in-play quote either.
+        if not allow_post_commence_insert:
+            return ODDS_POST_COMMENCE
         cur.execute(
             f"""
             SELECT 1 FROM odds
@@ -1009,6 +1018,7 @@ def insert_event_odds(
     unknown_markets: set | None = None,
     stats: dict | None = None,
     record_snapshots: bool = True,
+    allow_post_commence_insert: bool = False,
 ) -> int:
     """Write every representable odds row from one event payload. The bulk
     /odds response and the per-event additional-markets response share the
@@ -1027,9 +1037,11 @@ def insert_event_odds(
     logged at ERROR level per (bookmaker, match) and counted; it never raises
     and never happens silently.
 
-    Post-kickoff quotes never overwrite a pre-match price (in-play prices are
-    what `odds` must not be polluted with — see insert_odds_row); they can only
-    create keys that do not exist yet, which is the historical-backfill path.
+    Post-kickoff quotes never overwrite a pre-match price and never create a
+    new key (in-play prices are what `odds` must not be polluted with — see
+    insert_odds_row). allow_post_commence_insert=True is the historical
+    backfill's opt-in: it may create missing keys for a finished fixture
+    because its matcher has already proven the event was quoted pre-game.
 
     `record_snapshots=False` skips the odds_snapshots CLV append — the
     historical backfill passes it: its rows describe a past moment, and a
@@ -1096,6 +1108,7 @@ def insert_event_odds(
                     float(price),
                     line,
                     pre_match=pre_match,
+                    allow_post_commence_insert=allow_post_commence_insert,
                 )
                 if status in ODDS_WRITTEN:
                     inserted += 1

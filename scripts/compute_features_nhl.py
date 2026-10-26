@@ -72,7 +72,7 @@ for _p in ("/app/services/ml-models/src", _ML_MODELS_SRC):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from utils.training_data import preseason_exclusion_sql  # noqa: E402
+from utils.training_data import prematch_odds, preseason_exclusion_sql  # noqa: E402
 
 # Rows we are willing to build rolling form from. Preseason is excluded;
 # unmarked (pre-backfill) rows are unknown and stay in.
@@ -376,22 +376,26 @@ def _devig_two_way(odds_a: float | None, odds_b: float | None) -> tuple[float | 
 def _odds_avg(cur, match_id: str, market_type: str, selection: str, line=None):
     if line is None:
         cur.execute(
-            """
+            prematch_odds(
+                """
             SELECT AVG(odds_decimal)::float AS o
             FROM odds
             WHERE match_id = %s AND market_type = %s AND selection = %s
               AND NOT is_live
-            """,
+            """
+            ),
             (match_id, market_type, selection),
         )
     else:
         cur.execute(
-            """
+            prematch_odds(
+                """
             SELECT AVG(odds_decimal)::float AS o
             FROM odds
             WHERE match_id = %s AND market_type = %s AND selection = %s
               AND line = %s AND NOT is_live
-            """,
+            """
+            ),
             (match_id, market_type, selection, line),
         )
     row = cur.fetchone()
@@ -784,7 +788,8 @@ def _crossbook_per_book_query(
     """Shared helper for puck_line + total. Returns a list of
     {bookmaker, p_line, p_odds, c_odds} rows."""
     cur.execute(
-        """
+        prematch_odds(
+            """
         WITH per_book AS (
             SELECT DISTINCT ON (o.bookmaker)
                 o.bookmaker,
@@ -809,7 +814,8 @@ def _crossbook_per_book_query(
             ORDER BY o.bookmaker, o.timestamp DESC
         )
         SELECT bookmaker, p_line, p_odds, c_odds FROM per_book
-        """,
+        """
+        ),
         (market, counter, match_id, market, primary),
     )
     return cur.fetchall()

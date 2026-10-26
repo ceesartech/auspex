@@ -36,9 +36,20 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
+# Pre-kickoff odds rewrite (and the preseason predicate) live ONCE in
+# services/ml-models/src/utils/training_data.py; put that tree on sys.path the
+# same way compute_features_nba/nfl/nhl.py do.
+_ML_MODELS_SRC = str(Path(__file__).resolve().parent.parent / "services" / "ml-models" / "src")
+for _p in ("/app/services/ml-models/src", _ML_MODELS_SRC):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from utils.training_data import prematch_odds  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("compute_features")
@@ -234,22 +245,26 @@ def _rolling_team_stats(cur, team_id: str, before_date) -> dict:
 def _odds_avg(cur, match_id: str, market_type: str, selection: str, line=None):
     if line is None:
         cur.execute(
-            """
+            prematch_odds(
+                """
             SELECT AVG(odds_decimal)::float AS o
             FROM odds
             WHERE match_id = %s AND market_type = %s AND selection = %s
               AND NOT is_live
-            """,
+            """
+            ),
             (match_id, market_type, selection),
         )
     else:
         cur.execute(
-            """
+            prematch_odds(
+                """
             SELECT AVG(odds_decimal)::float AS o
             FROM odds
             WHERE match_id = %s AND market_type = %s AND selection = %s
               AND line = %s AND NOT is_live
-            """,
+            """
+            ),
             (match_id, market_type, selection, line),
         )
     row = cur.fetchone()

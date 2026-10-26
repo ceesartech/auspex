@@ -1,6 +1,7 @@
 """Utilities for loading and validating model training data."""
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -47,6 +48,54 @@ POSTSEASON_SEASON_TYPE = "postseason"
 
 # Legacy NHL marker values that affirmatively mean "not preseason".
 LEGACY_NOT_PRESEASON_GAME_TYPES = ("regular", "playoff")
+
+
+# ── Pre-kickoff odds only (audit §7, 2026-10-25) ──────────────────────────
+#
+# scripts/fetch_live_odds.py refused to OVERWRITE a pre-match price once a
+# fixture kicked off, but it still INSERTED any key it had not seen before —
+# and in-play markets mint new keys constantly (every moved spread/total line,
+# every book that only quotes in-play). Measured on prod: almost every
+# finished live-era fixture carries such rows (NBA 44/44, NFL 105/105, NHL
+# 187/188, soccer 1,716/1,889, tennis 394/430 incl. 1,600 in-play moneyline
+# rows). Serving never sees them (they do not exist before kickoff), but every
+# training frame and every post-game feature recompute did: in-play prices in
+# the newest rows, i.e. leakage concentrated in the held-out test window, and
+# cross-book line dispersion of 4-5 points instead of ~0.3.
+#
+# PREMATCH_ODDS_SQL is `odds` restricted to rows FIRST SEEN before kickoff —
+# unless the match has no such row at all, which is the historical-backfill
+# case (those rows are inserted years later by design; the v2 backfill
+# guarantees each is a pre-game snapshot). prematch_odds() rewrites every
+# `FROM odds [alias]` in a query to read from it, keeping the alias (or
+# `odds` when there was none, so `odds.<col>` references keep working).
+PREMATCH_ODDS_SQL = (
+    "(SELECT po.* FROM odds po JOIN matches pm ON pm.id = po.match_id"
+    ' WHERE COALESCE(po.created_at, po."timestamp") < pm.match_date'
+    " OR NOT EXISTS (SELECT 1 FROM odds pq WHERE pq.match_id = po.match_id"
+    ' AND COALESCE(pq.created_at, pq."timestamp") < pm.match_date))'
+)
+
+_SQL_KEYWORDS_AFTER_FROM = (
+    "WHERE|JOIN|LEFT|RIGHT|INNER|FULL|CROSS|GROUP|ORDER|LIMIT|ON|UNION|WINDOW|HAVING|LATERAL|USING|OFFSET"
+)
+_FROM_ODDS_RE = re.compile(
+    r"\bFROM(\s+)odds\b(?![_.])" r"(?:(\s+)(?:AS\s+)?(?!(?:" + _SQL_KEYWORDS_AFTER_FROM + r")\b)([A-Za-z_]\w*))?",
+    re.IGNORECASE,
+)
+
+
+def prematch_odds(sql: str) -> str:
+    """Rewrite every `FROM odds [alias]` in `sql` to read pre-kickoff rows only
+    (see PREMATCH_ODDS_SQL). Idempotent; never touches odds_snapshots."""
+    if PREMATCH_ODDS_SQL in sql:
+        return sql
+
+    def _sub(m: "re.Match[str]") -> str:
+        alias = m.group(3) or "odds"
+        return f"FROM{m.group(1)}{PREMATCH_ODDS_SQL} {alias}"
+
+    return _FROM_ODDS_RE.sub(_sub, sql)
 
 
 def preseason_exclusion_sql(alias: str = "m") -> str:
@@ -148,6 +197,7 @@ DEFAULT_TRAINING_QUERY = """
       AND m.away_score IS NOT NULL
     ORDER BY m.match_date ASC
 """
+DEFAULT_TRAINING_QUERY = prematch_odds(DEFAULT_TRAINING_QUERY)  # pre-kickoff odds only (see PREMATCH_ODDS_SQL)
 
 TARGET_COLUMN = "match_outcome"
 # Columns that exist on the frame but should never be used as model
@@ -251,6 +301,9 @@ NHL_MONEYLINE_TRAINING_QUERY = f"""
       AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
+NHL_MONEYLINE_TRAINING_QUERY = prematch_odds(
+    NHL_MONEYLINE_TRAINING_QUERY
+)  # pre-kickoff odds only (see PREMATCH_ODDS_SQL)
 
 # Columns exposed by NHL_MONEYLINE_TRAINING_QUERY that must NOT be used
 # as model inputs. Includes the target itself, identifiers, raw scores
@@ -350,6 +403,9 @@ NHL_REGULATION_TRAINING_QUERY = f"""
       AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
+NHL_REGULATION_TRAINING_QUERY = prematch_odds(
+    NHL_REGULATION_TRAINING_QUERY
+)  # pre-kickoff odds only (see PREMATCH_ODDS_SQL)
 
 # Same non-feature exclusion set as moneyline plus the new target.
 # Built as a fresh set rather than aliasing NHL_NON_FEATURE_COLUMNS so
@@ -813,6 +869,9 @@ NHL_PUCK_LINE_TRAINING_QUERY = f"""
       AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
+NHL_PUCK_LINE_TRAINING_QUERY = prematch_odds(
+    NHL_PUCK_LINE_TRAINING_QUERY
+)  # pre-kickoff odds only (see PREMATCH_ODDS_SQL)
 
 NHL_PUCK_LINE_NON_FEATURE_COLUMNS = {
     "match_id",
@@ -892,6 +951,7 @@ NHL_TOTAL_TRAINING_QUERY = f"""
       AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
+NHL_TOTAL_TRAINING_QUERY = prematch_odds(NHL_TOTAL_TRAINING_QUERY)  # pre-kickoff odds only (see PREMATCH_ODDS_SQL)
 
 NHL_TOTAL_NON_FEATURE_COLUMNS = {
     "match_id",
@@ -1069,6 +1129,9 @@ NBA_MONEYLINE_TRAINING_QUERY = f"""
       AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
+NBA_MONEYLINE_TRAINING_QUERY = prematch_odds(
+    NBA_MONEYLINE_TRAINING_QUERY
+)  # pre-kickoff odds only (see PREMATCH_ODDS_SQL)
 
 # Spread: home covered = 0, away covered = 1. Cover condition:
 # (home_score - away_score) > -closing_spread_home (the line is from
@@ -1122,6 +1185,7 @@ NBA_SPREAD_TRAINING_QUERY = f"""
       AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
+NBA_SPREAD_TRAINING_QUERY = prematch_odds(NBA_SPREAD_TRAINING_QUERY)  # pre-kickoff odds only (see PREMATCH_ODDS_SQL)
 
 # Total: over = 0, under = 1. Cover condition: home_score + away_score
 # > closing_total_line. INNER LATERAL filters to matches with a real
@@ -1173,6 +1237,7 @@ NBA_TOTAL_TRAINING_QUERY = f"""
       AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
+NBA_TOTAL_TRAINING_QUERY = prematch_odds(NBA_TOTAL_TRAINING_QUERY)  # pre-kickoff odds only (see PREMATCH_ODDS_SQL)
 
 # Columns each query exposes that must NOT be used as model inputs.
 # Same structure as NHL_NON_FEATURE_COLUMNS — IDs, raw scores (leakage),
@@ -1370,6 +1435,9 @@ NFL_MONEYLINE_TRAINING_QUERY = f"""
       AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
+NFL_MONEYLINE_TRAINING_QUERY = prematch_odds(
+    NFL_MONEYLINE_TRAINING_QUERY
+)  # pre-kickoff odds only (see PREMATCH_ODDS_SQL)
 
 # Spread: home covered = 0, away covered = 1. Same line-as-feature
 # math as NBA. NFL spreads span -14.5 to +14.5 with 0.5-point steps,
@@ -1421,6 +1489,7 @@ NFL_SPREAD_TRAINING_QUERY = f"""
       AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
+NFL_SPREAD_TRAINING_QUERY = prematch_odds(NFL_SPREAD_TRAINING_QUERY)  # pre-kickoff odds only (see PREMATCH_ODDS_SQL)
 
 # Total: over = 0, under = 1. NFL totals span 38-55 typically.
 NFL_TOTAL_TRAINING_QUERY = f"""
@@ -1469,6 +1538,7 @@ NFL_TOTAL_TRAINING_QUERY = f"""
       AND {MATCH_NOT_PRESEASON_SQL}
     ORDER BY m.match_date ASC
 """
+NFL_TOTAL_TRAINING_QUERY = prematch_odds(NFL_TOTAL_TRAINING_QUERY)  # pre-kickoff odds only (see PREMATCH_ODDS_SQL)
 
 # Same NON_FEATURE shape as NBA — IDs, raw scores (leakage), the
 # target itself, and the features blob (flattened separately).
@@ -1629,6 +1699,9 @@ TENNIS_MONEYLINE_TRAINING_QUERY = """
       AND m.home_score <> m.away_score
     ORDER BY m.match_date ASC
 """
+TENNIS_MONEYLINE_TRAINING_QUERY = prematch_odds(
+    TENNIS_MONEYLINE_TRAINING_QUERY
+)  # pre-kickoff odds only (see PREMATCH_ODDS_SQL)
 
 TENNIS_MONEYLINE_NON_FEATURE_COLUMNS = {
     "match_id",
@@ -1744,6 +1817,9 @@ MMA_MONEYLINE_TRAINING_QUERY = """
       AND m.home_score <> m.away_score
     ORDER BY m.match_date ASC
 """
+MMA_MONEYLINE_TRAINING_QUERY = prematch_odds(
+    MMA_MONEYLINE_TRAINING_QUERY
+)  # pre-kickoff odds only (see PREMATCH_ODDS_SQL)
 
 MMA_MONEYLINE_NON_FEATURE_COLUMNS = {
     "match_id",

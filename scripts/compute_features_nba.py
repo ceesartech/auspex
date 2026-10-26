@@ -74,7 +74,7 @@ for _p in ("/app/services/ml-models/src", _ML_MODELS_SRC):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from utils.training_data import preseason_exclusion_sql  # noqa: E402
+from utils.training_data import prematch_odds, preseason_exclusion_sql  # noqa: E402
 
 # Rows we are willing to build rolling form from. Preseason is excluded;
 # unmarked (pre-backfill) rows are unknown and stay in.
@@ -259,14 +259,16 @@ def fetch_closing_odds(cur, match_id: str) -> dict:
     'spread', 'total' with line as an INPUT FEATURE (not a fixed filter
     like NHL)."""
     cur.execute(
-        """
+        prematch_odds(
+            """
         SELECT DISTINCT ON (market_type, selection)
                market_type, selection, line, odds_decimal
         FROM odds
         WHERE match_id = %s AND is_live = false
           AND market_type IN ('moneyline', 'spread', 'total')
         ORDER BY market_type, selection, timestamp DESC NULLS LAST
-        """,
+        """
+        ),
         (match_id,),
     )
     out: dict[str, float] = {}
@@ -408,7 +410,8 @@ def fetch_spread_crossbook(cur, match_id: str) -> dict:
     threshold. NBA moneyline + total were tested in the same A/B
     and didn't help, so this fetcher is spread-only."""
     cur.execute(
-        """
+        prematch_odds(
+            """
         WITH per_book AS (
             SELECT DISTINCT ON (o.bookmaker)
                 o.bookmaker,
@@ -433,7 +436,8 @@ def fetch_spread_crossbook(cur, match_id: str) -> dict:
             ORDER BY o.bookmaker, o.timestamp DESC
         )
         SELECT bookmaker, p_line, p_odds, c_odds FROM per_book
-        """,
+        """
+        ),
         (match_id,),
     )
     rows = cur.fetchall()

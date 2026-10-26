@@ -81,7 +81,7 @@ for _p in ("/app/services/ml-models/src", _ML_MODELS_SRC):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from utils.training_data import preseason_exclusion_sql  # noqa: E402
+from utils.training_data import prematch_odds, preseason_exclusion_sql  # noqa: E402
 
 # Rows we are willing to build rolling form from. Preseason is excluded;
 # unmarked (pre-backfill) rows are unknown and stay in.
@@ -270,14 +270,16 @@ def fetch_closing_odds(cur, match_id: str) -> dict:
     line) and project into the feature shape. NFL uses 'moneyline',
     'spread', 'total' with line as an INPUT FEATURE."""
     cur.execute(
-        """
+        prematch_odds(
+            """
         SELECT DISTINCT ON (market_type, selection)
                market_type, selection, line, odds_decimal
         FROM odds
         WHERE match_id = %s AND is_live = false
           AND market_type IN ('moneyline', 'spread', 'total')
         ORDER BY market_type, selection, timestamp DESC NULLS LAST
-        """,
+        """
+        ),
         (match_id,),
     )
     out: dict[str, float] = {}
@@ -436,7 +438,8 @@ def fetch_total_crossbook(cur, match_id: str) -> dict:
     compute_for_match) so the model input shape is stable whether or not
     the cross-book data is present for this match."""
     cur.execute(
-        """
+        prematch_odds(
+            """
         WITH per_book AS (
             SELECT DISTINCT ON (o.bookmaker)
                 o.bookmaker,
@@ -461,7 +464,8 @@ def fetch_total_crossbook(cur, match_id: str) -> dict:
             ORDER BY o.bookmaker, o.timestamp DESC
         )
         SELECT bookmaker, p_line, p_odds, c_odds FROM per_book
-        """,
+        """
+        ),
         (match_id,),
     )
     rows = cur.fetchall()
@@ -513,7 +517,8 @@ def fetch_moneyline_crossbook(cur, match_id: str) -> dict:
     model input shape is stable whether or not cross-book data is
     present."""
     cur.execute(
-        """
+        prematch_odds(
+            """
         WITH per_book AS (
             SELECT DISTINCT ON (o.bookmaker)
                 o.bookmaker,
@@ -536,7 +541,8 @@ def fetch_moneyline_crossbook(cur, match_id: str) -> dict:
             ORDER BY o.bookmaker, o.timestamp DESC
         )
         SELECT bookmaker, home_odds, away_odds FROM per_book
-        """,
+        """
+        ),
         (match_id,),
     )
     rows = cur.fetchall()
