@@ -6,7 +6,7 @@ Locks the behaviors the graders depend on:
   * team sports store real scores; tennis/MMA store winner-flag 1/0
     (the corpus convention),
   * NHL games decided past regulation write metadata.regulation_winner
-    = 'draw' (grading_outcomes.nhl_regulation_outcome reads it),
+    = 'tie' (grading_outcomes.nhl_regulation_outcome reads it),
   * the fixtures path still skips non-'pre' events (the two paths
     split on state, never double-handle).
 """
@@ -108,11 +108,13 @@ class TestRecordResult:
         assert (captured["home_score"], captured["away_score"]) == (3, 1)
         assert captured["meta"]["result_source"] == "espn_scoreboard"
 
-    def test_nhl_overtime_writes_regulation_draw(self):
+    def test_nhl_overtime_writes_regulation_tie(self):
+        # 'tie' is the regulation model's label and the training query's
+        # value; the pre-2026-10 'draw' could never be predicted correctly.
         cfg = fu.SPORT_CONFIGS["nhl"]
         ok, captured = self._run(cfg, _comp(detail="Final/OT", home_score="4", away_score="3"))
         assert ok is True
-        assert captured["meta"]["regulation_winner"] == "draw"
+        assert captured["meta"]["regulation_winner"] == "tie"
 
     def test_nhl_regulation_win_writes_winner(self):
         cfg = fu.SPORT_CONFIGS["nhl"]
