@@ -159,6 +159,16 @@ _SOCCER_DISAGREEMENT_NOTE = (
     "current model quality."
 )
 
+_SOCCER_LONGSHOT_NOTE = (
+    "max_odds 8.0 -> 5.0 (2026-10-25): the proportional de-vig of soccer 1x2 carries a "
+    "favourite-longshot bias that is stable across 2012-19 AND 2020-26 (n=139k matches): "
+    "selections implied under 0.20 (odds above ~5) realise 0.8-1.7 pts BELOW implied (z -3.4 "
+    "to -4.1) and return -8% to -29% flat at the average price; the live post-gating book "
+    "agrees (odds >= 5: n=44, -25.5%; odds 3-5: n=124, +13%). Above 5 the EV gate selects "
+    "on model noise against a structurally over-priced longshot. The 3-5 band is flat-to-"
+    "positive, so the cap sits at 5, not lower."
+)
+
 _NO_SEASON_NOTE = (
     "The corpus was missing the entire 2025-26 season (0 finished games vs 335/1403/1398 in "
     "2024-25), so NFL week-1 rolling-form windows were 61% August preseason and the model "
@@ -212,10 +222,10 @@ GATES: dict[tuple[str, str], MarketGate] = {
     ),
     ("soccer", "1x2"): MarketGate(
         enabled=True,
-        max_odds=8.0,
+        max_odds=5.0,
         max_ev=0.40,
         max_gap=0.10,
-        note=_SOCCER_DISAGREEMENT_NOTE,
+        note=_SOCCER_DISAGREEMENT_NOTE + " " + _SOCCER_LONGSHOT_NOTE,
     ),
     ("soccer", "asian_handicap"): MarketGate(
         enabled=True,
@@ -363,6 +373,70 @@ def _same_line(a, b) -> bool:
     return abs(float(a) - float(b)) < 1e-9
 
 
+def devig_proportional(prices: dict[str, float], total: float = 1.0) -> dict[str, float] | None:
+    """Fair probabilities by proportional normalisation: p_i = total * (1/o_i) / sum(1/o_j).
+
+    Kept for comparison and as the fallback of devig_power. It spreads the
+    margin in proportion to each price's implied probability, which is the
+    mechanism behind the favourite-longshot bias the 2026-09-21 (racing) and
+    2026-10-25 (soccer) audits measured: favourites come out under-priced and
+    longshots over-priced. Returns None for an empty or non-positive group.
+    """
+    if not prices or any(o <= 0.0 for o in prices.values()):
+        return None
+    implied = {k: 1.0 / o for k, o in prices.items()}
+    s = sum(implied.values())
+    if s <= 0.0:
+        return None
+    return {k: total * v / s for k, v in implied.items()}
+
+
+def devig_power(prices: dict[str, float], total: float = 1.0) -> dict[str, float] | None:
+    """Fair probabilities by the power method: p_i = (1/o_i)^k with k chosen so
+    that sum(p_i) == total.
+
+    Unlike proportional normalisation this takes more margin off longshots
+    than off favourites, which is how books actually load their margin.
+    Measured on this repo's data: racing ECE 0.0050 -> 0.0013 (n=159k
+    entrants, 2026-09-21); soccer 1x2 at a ~9-book closing consensus, the
+    0.6-0.8 implied bands realise 0.68 / 0.81 against proportional 0.64 /
+    0.74 and power 0.665 / 0.774 (n=5,262 selections, 2026-10-25).
+
+    `total` is the sum the true probabilities take: 1.0 for a partition, 2.0
+    for double_chance (see OVERLAPPING_MARKETS). k is found by bisection on
+    the monotone function sum((1/o_i)^k); it is order-preserving, so it can
+    never flip which selection is the favourite. Falls back to proportional
+    when an implied probability is >= 1 (a price <= 1.00, where powers cannot
+    shrink it) or the root is not bracketed. Returns None for an empty or
+    non-positive group.
+    """
+    if not prices or any(o <= 0.0 for o in prices.values()):
+        return None
+    implied = {k: 1.0 / o for k, o in prices.items()}
+    if len(implied) < 2 or any(v >= 1.0 for v in implied.values()):
+        return devig_proportional(prices, total)
+
+    def gap(k: float) -> float:
+        return sum(v**k for v in implied.values()) - total
+
+    lo, hi = 0.05, 50.0
+    if gap(lo) < 0.0 or gap(hi) > 0.0:
+        return devig_proportional(prices, total)
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        if gap(mid) > 0.0:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-13:
+            break
+    k = 0.5 * (lo + hi)
+    fair = {sel: v**k for sel, v in implied.items()}
+    s = sum(fair.values())
+    # Rescale away the bisection residual so the group sums to `total` exactly.
+    return {sel: total * v / s for sel, v in fair.items()}
+
+
 def market_consensus_prob(
     cur,
     match_id: str,
@@ -374,10 +448,12 @@ def market_consensus_prob(
     """De-vigged multi-book consensus probability for one selection.
 
     Per bookmaker we take the latest non-live price for every selection in the
-    same market group, normalise 1/odds over that group so the book's
-    probabilities sum to the group's true total (1.0 for a partition,
+    same market group, de-vig it with the POWER method (devig_power) so the
+    book's probabilities sum to the group's true total (1.0 for a partition,
     OVERLAPPING_MARKETS' multiplicity otherwise), then average the target
-    selection's normalised probability across books.
+    selection's fair probability across books. Proportional normalisation was
+    replaced 2026-10-25: it over-prices longshots, which is exactly the side
+    the max_gap cap has to see clearly.
 
     For SIGN_FLIPPED_LINE_MARKETS (asian_handicap, spread) the group spans two
     line values: the target selection at `line` and the opposite side at
@@ -447,10 +523,10 @@ def market_consensus_prob(
                 sorted(prices),
             )
             continue
-        overround = sum(1.0 / price for price in prices.values())
-        if overround <= 0.0:
+        fair = devig_power(prices, group_total)
+        if fair is None:
             continue
-        normalised.append(group_total * (1.0 / prices[sel]) / overround)
+        normalised.append(fair[sel])
 
     if len(normalised) < MIN_CONSENSUS_BOOKS:
         return None

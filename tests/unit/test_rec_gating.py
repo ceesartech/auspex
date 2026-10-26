@@ -62,6 +62,19 @@ THREE_BOOK_1X2 = [
 ]
 
 
+def _power_fair(prices: tuple[float, ...], total: float = 1.0) -> list[float]:
+    """Independent power de-vig for expectations: bisection on k in sum((1/o)^k) = total."""
+    implied = [1.0 / o for o in prices]
+    lo, hi = 0.05, 50.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if sum(v**mid for v in implied) > total:
+            lo = mid
+        else:
+            hi = mid
+    return [v**lo for v in implied]
+
+
 # ── gate_for resolution ───────────────────────────────────────────────────
 
 
@@ -145,9 +158,11 @@ def test_max_odds_boundary():
     # max_odds is the FIRST REJECTED price: the racing caps come off bands
     # ("odds 12+", "6-12") that include their boundary, and 12.00 / 6.00 are
     # prices books quote constantly.
-    assert _soccer_1x2(odds=7.99) == (True, None)
-    assert _soccer_1x2(odds=8.0) == (False, "odds_above_max")
-    assert _soccer_1x2(odds=8.01) == (False, "odds_above_max")
+    # Soccer 1x2 caps at 5.0 since 2026-10-25 (favourite-longshot bias of the
+    # proportional de-vig; see _SOCCER_LONGSHOT_NOTE).
+    assert _soccer_1x2(odds=4.99) == (True, None)
+    assert _soccer_1x2(odds=5.0) == (False, "odds_above_max")
+    assert _soccer_1x2(odds=5.01) == (False, "odds_above_max")
 
 
 def test_max_ev_boundary():
@@ -235,14 +250,15 @@ def test_consensus_devigs_three_books_exactly():
     cur = FakeCursor(THREE_BOOK_1X2)
     got = rg.market_consensus_prob(cur, "match-1", "1x2", "home")
 
-    # Hand-computed: per book, normalise 1/odds over the three selections.
+    # Per book, power de-vig (an independent bisection here), then average.
     expected = (
-        (1 / 2.00) / (1 / 2.00 + 1 / 3.50 + 1 / 4.00)
-        + (1 / 2.10) / (1 / 2.10 + 1 / 3.40 + 1 / 3.80)
-        + (1 / 1.95) / (1 / 1.95 + 1 / 3.60 + 1 / 4.20)
+        _power_fair((2.00, 3.50, 4.00))[0] + _power_fair((2.10, 3.40, 3.80))[0] + _power_fair((1.95, 3.60, 4.20))[0]
     ) / 3
-    assert got == pytest.approx(expected, abs=1e-12)
-    assert got == pytest.approx(0.48068175642238103, abs=1e-12)
+    assert got == pytest.approx(expected, abs=1e-10)
+    assert got == pytest.approx(0.4854898445624268, abs=1e-10)
+    # The favourite comes out ABOVE the proportional consensus (0.48068...):
+    # power takes more margin off the longshots than off the favourite.
+    assert got > 0.48068175642238103
     assert cur.executions == 1
     assert cur.params == {
         "match_id": "match-1",
@@ -282,7 +298,7 @@ def test_consensus_skips_single_selection_and_bad_price_books():
 def test_consensus_skips_book_that_does_not_price_the_selection():
     rows = THREE_BOOK_1X2 + [_odds_row("delta", "draw", 3.30), _odds_row("delta", "away", 4.05)]
     got = rg.market_consensus_prob(FakeCursor(rows), "match-1", "1x2", "home")
-    assert got == pytest.approx(0.48068175642238103, abs=1e-12)
+    assert got == pytest.approx(0.4854898445624268, abs=1e-10)
 
 
 def test_consensus_ignores_live_rows():
@@ -315,7 +331,7 @@ def test_consensus_parses_line_out_of_display_selection():
         "opposite_line": 2.5,
         "max_age_hours": rg.MAX_ODDS_AGE_HOURS,
     }
-    assert got == pytest.approx(0.5081960244750942, abs=1e-12)
+    assert got == pytest.approx(0.5086385262167635, abs=1e-10)
 
 
 def test_consensus_accepts_bare_selection_plus_explicit_line():
@@ -389,10 +405,8 @@ def _handicap_rows() -> list[dict]:
 def test_handicap_consensus_pairs_the_two_signed_sides():
     cur = FakeCursor(_handicap_rows())
     got = rg.market_consensus_prob(cur, "m1", "asian_handicap", "home", line=-0.5)
-    expected = (
-        (1 / 1.95) / (1 / 1.95 + 1 / 1.90) + (1 / 2.00) / (1 / 2.00 + 1 / 1.85) + (1 / 1.92) / (1 / 1.92 + 1 / 1.94)
-    ) / 3
-    assert got == pytest.approx(expected, abs=1e-12)
+    expected = (_power_fair((1.95, 1.90))[0] + _power_fair((2.00, 1.85))[0] + _power_fair((1.92, 1.94))[0]) / 3
+    assert got == pytest.approx(expected, abs=1e-10)
 
 
 def test_handicap_consensus_sides_sum_to_one():
@@ -467,7 +481,7 @@ def test_double_chance_consensus_sums_to_two():
 
 def test_double_chance_candidate_is_not_rejected_by_a_halved_consensus():
     market_prob = rg.market_consensus_prob(FakeCursor(DOUBLE_CHANCE_ROWS), "m", "double_chance", "1X")
-    assert market_prob == pytest.approx(0.6948, abs=1e-3)
+    assert market_prob == pytest.approx(0.7022, abs=1e-3)
     assert rg.passes_gate(
         "soccer",
         "double_chance",
@@ -513,3 +527,41 @@ def test_purge_pending_recs_scopes_to_upcoming_pending_rows_of_the_sport():
 def test_purge_pending_recs_handles_missing_rowcount():
     cur = FakePurgeCursor(-1)  # psycopg2 reports -1 when it has no count
     assert rg.purge_pending_recs(cur, "nfl", ("moneyline",)) == 0
+
+
+# ── de-vig methods ────────────────────────────────────────────────────────
+
+
+def test_devig_power_sums_to_total_and_preserves_order():
+    fair = rg.devig_power({"home": 1.60, "draw": 4.00, "away": 5.50})
+    assert sum(fair.values()) == pytest.approx(1.0, abs=1e-12)
+    assert fair["home"] > fair["draw"] > fair["away"]
+
+
+def test_devig_power_favours_the_favourite_relative_to_proportional():
+    prices = {"home": 1.40, "draw": 4.75, "away": 8.00}
+    power = rg.devig_power(prices)
+    prop = rg.devig_proportional(prices)
+    assert power["home"] > prop["home"]
+    assert power["away"] < prop["away"]
+
+
+def test_devig_power_symmetric_two_way_is_a_coin_flip():
+    fair = rg.devig_power({"over": 1.91, "under": 1.91})
+    assert fair["over"] == pytest.approx(0.5, abs=1e-12)
+
+
+def test_devig_power_overlapping_group_sums_to_two():
+    fair = rg.devig_power({"1x": 1.30, "12": 1.25, "x2": 1.55}, 2.0)
+    assert sum(fair.values()) == pytest.approx(2.0, abs=1e-12)
+
+
+def test_devig_power_falls_back_to_proportional_on_an_unshrinkable_price():
+    prices = {"home": 1.0, "away": 12.0}  # implied 1.0 cannot be shrunk by a power
+    assert rg.devig_power(prices) == pytest.approx(rg.devig_proportional(prices))
+
+
+def test_devig_rejects_empty_and_non_positive_groups():
+    assert rg.devig_power({}) is None
+    assert rg.devig_power({"home": 2.0, "away": 0.0}) is None
+    assert rg.devig_proportional({"home": -1.0, "away": 2.0}) is None
