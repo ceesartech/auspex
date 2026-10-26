@@ -32,6 +32,7 @@ from psycopg2.extras import RealDictCursor
 sys.path.insert(0, "/app/services/api/src")
 sys.path.insert(0, os.path.dirname(__file__))
 
+import rec_gating  # noqa: E402
 from telegram_notify import Alert, enqueue_alerts  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
@@ -161,7 +162,47 @@ MARKET_PREDICTION_TYPE: dict[str, str] = {
 }
 
 
-def store_market_predictions(cur, match_id: str, markets: dict, model_version: str) -> int:
+# Market over/under-2.5 anchor for the derived scoreline (audit §7 2026-10-25,
+# item 4). The Dixon-Coles totals shape is blind to the totals market, and live
+# the derived over-2.5 ran +0.0108 +/- 0.0043 Brier worse than the closing O/U
+# market (n=1,302); scripts/ab_soccer_ou_anchor.py measures the joint 1x2 +
+# O/U-2.5 reconcile that closes it. The anchor is the SAME de-vigged multi-book
+# consensus the recommendation gate uses (rec_gating.market_consensus_prob):
+# >= MIN_CONSENSUS_BOOKS books, quotes fresher than MAX_ODDS_AGE_HOURS. It is
+# read from the odds table, NOT from features_cache — compute_features.py fills
+# a missing over/under price with NEUTRAL_DEFAULTS (1.95 / 1.95 -> 0.52), and
+# anchoring to that placeholder would drag every derived market to a constant.
+OU_ANCHOR_MARKET = "over_under"
+OU_ANCHOR_SELECTION = "over"
+OU_ANCHOR_LINE = 2.5
+
+
+def market_over25_anchor(cur, match_id: str) -> float | None:
+    """De-vigged market P(total goals > 2.5) for one match, or None when the
+    market cannot be seen (too few fresh books, or the lookup failed).
+
+    Runs inside the caller's transaction, so a failing query is rolled back to
+    a savepoint — otherwise one bad lookup would abort every later write in
+    the run. A failure is logged with the match id and treated as "no
+    anchor", which serves exactly the pre-anchor 1x2-only derivation."""
+    cur.execute("SAVEPOINT ou_anchor")
+    try:
+        p = rec_gating.market_consensus_prob(cur, match_id, OU_ANCHOR_MARKET, OU_ANCHOR_SELECTION, OU_ANCHOR_LINE)
+    except Exception as e:
+        cur.execute("ROLLBACK TO SAVEPOINT ou_anchor")
+        logger.warning("O/U-2.5 anchor lookup failed for %s (serving 1x2-only reconcile): %s", match_id, e)
+        return None
+    cur.execute("RELEASE SAVEPOINT ou_anchor")
+    return float(p) if p is not None else None
+
+
+def store_market_predictions(
+    cur,
+    match_id: str,
+    markets: dict,
+    model_version: str,
+    metadata: dict | None = None,
+) -> int:
     """Upsert one `predictions` row per derived market_type.
 
     `markets` is the {market_type: {selection: prob}} dict from the derivation
@@ -175,8 +216,14 @@ def store_market_predictions(cur, match_id: str, markets: dict, model_version: s
     asian_handicap `*_push` keys are kept in `probabilities` (the recommender
     needs them for push-aware EV) but excluded from the argmax since a push
     isn't a backable outcome.
+
+    `metadata` (optional) is MERGED into the row's metadata JSONB — used to
+    record how the full-time scoreline was reconciled ({"reconcile": "1x2"} or
+    {"reconcile": "1x2+ou2.5", "market_over_2.5": p}) so anchored and
+    unanchored rows can be scored separately later.
     """
     written = 0
+    meta_json = json.dumps(metadata or {}, allow_nan=False)
     for engine_mt, probs in markets.items():
         ptype = MARKET_PREDICTION_TYPE.get(engine_mt)
         if ptype is None or not probs:
@@ -194,13 +241,14 @@ def store_market_predictions(cur, match_id: str, markets: dict, model_version: s
             """
             INSERT INTO predictions
             (match_id, model_name, model_version, prediction_type,
-             predicted_outcome, confidence, probabilities)
+             predicted_outcome, confidence, probabilities, metadata)
             VALUES (%(match_id)s, 'ensemble', %(model_version)s, %(ptype)s,
-                    %(predicted)s, %(confidence)s, %(probs)s::jsonb)
+                    %(predicted)s, %(confidence)s, %(probs)s::jsonb, %(meta)s::jsonb)
             ON CONFLICT (match_id, model_name, model_version, prediction_type) DO UPDATE
                 SET predicted_outcome = EXCLUDED.predicted_outcome,
                     confidence = EXCLUDED.confidence,
                     probabilities = EXCLUDED.probabilities,
+                    metadata = COALESCE(predictions.metadata, '{}'::jsonb) || EXCLUDED.metadata,
                     updated_at = NOW()
             """,
             {
@@ -210,6 +258,7 @@ def store_market_predictions(cur, match_id: str, markets: dict, model_version: s
                 "predicted": top_sel,
                 "confidence": float(selectable[top_sel]),
                 "probs": json.dumps(probs, allow_nan=False),
+                "meta": meta_json,
             },
         )
         written += 1
@@ -311,9 +360,10 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
     # sys.path by load_models_into_process(). If it's unavailable we still
     # produce the 1x2 match_result prediction below — derivation just no-ops.
     try:
-        from predictors.market_derivation import derive_from_lambdas  # type: ignore
+        from predictors.market_derivation import derive_from_lambdas, valid_ou_anchor  # type: ignore
     except Exception as e:  # pragma: no cover - defensive import guard
         derive_from_lambdas = None
+        valid_ou_anchor = None
         logger.warning("market_derivation unavailable (%s); storing match_result only", e)
 
     # Halftime Dixon-Coles is an OPTIONAL standalone artifact. The
@@ -352,6 +402,8 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
 
     predicted = 0
     market_rows = 0
+    ou_anchored = 0
+    ou_unanchored = 0
     alerts: list[Alert] = []
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -463,7 +515,9 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
 
                 # Derive the wider market catalog from the Dixon-Coles
                 # scoreline, reconciled to the ensemble 1x2 so every
-                # market's home/draw/away split matches `match_result`.
+                # market's home/draw/away split matches `match_result` —
+                # and, when a real multi-book over/under-2.5 price exists,
+                # jointly to that market too (market_over25_anchor above).
                 # Best-effort: any failure here leaves the
                 # match_result prediction intact.
                 dc = ensemble.models.get("dixon_coles_soccer_match_result") if derive_from_lambdas else None
@@ -474,13 +528,23 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                             m["away_team"],
                             league=m.get("league_id"),
                         )
+                        p_over_mkt = market_over25_anchor(cur, m["match_id"])
                         markets = derive_from_lambdas(
                             h_lam,
                             a_lam,
                             float(getattr(dc, "rho", 0.0) or 0.0),
                             target_1x2=(float(proba[0]), float(proba[1]), float(proba[2])),
+                            target_over_25=p_over_mkt,
                         )
-                        market_rows += store_market_predictions(cur, m["match_id"], markets, model_version)
+                        if valid_ou_anchor is not None and valid_ou_anchor(p_over_mkt):
+                            ou_anchored += 1
+                            meta = {"reconcile": "1x2+ou2.5", "market_over_2.5": round(float(p_over_mkt), 6)}
+                        else:
+                            ou_unanchored += 1
+                            meta = {"reconcile": "1x2"}
+                        market_rows += store_market_predictions(
+                            cur, m["match_id"], markets, model_version, metadata=meta
+                        )
                     except Exception as e:
                         logger.warning("Market derivation failed for %s: %s", m["match_id"], e)
 
@@ -558,15 +622,20 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
     # across two messages.
     queue_depth = enqueue_alerts(alerts) if alerts else 0
     logger.info(
-        "Stored %d match-result predictions (+%d market rows); queued %d picks (queue depth now %d)",
+        "Stored %d match-result predictions (+%d market rows; scoreline anchored to the O/U-2.5 market "
+        "on %d matches, 1x2-only on %d); queued %d picks (queue depth now %d)",
         predicted,
         market_rows,
+        ou_anchored,
+        ou_unanchored,
         len(alerts),
         queue_depth,
     )
     return {
         "predicted": predicted,
         "market_rows": market_rows,
+        "ou_anchored": ou_anchored,
+        "ou_unanchored": ou_unanchored,
         "alerts_queued": len(alerts),
         "queue_depth": queue_depth,
     }
