@@ -94,48 +94,35 @@ HISTORY_LIMIT = 8  # K: runs of served-Brier history kept per ensemble (~2 month
 MIN_PAIRED_N = 100  # fewest shared rows a paired re-scoring may decide on
 
 # ── Which held-out rows has the INCUMBENT never seen? ─────────────────────────
-# The paired path used to answer with a DATE: rows after the incumbent's frame
-# end. That collapses whenever a backfill adds rows INSIDE the incumbent's date
-# range — the 2026-10-26 odds backfill gave the 2025-26 NBA/NFL season its first
-# lines, every spread/total challenger's held-out tail became that season, and
-# the "after the frame end" set shrank to two days: four bundles went to a human
-# and would have every week. Two better answers, in order:
-#   1. EXACT: the trainer now writes each ensemble's train+val match ids next to
-#      its artifact (SEEN_IDS_FILENAME); held-out rows outside that set are
-#      unseen whatever their dates.
-#   2. LEGACY incumbents (no id file) of a frame that INNER-joins a market line:
-#      a game whose first odds row was written after the incumbent trained had
-#      no line then, so it was outside the incumbent's frame.
-# The date cutoff stays as the union's third arm and as the only rule otherwise.
+# The paired path used to answer with a DATE only: rows after the incumbent's
+# frame end. That collapses whenever a backfill adds rows INSIDE the
+# incumbent's date range — the 2026-10-26 odds backfill gave the 2025-26
+# NBA/NFL season its first lines and four bundles went to a human. The trainer
+# now writes each ensemble's train+val match ids next to its artifact
+# (SEEN_IDS_FILENAME); held-out rows outside that set are unseen whatever
+# their dates. The date cutoff remains for artifacts without the file.
+# (A "first priced after the incumbent trained" rule for line-required frames
+# was tried the same day and removed: an odds REPLACE re-stamps every game's
+# first-priced time, which would count games the incumbent trained on as
+# unseen. All 2026-10-25/26 incumbents got exact reconstructed id files.)
 SEEN_IDS_FILENAME = "seen_match_ids.json.gz"
-LINE_REQUIRED_BUNDLES = frozenset({"nba_spread", "nba_total", "nfl_spread", "nfl_total"})
 
 
-def unseen_by_incumbent(match_ids, dates, cutoff=None, seen_ids=None, late_odds_ids=None):
+def unseen_by_incumbent(match_ids, dates, cutoff=None, seen_ids=None):
     """Boolean mask over the challenger's held-out rows: True where the incumbent
     cannot have trained or validated on the row. Returns (mask, basis).
 
-    seen_ids (exact, when the incumbent recorded them) wins outright. Otherwise a
-    row is unseen when it starts after `cutoff` or its match is in
-    `late_odds_ids` (legacy line-required incumbents only). With neither a cutoff
-    nor late ids, nothing is unseen — the caller must refuse rather than guess."""
+    seen_ids (exact, when the incumbent recorded them) wins outright; otherwise a
+    row is unseen when it starts after `cutoff`. With neither, nothing is unseen —
+    the caller must refuse rather than guess."""
     ids = [str(m) for m in match_ids]
     if seen_ids is not None:
         seen = {str(m) for m in seen_ids}
         return [m not in seen for m in ids], "challenger held-out rows outside the incumbent's recorded train+val ids"
-    late = {str(m) for m in (late_odds_ids or ())}
-    mask = []
-    for m, d in zip(ids, dates):
-        after = cutoff is not None and d is not None and d == d and d > cutoff
-        mask.append(bool(after or m in late))
-    parts = []
-    if cutoff is not None:
-        parts.append(f"rows after {cutoff}")
-    if late:
-        parts.append(
-            "games whose first odds row was written after the incumbent trained (outside its line-required frame)"
-        )
-    return mask, " OR ".join(parts) + " (unseen by BOTH models)" if parts else "no rule available"
+    if cutoff is None:
+        return [False] * len(ids), "no rule available"
+    mask = [bool(d is not None and d == d and d > cutoff) for d in dates]
+    return mask, f"rows after {cutoff} (unseen by BOTH models)"
 
 
 PAIRED_Z = 1.96  # two-sided 95% on the paired-delta SE

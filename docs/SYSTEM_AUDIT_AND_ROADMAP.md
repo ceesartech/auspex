@@ -1190,6 +1190,45 @@ with the growth-rate driver (WAL) eliminated.
 > 5. Optionally promote NBA/NFL spread/total now rather than at the Sunday
 >    retrain (evidence above; production backup first, as swap_production does).
 
+> **Update (2026-10-26, evening) — operator approvals executed.** Verified
+> backup first (`postgres/betting_system-2026-10-26T184445Z.dump`, 386 MB).
+> (1) **Odds replace — partial.** The operator expected ~87k credits; the API
+> reported 18,873 remaining (81,127 used of 100k), so only what fits ran:
+> NFL 2024-25 (fully cached, 0 credits: 285/286 games, 143 in-play events
+> rejected, 38,946 v1 rows archived → 17,014 written) and NBA 2024-25 (~5.3k
+> credits: 1,319/1,329 games, 254 in-play rejected). Archives:
+> /app/backups/odds_archive_*_20261026T18*.csv. The rest (NBA/NFL 2022-24, NHL
+> 2022-25, ~54k credits) is `scripts/ops/replace_v1_odds_after_reset.sh`: it
+> waits for the Nov 1 reset, takes and verifies a backup, replaces with a 15k
+> floor, recomputes features, takes a post-replace backup, and triggers a
+> retrain if it misses the 04:00 one. Installing it in cron was refused by
+> this session's permission policy; run it by hand after the reset.
+> (2) **NHL cleanup — done** in one transaction (archive
+> /app/backups/nhl_cleanup_20261026T190233Z.json): the 2 duplicate 2025-26
+> fixtures removed (canonical = the NHL-API rows with stats; the ESPN id and 4
+> predictions moved over), the ESPN "Montreal Canadiens" team row merged into
+> the history row (25 fixtures, 22 stats rows, 1 player), 186 regulation
+> predictions relabelled 'draw' → 'tie' (all had picked home/away, so
+> correctness is unchanged). Deployed first (`a42126e`): both loaders now
+> resolve a club under any accent spelling, so the merge cannot be undone by
+> the next fetch. Left alone: four never-played "if necessary" playoff
+> placeholders (scheduled, no twin, excluded from training).
+> (3) **Promote of the four held bundles — blocked** twice by this session's
+> permission policy despite approval; `scripts/ops/promote_held_bundles.py`
+> does it (command in its docstring). Independently, every production
+> incumbent except tennis now carries an exact `seen_match_ids.json.gz`
+> (12 reconstructed from today's run, 4 from the 2026-10-25 legacy run; each
+> row count verified against its own fingerprint), so the Nov 1 gate compares
+> on exact membership either way. The "first priced after training" rule added
+> earlier today was REMOVED: an odds replace re-stamps every game's first-priced
+> time and would have counted games the incumbent trained on as unseen.
+> (4) **Tennis source.** tennis-data.co.uk is the legitimate free source (same
+> author as football-data.co.uk, which the soccer loaders use); the 403 is a
+> Cloudflare bot check on every non-browser client, from the VM too. Options:
+> download the yearly ATP/WTA workbooks in a browser (preferred: both tours,
+> Pinnacle/B365/Avg), or Kaggle's CC0 "ATP Tennis 2000–2025 daily" mirror (ATP
+> only, a single odds pair, needs a Kaggle API token and a loader adapter).
+
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
 > fixed in one push. (1) `GET /predictions/upcoming` applied `LIMIT` to

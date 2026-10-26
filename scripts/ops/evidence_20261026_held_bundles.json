@@ -1,0 +1,6 @@
+{
+  "nba_spread": {"shared_n": 724, "delta": 0.0003, "se": 0.00265, "incumbent_brier": 0.50033, "challenger_brier": 0.50063, "verdict": "paired dBrier +0.00030 +/- 0.00265 (n=724) <= margin 0.00519"},
+  "nba_total": {"shared_n": 702, "delta": 0.00189, "se": 0.00387, "incumbent_brier": 0.49766, "challenger_brier": 0.49955, "verdict": "paired dBrier +0.00189 +/- 0.00387 (n=702) <= margin 0.00759", "note": "incumbent serves an isotonic step map (18 distinct probabilities on 702 games); challenger serves raw (699)"},
+  "nfl_spread": {"shared_n": 93, "delta": -0.00238, "se": 0.00387, "incumbent_brier": 0.50359, "challenger_brier": 0.50121, "verdict": "paired dBrier -0.00238 +/- 0.00387 (n=93) <= margin 0.00758"},
+  "nfl_total": {"shared_n": 93, "delta": -0.00026, "se": 0.01429, "incumbent_brier": 0.49633, "challenger_brier": 0.49607, "verdict": "paired dBrier -0.00026 +/- 0.01429 (n=93) <= margin 0.02802"}
+}

@@ -1009,19 +1009,15 @@ def test_recorded_seen_ids_decide_membership_exactly_whatever_the_dates():
     assert "recorded train+val ids" in basis
 
 
-def test_legacy_line_required_incumbent_counts_late_priced_games_as_unseen():
+def test_without_seen_ids_only_rows_after_the_cutoff_count():
     import pandas as pd
     from modal_bundles import unseen_by_incumbent
 
     cutoff = pd.Timestamp("2026-10-25", tz="UTC")
-    dates = [
-        pd.Timestamp("2026-02-01", tz="UTC"),
-        pd.Timestamp("2026-02-02", tz="UTC"),
-        pd.Timestamp("2026-10-26", tz="UTC"),
-    ]
-    mask, basis = unseen_by_incumbent(["backfilled", "old", "new"], dates, cutoff=cutoff, late_odds_ids={"backfilled"})
-    assert mask == [True, False, True]
-    assert "first odds row" in basis
+    dates = [pd.Timestamp("2026-02-01", tz="UTC"), pd.Timestamp("2026-10-26", tz="UTC"), None]
+    mask, basis = unseen_by_incumbent(["old", "new", "undated"], dates, cutoff=cutoff)
+    assert mask == [False, True, False]
+    assert "rows after" in basis
 
 
 def test_without_any_rule_nothing_counts_as_unseen():

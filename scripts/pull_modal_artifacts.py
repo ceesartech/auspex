@@ -86,7 +86,6 @@ from modal_bundles import (  # noqa: E402
     ARTIFACT_PREFIX,
     BUNDLE_TO_ENSEMBLE,
     HISTORY_LIMIT,
-    LINE_REQUIRED_BUNDLES,
     MIN_PAIRED_N,
     SEEN_IDS_FILENAME,
     derived_market_guard,
@@ -269,18 +268,6 @@ def read_seen_ids(ensemble_dir: Path) -> Optional[set]:
     return {str(m) for m in doc["match_ids"]}
 
 
-def _games_first_priced_after(database_url: str, trained_at: str) -> set:
-    """Matches whose FIRST odds row was written after `trained_at`."""
-    import psycopg2
-
-    with psycopg2.connect(database_url) as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT match_id::text FROM odds GROUP BY match_id HAVING MIN(created_at) > %s::timestamptz",
-            (trained_at,),
-        )
-        return {r[0] for r in cur.fetchall()}
-
-
 def paired_rescore(
     bundle: str,
     production: str,
@@ -384,22 +371,19 @@ def paired_rescore(
         )
 
     seen_ids = read_seen_ids(Path(production) / BUNDLE_TO_ENSEMBLE[bundle])
-    late_ids = None
-    if seen_ids is None and bundle in LINE_REQUIRED_BUNDLES and (incumbent_doc or {}).get("trained_at"):
-        late_ids = _games_first_priced_after(database_url, incumbent_doc["trained_at"])
 
     cutoff, cutoff_desc = _frame_cutoff(incumbent_fp, incumbent_doc)
-    if seen_ids is None and cutoff is None and not late_ids:
+    if seen_ids is None and cutoff is None:
         raise PairedEvalError(
             f"cannot establish rows the incumbent has never seen: {cutoff_desc} — refusing to score it "
             "on rows it may have trained or calibrated on"
         )
-    if "match_id" not in test_df.columns and (seen_ids is not None or late_ids):
+    if "match_id" not in test_df.columns and seen_ids is not None:
         raise PairedEvalError(f"{bundle} frame has no match_id column — cannot test membership")
 
     dates = pd.to_datetime(test_df["match_date"], errors="coerce", utc=True)
     match_ids = test_df["match_id"] if "match_id" in test_df.columns else [None] * len(test_df)
-    mask, basis = unseen_by_incumbent(match_ids, list(dates), cutoff, seen_ids, late_ids)
+    mask, basis = unseen_by_incumbent(match_ids, list(dates), cutoff, seen_ids)
     eval_df = test_df[mask]
     if seen_ids is None and cutoff is not None:
         basis = basis.replace(f"rows after {cutoff}", f"rows after {cutoff_desc}")
