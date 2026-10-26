@@ -30,6 +30,9 @@ import psycopg2
 import requests
 from psycopg2.extras import Json, RealDictCursor
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import team_identity  # noqa: E402
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("fetch_upcoming")
 
@@ -336,7 +339,9 @@ def ensure_team(cur, cfg: SportConfig, name: str, league_id: str) -> str | None:
     "Rosenborg BK") reuse the same row as football-data's "Rosenborg"
     instead of creating an orphan that has no historical matches:
 
-      1. Exact normalised match on (normalized_name, sport).
+      1. Exact normalised match on (normalized_name, sport), then the same
+         match with accents folded (team_identity: ESPN "Montreal" must reuse
+         the NHL API's "Montréal" row, not mint a history-less twin).
       2. Fuzzy match against teams in the same league: drop common club
          abbreviation tokens (BK, FC, etc.) from both sides and compare
          via SequenceMatcher. Reuse if ratio >= 0.85. Soccer-only — NHL
@@ -353,6 +358,11 @@ def ensure_team(cur, cfg: SportConfig, name: str, league_id: str) -> str | None:
     row = cur.fetchone()
     if row:
         return row["id"]
+
+    # 1b. Same club, other accent spelling ("Montreal" vs "Montréal").
+    folded_id = team_identity.find_team_accent_insensitive(cur, cfg.sport, norm)
+    if folded_id:
+        return folded_id
 
     # 2. Fuzzy match within the same league, after stripping club tokens.
     if league_id and (cfg.club_suffixes or cfg.club_prefixes):

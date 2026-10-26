@@ -59,6 +59,9 @@ import psycopg2
 import requests
 from psycopg2.extras import Json, RealDictCursor
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import team_identity  # noqa: E402
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("load_nhl_historical")
 
@@ -522,6 +525,18 @@ def ensure_nhl_team(cur, team_payload: dict, league_id: str) -> str | None:
         return None
     full = f"{place} {common}"
     norm = " ".join(full.strip().lower().split())
+    # Reuse the club's row under any accent spelling (ESPN's "Montreal
+    # Canadiens" vs our "Montréal Canadiens") before inserting a twin.
+    cur.execute("SELECT id FROM teams WHERE normalized_name = %s AND sport = 'nhl'", (norm,))
+    if cur.fetchone() is None:
+        folded_id = team_identity.find_team_accent_insensitive(cur, "nhl", norm)
+        if folded_id:
+            cur.execute(
+                "UPDATE teams SET external_ids = COALESCE(external_ids, '{}'::jsonb) || %s, "
+                "league_id = COALESCE(league_id, %s) WHERE id = %s",
+                (Json({"nhl_api_id": nhl_id, "nhl_api_abbrev": abbrev}), league_id, folded_id),
+            )
+            return folded_id
     cur.execute(
         """
         INSERT INTO teams (name, normalized_name, league_id, sport, external_ids)
