@@ -188,7 +188,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--season",
         default=None,
-        help="Limit backfill to one season (e.g. 2024-2025). Default: all seasons in matches table.",
+        help="Limit backfill to one season (e.g. 2024-2025, or 'current'). Default: all seasons in matches table.",
     )
     p.add_argument(
         "--refetch",
@@ -204,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.database_url:
         logger.error("DATABASE_URL not set")
         return 2
-    counts = backfill(args.database_url, args.season, args.refetch)
+    counts = backfill(args.database_url, load_nhl.resolve_season_arg(args.season), args.refetch)
     logger.info("Done. %s", counts)
     return 0
 

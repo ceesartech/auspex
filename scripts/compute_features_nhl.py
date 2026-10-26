@@ -89,11 +89,14 @@ FEATURE_SET = "nhl_baseline"
 # puck-line and total still couldn't beat naive marginal baselines on
 # v2; 5v5 differential is the analytics community's standard answer.
 #
-# Inference-time gap (unchanged from v2): goalie features still fall
-# to NEUTRAL_DEFAULTS at predict time for upcoming games until we add
-# projected-goalie ingestion. 5v5 features DO work at predict time
-# because they're rolled from each team's prior games — same shape
-# as pace.
+# Inference-time goalie gap: goalie features fall to NEUTRAL_DEFAULTS for
+# every upcoming game (no starter row exists before the game). A probable-
+# starter projection exists (pick_probable_starter, NHL_GOALIE_MODE=
+# actual_or_projected) but stays OFF by default — it did not clear the
+# 2026-10 held-out test (see DEFAULT_GOALIE_MODE). 5v5 features work at predict
+# time because they're rolled from each team's prior games — same shape
+# as pace — PROVIDED the live season's games get stats at all, which is
+# what the enrich_nhl_stats pipeline task now guarantees.
 FEATURE_VERSION = "v3"
 # Rolling window — NHL teams play ~3.5 games/week so 10 games is ~3 weeks
 # of recent form, the standard "last 10" cadence NHL coverage uses.
@@ -111,6 +114,40 @@ BACK_TO_BACK_DAYS = 1.5
 # adds 0-5 min, SO adds ~0-2 min). Error is <2% on per-60 rates which
 # is well within the noise of a 10-game rolling window.
 GAME_LENGTH_MIN = {"REG": 60.0, "OT": 65.0, "SO": 65.0}
+
+# How the starting goalie is chosen for the goalie-form features:
+#   "actual"              — the starter recorded on THIS game's
+#                           nhl_match_stats row; None for an unplayed game
+#                           (the pre-2026-10 behaviour: every upcoming game
+#                           served the 0.905 default while training rows
+#                           carried real starters — a train/serve skew).
+#   "actual_or_projected" — the recorded starter when the game has one,
+#                           else the probable starter (pick_probable_starter).
+#   "projected"           — always the probable starter (evaluation only:
+#                           what serving would have known before the game).
+#   "none"                — no goalie (defaults), for paired evaluation.
+GOALIE_MODES = ("actual", "actual_or_projected", "projected", "none")
+# Serve-time default: "actual" (unchanged behaviour), because the
+# projection did NOT clear a held-out test. scripts/ab_nhl_projected_goalie.py
+# 2026-10-26, current production ensembles, paired multiclass ΔBrier vs the
+# default-goalie row, n=1,300 games 2025-11-15..2026-10-25:
+#     moneyline  -0.00090 ± 0.00112   regulation -0.00045 ± 0.00136
+#     puck_line  -0.00243 ± 0.00179   total      +0.00120 ± 0.00068 (worse)
+# and the ORACLE (true starter) is no better (-0.00072 / +0.00015 / -0.00182
+# / +0.00106) — this model gets no out-of-sample value from goalie form. The
+# in-sample 2024-25 read (-0.003 to -0.004 projected, ~2x for the oracle)
+# was fit, not signal. Re-run the harness after a retrain on the restored
+# 2025-26 goalie data before flipping NHL_GOALIE_MODE=actual_or_projected.
+DEFAULT_GOALIE_MODE = os.environ.get("NHL_GOALIE_MODE", "actual")
+# Probable-starter rule parameters: look-back in team games, and the gap
+# under which the previous game counts as the first half of a back-to-back.
+# Measured 2026-10 on 13,123 team-games 2020-25 (projection from strictly
+# earlier starts): the rule names the real starter 65.7% of the time at a
+# 7-game window (5: 65.3%, 10: 64.6%, 15: 64.7%), vs 47.0% for "last
+# game's starter"; the back-to-back clause lifts second-night games from
+# 30.7% to 73.9% (10-game window).
+PROBABLE_STARTER_WINDOW = 7
+PROBABLE_STARTER_B2B_HOURS = 36.0
 
 # NHL-tuned neutral defaults, rough league averages 2018-2024:
 #   * Goals/game per team ≈ 3.05
@@ -675,14 +712,90 @@ def _rolling_5v5_stats(cur, team_id: str, before_date, side: str) -> dict:
     }
 
 
-def _find_starting_goalie(cur, team_id: str, before_date) -> str | None:
-    """Look up the team's starting goalie for the upcoming match. For
-    HISTORICAL games (where this feature compute runs during the
-    --all-finished sweep) the goalie is already set on the matching
-    nhl_match_stats row, so we read it from there. For UPCOMING games
-    there's no such row yet — returns None and the caller falls back
-    to NEUTRAL_DEFAULTS for all goalie features. Closing that gap
-    needs a projected-goalie ingestion path (e.g., DailyFaceoff scrape)."""
+def pick_probable_starter(
+    recent_starts: list[tuple[str, object]],
+    before_date,
+    b2b_hours: float = PROBABLE_STARTER_B2B_HOURS,
+) -> str | None:
+    """Probable starting goalie from the team's recent starts.
+
+    `recent_starts` is [(goalie_id, match_date), ...], most recent first,
+    already limited to the look-back window. The goalie with the most
+    starts wins (ties: the more recent start). Exception: when the
+    previous game was the first half of a back-to-back (within
+    `b2b_hours`) and the #1 goalie started it, the #2 goalie is picked —
+    clubs rarely start the same goalie on consecutive nights. Pure
+    function; returns None with no history."""
+    starts = [(g, d) for g, d in recent_starts if g]
+    if not starts:
+        return None
+    counts: dict[str, int] = {}
+    first_seen: dict[str, int] = {}
+    for i, (g, _) in enumerate(starts):
+        counts[g] = counts.get(g, 0) + 1
+        first_seen.setdefault(g, i)
+    ranked = sorted(counts, key=lambda g: (-counts[g], first_seen[g]))
+    prev_goalie, prev_date = starts[0]
+    try:
+        gap_h = (before_date - prev_date).total_seconds() / 3600.0
+    except TypeError:
+        gap_h = float("inf")
+    if 0 <= gap_h <= b2b_hours and len(ranked) > 1 and ranked[0] == prev_goalie:
+        return ranked[1]
+    return ranked[0]
+
+
+def _recent_team_starts(cur, team_id: str, before_date, n: int = PROBABLE_STARTER_WINDOW) -> list[tuple[str, object]]:
+    """The team's last `n` recorded starters strictly before this game,
+    most recent first. The 6 h guard keeps the current game itself (and
+    any near-duplicate fixture row of it) out of its own projection."""
+    cur.execute(
+        f"""
+        SELECT s.starting_goalie_id::text AS gid, m.match_date
+        FROM nhl_match_stats s
+        JOIN matches m ON m.id = s.match_id
+        WHERE s.team_id = %s
+          AND s.starting_goalie_id IS NOT NULL
+          AND m.status = 'finished'
+          AND m.match_date < %s::timestamptz - INTERVAL '6 hours'
+          AND {NOT_PRESEASON_SQL}
+        ORDER BY m.match_date DESC
+        LIMIT %s
+        """,
+        (team_id, before_date, n),
+    )
+    return [(r["gid"], r["match_date"]) for r in cur.fetchall()]
+
+
+def _projected_starting_goalie(cur, team_id: str, before_date) -> str | None:
+    return pick_probable_starter(_recent_team_starts(cur, team_id, before_date), before_date)
+
+
+def _find_starting_goalie(cur, team_id: str, before_date, mode: str | None = None) -> str | None:
+    """Starting goalie whose rolling form feeds this game's goalie features,
+    per `mode` (GOALIE_MODES; default DEFAULT_GOALIE_MODE).
+
+    A finished game's starter sits on its nhl_match_stats row (written by
+    load_nhl_historical / backfill_nhl_goalies, and since 2026-10 by the
+    live enrich_nhl_stats task). An upcoming game has no such row; only
+    under "actual_or_projected" does it get the probable starter from the
+    team's recent starts instead of falling to the neutral defaults."""
+    mode = mode or DEFAULT_GOALIE_MODE
+    if mode not in GOALIE_MODES:
+        raise ValueError(f"unknown goalie mode {mode!r}; expected one of {GOALIE_MODES}")
+    if mode == "none":
+        return None
+    if mode == "projected":
+        return _projected_starting_goalie(cur, team_id, before_date)
+    actual = _actual_starting_goalie(cur, team_id, before_date)
+    if actual is None and mode == "actual_or_projected":
+        return _projected_starting_goalie(cur, team_id, before_date)
+    return actual
+
+
+def _actual_starting_goalie(cur, team_id: str, before_date) -> str | None:
+    """The starter recorded on this game's own nhl_match_stats row (a game
+    of this team within ±6 h of `before_date`), or None."""
     cur.execute(
         """
         SELECT s.starting_goalie_id::text AS gid
@@ -870,9 +983,10 @@ def fetch_total_crossbook(cur, match_id: str) -> dict:
     return _crossbook_aggregate(rows, "total")
 
 
-def compute_match_features(cur, match_id: str):
+def compute_match_features(cur, match_id: str, goalie_mode: str | None = None):
     """Return the feature dict for one NHL match, or None if the match
-    has no team ids."""
+    has no team ids. `goalie_mode` picks the starter source (GOALIE_MODES;
+    default DEFAULT_GOALIE_MODE)."""
     cur.execute(
         "SELECT home_team_id::text AS h, away_team_id::text AS a, match_date AS d " "FROM matches WHERE id = %s",
         (match_id,),
@@ -926,12 +1040,11 @@ def compute_match_features(cur, match_id: str):
     features.update(home_pace)
     features.update(away_pace)
 
-    # Starting goalie rolling stats. For historical games (current_match
-    # is finished), the goalie row exists; for upcoming games it's
-    # absent and goalie features default. Document a v2-of-v2 path:
-    # add projected-goalie ingestion so prediction-time benefits too.
-    home_goalie_id = _find_starting_goalie(cur, m["h"], m["d"])
-    away_goalie_id = _find_starting_goalie(cur, m["a"], m["d"])
+    # Starting goalie rolling stats. A finished game reads its recorded
+    # starter; an upcoming game defaults unless the probable-starter mode
+    # is switched on (see _find_starting_goalie / DEFAULT_GOALIE_MODE).
+    home_goalie_id = _find_starting_goalie(cur, m["h"], m["d"], goalie_mode)
+    away_goalie_id = _find_starting_goalie(cur, m["a"], m["d"], goalie_mode)
     home_goalie = _goalie_rolling_form(cur, home_goalie_id, m["d"], "home")
     away_goalie = _goalie_rolling_form(cur, away_goalie_id, m["d"], "away")
     features.update(home_goalie)

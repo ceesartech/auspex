@@ -193,6 +193,18 @@ def list_games_needing_5v5(conn, season: str | None, refetch: bool) -> list[tupl
         return [(r["match_id"], r["nhl_game_id"], r["home_team_id"], r["away_team_id"]) for r in cur.fetchall()]
 
 
+def map_pbp_team_ids(payload: dict, home_team_id: str, away_team_id: str) -> dict[int, str]:
+    """{NHL API team id: fixture team id} from a play-by-play payload's
+    homeTeam/awayTeam blocks, so 5v5 rows are keyed to the fixture's own
+    team rows whatever spelling created them."""
+    out: dict[int, str] = {}
+    for side, tid in (("homeTeam", home_team_id), ("awayTeam", away_team_id)):
+        nhl_id = (payload.get(side) or {}).get("id")
+        if nhl_id is not None and tid:
+            out[int(nhl_id)] = tid
+    return out
+
+
 def lookup_team_id_by_nhl_id(cur, nhl_team_id: int) -> str | None:
     """Map an NHL API team id back to our internal teams.id by joining
     on external_ids->>'nhl_api_id'. load_nhl_historical.ensure_nhl_team
@@ -270,13 +282,17 @@ def backfill(database_url: str, season: str | None, refetch: bool) -> dict:
                     if not by_nhl_team:
                         counts["games_with_no_5v5_data"] += 1
                     else:
-                        # Map the play-by-play's NHL API team ids to our
-                        # internal teams.id. We already know home and away
-                        # for this match — fall back to a per-team lookup
-                        # for safety in case the NHL API uses a different
-                        # id (rare but happens for relocated franchises).
+                        # Map the play-by-play's NHL API team ids to the
+                        # FIXTURE's own team ids via the payload's home/away
+                        # blocks. The old lookup-by-nhl_api_id returned the
+                        # NHL-API team row, which for an ESPN-created live
+                        # fixture can be a different row for the same club
+                        # (ESPN 'Montreal' vs API 'Montréal') — the guard
+                        # below then dropped that team's row silently. The
+                        # per-team lookup stays as the fallback.
+                        oriented = map_pbp_team_ids(payload, home_team_id, away_team_id)
                         for nhl_tid, stats in by_nhl_team.items():
-                            internal_tid = lookup_team_id_by_nhl_id(cur, nhl_tid)
+                            internal_tid = oriented.get(nhl_tid) or lookup_team_id_by_nhl_id(cur, nhl_tid)
                             if internal_tid is None:
                                 logger.warning(
                                     "game %s: NHL team id %s not in teams table — skipping team",
@@ -320,7 +336,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--season",
         default=None,
-        help="Limit backfill to one season (e.g. 2024-2025). Default: all seasons.",
+        help="Limit backfill to one season (e.g. 2024-2025, or 'current'). Default: all seasons.",
     )
     p.add_argument(
         "--refetch",
@@ -336,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.database_url:
         logger.error("DATABASE_URL not set")
         return 2
-    counts = backfill(args.database_url, args.season, args.refetch)
+    counts = backfill(args.database_url, load_nhl.resolve_season_arg(args.season), args.refetch)
     logger.info("Done. %s", counts)
     return 0
 

@@ -325,6 +325,29 @@ with DAG(
     # Grade immediately after results land — same tick settlement.
     fetch_results >> grade_completed_matches
 
+    # NHL live-season stats enrichment (audit 2026-10-25). The NHL feature
+    # builder rolls team shots / special teams / save% from nhl_match_stats,
+    # starting-goalie form from nhl_match_stats.starting_goalie_id and 5v5
+    # Corsi/xG from nhl_match_advanced_stats — but only the historical
+    # loaders ever wrote those tables, so the 2026-27 season had ZERO rows
+    # and every live feature rolled from last season's games. This attaches
+    # the NHL API's stats to the ESPN-created fixtures as games finish
+    # (--attach-only: never mints a second fixture), then fills the starter
+    # and 5v5 rows for the current season. Each step only touches games that
+    # still lack data, so a quiet tick is a few cheap requests. Parallel to
+    # grading: grading reads scores, not these tables.
+    enrich_nhl_stats = BashOperator(
+        task_id="enrich_nhl_stats",
+        bash_command=" && ".join(
+            [
+                f"{DOCKER_EXEC} python /app/scripts/load_nhl_historical.py --recent-days 3 --attach-only",
+                f"{DOCKER_EXEC} python /app/scripts/backfill_nhl_goalies.py --season current",
+                f"{DOCKER_EXEC} python /app/scripts/backfill_nhl_5v5_stats.py --season current",
+            ]
+        ),
+    )
+    fetch_results >> enrich_nhl_stats
+
     # Parallel grader for the horse-racing schema (races,
     # race_entrants, race_predictions, race_recommendations). Same
     # split-from-the-pipeline rationale as grade_completed_matches:
