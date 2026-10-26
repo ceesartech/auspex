@@ -1235,7 +1235,20 @@ with the growth-rate driver (WAL) eliminated.
 > daily" mirror (ATP only, a single odds pair, needs a Kaggle API token).
 > Plan agreed 2026-10-26: run `scripts/ops/replace_v1_odds_after_reset.sh` on
 > Nov 1 after the operator raises the odds-api plan; the four held bundles are
-> left to the Nov 1 scheduled retrain under the fixed gate.
+> left to the Nov 1 scheduled retrain under the fixed gate. **Tennis goes
+> through the-odds-api too** (operator decision): `backfill_historical_odds.py
+> --sport tennis` resolves each match's tournament key from venue + date
+> (TENNIS_EVENTS; Slams/combined events query both tour keys, player order is
+> matched either way) and prices only the listed tournaments — the same set
+> live tennis odds come from. Dry run on the current corpus: 11,138 of 29,421
+> finished matches are in listed tournaments; 2,975 calls ≈ 29.8k credits at
+> 3 h windows (1,910 ≈ 19.1k at 6 h). The corpus is also missing Feb 2025 –
+> Apr 2026 (≈ 15 months, 118 matches in all of 2025); the Nov 1 script loads
+> those from ESPN first (free), so tennis needs ≈ 40k credits. Credit budget
+> for Nov 1: ≈ 54k team-sport replace + ≈ 40k tennis + ≈ 40k/month live, so
+> more than the 100k plan; the script skips the tennis odds step (and says so)
+> unless ≥ 85k remain after the team sports. Validate afterwards with
+> `scripts/ab_tennis_market_odds.py` before reading anything into the retrain.
 
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all

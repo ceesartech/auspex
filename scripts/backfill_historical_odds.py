@@ -103,6 +103,7 @@ class Game:
     match_date: datetime
     home: str
     away: str
+    venue: str = ""
 
 
 @dataclass
@@ -217,6 +218,143 @@ def credits_per_call(markets: str, regions: str) -> int:
     return n_markets * n_regions * HISTORICAL_COST_MULTIPLIER
 
 
+# ── Tennis: one the-odds-api key per TOURNAMENT ─────────────────────────
+#
+# the-odds-api lists tennis per tournament (tennis_atp_wimbledon, ...), and only
+# the Slams, the 1000s and the tour finals — exactly the set the live fetch
+# prices (fetch_live_odds.SPORT_KEYS), so training and serving see the same
+# provider. Our ESPN tennis rows carry no tournament name, but every one has a
+# venue; (venue, date window) resolves the tournament. ESPN's "ATP Tour" feed
+# also carries the women's draw at the Slams, so combined events query BOTH
+# tour keys and let the player names decide. Windows are generous (qualifying
+# rounds in them simply never match) and never overlap for one venue.
+TENNIS_EVENTS: tuple[tuple[tuple[str, ...], tuple[str, str], tuple[str, ...]], ...] = (
+    (("melbourne",), ("01-08", "02-05"), ("tennis_atp_australian_open", "tennis_wta_australian_open")),
+    (("indian wells",), ("03-01", "03-24"), ("tennis_atp_indian_wells", "tennis_wta_indian_wells")),
+    (("miami",), ("03-15", "04-08"), ("tennis_atp_miami", "tennis_wta_miami")),
+    (("monte carlo", "monte-carlo"), ("04-01", "04-20"), ("tennis_atp_monte_carlo",)),
+    (("madrid",), ("04-18", "05-12"), ("tennis_atp_madrid_open", "tennis_wta_madrid_open")),
+    (("rome", "roma"), ("05-01", "05-25"), ("tennis_atp_italian_open", "tennis_wta_italian_open")),
+    (("paris",), ("05-18", "06-12"), ("tennis_atp_french_open", "tennis_wta_french_open")),
+    (("london", "wimbledon"), ("06-26", "07-18"), ("tennis_atp_wimbledon", "tennis_wta_wimbledon")),
+    (("toronto", "montreal"), ("07-25", "08-20"), ("tennis_atp_canadian_open", "tennis_wta_canadian_open")),
+    (("cincinnati", "mason"), ("08-05", "08-28"), ("tennis_atp_cincinnati_open", "tennis_wta_cincinnati_open")),
+    (("new york", "flushing"), ("08-18", "09-14"), ("tennis_atp_us_open", "tennis_wta_us_open")),
+    (("beijing",), ("09-20", "10-10"), ("tennis_wta_china_open",)),
+    (("shanghai",), ("09-28", "10-22"), ("tennis_atp_shanghai_masters",)),
+    (("wuhan",), ("10-01", "10-22"), ("tennis_wta_wuhan_open",)),
+    (("paris",), ("10-25", "11-08"), ("tennis_atp_paris_masters",)),
+    (("riyadh", "cancun", "fort worth"), ("10-25", "11-12"), ("tennis_wta_finals",)),
+    (("turin", "torino"), ("11-08", "11-25"), ("tennis_atp_finals",)),
+)
+
+
+def _fold(text: str) -> str:
+    """Casefold, strip accents and punctuation-ish noise for name/venue matching."""
+    import unicodedata
+
+    t = "".join(ch for ch in unicodedata.normalize("NFKD", text or "") if not unicodedata.combining(ch))
+    return " ".join(t.lower().replace(".", " ").replace("-", " ").split())
+
+
+def tennis_keys_for(venue: str, when: datetime) -> tuple[str, ...]:
+    """the-odds-api tournament keys a tennis match may be listed under, or ()."""
+    v = _fold(venue)
+    md = when.strftime("%m-%d")
+    for venues, (lo, hi), keys in TENNIS_EVENTS:
+        if lo <= md <= hi and any(_fold(name) in v for name in venues):
+            return keys
+    return ()
+
+
+def plan_tennis_snapshots(
+    games: list[Game], window_hours: float = DEFAULT_WINDOW_HOURS, lead_minutes: int = DEFAULT_LEAD_MINUTES
+) -> list[tuple[str, Snapshot]]:
+    """(sport_key, Snapshot) tasks: games grouped by their tournament key set,
+    clustered by start time exactly as plan_snapshots does, and each cluster
+    requested once per key in the set."""
+    by_keys: dict[tuple[str, ...], list[Game]] = {}
+    for g in games:
+        keys = tennis_keys_for(g.venue, g.match_date)
+        if keys:
+            by_keys.setdefault(keys, []).append(g)
+    tasks: list[tuple[str, Snapshot]] = []
+    for keys, gs in by_keys.items():
+        for snap in plan_snapshots(gs, window_hours, lead_minutes):
+            tasks.extend((k, snap) for k in keys)
+    tasks.sort(key=lambda t: (t[1].requested, t[0]))
+    return tasks
+
+
+def match_tennis_events(
+    events: list[dict],
+    snapshot_time: datetime,
+    games: list[Game],
+    max_offset_hours: float = 12.0,
+) -> tuple[list[tuple[dict, Game, bool]], dict[str, int]]:
+    """One-to-one (event, game, swapped) for ONE tennis snapshot.
+
+    Player order is arbitrary on both sides (ESPN's and the-odds-api's "home"
+    player are just list positions), so a pair matches in either orientation;
+    `swapped` says the event's home_team is OUR away player. Strictly pre-game
+    (commence_time after the snapshot) and within max_offset_hours (order of
+    play moves start times by hours). Exact folded names first, then the best
+    fuzzy pair >= FUZZY_THRESHOLD among this snapshot's games."""
+    offset = timedelta(hours=max_offset_hours)
+    counts = {"events": len(events), "in_play_or_started": 0, "unmatched": 0, "exact": 0, "fuzzy": 0}
+    free = list(games)
+    pairs: list[tuple[dict, Game, bool]] = []
+    pending: list[tuple[dict, datetime]] = []
+    for ev in events:
+        commence = _parse_ts(ev.get("commence_time"))
+        if commence is None or not ev.get("home_team") or not ev.get("away_team"):
+            counts["unmatched"] += 1
+            continue
+        if commence <= snapshot_time:
+            counts["in_play_or_started"] += 1
+            continue
+        pending.append((ev, commence))
+    rest: list[tuple[dict, datetime]] = []
+    for ev, commence in pending:
+        h, a = _fold(ev["home_team"]), _fold(ev["away_team"])
+        hit = None
+        for g in free:
+            if abs(g.match_date - commence) > offset:
+                continue
+            gh, ga = _fold(g.home), _fold(g.away)
+            if (gh, ga) == (h, a):
+                hit = (g, False)
+                break
+            if (gh, ga) == (a, h):
+                hit = (g, True)
+                break
+        if hit is None:
+            rest.append((ev, commence))
+            continue
+        free.remove(hit[0])
+        pairs.append((ev, hit[0], hit[1]))
+        counts["exact"] += 1
+    for ev, commence in rest:
+        h, a = _fold(ev["home_team"]), _fold(ev["away_team"])
+        best, best_score, best_swapped = None, 0.0, False
+        for g in free:
+            if abs(g.match_date - commence) > offset:
+                continue
+            gh, ga = _fold(g.home), _fold(g.away)
+            straight = (SequenceMatcher(None, gh, h).ratio() + SequenceMatcher(None, ga, a).ratio()) / 2
+            crossed = (SequenceMatcher(None, gh, a).ratio() + SequenceMatcher(None, ga, h).ratio()) / 2
+            score, swapped = (straight, False) if straight >= crossed else (crossed, True)
+            if score > best_score:
+                best, best_score, best_swapped = g, score, swapped
+        if best is not None and best_score >= FUZZY_THRESHOLD:
+            free.remove(best)
+            pairs.append((ev, best, best_swapped))
+            counts["fuzzy"] += 1
+        else:
+            counts["unmatched"] += 1
+    return pairs, counts
+
+
 # ── I/O ─────────────────────────────────────────────────────────────────
 
 
@@ -263,7 +401,7 @@ def load_games(cur, sport: str, start: date, end: date, mode: str) -> list[Game]
     )
     cur.execute(
         f"""
-        SELECT m.id::text AS match_id, m.match_date, ht.name AS home, at.name AS away
+        SELECT m.id::text AS match_id, m.match_date, ht.name AS home, at.name AS away, m.venue
         FROM matches m
         JOIN leagues l ON l.id = m.league_id
         JOIN teams ht ON ht.id = m.home_team_id
@@ -277,7 +415,7 @@ def load_games(cur, sport: str, start: date, end: date, mode: str) -> list[Game]
         """,
         (sport, start, end + timedelta(days=1)),
     )
-    return [Game(r["match_id"], r["match_date"], r["home"], r["away"]) for r in cur.fetchall()]
+    return [Game(r["match_id"], r["match_date"], r["home"], r["away"], r.get("venue") or "") for r in cur.fetchall()]
 
 
 _ARCHIVE_COLUMNS = (
@@ -451,9 +589,140 @@ def run(
     return totals
 
 
+def run_tennis(
+    database_url: str,
+    start: date,
+    end: date,
+    markets: str,
+    api_key: str,
+    regions: str,
+    dry_run: bool,
+    mode: str = "insert",
+    cache_dir: str | None = None,
+    archive_dir: str | None = None,
+    window_hours: float = DEFAULT_WINDOW_HOURS,
+    lead_minutes: int = DEFAULT_LEAD_MINUTES,
+    max_offset_hours: float = 12.0,
+    quota_floor: int = DEFAULT_QUOTA_FLOOR,
+    confirm_replace: bool = False,
+) -> dict[str, int]:
+    """run() for tennis: snapshots are per TOURNAMENT key (TENNIS_EVENTS), the
+    matcher ignores player order, and prices are written in OUR orientation."""
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}")
+    if mode == "replace" and not (confirm_replace or dry_run):
+        raise RuntimeError(
+            "replace mode deletes existing odds rows (archived to CSV first) — a destructive data change. "
+            "Re-run with --confirm-replace once an operator has approved it."
+        )
+    with psycopg2.connect(database_url) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            games = load_games(cur, "tennis", start, end, mode)
+    tasks = plan_tennis_snapshots(games, window_hours, lead_minutes)
+    mapped = {g.match_id for _, snap in tasks for g in snap.games}
+    per_call = credits_per_call(markets, regions)
+    cached = sum(1 for key, snap in tasks if (p := cache_path(cache_dir, key, snap, markets, regions)) and p.exists())
+    per_key: dict[str, int] = {}
+    for key, _ in tasks:
+        per_key[key] = per_key.get(key, 0) + 1
+    totals = {
+        "games": len(games),
+        "games_in_listed_tournaments": len(mapped),
+        "snapshot_calls_planned": len(tasks),
+        "snapshots_cached": cached,
+        "estimated_credits": per_call * (len(tasks) - cached),
+        "snapshots_fetched": 0,
+        "snapshots_skipped": 0,
+        "games_matched": 0,
+        "events_in_play_rejected": 0,
+        "fuzzy_matches": 0,
+        "swapped_orientation": 0,
+        "odds_rows_written": 0,
+        "rows_archived": 0,
+        "stopped_on_quota": 0,
+    }
+    logger.info("Tennis plan: %s; calls per key: %s", totals, dict(sorted(per_key.items())))
+    if dry_run or not tasks:
+        return totals
+
+    archive_file = None
+    writer = None
+    if mode == "replace":
+        Path(archive_dir or ".").mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        archive_path = Path(archive_dir or ".") / f"odds_archive_tennis_{start}_{end}_{stamp}.csv"
+        archive_file = open(archive_path, "w", newline="")
+        writer = csv.writer(archive_file)
+        writer.writerow(_ARCHIVE_COLUMNS)
+    matched: set[str] = set()
+    archived: set[str] = set()
+    remaining: int | None = None
+    try:
+        with psycopg2.connect(database_url) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                for key, snap in tasks:
+                    todo = [g for g in snap.games if g.match_id not in matched]
+                    if not todo:
+                        continue  # every game of this cluster was priced under the other tour's key
+                    path = cache_path(cache_dir, key, snap, markets, regions)
+                    if path is not None and path.exists():
+                        response = json.loads(path.read_text())
+                    else:
+                        if remaining is not None and remaining - per_call < quota_floor:
+                            logger.error("Quota floor reached (remaining=%d) — stopping; re-run resumes", remaining)
+                            totals["stopped_on_quota"] = 1
+                            break
+                        response, remaining = fetch_historical_snapshot(key, snap.iso, markets, api_key, regions)
+                        if response is None:
+                            totals["snapshots_skipped"] += 1
+                            continue
+                        totals["snapshots_fetched"] += 1
+                        if path is not None:
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            path.write_text(json.dumps(response))
+                    if mode == "cache-only":
+                        continue
+                    snap_time = _parse_ts(response.get("timestamp")) or snap.requested
+                    pairs, counts = match_tennis_events(response.get("data") or [], snap_time, todo, max_offset_hours)
+                    totals["events_in_play_rejected"] += counts["in_play_or_started"]
+                    totals["fuzzy_matches"] += counts["fuzzy"]
+                    for event, game, swapped in pairs:
+                        if writer is not None and game.match_id not in archived:
+                            totals["rows_archived"] += archive_and_delete(cur, game.match_id, writer)
+                            archived.add(game.match_id)
+                        ours_home, ours_away = (
+                            (event["away_team"], event["home_team"])
+                            if swapped
+                            else (event["home_team"], event["away_team"])
+                        )
+                        totals["odds_rows_written"] += fetch_live_odds.insert_event_odds(
+                            cur,
+                            game.match_id,
+                            event,
+                            "tennis",
+                            ours_home,
+                            ours_away,
+                            record_snapshots=False,
+                            allow_post_commence_insert=True,
+                        )
+                        matched.add(game.match_id)
+                        totals["swapped_orientation"] += int(swapped)
+                    conn.commit()
+    finally:
+        if archive_file is not None:
+            archive_file.close()
+    totals["games_matched"] = len(matched)
+    logger.info("Totals: %s", totals)
+    return totals
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--sport", default="icehockey_nhl", help="the-odds-api sport key (e.g. icehockey_nhl).")
+    p.add_argument(
+        "--sport",
+        default="icehockey_nhl",
+        help="the-odds-api sport key (e.g. icehockey_nhl), or 'tennis' for every listed tournament (TENNIS_EVENTS).",
+    )
     p.add_argument("--start", required=True, help="Inclusive start date YYYY-MM-DD (UTC).")
     p.add_argument("--end", required=True, help="Inclusive end date YYYY-MM-DD (UTC).")
     p.add_argument(
@@ -496,6 +765,28 @@ def main(argv=None):
     except ValueError as e:
         logger.error("Bad --start/--end (expected YYYY-MM-DD): %s", e)
         return 2
+
+    if args.sport == "tennis":
+        # Per-tournament keys are resolved from each match's venue; the model
+        # uses the match-winner price only, so h2h is the default (10 credits/call).
+        totals = run_tennis(
+            database_url=args.database_url,
+            start=start,
+            end=end,
+            markets=args.markets or "h2h",
+            api_key=args.api_key or "",
+            regions=args.regions,
+            dry_run=args.dry_run,
+            mode=args.mode,
+            cache_dir=args.cache_dir,
+            archive_dir=args.archive_dir,
+            window_hours=args.window_hours,
+            lead_minutes=args.lead_minutes,
+            quota_floor=args.quota_floor,
+            confirm_replace=args.confirm_replace,
+        )
+        print(json.dumps(totals, indent=2))
+        return 0
 
     sport = fetch_live_odds.sport_for_key(args.sport)
     if sport is None:

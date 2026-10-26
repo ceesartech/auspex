@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -259,3 +259,66 @@ class TestSafetyRails:
     def test_cost_per_call(self):
         assert backfill.credits_per_call("h2h,spreads,totals", "us") == 30
         assert backfill.credits_per_call("h2h", "us,eu") == 20
+
+
+# ── Tennis: per-tournament keys, player order agnostic ────────────────
+
+
+def _tg(mid, when, home, away, venue):
+    return backfill.Game(mid, when, home, away, venue)
+
+
+class TestTennisKeys:
+    def test_paris_resolves_by_date(self):
+        may = datetime(2025, 5, 28, 10, tzinfo=UTC)
+        nov = datetime(2025, 11, 1, 10, tzinfo=UTC)
+        assert backfill.tennis_keys_for("Paris, France", may) == ("tennis_atp_french_open", "tennis_wta_french_open")
+        assert backfill.tennis_keys_for("paris, France", nov) == ("tennis_atp_paris_masters",)
+
+    def test_accents_and_case_do_not_matter_and_unlisted_events_map_to_nothing(self):
+        when = datetime(2023, 4, 10, tzinfo=UTC)
+        assert backfill.tennis_keys_for("Monte-Carlo, Monaco", when) == ("tennis_atp_monte_carlo",)
+        assert backfill.tennis_keys_for("Santiago de Querétaro, Mexico", when) == ()
+        assert backfill.tennis_keys_for("Paris, France", datetime(2025, 3, 1, tzinfo=UTC)) == ()
+
+    def test_combined_events_plan_one_call_per_tour_key(self):
+        g = [_tg("a", datetime(2025, 1, 20, 0, tzinfo=UTC), "Novak Djokovic", "Carlos Alcaraz", "Melbourne, Australia")]
+        tasks = backfill.plan_tennis_snapshots(g)
+        assert [k for k, _ in tasks] == ["tennis_atp_australian_open", "tennis_wta_australian_open"]
+        assert tasks[0][1].requested == datetime(2025, 1, 19, 23, 50, tzinfo=UTC)
+
+    def test_unlisted_tournaments_cost_nothing(self):
+        g = [_tg("a", datetime(2025, 3, 1, tzinfo=UTC), "A B", "C D", "Santiago de Querétaro, Mexico")]
+        assert backfill.plan_tennis_snapshots(g) == []
+
+
+class TestTennisMatcher:
+    def _ev(self, home, away, when):
+        return {"home_team": home, "away_team": away, "commence_time": when.isoformat().replace("+00:00", "Z")}
+
+    def test_either_player_order_matches_and_reports_the_swap(self):
+        start = datetime(2025, 1, 20, 2, tzinfo=UTC)
+        games = [_tg("m1", start, "Félix Auger-Aliassime", "Jannik Sinner", "Melbourne")]
+        events = [self._ev("Jannik Sinner", "Felix Auger-Aliassime", start + timedelta(hours=3))]
+        pairs, counts = backfill.match_tennis_events(events, start - timedelta(minutes=10), games)
+        assert [(g.match_id, swapped) for _, g, swapped in pairs] == [("m1", True)]
+        assert counts["exact"] == 1
+
+    def test_in_play_events_are_rejected(self):
+        start = datetime(2025, 1, 20, 2, tzinfo=UTC)
+        games = [_tg("m1", start, "A Player", "B Player", "Melbourne")]
+        pairs, counts = backfill.match_tennis_events([self._ev("A Player", "B Player", start)], start, games)
+        assert pairs == [] and counts["in_play_or_started"] == 1
+
+    def test_fuzzy_names_resolve_within_the_snapshot_only(self):
+        start = datetime(2025, 1, 20, 2, tzinfo=UTC)
+        games = [_tg("m1", start, "Alex de Minaur", "Ben Shelton", "Melbourne")]
+        events = [self._ev("Alex De Minaur", "Benjamin Shelton", start + timedelta(hours=1))]
+        pairs, counts = backfill.match_tennis_events(events, start - timedelta(minutes=10), games)
+        assert len(pairs) == 1 and counts["fuzzy"] == 1
+
+
+class TestTennisCli:
+    def test_tennis_is_accepted_as_a_sport(self):
+        args = backfill.parse_args(["--sport", "tennis", "--start", "2025-01-01", "--end", "2025-12-31", "--dry-run"])
+        assert args.sport == "tennis"
