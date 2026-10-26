@@ -1,53 +1,68 @@
-"""Backfill historical pre-match odds from the-odds-api historical endpoint.
+"""Backfill historical PRE-GAME odds from the-odds-api historical endpoint.
 
-The live fetch_live_odds.py only pulls UPCOMING events from
-/v4/sports/{sport}/odds — meaning historical NHL games loaded via
-load_nhl_historical.py have no odds rows. Without odds, the
-moneyline / puck-line / total features in features_cache fall back
-to NEUTRAL_DEFAULTS for every historical game, and the trained model
-gets zero signal from the market line (the strongest single
-predictor in sports modeling).
+The live fetch_live_odds.py only pulls UPCOMING events, so games loaded by the
+load_*_historical scripts have no odds rows and every market feature falls back
+to NEUTRAL_DEFAULTS (the moneyline is the strongest single predictor we have).
 
-This script walks /v4/historical/sports/{sport}/odds for a date range,
-takes one snapshot per game-day, and inserts whatever bookmaker lines
-were live just before that day's first NHL game. Reuses the team
-matching and market mapping logic from fetch_live_odds.py — same
-sport-dispatch, same insertion guard, same `is_opening=false,
-is_live=false` so feature compute treats them identically to live
-odds.
+v2 (2026-10-25) — why the old design was replaced
+--------------------------------------------------
+v1 took ONE snapshot per game-day at 03:00 UTC of the NEXT day, "after most
+games started", on the theory that it returns the line "live right at puck
+drop". It does not: the historical /odds endpoint returns what the live one
+returns at that instant — upcoming events AND events in progress, the latter
+with IN-PLAY prices. The insert path's in-play guard compares against NOW(), so
+for a historical game it never fired. Combined with a ±2-day team-name match
+that returned the first hit without date ordering, and an insert path where the
+first snapshot to reach a key wins, the stored "closing" lines for 2022-25
+NBA/NFL/NHL games were a mix of (a) day-early lines, (b) in-play lines for any
+game in progress at 03:00 UTC, and (c) occasionally another game's lines when
+the same teams met within two days. Measured on prod (audit §7, 2026-10-25):
+historical NBA markets are far more confident than the live closing market
+(mean |p-0.5| 0.20-0.215 vs 0.148; 141 games above 90% implied in 2022-23 vs 0
+live), and the cross-book line dispersion they produce is 4-5x the live value.
 
-Quota cost:
-    The historical endpoint has a 10x quota multiplier compared to
-    the live endpoint. Cost per call = regions × markets × 10.
-    Default config (1 region, 3 markets) = 30 credits/call.
-    NHL plays ~170 game days per season, so 5 seasons ≈ 25k credits.
+v2 design:
+  * PLAN: cluster each game's commence time into groups no wider than
+    --window-hours; one snapshot per group at (group's first commence -
+    --lead-minutes). Every game therefore gets a synchronized, strictly
+    pre-game snapshot taken at most window+lead before its own tip.
+  * MATCH: an event is accepted only if its commence_time is AFTER the
+    snapshot's own timestamp (never in-play), and only against the games of
+    the group the snapshot was planned for (exact normalized names, then a
+    fuzzy match restricted to those few games, one-to-one, commence within
+    --max-offset-hours of our match_date). Nothing two days away can attach.
+  * CACHE: every raw response is written to --cache-dir and read back on
+    re-runs, so credits are spent once; `--mode cache-only` stages a season
+    for offline validation without touching the database.
+  * MODES: insert (default) writes only games that have NO pre-match odds
+    rows yet — purely additive. replace archives a game's existing rows to
+    --archive-dir (CSV) and swaps in the v2 snapshot; it is a destructive
+    data change and refuses to run without --confirm-replace.
+  * QUOTA: stops before x-requests-remaining would fall below --quota-floor,
+    so the live odds fetch (≈1.3k credits/day) is never starved.
 
-    --dry-run prints the call count + credit estimate without spending
-    any quota. Always run --dry-run first.
+Cost per call = regions × markets × 10 (the historical multiplier), i.e. 30
+credits for us × h2h,spreads,totals. A season is ~1-1.5 calls per game-day.
 
-Usage:
-    # Estimate cost before spending
-    python scripts/backfill_historical_odds.py \\
-        --sport icehockey_nhl --start 2022-10-01 --end 2025-06-30 --dry-run
-
-    # Actually backfill the most recent 3 clean seasons (no COVID)
-    python scripts/backfill_historical_odds.py \\
-        --sport icehockey_nhl --start 2022-10-01 --end 2025-06-30
-
-    # Trim markets to halve cost (just moneyline + totals, no puck line)
-    python scripts/backfill_historical_odds.py \\
-        --sport icehockey_nhl --start 2022-10-01 --end 2025-06-30 \\
-        --markets h2h,totals
+Usage (inside the api container):
+    python /app/scripts/backfill_historical_odds.py --sport basketball_nba \\
+        --start 2025-10-01 --end 2026-06-30 --dry-run
+    python /app/scripts/backfill_historical_odds.py --sport basketball_nba \\
+        --start 2025-10-01 --end 2026-06-30 --cache-dir /app/backups/odds_hist_cache
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import importlib.util
+import json
 import logging
 import os
 import sys
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import psycopg2
@@ -60,22 +75,14 @@ logger = logging.getLogger("backfill_historical_odds")
 BASE_URL = "https://api.the-odds-api.com/v4"
 # the-odds-api documents a 10x quota multiplier for the historical API.
 HISTORICAL_COST_MULTIPLIER = 10
-# Snapshot is taken at this UTC hour on (game-date + day_offset). For NHL
-# the modal evening slate runs 23:00 UTC - 02:00 UTC (7pm-10pm ET, plus
-# West Coast late games). The default 03:00 UTC of the NEXT day = 11pm
-# ET puts the snapshot AFTER most games have started, so the-odds-api
-# returns the line that was live right at puck drop for Eastern games
-# (true closing) and the line ~30min before tip for the few Western
-# games still pending. Override per-sport with --snapshot-hour /
-# --snapshot-day-offset if a sport has a different slate cadence.
-#
-# The "ideal" alternative is per-game snapshots (one call per match at
-# commence_time - 5min). That's ~30 credits × games-in-window = ~114k
-# credits for 3 seasons of NHL — over the 100k tier — so we defer it
-# to a future enhancement and use the best single-snapshot timing today.
-DEFAULT_SNAPSHOT_HOUR_UTC = 3
-DEFAULT_SNAPSHOT_DAY_OFFSET = 1
 
+DEFAULT_WINDOW_HOURS = 3.0
+DEFAULT_LEAD_MINUTES = 10
+DEFAULT_MAX_OFFSET_HOURS = 3.0
+DEFAULT_QUOTA_FLOOR = 15000
+FUZZY_THRESHOLD = 0.8
+
+MODES = ("insert", "cache-only", "replace")
 
 # Reuse fetch_live_odds.py helpers without a hard package import.
 # scripts/ isn't an installable package; we load by path.
@@ -87,12 +94,144 @@ sys.modules["_fetch_live_odds"] = fetch_live_odds
 _spec.loader.exec_module(fetch_live_odds)
 
 
+# ── Pure planning / matching (unit-tested) ──────────────────────────────
+
+
+@dataclass
+class Game:
+    match_id: str
+    match_date: datetime
+    home: str
+    away: str
+
+
+@dataclass
+class Snapshot:
+    requested: datetime
+    games: list[Game] = field(default_factory=list)
+
+    @property
+    def iso(self) -> str:
+        return self.requested.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def plan_snapshots(
+    games: list[Game],
+    window_hours: float = DEFAULT_WINDOW_HOURS,
+    lead_minutes: int = DEFAULT_LEAD_MINUTES,
+) -> list[Snapshot]:
+    """Group games by commence time (greedy: a group spans at most window_hours
+    from its first game) and plan one snapshot per group at first - lead."""
+    out: list[Snapshot] = []
+    window = timedelta(hours=window_hours)
+    lead = timedelta(minutes=lead_minutes)
+    current: Snapshot | None = None
+    first: datetime | None = None
+    for g in sorted(games, key=lambda x: x.match_date):
+        if current is None or first is None or g.match_date - first > window:
+            first = g.match_date
+            current = Snapshot(requested=first - lead)
+            out.append(current)
+        current.games.append(g)
+    return out
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def match_events_to_games(
+    events: list[dict],
+    snapshot_time: datetime,
+    games: list[Game],
+    max_offset_hours: float = DEFAULT_MAX_OFFSET_HOURS,
+    normalize=None,
+) -> tuple[list[tuple[dict, Game]], dict[str, int]]:
+    """One-to-one (event, game) pairs for ONE snapshot.
+
+    An event qualifies only when its commence_time is strictly AFTER
+    snapshot_time (a game in progress carries in-play prices) and within
+    max_offset_hours of a candidate game's match_date. Exact normalized
+    home+away names win; otherwise the best fuzzy pair at or above
+    FUZZY_THRESHOLD among the snapshot's own games. Returns (pairs, counts)."""
+    norm = normalize or fetch_live_odds.normalize_name
+    offset = timedelta(hours=max_offset_hours)
+    counts = {"events": len(events), "in_play_or_started": 0, "unmatched": 0, "exact": 0, "fuzzy": 0}
+    free = list(games)
+    pairs: list[tuple[dict, Game]] = []
+    pending: list[tuple[dict, datetime]] = []
+    for ev in events:
+        commence = _parse_ts(ev.get("commence_time"))
+        if commence is None or not ev.get("home_team") or not ev.get("away_team"):
+            counts["unmatched"] += 1
+            continue
+        if commence <= snapshot_time:
+            counts["in_play_or_started"] += 1
+            continue
+        pending.append((ev, commence))
+
+    # Pass 1: exact names.
+    rest: list[tuple[dict, datetime]] = []
+    for ev, commence in pending:
+        h, a = norm(ev["home_team"]), norm(ev["away_team"])
+        hit = next(
+            (g for g in free if norm(g.home) == h and norm(g.away) == a and abs(g.match_date - commence) <= offset),
+            None,
+        )
+        if hit is None:
+            rest.append((ev, commence))
+            continue
+        free.remove(hit)
+        pairs.append((ev, hit))
+        counts["exact"] += 1
+
+    # Pass 2: fuzzy, restricted to this snapshot's remaining games.
+    for ev, commence in rest:
+        h, a = norm(ev["home_team"]), norm(ev["away_team"])
+        best, best_score = None, 0.0
+        for g in free:
+            if abs(g.match_date - commence) > offset:
+                continue
+            score = (
+                SequenceMatcher(None, norm(g.home), h).ratio() + SequenceMatcher(None, norm(g.away), a).ratio()
+            ) / 2
+            if score > best_score:
+                best, best_score = g, score
+        if best is not None and best_score >= FUZZY_THRESHOLD:
+            free.remove(best)
+            pairs.append((ev, best))
+            counts["fuzzy"] += 1
+        else:
+            counts["unmatched"] += 1
+    return pairs, counts
+
+
+def credits_per_call(markets: str, regions: str) -> int:
+    n_markets = len([m for m in markets.split(",") if m.strip()])
+    n_regions = len([r for r in regions.split(",") if r.strip()])
+    return n_markets * n_regions * HISTORICAL_COST_MULTIPLIER
+
+
+# ── I/O ─────────────────────────────────────────────────────────────────
+
+
+def cache_path(cache_dir: str | None, sport_key: str, snap: Snapshot, markets: str, regions: str) -> Path | None:
+    if not cache_dir:
+        return None
+    tag = f"{markets.replace(',', '+')}_{regions.replace(',', '+')}"
+    return Path(cache_dir) / sport_key / f"{snap.iso}_{tag}.json"
+
+
 def fetch_historical_snapshot(
     sport_key: str, snapshot_iso: str, markets: str, api_key: str, regions: str
-) -> dict | None:
-    """One historical snapshot call. Returns the parsed response dict
-    (with `data` list of events) or None on a graceful skip (404 / 422
-    / non-200). Raises on auth errors so a bad key fails fast."""
+) -> tuple[dict | None, int | None]:
+    """One historical snapshot call. Returns (response or None on a graceful
+    skip, x-requests-remaining or None). Raises on auth errors."""
     url = f"{BASE_URL}/historical/sports/{sport_key}/odds"
     params = {
         "apiKey": api_key,
@@ -105,91 +244,75 @@ def fetch_historical_snapshot(
     r = requests.get(url, params=params, timeout=30)
     if r.status_code == 401:
         raise RuntimeError("the-odds-api: invalid API key (401)")
-    if r.status_code in (404, 422):
-        logger.warning("snapshot %s: HTTP %d — skipping", snapshot_iso, r.status_code)
-        return None
+    remaining_hdr = r.headers.get("x-requests-remaining")
+    remaining = int(float(remaining_hdr)) if remaining_hdr not in (None, "") else None
     if r.status_code != 200:
         logger.warning("snapshot %s: HTTP %d — skipping", snapshot_iso, r.status_code)
-        return None
+        return None, remaining
+    logger.info("snapshot %s: cost=%s remaining=%s", snapshot_iso, r.headers.get("x-requests-last", "?"), remaining_hdr)
+    return r.json(), remaining
 
-    used = r.headers.get("x-requests-used", "?")
-    remaining = r.headers.get("x-requests-remaining", "?")
-    cost = r.headers.get("x-requests-last", "?")
-    logger.info(
-        "snapshot %s: events=? cost=%s quota used=%s remaining=%s",
-        snapshot_iso,
-        cost,
-        used,
-        remaining,
+
+def load_games(cur, sport: str, start: date, end: date, mode: str) -> list[Game]:
+    """Finished non-preseason games of `sport` in [start, end]. In insert mode,
+    only games with NO pre-match odds rows at all (purely additive)."""
+    only_missing = (
+        "AND NOT EXISTS (SELECT 1 FROM odds o WHERE o.match_id = m.id AND COALESCE(o.is_live, false) = false)"
+        if mode == "insert"
+        else ""
     )
-    return r.json()
-
-
-def game_dates_in_range(database_url: str, sport_key: str, start: date, end: date) -> list[date]:
-    """Distinct dates (UTC) of finished NHL matches in the DB within
-    [start, end]. Skipping dark dates is the cheapest way to cut quota
-    cost in half — NHL's regular season is dense but Oct-Dec and
-    Mar-Jun have plenty of dark Mondays."""
-    sport = fetch_live_odds.sport_for_key(sport_key)
-    if sport is None:
-        raise ValueError(f"Unknown sport key prefix: {sport_key!r}")
-    with psycopg2.connect(database_url) as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT DISTINCT DATE(m.match_date) AS d
-                FROM matches m
-                JOIN leagues l ON l.id = m.league_id
-                WHERE l.sport = %s
-                  AND m.status = 'finished'
-                  AND m.match_date >= %s
-                  AND m.match_date < %s
-                ORDER BY d ASC
-                """,
-                (sport, start, end + timedelta(days=1)),
-            )
-            return [row["d"] for row in cur.fetchall()]
-
-
-def snapshot_timestamp(
-    d: date,
-    hour_utc: int = DEFAULT_SNAPSHOT_HOUR_UTC,
-    day_offset: int = DEFAULT_SNAPSHOT_DAY_OFFSET,
-) -> str:
-    """ISO-8601 timestamp for the snapshot to fetch for game-day `d`.
-    The-odds-api returns the most recent snapshot at-or-before this
-    timestamp. With NHL defaults (hour=3, offset=+1) we ask for
-    11pm-ET-of-game-day, which sits AFTER most evening games started
-    and returns their closing lines."""
-    snapshot_date = d + timedelta(days=day_offset)
-    return (
-        datetime(snapshot_date.year, snapshot_date.month, snapshot_date.day, hour_utc, 0, 0, tzinfo=timezone.utc)
-        .isoformat()
-        .replace("+00:00", "Z")
+    cur.execute(
+        f"""
+        SELECT m.id::text AS match_id, m.match_date, ht.name AS home, at.name AS away
+        FROM matches m
+        JOIN leagues l ON l.id = m.league_id
+        JOIN teams ht ON ht.id = m.home_team_id
+        JOIN teams at ON at.id = m.away_team_id
+        WHERE l.sport = %s
+          AND m.status = 'finished'
+          AND m.match_date >= %s AND m.match_date < %s
+          AND COALESCE(m.metadata->>'season_type', '') <> 'preseason'
+          {only_missing}
+        ORDER BY m.match_date
+        """,
+        (sport, start, end + timedelta(days=1)),
     )
+    return [Game(r["match_id"], r["match_date"], r["home"], r["away"]) for r in cur.fetchall()]
 
 
-def process_snapshot_response(cur, sport: str, response: dict) -> tuple[int, int]:
-    """Process one historical snapshot's data array. Returns (events_matched, odds_rows_inserted).
-    Reuses fetch_live_odds.process_event end-to-end — the response shape inside `data` is
-    identical to the live endpoint's top-level array."""
-    data = response.get("data") or []
-    unmatched: list[str] = []
-    events_matched = 0
-    odds_rows_inserted = 0
-    for event in data:
-        inserted = fetch_live_odds.process_event(cur, sport, event, unmatched_log=unmatched)
-        if inserted > 0:
-            events_matched += 1
-            odds_rows_inserted += inserted
-    if unmatched:
-        logger.info(
-            "  %d/%d events had no matching DB fixture. First 3: %s",
-            len(unmatched),
-            len(data),
-            unmatched[:3],
-        )
-    return events_matched, odds_rows_inserted
+_ARCHIVE_COLUMNS = (
+    "id",
+    "match_id",
+    "bookmaker",
+    "market_type",
+    "selection",
+    "odds_decimal",
+    "odds_american",
+    "line",
+    "implied_probability",
+    "timestamp",
+    "is_opening",
+    "is_live",
+    "created_at",
+    "last_seen_at",
+)
+
+
+def archive_and_delete(cur, match_id: str, writer) -> int:
+    """replace mode: copy the game's pre-match odds rows to the archive CSV,
+    then delete them. Returns rows archived (== rows deleted)."""
+    cur.execute(
+        f"SELECT {', '.join(_ARCHIVE_COLUMNS)} FROM odds WHERE match_id = %s AND COALESCE(is_live, false) = false",
+        (match_id,),
+    )
+    rows = cur.fetchall()
+    for r in rows:
+        writer.writerow([r[c] for c in _ARCHIVE_COLUMNS])
+    cur.execute("DELETE FROM odds WHERE match_id = %s AND COALESCE(is_live, false) = false", (match_id,))
+    return len(rows)
+
+
+# ── Orchestration ───────────────────────────────────────────────────────
 
 
 def run(
@@ -201,56 +324,129 @@ def run(
     api_key: str,
     regions: str,
     dry_run: bool,
-    snapshot_hour: int = DEFAULT_SNAPSHOT_HOUR_UTC,
-    snapshot_day_offset: int = DEFAULT_SNAPSHOT_DAY_OFFSET,
+    mode: str = "insert",
+    cache_dir: str | None = None,
+    archive_dir: str | None = None,
+    window_hours: float = DEFAULT_WINDOW_HOURS,
+    lead_minutes: int = DEFAULT_LEAD_MINUTES,
+    max_offset_hours: float = DEFAULT_MAX_OFFSET_HOURS,
+    quota_floor: int = DEFAULT_QUOTA_FLOOR,
+    confirm_replace: bool = False,
 ) -> dict[str, int]:
     sport = fetch_live_odds.sport_for_key(sport_key)
     if sport is None:
         raise ValueError(f"Unknown sport key prefix: {sport_key!r}")
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}")
+    if mode == "replace" and not (confirm_replace or dry_run):
+        raise RuntimeError(
+            "replace mode deletes existing odds rows (archived to CSV first) — a destructive data change. "
+            "Re-run with --confirm-replace once an operator has approved it."
+        )
 
-    dates = game_dates_in_range(database_url, sport_key, start, end)
-    n_markets = len([m for m in markets.split(",") if m.strip()])
-    n_regions = len([r for r in regions.split(",") if r.strip()])
-    cost_per_call = n_markets * n_regions * HISTORICAL_COST_MULTIPLIER
-    estimated_cost = cost_per_call * len(dates)
-
-    logger.info(
-        "Plan: sport=%s dates=%d markets=%s regions=%s cost/call=%d total_estimate=%d credits",
-        sport_key,
-        len(dates),
-        markets,
-        regions,
-        cost_per_call,
-        estimated_cost,
-    )
-
-    if dry_run:
-        logger.info("Dry run — no API calls made.")
-        return {
-            "dates_planned": len(dates),
-            "estimated_credits": estimated_cost,
-            "events_matched": 0,
-            "odds_rows_inserted": 0,
-        }
-
-    if not dates:
-        logger.info("No game dates in range — nothing to do.")
-        return {"dates_planned": 0, "events_matched": 0, "odds_rows_inserted": 0}
-
-    totals = {"events_matched": 0, "odds_rows_inserted": 0, "dates_processed": 0, "dates_skipped": 0}
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            for d in dates:
-                snap = snapshot_timestamp(d, hour_utc=snapshot_hour, day_offset=snapshot_day_offset)
-                response = fetch_historical_snapshot(sport_key, snap, markets, api_key, regions)
-                if response is None:
-                    totals["dates_skipped"] += 1
-                    continue
-                events_matched, odds_inserted = process_snapshot_response(cur, sport, response)
-                totals["events_matched"] += events_matched
-                totals["odds_rows_inserted"] += odds_inserted
-                totals["dates_processed"] += 1
-                conn.commit()
+            games = load_games(cur, sport, start, end, mode)
+    snaps = plan_snapshots(games, window_hours, lead_minutes)
+    per_call = credits_per_call(markets, regions)
+    cached = sum(1 for s in snaps if (p := cache_path(cache_dir, sport_key, s, markets, regions)) and p.exists())
+    estimate = per_call * (len(snaps) - cached)
+    logger.info(
+        "Plan: sport=%s mode=%s games=%d snapshots=%d (cached %d) cost/call=%d estimate=%d credits",
+        sport_key,
+        mode,
+        len(games),
+        len(snaps),
+        cached,
+        per_call,
+        estimate,
+    )
+    totals = {
+        "games": len(games),
+        "snapshots_planned": len(snaps),
+        "snapshots_cached": cached,
+        "estimated_credits": estimate,
+        "snapshots_fetched": 0,
+        "snapshots_skipped": 0,
+        "games_matched": 0,
+        "games_unmatched": 0,
+        "events_in_play_rejected": 0,
+        "fuzzy_matches": 0,
+        "odds_rows_written": 0,
+        "rows_archived": 0,
+        "stopped_on_quota": 0,
+    }
+    if dry_run or not snaps:
+        return totals
+
+    archive_file = None
+    writer = None
+    if mode == "replace":
+        Path(archive_dir or ".").mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        archive_path = Path(archive_dir or ".") / f"odds_archive_{sport_key}_{start}_{end}_{stamp}.csv"
+        archive_file = open(archive_path, "w", newline="")
+        writer = csv.writer(archive_file)
+        writer.writerow(_ARCHIVE_COLUMNS)
+        logger.info("replace mode: archiving replaced rows to %s", archive_path)
+
+    remaining: int | None = None
+    try:
+        with psycopg2.connect(database_url) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                for snap in snaps:
+                    path = cache_path(cache_dir, sport_key, snap, markets, regions)
+                    if path is not None and path.exists():
+                        response = json.loads(path.read_text())
+                    else:
+                        if remaining is not None and remaining - per_call < quota_floor:
+                            logger.error(
+                                "Quota floor reached (remaining=%d, floor=%d) — stopping; re-run resumes from cache",
+                                remaining,
+                                quota_floor,
+                            )
+                            totals["stopped_on_quota"] = 1
+                            break
+                        response, remaining = fetch_historical_snapshot(sport_key, snap.iso, markets, api_key, regions)
+                        if response is None:
+                            totals["snapshots_skipped"] += 1
+                            continue
+                        totals["snapshots_fetched"] += 1
+                        if path is not None:
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            path.write_text(json.dumps(response))
+                    if mode == "cache-only":
+                        continue
+
+                    snap_time = _parse_ts(response.get("timestamp")) or snap.requested
+                    pairs, counts = match_events_to_games(
+                        response.get("data") or [], snap_time, snap.games, max_offset_hours
+                    )
+                    totals["events_in_play_rejected"] += counts["in_play_or_started"]
+                    totals["fuzzy_matches"] += counts["fuzzy"]
+                    totals["games_matched"] += len(pairs)
+                    totals["games_unmatched"] += len(snap.games) - len(pairs)
+                    if writer is not None:
+                        # Clear EVERY planned game of this group, matched or not: an
+                        # unmatched game is better off on NEUTRAL_DEFAULTS than keeping
+                        # a v1 row that may be in-play or another game's price.
+                        for game in snap.games:
+                            totals["rows_archived"] += archive_and_delete(cur, game.match_id, writer)
+                    for event, game in pairs:
+                        totals["odds_rows_written"] += fetch_live_odds.insert_event_odds(
+                            cur,
+                            game.match_id,
+                            event,
+                            sport,
+                            event["home_team"],
+                            event["away_team"],
+                            record_snapshots=False,
+                        )
+                    conn.commit()
+    finally:
+        if archive_file is not None:
+            archive_file.close()
+    logger.info("Totals: %s", totals)
     return totals
 
 
@@ -268,25 +464,18 @@ def parse_args(argv=None):
     p.add_argument("--regions", default="us", help="the-odds-api region (default 'us').")
     p.add_argument("--api-key", default=os.environ.get("THE_ODDS_API_KEY"))
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
-    p.add_argument(
-        "--snapshot-hour",
-        type=int,
-        default=DEFAULT_SNAPSHOT_HOUR_UTC,
-        help=f"UTC hour of the snapshot timestamp (default {DEFAULT_SNAPSHOT_HOUR_UTC}). "
-        "For NHL, 3 sits 11pm ET = after most evening games start = closing lines.",
-    )
-    p.add_argument(
-        "--snapshot-day-offset",
-        type=int,
-        default=DEFAULT_SNAPSHOT_DAY_OFFSET,
-        help=f"Days added to game-date when picking the snapshot timestamp "
-        f"(default {DEFAULT_SNAPSHOT_DAY_OFFSET}). Combined with --snapshot-hour, "
-        "this lets each sport target a slate-appropriate close-of-play time.",
-    )
+    p.add_argument("--mode", choices=MODES, default="insert")
+    p.add_argument("--cache-dir", default=None, help="Raw-response cache (read-through). Strongly recommended.")
+    p.add_argument("--archive-dir", default="/app/backups", help="replace mode: where replaced rows are archived.")
+    p.add_argument("--window-hours", type=float, default=DEFAULT_WINDOW_HOURS)
+    p.add_argument("--lead-minutes", type=int, default=DEFAULT_LEAD_MINUTES)
+    p.add_argument("--max-offset-hours", type=float, default=DEFAULT_MAX_OFFSET_HOURS)
+    p.add_argument("--quota-floor", type=int, default=DEFAULT_QUOTA_FLOOR)
+    p.add_argument("--confirm-replace", action="store_true", help="Required for --mode replace (destructive).")
     p.add_argument(
         "--dry-run",
         action="store_true",
-        help="Estimate quota cost without making API calls. Always run this first.",
+        help="Plan and estimate quota cost without API calls or writes. Always run this first.",
     )
     return p.parse_args(argv)
 
@@ -326,10 +515,16 @@ def main(argv=None):
         api_key=args.api_key or "",
         regions=args.regions,
         dry_run=args.dry_run,
-        snapshot_hour=args.snapshot_hour,
-        snapshot_day_offset=args.snapshot_day_offset,
+        mode=args.mode,
+        cache_dir=args.cache_dir,
+        archive_dir=args.archive_dir,
+        window_hours=args.window_hours,
+        lead_minutes=args.lead_minutes,
+        max_offset_hours=args.max_offset_hours,
+        quota_floor=args.quota_floor,
+        confirm_replace=args.confirm_replace,
     )
-    logger.info("Done. %s", totals)
+    print(json.dumps(totals, indent=2))
     return 0
 
 

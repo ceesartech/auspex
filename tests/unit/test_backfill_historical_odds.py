@@ -1,12 +1,12 @@
 """Unit tests for backfill_historical_odds — covers the pure logic
-(snapshot timestamp formatting, cost estimation math, helper reuse
-from fetch_live_odds) without touching the network or DB."""
+(snapshot planning, strictly-pre-game event matching, cost estimation,
+helper reuse from fetch_live_odds) without touching the network or DB."""
 
 from __future__ import annotations
 
 import importlib.util
 import sys
-from datetime import date
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -27,40 +27,99 @@ backfill = _load("backfill_historical_odds", "backfill_historical_odds.py")
 fetch_live_odds = backfill.fetch_live_odds  # re-exported via the dynamic import
 
 
-# ── Snapshot timestamp ────────────────────────────────────────────────
+# ── Snapshot planning ─────────────────────────────────────────────────
+
+UTC = timezone.utc
 
 
-class TestSnapshotTimestamp:
-    def test_defaults_capture_nhl_closing_lines(self):
-        # 03:00 UTC of game-date+1 = 11pm ET = AFTER most evening NHL
-        # games have started, so the-odds-api returns closing lines.
-        # Locked in here so a future drift to a worse time (the old
-        # 22:00 UTC same-day = 5pm ET pre-game lines bug) triggers a
-        # test failure rather than silently degrading model signal.
-        assert backfill.DEFAULT_SNAPSHOT_HOUR_UTC == 3
-        assert backfill.DEFAULT_SNAPSHOT_DAY_OFFSET == 1
+def _g(mid, hh, mm=0, day=1, home="Boston Bruins", away="Toronto Maple Leafs"):
+    return backfill.Game(mid, datetime(2025, 11, day, hh, mm, tzinfo=UTC), home, away)
 
-    def test_default_iso_format_uses_next_day(self):
-        # Game-date April 1 → snapshot at 03:00 UTC on April 2.
-        ts = backfill.snapshot_timestamp(date(2024, 4, 1))
-        assert ts == "2024-04-02T03:00:00Z"
 
-    def test_custom_hour_only(self):
-        ts = backfill.snapshot_timestamp(date(2024, 4, 1), hour_utc=19)
-        # Still uses the default offset (+1 day).
-        assert ts == "2024-04-02T19:00:00Z"
+class TestPlanSnapshots:
+    def test_one_snapshot_per_cluster_taken_before_the_first_game(self):
+        games = [_g("a", 23), _g("b", 23, 30), _g("c", 0, 0, day=2), _g("d", 1, 30, day=2), _g("e", 17, day=2)]
+        snaps = backfill.plan_snapshots(games, window_hours=3.0, lead_minutes=10)
+        assert [len(s.games) for s in snaps] == [4, 1]
+        assert snaps[0].requested == datetime(2025, 11, 1, 22, 50, tzinfo=UTC)
+        assert snaps[1].requested == datetime(2025, 11, 2, 16, 50, tzinfo=UTC)
+        # every game's snapshot is strictly before its own start
+        for s in snaps:
+            assert all(s.requested < g.match_date for g in s.games)
 
-    def test_custom_offset_zero(self):
-        # day_offset=0 means same-day snapshot (legacy behavior). Useful
-        # for sports whose evening slate finishes before UTC rollover.
-        ts = backfill.snapshot_timestamp(date(2024, 4, 1), hour_utc=22, day_offset=0)
-        assert ts == "2024-04-01T22:00:00Z"
+    def test_a_cluster_never_spans_more_than_the_window(self):
+        games = [_g(str(i), 18 + i) for i in range(5)]  # 18:00 .. 22:00
+        snaps = backfill.plan_snapshots(games, window_hours=3.0)
+        assert [len(s.games) for s in snaps] == [4, 1]  # 18..21 then 22
 
-    def test_custom_offset_crosses_month_boundary(self):
-        # Game-date April 30 + 1 day offset → May 1. Date arithmetic
-        # must roll cleanly across month boundaries.
-        ts = backfill.snapshot_timestamp(date(2024, 4, 30))
-        assert ts == "2024-05-01T03:00:00Z"
+    def test_iso_is_utc_z(self):
+        snaps = backfill.plan_snapshots([_g("a", 1)], lead_minutes=10)
+        assert snaps[0].iso == "2025-11-01T00:50:00Z"
+
+    def test_empty(self):
+        assert backfill.plan_snapshots([]) == []
+
+
+# ── Event matching ────────────────────────────────────────────────────
+
+
+def _ev(home, away, hh, mm=0, day=1):
+    ts = datetime(2025, 11, day, hh, mm, tzinfo=UTC).isoformat().replace("+00:00", "Z")
+    return {"home_team": home, "away_team": away, "commence_time": ts, "bookmakers": []}
+
+
+class TestMatchEvents:
+    def test_in_play_events_are_rejected(self):
+        snap_time = datetime(2025, 11, 1, 23, 40, tzinfo=UTC)
+        game = _g("a", 23, 30)
+        pairs, counts = backfill.match_events_to_games(
+            [_ev("Boston Bruins", "Toronto Maple Leafs", 23, 30)], snap_time, [game]
+        )
+        assert pairs == []
+        assert counts["in_play_or_started"] == 1
+
+    def test_exact_pre_game_match(self):
+        snap_time = datetime(2025, 11, 1, 23, 20, tzinfo=UTC)
+        game = _g("a", 23, 30)
+        pairs, counts = backfill.match_events_to_games(
+            [_ev("Boston Bruins", "Toronto Maple Leafs", 23, 30)], snap_time, [game]
+        )
+        assert [g.match_id for _, g in pairs] == ["a"]
+        assert counts["exact"] == 1
+
+    def test_the_rematch_two_days_later_cannot_attach(self):
+        # v1's defect: the same pairing within ±2 days matched the first hit.
+        snap_time = datetime(2025, 11, 1, 22, 50, tzinfo=UTC)
+        game = _g("a", 23)
+        later = _ev("Boston Bruins", "Toronto Maple Leafs", 23, day=3)
+        pairs, counts = backfill.match_events_to_games([later], snap_time, [game])
+        assert pairs == [] and counts["unmatched"] == 1
+
+    def test_home_away_must_agree(self):
+        snap_time = datetime(2025, 11, 1, 22, 50, tzinfo=UTC)
+        game = _g("a", 23)
+        swapped = _ev("Toronto Maple Leafs", "Boston Bruins", 23)
+        pairs, _ = backfill.match_events_to_games([swapped], snap_time, [game])
+        assert pairs == []
+
+    def test_fuzzy_names_resolve_within_the_group_only(self):
+        snap_time = datetime(2025, 11, 1, 22, 50, tzinfo=UTC)
+        games = [
+            _g("clips", 23, home="LA Clippers", away="Utah Jazz"),
+            _g("lal", 23, home="Los Angeles Lakers", away="Miami Heat"),
+        ]
+        events = [_ev("Los Angeles Clippers", "Utah Jazz", 23), _ev("Los Angeles Lakers", "Miami Heat", 23)]
+        pairs, counts = backfill.match_events_to_games(events, snap_time, games)
+        got = {e["home_team"]: g.match_id for e, g in pairs}
+        assert got == {"Los Angeles Clippers": "clips", "Los Angeles Lakers": "lal"}
+        assert counts["exact"] == 1 and counts["fuzzy"] == 1
+
+    def test_one_to_one(self):
+        snap_time = datetime(2025, 11, 1, 22, 50, tzinfo=UTC)
+        game = _g("a", 23)
+        dup = [_ev("Boston Bruins", "Toronto Maple Leafs", 23), _ev("Boston Bruins", "Toronto Maple Leafs", 23, 5)]
+        pairs, counts = backfill.match_events_to_games(dup, snap_time, [game])
+        assert len(pairs) == 1 and counts["unmatched"] == 1
 
 
 # ── Cost math ────────────────────────────────────────────────────────
@@ -166,21 +225,37 @@ class TestArgparse:
         assert args.markets == "h2h,totals"
 
 
-# ── process_snapshot_response ─────────────────────────────────────────
+# ── Safety rails ──────────────────────────────────────────────────────
 
 
-class TestProcessSnapshotResponse:
-    def test_empty_data_array(self):
-        # No events in the snapshot — graceful no-op, returns (0, 0).
-        # We don't even need a cursor because process_event isn't called.
-        events_matched, odds_inserted = backfill.process_snapshot_response(cur=None, sport="nhl", response={"data": []})
-        assert events_matched == 0
-        assert odds_inserted == 0
+class TestSafetyRails:
+    def test_replace_refuses_without_confirmation(self, monkeypatch):
+        monkeypatch.setattr(backfill, "load_games", lambda *a, **k: [])
 
-    def test_missing_data_key(self):
-        # If the API returns an unexpected shape (no `data` key), we
-        # treat it as "nothing to do" rather than crashing — protects
-        # the bulk job from a single bad response.
-        events_matched, odds_inserted = backfill.process_snapshot_response(cur=None, sport="nhl", response={})
-        assert events_matched == 0
-        assert odds_inserted == 0
+        class _Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def cursor(self, **k):
+                return self
+
+        monkeypatch.setattr(backfill.psycopg2, "connect", lambda *a, **k: _Conn())
+        with pytest.raises(RuntimeError, match="confirm-replace"):
+            backfill.run(
+                "postgres://x",
+                "icehockey_nhl",
+                datetime(2024, 1, 1).date(),
+                datetime(2024, 1, 2).date(),
+                "h2h",
+                "key",
+                "us",
+                dry_run=False,
+                mode="replace",
+            )
+
+    def test_cost_per_call(self):
+        assert backfill.credits_per_call("h2h,spreads,totals", "us") == 30
+        assert backfill.credits_per_call("h2h", "us,eu") == 20

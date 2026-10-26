@@ -1008,6 +1008,7 @@ def insert_event_odds(
     away: str,
     unknown_markets: set | None = None,
     stats: dict | None = None,
+    record_snapshots: bool = True,
 ) -> int:
     """Write every representable odds row from one event payload. The bulk
     /odds response and the per-event additional-markets response share the
@@ -1029,6 +1030,11 @@ def insert_event_odds(
     Post-kickoff quotes never overwrite a pre-match price (in-play prices are
     what `odds` must not be polluted with — see insert_odds_row); they can only
     create keys that do not exist yet, which is the historical-backfill path.
+
+    `record_snapshots=False` skips the odds_snapshots CLV append — the
+    historical backfill passes it: its rows describe a past moment, and a
+    snapshot stamped captured_at=NOW() years after kickoff is noise in a time
+    series whose readers bound themselves by captured_at < match_date.
 
     Returns the number of rows WRITTEN (inserted + price-updated). When
     `stats` is given, the ODDS_INSERTED / ODDS_UPDATED / ODDS_UNCHANGED /
@@ -1101,15 +1107,16 @@ def insert_event_odds(
                 # are kept: odds_snapshots is a time series and its readers
                 # bound themselves by captured_at (migration 022's vw_rec_clv
                 # requires captured_at < match_date).
-                insert_snapshot_row(
-                    cur,
-                    match_id,
-                    bookmaker_name,
-                    market_type,
-                    selection,
-                    float(price),
-                    line,
-                )
+                if record_snapshots:
+                    insert_snapshot_row(
+                        cur,
+                        match_id,
+                        bookmaker_name,
+                        market_type,
+                        selection,
+                        float(price),
+                        line,
+                    )
     return inserted
 
 
