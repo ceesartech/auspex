@@ -1250,6 +1250,23 @@ with the growth-rate driver (WAL) eliminated.
 > unless ≥ 85k remain after the team sports. Validate afterwards with
 > `scripts/ab_tennis_market_odds.py` before reading anything into the retrain.
 
+> **Incident (2026-10-27 08:00 → 2026-10-29 06:45 UTC) — 63 failed pipeline
+> runs, fixed (`c6d6d5f`, `f11ea6c`).** ESPN's NBA scoreboard intermittently
+> answers HTTP 200 with an EMPTY body (logged since the fix: "nba/nba
+> 2026-10-27: non-JSON body (HTTP 200, 0 bytes)"); probes in between parse
+> fine. `fetch_day` decoded the body outside its error handling, so one empty
+> response failed `fetch_results` (all 136 failed attempts died in the NBA
+> step), skipped NFL/tennis/MMA results chained after it with `&&`, left
+> grading and NHL enrichment upstream_failed, and failed the NBA fixture chain
+> 5 times. Fix: 3 attempts with backoff per request, a final failure logged at
+> ERROR and skipped (results exit non-zero only when EVERY request for a sport
+> failed); every sport runs regardless; grading and NHL enrichment run on
+> ALL_DONE. No data was lost — the good runs in between recorded every NBA
+> game and every finished game of the last 3 days is graded. The deploy was
+> first blocked by CI: GitHub moved `ubuntu-latest` to Ubuntu 26.04 and
+> Playwright has no chromium there, so the Frontend job is pinned to
+> `ubuntu-24.04`. First three runs after the deploy: all success.
+
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
 > fixed in one push. (1) `GET /predictions/upcoming` applied `LIMIT` to
