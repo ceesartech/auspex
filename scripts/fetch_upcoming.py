@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
@@ -305,16 +306,47 @@ def _strip_club_tokens(norm: str, cfg: SportConfig) -> str:
     return " ".join(tokens) if tokens else norm
 
 
+# ESPN's scoreboard API intermittently answers 200 with an empty or non-JSON
+# body. From 2026-10-27 the NBA endpoint did so on about a third of pipeline
+# runs; r.json() sat outside the error handling, so one bad body crashed the
+# whole fetch_results task, skipped every sport chained after NBA, and blocked
+# grading and NHL enrichment behind it (63 failed DAG runs in two days).
+# Every request now gets FETCH_ATTEMPTS tries with backoff; a day that still
+# fails is logged at ERROR and counted, never raised. FETCH_STATS lets main()
+# tell a blip (some days failed) from an outage (every request failed).
+FETCH_ATTEMPTS = 3
+FETCH_BACKOFF_SECONDS = (2.0, 6.0)
+FETCH_STATS = {"ok": 0, "failed": 0}
+
+
 def fetch_day(cfg: SportConfig, league_slug: str, day: date) -> list[dict]:
     url = f"{ESPN_BASE}/{cfg.espn_path}/{league_slug}/scoreboard"
     params = {"dates": day.strftime("%Y%m%d")}
-    try:
-        r = requests.get(url, params=params, timeout=20)
-        r.raise_for_status()
-    except requests.RequestException as e:
-        logger.warning("ESPN fetch failed for %s/%s %s: %s", cfg.sport, league_slug, day, e)
-        return []
-    return r.json().get("events", []) or []
+    last_error = ""
+    for attempt in range(FETCH_ATTEMPTS):
+        if attempt:
+            time.sleep(FETCH_BACKOFF_SECONDS[min(attempt - 1, len(FETCH_BACKOFF_SECONDS) - 1)])
+        try:
+            r = requests.get(url, params=params, timeout=20)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            last_error = str(e)
+            continue
+        try:
+            payload = r.json()
+        except ValueError:  # requests' JSONDecodeError subclasses ValueError
+            last_error = (
+                f"non-JSON body (HTTP {r.status_code}, {r.headers.get('content-type')}, "
+                f"{len(r.text)} bytes: {r.text[:80]!r})"
+            )
+            continue
+        FETCH_STATS["ok"] += 1
+        return (payload or {}).get("events", []) or []
+    FETCH_STATS["failed"] += 1
+    logger.error(
+        "ESPN fetch FAILED after %d attempts for %s/%s %s: %s", FETCH_ATTEMPTS, cfg.sport, league_slug, day, last_error
+    )
+    return []
 
 
 def ensure_league(cur, cfg: SportConfig, code: str, name: str, country: str) -> str | None:
@@ -1258,6 +1290,11 @@ def main(argv: list[str] | None = None) -> int:
     leagues = [s.strip() for s in leagues_arg.split(",") if s.strip()]
     if args.results:
         counts = fetch_results_all(args.database_url, cfg, leagues, args.days_back)
+        if FETCH_STATS["failed"] and not FETCH_STATS["ok"]:
+            logger.error(
+                "Every ESPN request for %s failed (%d) — treating as an outage", cfg.sport, FETCH_STATS["failed"]
+            )
+            return 1
         total = sum(counts.values())
         logger.info("Recorded %d %s result(s) across %d leagues", total, cfg.sport, len(counts))
         return 0

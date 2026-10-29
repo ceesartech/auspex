@@ -309,17 +309,29 @@ with DAG(
     # keep the every-15-min task count flat (six separate tasks would
     # add ~576 task-runs/day for no isolation benefit — a partial
     # failure surfaces the same either way via the non-zero exit).
+    #
+    # Every sport runs even when an earlier one fails, and the task exits
+    # non-zero at the end if any did (2026-10-29: the sports used to be
+    # chained with &&, so one bad ESPN NBA response skipped NFL/tennis/MMA
+    # results too). fetch_upcoming itself now retries a bad response and
+    # only exits non-zero when EVERY request for a sport failed (an outage).
     fetch_results = BashOperator(
         task_id="fetch_results",
-        bash_command=" && ".join(
-            f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport {s} --results --days-back 3"
+        bash_command="rc=0; "
+        + " ".join(
+            f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport {s} --results --days-back 3 || rc=1;"
             for s in ("soccer", "nhl", "nba", "nfl", "tennis", "mma")
-        ),
+        )
+        + " exit $rc",
     )
 
+    # ALL_DONE: grade whatever results did arrive. Grading only touches
+    # finished matches, so a partial results run is safe to grade, and an
+    # upstream failure must not also stop settlement for every other sport.
     grade_completed_matches = BashOperator(
         task_id="grade_completed_matches",
         bash_command=f"{DOCKER_EXEC} python /app/scripts/grade_completed_matches.py --days 14",
+        trigger_rule=TriggerRule.ALL_DONE,
     )
 
     # Grade immediately after results land — same tick settlement.
@@ -345,6 +357,8 @@ with DAG(
                 f"{DOCKER_EXEC} python /app/scripts/backfill_nhl_5v5_stats.py --season current",
             ]
         ),
+        # Same reasoning as grading: it reads finished NHL games only.
+        trigger_rule=TriggerRule.ALL_DONE,
     )
     fetch_results >> enrich_nhl_stats
 
