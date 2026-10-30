@@ -223,8 +223,9 @@ memory; this section makes it repo-canonical.
 | Soccer 1x2 pre-match feature families (rest/congestion, Elo, venue-specific form, 10/20-match + EWMA form, season-to-date table, draw propensity, H2H, discipline, cross-book micro-structure, calendar, rolling shots/SoT/corners, rolling xG, totals form) | **CLOSED — market is the ceiling** (2026-10-25) | `scripts/ab_soccer_feature_screen.py` on the full prod frame: 138,773 matches 2012–2026 with 1x2 odds, fixed test 2024–26 n=23,784 (SE ≈ 0.0001–0.0002 per family, 40× tighter than the audit's n≈3.5k). De-vigged average-odds market Brier **0.59496**; LR on market logits −0.00031 ± 0.00012; a prod-like GBM (odds + 5-match form + match_stats diffs) +0.00004 ± 0.00024 vs the raw market. Every family \|ΔBrier\| ≤ 0.00033: best is cross-book micro-structure −0.00023 ± 0.00011 (7/8 seasons negative), all 60 features together −0.00033 ± 0.00019 — 15–50× under the gate. Elo −0.00007, rest −0.00007, venue form −0.00002, H2H +0.00002 | Nothing form-shaped. Only information the closing price does not already carry (confirmed line-ups / injuries, or a sharper price than the books' average) can move soccer 1x2 |
 | Soccer over-2.5 features beyond the market total price | **CLOSED** (2026-10-25) | Same harness, 39,435 matches with O/U odds (2019–26), test n=14,746: market O/U price Brier 0.48294 (−0.0176 ± 0.0014 vs the constant base rate the derived-market guard uses); totals form −0.00027 ± 0.00013, xG / shots / rest / season / weather / micro all within ±0.0003 of the price; no GBM beats the price. **The open finding is the inverse:** a model that sees only 1x2 odds (what the Dixon-Coles path has without a totals price) scores +0.00095 ± 0.00058 historically and the served derived O/U is **+0.0108 ± 0.0043 worse than the closing O/U market live** (n=1,302, 2026-07..10) | Lever is the §7 2026-10-25 item 4: a second IPF constraint anchoring the scoreline matrix to the market O/U 2.5 (and BTTS where priced), not more features |
 | Soccer favourite–longshot bias of the proportional de-vig | **MEASURED — calibration, not a standalone edge** (2026-10-25) | Realized minus implied by implied band, stable in 2012–19 AND 2020–26: 0.7–0.8 → +0.035 / +0.029 (z 5.3 / 4.0), 0.8+ → +0.030 / +0.038, <0.10 → −0.013 / −0.017 (z −3.6 / −4.1). Flat-stake at the average price: <0.10 implied −24% / −29%, 0.1–0.2 −8% / −10%, favourites ≈ −1 to +1%. At the best (Max) price, p ≥ 0.6 returns **+0.47% ± 0.39%** (n=27,574; by year −1.8% .. +2.9%) → the vig eats it. Live confirmation on 5,262 closing selections (~9 books): 0.6–0.8 bands realized 0.68 / 0.81 vs proportional 0.64 / 0.74 vs power de-vig 0.665 / 0.774 | **SHIPPED 2026-10-26 (`1c6e307`):** power de-vig in `rec_gating.market_consensus_prob` and soccer 1x2 `max_odds` 8.0 → **5.0**. Not 3.5 as first floated: the bias condemns implied < 0.20 (odds above ~5) in both eras, while the 3–5 band is flat-to-positive (live post-gating odds 3–5: n=124, +13%; ≥ 5: n=44, −25.5%) |
-| Historical odds backfill v1 (one snapshot per game-day at 03:00 UTC the next day) | **DEFECT — replaced by v2** (2026-10-26) | The historical endpoint returns in-progress events with IN-PLAY prices; the insert path's in-play guard compares against NOW() so it never fired; a ±2-day name match took the first hit; the first snapshot to reach a key won. Same-game comparison against v2 strictly-pre-game snapshots: NBA Jan–Mar 2025 v1 Brier 0.385 vs v2 0.402, **v1 − v2 = −0.0167 ± 0.0050** (n=616) — a "closing" line cannot beat the pre-game consensus by 3.3 SE without in-play information; 11% of games differ by > 10 pts. NFL 2024-25 v1 is stale instead (+0.0083 ± 0.0047, n=285). Cross-book line dispersion: v1 seasons 0.8–1.6, v2 0.22–0.24, live 0.12–0.20 | 2022-25 NBA/NFL/NHL still carry v1 rows: `backfill_historical_odds.py --mode replace --confirm-replace` (archives to CSV first) awaits operator approval and ~67k credits of November quota |
+| Historical odds backfill v1 (one snapshot per game-day at 03:00 UTC the next day) | **DEFECT — replaced by v2** (2026-10-26) | The historical endpoint returns in-progress events with IN-PLAY prices; the insert path's in-play guard compares against NOW() so it never fired; a ±2-day name match took the first hit; the first snapshot to reach a key won. Same-game comparison against v2 strictly-pre-game snapshots: NBA Jan–Mar 2025 v1 Brier 0.385 vs v2 0.402, **v1 − v2 = −0.0167 ± 0.0050** (n=616) — a "closing" line cannot beat the pre-game consensus by 3.3 SE without in-play information; 11% of games differ by > 10 pts. NFL 2024-25 v1 is stale instead (+0.0083 ± 0.0047, n=285). Cross-book line dispersion: v1 seasons 0.8–1.6, v2 0.22–0.24, live 0.12–0.20 | **REPLACED 2026-10-30:** every NBA/NFL/NHL game 2022-25 now carries v2 strictly-pre-game lines only (no v1 row left; v1 archived to CSV). Re-validate the cross-book "wins" (NFL total/ML, NBA spread, NHL puck line/total) — they were measured on v1 lines |
 | Soccer derived markets anchored to the market over/under 2.5 | **SHIPPED** (2026-10-26, `d2ccd32`) | `scripts/ab_soccer_ou_anchor.py`, monthly walk-forward 2019-07..2026-10, n=40,279, month-clustered SE, anchored − 1x2-only reconcile: over 2.5 **−0.00543 ± 0.00053** (team-aware base; −0.0088 identity-blind), better in all 8 years; over 1.5 −0.0032, over 3.5 −0.0047, BTTS −0.0037, correct score −0.0008, DC/DNB/AH±0.5 exactly 0. Live served-path check (n=966): over 2.5 −0.0061 ± 0.0041, no market worse than z 0.76. One cell degrades on the identity-blind base only (home win-to-nil +0.00074 ± 0.00024) and improves live; accepted | `("soccer","over_under")` rec gate stays OFF — a Brier win is not an ROI win. BTTS anchoring needs a BTTS feed |
+| Tennis market price as a model input (the-odds-api historical h2h, 2021-09..2026-10) | **PASSES the gate; does NOT beat the market** (2026-10-30) | `scripts/ab_tennis_market_odds.py` on the real frame (43,223 matches, 5,889 = 13.6% priced): with vs without market, all rows, holdout from 2026-04 **−0.0188 ± 0.0022** (n=6,485); walk-forward 2023 −0.0088 ± 0.0015, 2024 −0.0084 ± 0.0016, 2025 −0.0086 ± 0.0018, 2026 −0.0136 ± 0.0017. On PRICED rows the model with market is still worse than the de-vigged market itself: holdout +0.0172 ± 0.0041 (n=1,657), 2023..2026 +0.040 / +0.050 / +0.027 / +0.023 (accuracy 0.687 vs market 0.704) | Ships through the normal weekly retrain + promote gate (features recomputed). `("tennis","moneyline")` rec gate stays OFF: the model loses to the price it would bet against. Next lever is coverage (priced rows 13.6%) or serving the market where priced |
 | NHL probable starting goalie at serve time | **CLOSED — no gain** (2026-10-26) | `scripts/ab_nhl_projected_goalie.py`: "most starts in the last 7, rest the No. 1 on the 2nd night of a back-to-back" picks the real starter 65.7% (13,123 team-games; last-starter rule 47.0%). Paired ΔBrier on 1,300 held-out games vs default goalie features: ML −0.0009 ± 0.0011, regulation −0.0005 ± 0.0014, puck line −0.0024 ± 0.0018, total **+0.0012 ± 0.0007**; even the TRUE starter does no better. Shipped behind `NHL_GOALIE_MODE=actual_or_projected`, default off | A confirmed-starter feed (lines posted ~90 min pre-game) |
 
 ### 4.3 Validation methodology (house rules)
@@ -1266,6 +1267,45 @@ with the growth-rate driver (WAL) eliminated.
 > first blocked by CI: GitHub moved `ubuntu-latest` to Ubuntu 26.04 and
 > Playwright has no chromium there, so the Frontend job is pinned to
 > `ubuntu-24.04`. First three runs after the deploy: all success.
+
+> **Update (2026-10-30) — the "Nov 1" odds job ran two days early.** The
+> operator raised the-odds-api plan to **5,000,000 credits/month** ahead of
+> the reset (balance 5,000,000, used 0 at 17:37 UTC), so
+> `scripts/ops/replace_v1_odds_after_reset.sh` was launched on request and
+> finished at 18:52 UTC. Verified backup first
+> (`postgres/betting_system-2026-10-30T*.dump`, landed 17:39) and after.
+> **Replace** (every v1 row archived to `/app/backups/odds_archive_*_20261030T*.csv`):
+> NFL 2022-09..2024-02 571 games, 569 priced, 129,454 v1 rows out, 59,634 in;
+> NBA 2022-10..2024-06 2,644 games, 2,638 priced, 213,398 out, 265,520 in;
+> NHL 2022-10..2025-06 4,198 games, 4,198 priced, 328,094 out, 336,746 in.
+> 1,631 in-play events were rejected. One NHL snapshot (2024-03-22) failed
+> transiently and left 2 games on v1 rows; a one-day re-run replaced them —
+> a DB check confirms no pre-run odds row remains in any of the three
+> windows. The 8 unpriced games (2 NFL, 6 NBA) are better unpriced than
+> in-play. **Tennis matches:** 13.2k Jan 2025 – Apr 2026 matches loaded from
+> ESPN (the loader's "261,044 matches written" counts upserts); quarterly
+> counts now 2.3–2.9k, matching earlier years; 0 duplicates introduced.
+> **Tennis odds:** 4,361 tournament-key snapshots, 3,112 fetched, 5,484
+> games priced; a retry after `2d517c3` priced 153 more (5,889 total, 13.6%
+> of the frame). All 1,143 skipped snapshots are a permanent `404
+> UNKNOWN_SPORT` (the tournament key was not open at that time — mostly
+> warm-up-week games inside a TENNIS_EVENTS window), the same count on both
+> runs. **Correction:** `2d517c3`'s message says a rate-limit burst dropped
+> ~270 tennis snapshots; the retry log shows zero 429s — the snapshots that
+> answered 200 on re-probe were NEW cluster times (pricing games re-groups
+> the rest), not failed calls. The retry/backoff it adds is still right for
+> the NHL-type transient failure. Coverage limit: ~6.0k listed-tournament
+> events were rejected as started — the snapshot is anchored on ESPN's time,
+> which runs later than the-odds-api `commence_time` for tennis; anchoring
+> snapshots on the provider's event list would recover part of them.
+> **Validation** (`ab_tennis_market_odds.py`): see the §4 registry row — the
+> market input passes the gate in every window, but the model still loses to
+> the market on priced rows, so tennis recs stay gated off. Features
+> recomputed for nfl/nba/nhl/tennis; the Sun Nov 1 04:00 retrain trains on
+> the clean data. Credits: 80,549 used of 5M (balance check). Pre-existing finding, not
+> touched: ~3.8k tennis player-pair/day duplicates in Jun–Oct 2026 are stale
+> `scheduled` rows with no ESPN id next to the real finished match (only 3
+> finished duplicate pairs, so training is unaffected).
 
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
