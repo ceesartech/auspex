@@ -312,12 +312,12 @@ class TestActualOutcome:
         )
 
     def test_returns_none_for_ungraded_markets(self):
-        # team_total isn't in the dispatch table — must fall through to
-        # None so grading skips it cleanly. (asian_handicap graduated to
-        # a real branch: '{line}_{side}' vs the home-perspective margin.)
+        # player_prop isn't in the dispatch table — must fall through to
+        # None so grading skips it cleanly. (asian_handicap and the
+        # derived markets graduated to real branches.)
         assert (
             go.actual_outcome(
-                prediction_type="team_total",
+                prediction_type="player_prop",
                 model_name="ensemble",
                 predicted_outcome="home_over_1.5",
                 home_score=2,
@@ -792,6 +792,16 @@ class TestGradeRecSelection:
         assert go.grade_rec_selection("btts", "no", 3, 0) == go.REC_WON
         assert go.grade_rec_selection("correct_score", "2-1", 2, 1) == go.REC_WON
 
+    def test_space_separated_selections(self):
+        # The June-2026 NHL generator wrote 'home -1.5' / 'over 5.5'. Real
+        # rows: home -1.5 at 4-2 (settled 'lost' by the old argmax path) and
+        # away +1.5 at 4-3, over 5.5 at 0-3.
+        assert go.grade_rec_selection("puck_line", "home -1.5", 4, 2) == go.REC_WON
+        assert go.grade_rec_selection("puck_line", "away +1.5", 4, 3) == go.REC_WON
+        assert go.grade_rec_selection("total", "over 5.5", 0, 3) == go.REC_LOST
+        # A name with a space is still a bare selection, not (side, line).
+        assert go._split_sel_line("Carlos Alcaraz") == ("carlos alcaraz", None)
+
     def test_unknown_formats_stay_open(self):
         assert go.grade_rec_selection("over_under_ht", "over_1.5", 2, 1) is None
         assert go.grade_rec_selection("team_total", "home_over_1.5", 2, 1) is None
@@ -831,3 +841,113 @@ class TestAsianHandicapPredictionGrading:
         )
         assert a == "push_-0.75"
         assert go.grade_prediction("-0.75_home", a, prediction_type="asian_handicap") is None
+
+
+def _actual(prediction_type, predicted, h, a, model_name="ensemble", metadata=None):
+    return go.actual_outcome(
+        prediction_type=prediction_type,
+        model_name=model_name,
+        predicted_outcome=predicted,
+        home_score=h,
+        away_score=a,
+        metadata=metadata,
+    )
+
+
+class TestDerivedMarketGrading:
+    """market_derivation.py keys, graded from the final score."""
+
+    def test_clean_sheet_is_graded_for_the_picked_team(self):
+        assert _actual("clean_sheet", "home_no", 2, 0) == "home_yes"
+        assert _actual("clean_sheet", "home_no", 2, 1) == "home_no"
+        assert _actual("clean_sheet", "away_yes", 2, 0) == "away_no"
+        assert go.grade_prediction("home_no", _actual("clean_sheet", "home_no", 2, 0)) is False
+        assert go.grade_prediction("away_no", _actual("clean_sheet", "away_no", 2, 0)) is True
+
+    def test_win_to_nil(self):
+        assert _actual("win_to_nil", "home_no", 2, 0) == "home_yes"
+        assert _actual("win_to_nil", "home_no", 0, 0) == "home_no"  # nil-nil is not a win
+        assert _actual("win_to_nil", "away_no", 0, 1) == "away_yes"
+        assert _actual("win_to_nil", "away_no", 1, 2) == "away_no"
+
+    def test_team_total_uses_the_picked_line(self):
+        assert _actual("team_total", "home_over_0.5", 1, 3) == "home_over_0.5"
+        assert _actual("team_total", "away_under_2.5", 1, 3) == "away_over_2.5"
+        assert go.grade_prediction("away_under_2.5", "away_over_2.5") is False
+        # integer line hit exactly -> push -> NULL
+        assert _actual("team_total", "home_over_1", 1, 0) == "push"
+        assert go.grade_prediction("home_over_1", "push") is None
+
+    def test_odd_even_and_total_goals_bands(self):
+        assert _actual("odd_even", "odd", 2, 1) == "odd"
+        assert _actual("odd_even", "odd", 0, 0) == "even"
+        assert _actual("total_goals", "2", 1, 1) == "2"
+        assert _actual("total_goals", "6+", 4, 3) == "6+"
+        # NHL bands run to 8+: 7 goals is its own key, 9 folds into 8+.
+        assert _actual("total_goals", "8+", 4, 3, model_name="dixon_coles_nhl") == "7"
+        assert _actual("total_goals", "8+", 5, 4, model_name="dixon_coles_nhl") == "8+"
+
+    def test_winning_margin(self):
+        assert _actual("winning_margin", "draw", 1, 1) == "draw"
+        assert _actual("winning_margin", "home_1", 2, 1) == "home_1"
+        assert _actual("winning_margin", "home_1", 0, 2) == "away_2"
+        assert _actual("winning_margin", "home_1", 5, 1) == "home_3plus"
+
+    def test_result_combos(self):
+        assert _actual("result_btts", "home_yes", 2, 1) == "home_yes"
+        assert _actual("result_btts", "home_yes", 1, 1) == "draw_yes"
+        assert _actual("result_btts", "home_yes", 0, 0) == "draw_no"
+        assert _actual("result_over_under", "home_over", 2, 1) == "home_over"
+        assert _actual("result_over_under", "home_over", 1, 0) == "home_under"
+
+    def test_malformed_team_picks_stay_ungraded(self):
+        assert _actual("clean_sheet", "yes", 1, 0) is None
+        assert _actual("win_to_nil", "draw_no", 1, 0) is None
+        assert _actual("team_total", "home_over", 1, 0) is None
+
+
+class TestNhlDerivedMarketGrading:
+    def test_regulation_1x2_maps_tie_to_draw(self):
+        md = {"regulation_winner": "tie"}
+        assert _actual("regulation_1x2", "home", 4, 3, model_name="dixon_coles_nhl", metadata=md) == "draw"
+        md = {"regulation_winner": "draw"}  # the pre-2026-10 ESPN label
+        assert _actual("regulation_1x2", "home", 4, 3, model_name="dixon_coles_nhl", metadata=md) == "draw"
+        md = {"regulation_winner": "away"}
+        assert _actual("regulation_1x2", "away", 1, 3, model_name="dixon_coles_nhl", metadata=md) == "away"
+
+    def test_regulation_1x2_without_regulation_winner_is_ungraded(self):
+        assert _actual("regulation_1x2", "home", 4, 3, model_name="dixon_coles_nhl", metadata={}) is None
+
+    def test_puck_line_uses_the_handicap_keys(self):
+        # '-1.5_away' = away +1.5 against a home -1.5: a one-goal home win covers.
+        a = _actual("puck_line", "-1.5_away", 4, 3, model_name="dixon_coles_nhl")
+        assert a == "away_covers_-1.5"
+        assert go.grade_prediction("-1.5_away", a, prediction_type="puck_line") is True
+        # '1.5_home' = home +1.5: a two-goal home loss fails.
+        a = _actual("puck_line", "1.5_home", 1, 3, model_name="dixon_coles_nhl")
+        assert a == "away_covers_1.5"
+        assert go.grade_prediction("1.5_home", a, prediction_type="puck_line") is False
+
+
+class TestHalftimeMarketGrading:
+    HT = {"halftime_home_score": 1, "halftime_away_score": 0}
+
+    def test_without_halftime_scores_every_ht_market_is_ungraded(self):
+        for pt, pick in (
+            ("match_result_ht", "home"),
+            ("btts_ht", "no"),
+            ("over_under_ht", "over_0.5"),
+            ("ht_ft_double_result", "home_home"),
+        ):
+            assert _actual(pt, pick, 2, 1, metadata={}) is None
+
+    def test_halftime_markets(self):
+        assert _actual("match_result_ht", "draw", 2, 2, metadata=self.HT) == "home"
+        assert _actual("btts_ht", "no", 2, 2, metadata=self.HT) == "no"
+        assert _actual("over_under_ht", "over_0.5", 2, 2, metadata=self.HT) == "over_0.5"
+        assert _actual("over_under_ht", "under_1.5", 2, 2, metadata=self.HT) == "under_1.5"
+        assert _actual("ht_ft_double_result", "home_home", 2, 2, metadata=self.HT) == "home_draw"
+
+    def test_halftime_above_final_is_a_data_error(self):
+        md = {"halftime_home_score": 3, "halftime_away_score": 0}
+        assert _actual("match_result_ht", "home", 2, 1, metadata=md) is None

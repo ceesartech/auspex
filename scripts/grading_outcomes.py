@@ -19,6 +19,18 @@ Dispatch table — what each prediction_type means and how it grades:
   double_chance     ensemble (soccer derived)      1X / 12 / X2 from match result
   draw_no_bet       ensemble (soccer derived)      home/away (push on draw)
   correct_score     ensemble (soccer derived)      exact <h>-<a> string match
+  asian_handicap    ensemble (soccer derived)      '{home_line}_{side}' vs margin
+  puck_line         dixon_coles_nhl                same keys + math as asian_handicap
+  regulation_1x2    dixon_coles_nhl                metadata.regulation_winner (tie→draw)
+  clean_sheet       soccer / NHL derived           '{team}_{yes|no}' for the picked team
+  win_to_nil        soccer / NHL derived           '{team}_{yes|no}' for the picked team
+  team_total        ensemble (soccer derived)      '{team}_{over|under}_{line}', picked team+line
+  odd_even          ensemble (soccer derived)      parity of the total
+  total_goals       soccer / NHL derived           exact total, top band 6+ (NHL 8+)
+  winning_margin    ensemble (soccer derived)      draw / {side}_{1|2|3plus}
+  result_btts       ensemble (soccer derived)      {result}_{yes|no}
+  result_over_under ensemble (soccer derived)      {result}_{over|under} at 2.5
+  *_ht, ht_ft_…     ensemble (soccer halftime)     metadata.halftime_{home,away}_score
 
 Returns None when the outcome can't be determined — caller leaves
 is_correct NULL and the grading script tries again on the next run.
@@ -26,11 +38,10 @@ Push semantics: actual_outcome="push" → grading marks
 betting_recommendations status='void' with profit_loss=0; predictions
 is_correct stays NULL (a push isn't right or wrong).
 
-Markets not in the dispatch table (asian_handicap, team_total,
-clean_sheet, win_to_nil, odd_even, winning_margin, total_goals,
-result_btts, result_over_under, player_prop, lottery) are NOT graded
-in v1 — they pass through with actual_outcome=None. Add coverage
-when needed.
+Markets not in the dispatch table (player_prop, lottery) are NOT
+graded — they pass through with actual_outcome=None. The derived
+markets were added 2026-10-30: until then ~92k soccer + 1.4k NHL
+derived predictions sat is_correct NULL on every grading run.
 """
 
 from __future__ import annotations
@@ -232,6 +243,145 @@ def correct_score_outcome(home_score: int, away_score: int) -> str:
     return f"{home_score}-{away_score}"
 
 
+# ── Derived markets (market_derivation.py, soccer + NHL) ────────────
+#
+# Several of these markets pack more than one binary proposition into a
+# single key set (clean_sheet carries home_yes/home_no/away_yes/away_no),
+# so no single "what happened" label grades the argmax by equality. As
+# with over_under, the actual is computed FOR the picked proposition: a
+# 'home_no' clean-sheet pick gets 'home_yes' or 'home_no' back.
+
+HANDICAP_PREDICTION_TYPES = frozenset({"asian_handicap", "puck_line"})
+HALFTIME_TYPES = frozenset({"match_result_ht", "btts_ht", "over_under_ht", "ht_ft_double_result"})
+
+# Top band of the exact-total market (derive_soccer_markets emits '6+',
+# derive_hockey_markets '8+').
+TOTAL_GOALS_CAP_SOCCER = 6
+TOTAL_GOALS_CAP_NHL = 8
+
+
+def _split_team_pick(predicted_outcome: Optional[str]) -> Optional[tuple[str, str]]:
+    """'home_yes' -> ('home', 'yes'); None unless '{home|away}_<rest>'."""
+    if not predicted_outcome or "_" not in predicted_outcome:
+        return None
+    team, _, rest = predicted_outcome.partition("_")
+    if team not in ("home", "away") or not rest:
+        return None
+    return team, rest
+
+
+def clean_sheet_outcome(predicted_outcome: Optional[str], home_score: int, away_score: int) -> Optional[str]:
+    """'{team}_yes' when the picked team conceded nothing, else '{team}_no'."""
+    pick = _split_team_pick(predicted_outcome)
+    if pick is None:
+        return None
+    team = pick[0]
+    conceded = away_score if team == "home" else home_score
+    return f"{team}_{'yes' if conceded == 0 else 'no'}"
+
+
+def win_to_nil_outcome(predicted_outcome: Optional[str], home_score: int, away_score: int) -> Optional[str]:
+    """'{team}_yes' when the picked team won without conceding."""
+    pick = _split_team_pick(predicted_outcome)
+    if pick is None:
+        return None
+    team = pick[0]
+    scored, conceded = (home_score, away_score) if team == "home" else (away_score, home_score)
+    return f"{team}_{'yes' if scored > conceded and conceded == 0 else 'no'}"
+
+
+def team_total_outcome(predicted_outcome: Optional[str], home_score: int, away_score: int) -> Optional[str]:
+    """'{team}_{over|under}_{line}' for the picked team and line. 'push'
+    on an integer line hit exactly (the derivation offers .5 lines only)."""
+    pick = _split_team_pick(predicted_outcome)
+    if pick is None:
+        return None
+    team, rest = pick
+    line = _extract_over_under_line(rest)
+    if line is None:
+        return None
+    goals = home_score if team == "home" else away_score
+    if goals == line:
+        return "push"
+    return f"{team}_{'over' if goals > line else 'under'}_{_fmt_line(line)}"
+
+
+def odd_even_outcome(home_score: int, away_score: int) -> str:
+    return "odd" if (home_score + away_score) % 2 else "even"
+
+
+def total_goals_outcome(model_name: str, home_score: int, away_score: int) -> str:
+    """Exact total as the derivation keys it: '0'..'5' then '6+' for
+    soccer, '0'..'7' then '8+' for the NHL Dixon-Coles markets."""
+    cap = TOTAL_GOALS_CAP_NHL if "nhl" in (model_name or "") else TOTAL_GOALS_CAP_SOCCER
+    total = home_score + away_score
+    return f"{cap}+" if total >= cap else str(total)
+
+
+def winning_margin_outcome(home_score: int, away_score: int) -> str:
+    """'draw', or '{home|away}_{1|2|3plus}'."""
+    margin = home_score - away_score
+    if margin == 0:
+        return "draw"
+    side = "home" if margin > 0 else "away"
+    n = abs(margin)
+    return f"{side}_{n if n < 3 else '3plus'}"
+
+
+def result_btts_outcome(home_score: int, away_score: int) -> str:
+    return f"{soccer_match_result(home_score, away_score)}_{btts_outcome(home_score, away_score)}"
+
+
+def result_over_under_outcome(home_score: int, away_score: int) -> str:
+    """Result + over/under 2.5 — the only line the derivation offers."""
+    side = "over" if home_score + away_score > 2.5 else "under"
+    return f"{soccer_match_result(home_score, away_score)}_{side}"
+
+
+def halftime_scores(metadata: Optional[dict]) -> Optional[tuple[int, int]]:
+    """(home, away) at half-time from metadata.halftime_{home,away}_score,
+    which the ESPN results path derives from the scoring plays. None when
+    absent, so HT markets stay ungraded rather than guessed."""
+    md = metadata or {}
+    h, a = md.get("halftime_home_score"), md.get("halftime_away_score")
+    if h is None or a is None:
+        return None
+    try:
+        return int(h), int(a)
+    except (TypeError, ValueError):
+        return None
+
+
+def halftime_outcome(
+    prediction_type: str,
+    predicted_outcome: Optional[str],
+    home_score: int,
+    away_score: int,
+    metadata: Optional[dict],
+) -> Optional[str]:
+    ht = halftime_scores(metadata)
+    if ht is None:
+        return None
+    ht_home, ht_away = ht
+    if ht_home > home_score or ht_away > away_score:
+        # A half-time score above the final one is a data error — don't
+        # grade four markets off it.
+        logger.warning(
+            "half-time %d-%d exceeds final %d-%d; HT markets left ungraded", ht_home, ht_away, home_score, away_score
+        )
+        return None
+    if prediction_type == "match_result_ht":
+        return soccer_match_result(ht_home, ht_away)
+    if prediction_type == "btts_ht":
+        return btts_outcome(ht_home, ht_away)
+    if prediction_type == "over_under_ht":
+        line = _extract_over_under_line(predicted_outcome)
+        return None if line is None else _ou_outcome_for_line(ht_home, ht_away, line)
+    if prediction_type == "ht_ft_double_result":
+        return f"{soccer_match_result(ht_home, ht_away)}_{soccer_match_result(home_score, away_score)}"
+    return None
+
+
 # ── Top-level dispatch ──────────────────────────────────────────────
 
 
@@ -261,6 +411,11 @@ def actual_outcome(
     # with soccer 1X2.
     if prediction_type == "match_result" and is_nhl_regulation(model_name):
         return nhl_regulation_outcome(metadata or {})
+    if prediction_type == "regulation_1x2":
+        # dixon_coles_nhl labels the regulation 3-way home/DRAW/away,
+        # unlike ensemble_nhl_reg's home/tie/away.
+        winner = nhl_regulation_outcome(metadata or {})
+        return "draw" if winner == "tie" else winner
 
     # The remaining markets all need both score columns populated.
     if home_score is None or away_score is None:
@@ -304,11 +459,12 @@ def actual_outcome(
         return draw_no_bet_outcome(home_score, away_score)
     if prediction_type == "correct_score":
         return correct_score_outcome(home_score, away_score)
-    if prediction_type == "asian_handicap":
+    if prediction_type in HANDICAP_PREDICTION_TYPES:
         # predicted_outcome is the model key '{home_line}_{side}' (e.g.
         # '-0.5_home'); grade the HOME-perspective line, side decides
         # correctness in grade_prediction. Quarter-line half outcomes and
-        # pushes grade to NULL (not right or wrong).
+        # pushes grade to NULL (not right or wrong). dixon_coles_nhl's
+        # puck_line uses the same keys ('-1.5_home', '1.5_away', ...).
         line = _extract_ah_line(predicted_outcome)
         if line is None:
             return None
@@ -318,9 +474,26 @@ def actual_outcome(
         if verdict == REC_LOST:
             return f"away_covers_{_fmt_line(line)}"
         return f"push_{_fmt_line(line)}"
+    if prediction_type == "clean_sheet":
+        return clean_sheet_outcome(predicted_outcome, home_score, away_score)
+    if prediction_type == "win_to_nil":
+        return win_to_nil_outcome(predicted_outcome, home_score, away_score)
+    if prediction_type == "team_total":
+        return team_total_outcome(predicted_outcome, home_score, away_score)
+    if prediction_type == "odd_even":
+        return odd_even_outcome(home_score, away_score)
+    if prediction_type == "total_goals":
+        return total_goals_outcome(model_name, home_score, away_score)
+    if prediction_type == "winning_margin":
+        return winning_margin_outcome(home_score, away_score)
+    if prediction_type == "result_btts":
+        return result_btts_outcome(home_score, away_score)
+    if prediction_type == "result_over_under":
+        return result_over_under_outcome(home_score, away_score)
+    if prediction_type in HALFTIME_TYPES:
+        return halftime_outcome(prediction_type, predicted_outcome, home_score, away_score, metadata)
 
-    # Markets we don't grade in v1 (asian_handicap, team_total,
-    # clean_sheet, etc.) fall through to None.
+    # Markets we don't grade (player_prop, lottery, ...) fall through to None.
     return None
 
 
@@ -350,7 +523,7 @@ def grade_prediction(
         return None
     if predicted is None:
         return None
-    if prediction_type == "asian_handicap":
+    if prediction_type in HANDICAP_PREDICTION_TYPES:
         # predicted '{line}_{side}' vs actual '{home|away}_covers_{line}'.
         if actual.startswith("push_"):
             return None
@@ -378,14 +551,20 @@ _TOTAL_TYPES = {"over_under", "total"}
 
 
 def _split_sel_line(selection: str):
-    """'home_-0.75' / 'over_2.5' -> (side, line) or (selection, None)."""
-    if "_" in (selection or ""):
-        side, _, raw = selection.partition("_")
-        try:
-            return side.lower(), float(raw)
-        except ValueError:
-            pass
-    return (selection or "").strip().lower(), None
+    """'home_-0.75' / 'over_2.5' -> (side, line) or (selection, None).
+
+    Also the space-separated 'home -1.5' / 'over 5.5' that the June-2026
+    NHL generator wrote: five of those recs sat won/lost with no P&L (one
+    mis-settled) because this returned no line for them."""
+    sel = (selection or "").strip()
+    for sep in ("_", " "):
+        if sep in sel:
+            side, _, raw = sel.partition(sep)
+            try:
+                return side.lower(), float(raw)
+            except ValueError:
+                pass
+    return sel.lower(), None
 
 
 def _handicap_outcome(margin: float, line: float):

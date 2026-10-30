@@ -20,6 +20,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -365,7 +366,31 @@ def ensure_league(cur, cfg: SportConfig, code: str, name: str, country: str) -> 
 
 
 def ensure_team(cur, cfg: SportConfig, name: str, league_id: str) -> str | None:
-    """Resolve `name` to a team_id, reusing an existing row when possible.
+    """Resolve `name` to a team_id via find_team, inserting a new team row
+    only when no existing one matches."""
+    team_id = find_team(cur, cfg, name, league_id)
+    if team_id:
+        return team_id
+
+    # 3. Insert new team. ON CONFLICT guard for race conditions on the
+    # unique (normalized_name, sport) constraint.
+    cur.execute(
+        """
+        INSERT INTO teams (name, normalized_name, league_id, sport)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (normalized_name, sport) DO UPDATE
+            SET league_id = COALESCE(teams.league_id, EXCLUDED.league_id)
+        RETURNING id
+        """,
+        (name, normalize_team(name), league_id, cfg.sport),
+    )
+    row = cur.fetchone()
+    return row["id"] if row else None
+
+
+def find_team(cur, cfg: SportConfig, name: str, league_id: str | None) -> str | None:
+    """Resolve `name` to an EXISTING team_id, or None. Never writes —
+    backfills that must not mint teams use this instead of ensure_team.
 
     The match strategy is three-tier so vendor team names (e.g. ESPN's
     "Rosenborg BK") reuse the same row as football-data's "Rosenborg"
@@ -378,7 +403,7 @@ def ensure_team(cur, cfg: SportConfig, name: str, league_id: str) -> str | None:
          abbreviation tokens (BK, FC, etc.) from both sides and compare
          via SequenceMatcher. Reuse if ratio >= 0.85. Soccer-only — NHL
          team names are unambiguous so we skip the fuzzy step.
-      3. INSERT a new row only if neither lookup found a candidate.
+      3. (ensure_team only) INSERT a new row if neither lookup matched.
     """
     norm = normalize_team(name)
 
@@ -417,21 +442,7 @@ def ensure_team(cur, cfg: SportConfig, name: str, league_id: str) -> str | None:
                     best_id = c["id"]
             if best_id and best_score >= 0.85:
                 return best_id
-
-    # 3. Insert new team. ON CONFLICT guard for race conditions on the
-    # unique (normalized_name, sport) constraint.
-    cur.execute(
-        """
-        INSERT INTO teams (name, normalized_name, league_id, sport)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (normalized_name, sport) DO UPDATE
-            SET league_id = COALESCE(teams.league_id, EXCLUDED.league_id)
-        RETURNING id
-        """,
-        (name, norm, league_id, cfg.sport),
-    )
-    row = cur.fetchone()
-    return row["id"] if row else None
+    return None
 
 
 def insert_scheduled_match(cur, cfg: SportConfig, league_id, home_id, away_id, match_dt, venue) -> int:
@@ -1142,6 +1153,37 @@ def _final_scores(cfg: SportConfig, home: dict, away: dict) -> tuple[int, int] |
 
 _EXTRA_TIME_TOKENS = ("/OT", "/SO", "/2OT", "OVERTIME", "SHOOTOUT", "AET", "PEN")
 
+_PLAY_MINUTE = re.compile(r"\s*(\d+)'")
+
+
+def halftime_scores(comp: dict, home: dict, away: dict, final: tuple[int, int]) -> tuple[int, int] | None:
+    """Soccer half-time (home, away) from the scoreboard's scoring plays.
+
+    ESPN's soccer scoreboard has no linescores, but `details` lists every
+    goal with its clock and the credited team (an own goal is credited to
+    the side it benefits). Base minute <= 45, first-half stoppage included
+    ("45'+2'"), is a first-half goal; shootout kicks are not goals. Returns
+    None unless the plays reproduce the final score exactly — a partial
+    play list must not grade four half-time markets."""
+    home_id, away_id = str(home.get("id") or ""), str(away.get("id") or "")
+    if not home_id or not away_id or home_id == away_id:
+        return None
+    first_half = {home_id: 0, away_id: 0}
+    total = {home_id: 0, away_id: 0}
+    for play in comp.get("details") or []:
+        if not play.get("scoringPlay") or play.get("shootout"):
+            continue
+        team = str((play.get("team") or {}).get("id") or "")
+        minute = _PLAY_MINUTE.match((play.get("clock") or {}).get("displayValue") or "")
+        if team not in total or minute is None:
+            return None
+        total[team] += 1
+        if int(minute.group(1)) <= 45:
+            first_half[team] += 1
+    if (total[home_id], total[away_id]) != tuple(final):
+        return None
+    return first_half[home_id], first_half[away_id]
+
 
 def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_context: dict | None = None) -> bool:
     """Record one completed competition (state == 'post'). Grading needs:
@@ -1180,6 +1222,12 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
         # 2026-10) graded every correct tie pick as a miss and silently
         # dropped every live-season regulation tie from the training frame.
         result_meta["regulation_winner"] = "tie" if went_extra else ("home" if home_score > away_score else "away")
+    if cfg.sport == "soccer":
+        # The four half-time markets grade from these (grading_outcomes.
+        # halftime_scores); absent when the plays don't add up.
+        ht = halftime_scores(comp, home, away, (home_score, away_score))
+        if ht is not None:
+            result_meta["halftime_home_score"], result_meta["halftime_away_score"] = ht
 
     home_id = ensure_team(cur, cfg, home_name, league_id)
     away_id = ensure_team(cur, cfg, away_name, league_id)

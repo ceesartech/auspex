@@ -128,3 +128,94 @@ class TestFixturesPathUnchanged:
         cfg = fu.SPORT_CONFIGS["soccer"]
         cur = MagicMock()
         assert fu._process_competition(cur, cfg, "league-uuid", _comp(state="post")) is False
+
+
+def _goal(team_id, clock, shootout=False, scoring=True):
+    return {
+        "scoringPlay": scoring,
+        "shootout": shootout,
+        "team": {"id": team_id},
+        "clock": {"displayValue": clock},
+    }
+
+
+def _soccer_comp(home_score, away_score, details):
+    comp = _comp(home_score=str(home_score), away_score=str(away_score))
+    comp["competitors"][0]["id"] = "10"
+    comp["competitors"][1]["id"] = "20"
+    comp["details"] = details
+    return comp
+
+
+class TestHalftimeScores:
+    def _ht(self, comp):
+        home, away = comp["competitors"]
+        final = (int(home["score"]), int(away["score"]))
+        return fu.halftime_scores(comp, home, away, final)
+
+    def test_first_half_includes_stoppage_and_own_goals(self):
+        # Own goals arrive credited to the side they benefit.
+        comp = _soccer_comp(
+            2,
+            1,
+            [_goal("10", "17'"), _goal("20", "45'+2'"), _goal("10", "46'"), {"scoringPlay": False, "clock": {}}],
+        )
+        assert self._ht(comp) == (1, 1)
+
+    def test_shootout_kicks_are_not_goals(self):
+        comp = _soccer_comp(1, 1, [_goal("10", "30'"), _goal("20", "88'"), _goal("10", "120'", shootout=True)])
+        assert self._ht(comp) == (1, 0)
+
+    def test_goalless_draw_without_plays(self):
+        assert self._ht(_soccer_comp(0, 0, [])) == (0, 0)
+
+    def test_plays_that_do_not_reproduce_the_final_are_rejected(self):
+        # One goal missing from the feed: grading four HT markets off it would be a guess.
+        assert self._ht(_soccer_comp(2, 0, [_goal("10", "12'")])) is None
+
+    def test_unknown_team_or_clock_is_rejected(self):
+        assert self._ht(_soccer_comp(1, 0, [_goal("99", "12'")])) is None
+        assert self._ht(_soccer_comp(1, 0, [_goal("10", "")])) is None
+
+    def test_missing_competitor_ids(self):
+        comp = _comp()
+        home, away = comp["competitors"]
+        assert fu.halftime_scores(comp, home, away, (3, 1)) is None
+
+
+class TestRecordResultHalftime:
+    def _meta(self, cfg, comp):
+        fu.ensure_team = MagicMock(return_value="team-uuid")
+        captured = {}
+
+        def fake_insert(cur, cfg, league_id, home_id, away_id, match_dt, venue, hs, as_, meta):
+            captured.update(meta=meta)
+            return 1
+
+        fu.insert_finished_match = fake_insert
+        assert fu._record_result(MagicMock(), cfg, "league-uuid", comp) is True
+        return captured["meta"]
+
+    def test_soccer_result_carries_halftime(self):
+        comp = _soccer_comp(2, 1, [_goal("10", "17'"), _goal("20", "50'"), _goal("10", "80'")])
+        meta = self._meta(fu.SPORT_CONFIGS["soccer"], comp)
+        assert (meta["halftime_home_score"], meta["halftime_away_score"]) == (1, 0)
+
+    def test_soccer_result_without_usable_plays_has_no_halftime(self):
+        meta = self._meta(fu.SPORT_CONFIGS["soccer"], _soccer_comp(2, 1, [_goal("10", "17'")]))
+        assert "halftime_home_score" not in meta
+
+    def test_nhl_result_has_no_halftime(self):
+        comp = _soccer_comp(4, 3, [_goal("10", "17'")])
+        meta = self._meta(fu.SPORT_CONFIGS["nhl"], comp)
+        assert "halftime_home_score" not in meta
+
+
+class TestFindTeamNeverWrites:
+    def test_find_team_returns_none_without_inserting(self, monkeypatch):
+        cur = MagicMock()
+        cur.fetchone.return_value = None
+        cur.fetchall.return_value = []
+        monkeypatch.setattr(fu.team_identity, "find_team_accent_insensitive", lambda *a: None)
+        assert fu.find_team(cur, fu.SPORT_CONFIGS["soccer"], "Nowhere FC", "league-uuid") is None
+        assert not any("INSERT" in str(c.args[0]) for c in cur.execute.call_args_list)
