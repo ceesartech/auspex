@@ -60,6 +60,7 @@ import json
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -80,6 +81,11 @@ DEFAULT_WINDOW_HOURS = 3.0
 DEFAULT_LEAD_MINUTES = 10
 DEFAULT_MAX_OFFSET_HOURS = 3.0
 DEFAULT_QUOTA_FLOOR = 15000
+# Rate limits (429), 5xx and dropped connections are retried; anything else
+# (e.g. 404 UNKNOWN_SPORT for a tournament key that wasn't open yet) is final.
+FETCH_ATTEMPTS = 4
+FETCH_BACKOFF_SECONDS = (2.0, 6.0, 20.0)
+RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 FUZZY_THRESHOLD = 0.8
 
 MODES = ("insert", "cache-only", "replace")
@@ -368,8 +374,9 @@ def cache_path(cache_dir: str | None, sport_key: str, snap: Snapshot, markets: s
 def fetch_historical_snapshot(
     sport_key: str, snapshot_iso: str, markets: str, api_key: str, regions: str
 ) -> tuple[dict | None, int | None]:
-    """One historical snapshot call. Returns (response or None on a graceful
-    skip, x-requests-remaining or None). Raises on auth errors."""
+    """One historical snapshot call, retrying rate limits, 5xx and connection
+    errors with backoff. Returns (response or None on a graceful skip,
+    x-requests-remaining or None). Raises on auth errors."""
     url = f"{BASE_URL}/historical/sports/{sport_key}/odds"
     params = {
         "apiKey": api_key,
@@ -379,13 +386,36 @@ def fetch_historical_snapshot(
         "dateFormat": "iso",
         "date": snapshot_iso,
     }
-    r = requests.get(url, params=params, timeout=30)
+    r = None
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        if attempt > 1:
+            time.sleep(FETCH_BACKOFF_SECONDS[min(attempt - 2, len(FETCH_BACKOFF_SECONDS) - 1)])
+        try:
+            r = requests.get(url, params=params, timeout=30)
+        except requests.RequestException as exc:
+            logger.warning("snapshot %s %s: %s (attempt %d/%d)", sport_key, snapshot_iso, exc, attempt, FETCH_ATTEMPTS)
+            r = None
+            continue
+        if r.status_code not in RETRYABLE_STATUS:
+            break
+        logger.warning(
+            "snapshot %s %s: HTTP %d (attempt %d/%d)", sport_key, snapshot_iso, r.status_code, attempt, FETCH_ATTEMPTS
+        )
+    if r is None:
+        logger.error(
+            "snapshot %s %s: no response after %d attempts — skipping", sport_key, snapshot_iso, FETCH_ATTEMPTS
+        )
+        return None, None
     if r.status_code == 401:
         raise RuntimeError("the-odds-api: invalid API key (401)")
     remaining_hdr = r.headers.get("x-requests-remaining")
     remaining = int(float(remaining_hdr)) if remaining_hdr not in (None, "") else None
     if r.status_code != 200:
-        logger.warning("snapshot %s: HTTP %d — skipping", snapshot_iso, r.status_code)
+        try:
+            error_code = (r.json() or {}).get("error_code", "")
+        except ValueError:
+            error_code = ""
+        logger.warning("snapshot %s %s: HTTP %d %s — skipping", sport_key, snapshot_iso, r.status_code, error_code)
         return None, remaining
     logger.info("snapshot %s: cost=%s remaining=%s", snapshot_iso, r.headers.get("x-requests-last", "?"), remaining_hdr)
     return r.json(), remaining

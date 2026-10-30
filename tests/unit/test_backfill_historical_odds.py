@@ -322,3 +322,55 @@ class TestTennisCli:
     def test_tennis_is_accepted_as_a_sport(self):
         args = backfill.parse_args(["--sport", "tennis", "--start", "2025-01-01", "--end", "2025-12-31", "--dry-run"])
         assert args.sport == "tennis"
+
+
+class _Resp:
+    def __init__(self, status, body=None, remaining="4000000"):
+        self.status_code = status
+        self._body = body if body is not None else {}
+        self.headers = {"x-requests-remaining": remaining, "x-requests-last": "10"}
+
+    def json(self):
+        return self._body
+
+
+class TestFetchRetries:
+    """A 429 burst lost ~270 tennis snapshots on 2026-10-30; one transient
+    failure left two NHL games on contaminated v1 lines."""
+
+    def _fetch(self, monkeypatch, responses):
+        calls = []
+
+        def fake_get(url, params, timeout):
+            calls.append(params["date"])
+            nxt = responses.pop(0)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return nxt
+
+        monkeypatch.setattr(backfill.requests, "get", fake_get)
+        monkeypatch.setattr(backfill.time, "sleep", lambda s: None)
+        out = backfill.fetch_historical_snapshot("icehockey_nhl", "2024-03-22T22:50:00Z", "h2h", "k", "us")
+        return out, calls
+
+    def test_rate_limit_is_retried(self, monkeypatch):
+        (resp, remaining), calls = self._fetch(monkeypatch, [_Resp(429), _Resp(429), _Resp(200, {"data": []})])
+        assert resp == {"data": []} and remaining == 4000000 and len(calls) == 3
+
+    def test_connection_error_is_retried(self, monkeypatch):
+        (resp, _), calls = self._fetch(
+            monkeypatch, [backfill.requests.ConnectionError("reset"), _Resp(200, {"data": []})]
+        )
+        assert resp == {"data": []} and len(calls) == 2
+
+    def test_unknown_sport_is_final(self, monkeypatch):
+        (resp, remaining), calls = self._fetch(monkeypatch, [_Resp(404, {"error_code": "UNKNOWN_SPORT"})])
+        assert resp is None and remaining == 4000000 and len(calls) == 1
+
+    def test_gives_up_after_the_attempt_budget(self, monkeypatch):
+        (resp, _), calls = self._fetch(monkeypatch, [_Resp(503)] * backfill.FETCH_ATTEMPTS)
+        assert resp is None and len(calls) == backfill.FETCH_ATTEMPTS
+
+    def test_auth_error_still_raises(self, monkeypatch):
+        with pytest.raises(RuntimeError):
+            self._fetch(monkeypatch, [_Resp(401)])
