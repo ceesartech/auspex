@@ -61,6 +61,7 @@ class FakeCursor:
                         "prediction_type": p["prediction_type"],
                         "model_name": p["model_name"],
                         "predicted_outcome": p["predicted_outcome"],
+                        "after_kickoff": p.get("after_kickoff", False),
                     }
                 )
             self._last = ("preds", rows)
@@ -268,10 +269,10 @@ class TestGradeMatchEdgeCases:
         assert counts["predictions_graded"] == 0
 
     def test_ungradable_market_increments_skipped_counter(self):
-        # team_total isn't in the v1 dispatch — actual_outcome
+        # player_prop isn't in the dispatch — actual_outcome
         # returns None and the counter ticks "skipped".
         match = {"match_id": "m1", "home_score": 2, "away_score": 1, "metadata": {}}
-        preds = [_pred("p1", "m1", "team_total", "ensemble", "-0.5_home")]
+        preds = [_pred("p1", "m1", "player_prop", "ensemble", "over_0.5")]
         cur = FakeCursor(preds, [])
 
         counts = gcm.grade_match(cur, match)
@@ -280,6 +281,20 @@ class TestGradeMatchEdgeCases:
         assert counts["predictions_graded"] == 0
         # No UPDATE happened.
         assert cur.predictions["p1"]["is_correct"] is None
+
+    def test_prediction_written_after_kickoff_is_never_graded(self):
+        # 467 June-2026 rows on 2023-25 matches: hindsight, not predictions.
+        match = {"match_id": "m1", "home_score": 2, "away_score": 1, "metadata": {}}
+        late = {**_pred("p1", "m1", "match_result", "ensemble", "home"), "after_kickoff": True}
+        cur = FakeCursor([late, _pred("p2", "m1", "btts", "ensemble", "yes")], [])
+        stats: dict = {}
+
+        counts = gcm.grade_match(cur, match, stats)
+
+        assert counts["predictions_graded"] == 1 and counts["predictions_skipped"] == 1
+        assert cur.predictions["p1"]["is_correct"] is None
+        assert cur.predictions["p2"]["is_correct"] is True
+        assert stats["after_kickoff_skips"] == 1
 
     def test_rec_settles_from_its_own_selection_without_graded_prediction(self):
         # Rec-level settlement: the rec grades from ITS OWN selection

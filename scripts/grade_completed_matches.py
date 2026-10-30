@@ -124,13 +124,20 @@ def list_finished_matches(cur, days: int, match_id: Optional[str]) -> list[dict]
 
 def list_ungraded_predictions(cur, match_id: str) -> list[dict]:
     """Every prediction row for the match whose is_correct is still
-    NULL. We grade and update each in place."""
+    NULL. We grade and update each in place.
+
+    `after_kickoff` flags rows written after the match started: hindsight,
+    not a prediction. 467 such rows (written 2026-06-02/03 for 2023-25 NFL,
+    NBA and tennis matches) sat ungraded only because they were older than
+    the --days window; a wide run would have folded them into accuracy."""
     cur.execute(
         """
-        SELECT id::text AS prediction_id,
-               prediction_type, model_name, predicted_outcome
-        FROM predictions
-        WHERE match_id = %s AND is_correct IS NULL
+        SELECT p.id::text AS prediction_id,
+               p.prediction_type, p.model_name, p.predicted_outcome,
+               (p.created_at > m.match_date) AS after_kickoff
+        FROM predictions p
+        JOIN matches m ON m.id = p.match_id
+        WHERE p.match_id = %s AND p.is_correct IS NULL
         """,
         (match_id,),
     )
@@ -363,6 +370,13 @@ def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
     }
 
     for pred in list_ungraded_predictions(cur, match["match_id"]):
+        # Written after kickoff: never graded (see list_ungraded_predictions).
+        if pred.get("after_kickoff"):
+            counts["predictions_skipped"] += 1
+            if stats is not None:
+                stats["after_kickoff_skips"] = stats.get("after_kickoff_skips", 0) + 1
+            continue
+
         # PHANTOM-LINE GUARD. A line-dependent prediction is only
         # gradable if a real book priced that market: otherwise the
         # closing_spread_home / closing_total_line sitting in
@@ -421,8 +435,9 @@ def run(database_url: str, days: int, match_id: Optional[str]) -> dict:
         "predictions_skipped": 0,
         "recs_settled": 0,
         "phantom_line_skips": 0,
+        "after_kickoff_skips": 0,
     }
-    stats: dict = {"phantom_line_skips": 0}
+    stats: dict = {"phantom_line_skips": 0, "after_kickoff_skips": 0}
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             matches = list_finished_matches(cur, days, match_id)
@@ -437,6 +452,12 @@ def run(database_url: str, days: int, match_id: Optional[str]) -> dict:
                     summary[k] += per[k]
             conn.commit()
     summary["phantom_line_skips"] = stats["phantom_line_skips"]
+    summary["after_kickoff_skips"] = stats["after_kickoff_skips"]
+    if stats["after_kickoff_skips"]:
+        logger.warning(
+            "Left %d prediction(s) ungraded because they were written after kickoff",
+            stats["after_kickoff_skips"],
+        )
     if stats["phantom_line_skips"]:
         # One summary line, not one per prediction. These rows stay
         # is_correct NULL on purpose: the market was never priced, so
