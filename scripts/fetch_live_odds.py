@@ -84,6 +84,68 @@ BASE_URL = "https://api.the-odds-api.com/v4"
 # sports (NBA, NFL, MLB, tennis), see the sport-keys reference linked
 # in the module docstring AND register the sport's market mapper below.
 # An unregistered sport will be skipped with a warning.
+# Tennis — the-odds-api lists tennis per TOURNAMENT. These are the provider's
+# 51 keys (`GET /v4/sports?all=true`, 2026-10-30): Slams, 1000s and 500s. The
+# hand-written list this replaced named four keys that do not exist
+# (tennis_*_australian_open, *_miami, atp_monte_carlo, *_finals) and none of
+# the 500s, so Australian Open / Miami / Monte Carlo were never priced. At run
+# time resolve_tennis_keys() swaps this list for the provider's ACTIVE tennis
+# keys (free endpoint), so a renamed key cannot silently go dark again; this
+# list is only the fallback. Out-of-tournament keys cost 0 credits.
+TENNIS_PROVIDER_KEYS: tuple[str, ...] = (
+    "tennis_atp_aus_open_singles",
+    "tennis_atp_barcelona_open",
+    "tennis_atp_canadian_open",
+    "tennis_atp_china_open",
+    "tennis_atp_cincinnati_open",
+    "tennis_atp_dubai",
+    "tennis_atp_french_open",
+    "tennis_atp_halle_open",
+    "tennis_atp_hamburg_open",
+    "tennis_atp_indian_wells",
+    "tennis_atp_italian_open",
+    "tennis_atp_japan_open",
+    "tennis_atp_madrid_open",
+    "tennis_atp_miami_open",
+    "tennis_atp_monte_carlo_masters",
+    "tennis_atp_munich",
+    "tennis_atp_paris_masters",
+    "tennis_atp_qatar_open",
+    "tennis_atp_queens_club_champ",
+    "tennis_atp_shanghai_masters",
+    "tennis_atp_swiss_indoors",
+    "tennis_atp_us_open",
+    "tennis_atp_vienna_open",
+    "tennis_atp_washington_open",
+    "tennis_atp_wimbledon",
+    "tennis_wta_aus_open_singles",
+    "tennis_wta_bad_homburg_open",
+    "tennis_wta_canadian_open",
+    "tennis_wta_charleston_open",
+    "tennis_wta_china_open",
+    "tennis_wta_cincinnati_open",
+    "tennis_wta_dubai",
+    "tennis_wta_french_open",
+    "tennis_wta_german_open",
+    "tennis_wta_guadalajara_open",
+    "tennis_wta_indian_wells",
+    "tennis_wta_italian_open",
+    "tennis_wta_madrid_open",
+    "tennis_wta_miami_open",
+    "tennis_wta_monterrey_open",
+    "tennis_wta_ningbo_open",
+    "tennis_wta_pan_pacific_open",
+    "tennis_wta_qatar_open",
+    "tennis_wta_queens_club_champ",
+    "tennis_wta_singapore_open",
+    "tennis_wta_strasbourg",
+    "tennis_wta_stuttgart_open",
+    "tennis_wta_us_open",
+    "tennis_wta_washington_open",
+    "tennis_wta_wimbledon",
+    "tennis_wta_wuhan_open",
+)
+
 DEFAULT_SPORTS = [
     # European top flights (in season Aug-May)
     "soccer_epl",
@@ -124,43 +186,8 @@ DEFAULT_SPORTS = [
     "basketball_nba",
     # NFL (in season Sep-Feb, Super Bowl early Feb)
     "americanfootball_nfl",
-    # Tennis — the-odds-api keys are EVENT-specific. Coverage
-    # expanded 2026-06-04 from 4 Grand Slams to include the
-    # ATP/WTA 1000 (Masters/Premier) tier so we have year-round
-    # tennis odds rather than just the 4 majors. Out-of-tournament
-    # keys 422 silently so off-season cost is one round-trip per
-    # dormant key — adds ~14 dormant-day round trips across the
-    # whole list (negligible quota at 0 units each).
-    # Grand Slams
-    "tennis_atp_australian_open",
-    "tennis_atp_french_open",
-    "tennis_atp_wimbledon",
-    "tennis_atp_us_open",
-    "tennis_wta_australian_open",
-    "tennis_wta_french_open",
-    "tennis_wta_wimbledon",
-    "tennis_wta_us_open",
-    # ATP Masters 1000 + year-end finals
-    "tennis_atp_indian_wells",
-    "tennis_atp_miami",
-    "tennis_atp_monte_carlo",
-    "tennis_atp_madrid_open",
-    "tennis_atp_italian_open",
-    "tennis_atp_canadian_open",
-    "tennis_atp_cincinnati_open",
-    "tennis_atp_shanghai_masters",
-    "tennis_atp_paris_masters",
-    "tennis_atp_finals",
-    # WTA 1000 + year-end finals
-    "tennis_wta_indian_wells",
-    "tennis_wta_miami",
-    "tennis_wta_madrid_open",
-    "tennis_wta_italian_open",
-    "tennis_wta_canadian_open",
-    "tennis_wta_cincinnati_open",
-    "tennis_wta_china_open",
-    "tennis_wta_wuhan_open",
-    "tennis_wta_finals",
+    # Tennis: TENNIS_PROVIDER_KEYS below (static fallback for resolve_tennis_keys).
+    *TENNIS_PROVIDER_KEYS,
     # MMA — UFC + Bellator. the-odds-api key is a single global
     # 'mma_mixed_martial_arts' that returns every active card across
     # promotions, so no per-promotion fanout needed.
@@ -1351,6 +1378,32 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def resolve_tennis_keys(sports: list[str], api_key: str) -> list[str]:
+    """Replace the configured tennis keys with the provider's ACTIVE tennis
+    keys (GET /v4/sports — free, in-season only). A failed listing keeps the
+    configured list and says so; sports without tennis keys pass through."""
+    if not any(s.startswith("tennis_") for s in sports):
+        return sports
+    try:
+        r = requests.get(f"{BASE_URL}/sports", params={"apiKey": api_key}, timeout=10)
+        r.raise_for_status()
+        active = sorted(
+            {
+                str(row["key"])
+                for row in r.json()
+                if str(row.get("key", "")).startswith("tennis_") and row.get("active", True)
+            }
+        )
+    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+        logger.error("Tennis key discovery failed (%s) — using the configured tennis keys", exc)
+        return sports
+    unknown = [k for k in active if k not in TENNIS_PROVIDER_KEYS]
+    if unknown:
+        logger.warning("Provider lists tennis keys not in TENNIS_PROVIDER_KEYS (add them): %s", ", ".join(unknown))
+    logger.info("Tennis: %d active provider key(s): %s", len(active), ", ".join(active) or "none")
+    return [s for s in sports if not s.startswith("tennis_")] + active
+
+
 def main(argv=None):
     args = parse_args(argv)
     if not args.api_key:
@@ -1367,7 +1420,7 @@ def main(argv=None):
         print(f"Quota — used: {r.headers.get('x-requests-used')}, remaining: {r.headers.get('x-requests-remaining')}")
         return 0
 
-    sports = [s.strip() for s in args.sports.split(",") if s.strip()]
+    sports = resolve_tennis_keys([s.strip() for s in args.sports.split(",") if s.strip()], args.api_key)
     results = run(
         args.database_url,
         sports,

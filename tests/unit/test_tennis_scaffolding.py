@@ -119,11 +119,11 @@ class TestFetchLiveOddsTennisDispatch:
         # Off-tournament keys 422 silently so the cost is one
         # round-trip per dormant key.
         for key in (
-            "tennis_atp_australian_open",
+            "tennis_atp_aus_open_singles",
             "tennis_atp_french_open",
             "tennis_atp_wimbledon",
             "tennis_atp_us_open",
-            "tennis_wta_australian_open",
+            "tennis_wta_aus_open_singles",
             "tennis_wta_french_open",
             "tennis_wta_wimbledon",
             "tennis_wta_us_open",
@@ -267,3 +267,45 @@ class TestProcessEventIndividual:
         # No name fields at all → None. process_event drops the event.
         assert fu._competitor_name({}, is_individual=True) is None
         assert fu._competitor_name({"athlete": {}}, is_individual=True) is None
+
+
+class TestTennisKeyDiscovery:
+    """The hand-written tennis list named four keys the provider does not
+    have; live keys now come from the provider's active list."""
+
+    class _R:
+        def __init__(self, body):
+            self._body = body
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._body
+
+    def test_configured_tennis_keys_are_replaced_by_the_active_ones(self, monkeypatch):
+        body = [
+            {"key": "tennis_atp_paris_masters", "active": True},
+            {"key": "tennis_atp_swiss_indoors", "active": True},
+            {"key": "basketball_nba", "active": True},
+        ]
+        monkeypatch.setattr(flo.requests, "get", lambda *a, **k: self._R(body))
+        out = flo.resolve_tennis_keys(["basketball_nba", "tennis_atp_wimbledon", "tennis_wta_us_open"], "k")
+        assert out == ["basketball_nba", "tennis_atp_paris_masters", "tennis_atp_swiss_indoors"]
+
+    def test_a_failed_listing_keeps_the_configured_keys(self, monkeypatch):
+        def boom(*a, **k):
+            raise flo.requests.ConnectionError("down")
+
+        monkeypatch.setattr(flo.requests, "get", boom)
+        sports = ["icehockey_nhl", "tennis_atp_wimbledon"]
+        assert flo.resolve_tennis_keys(sports, "k") == sports
+
+    def test_no_tennis_configured_means_no_listing_call(self, monkeypatch):
+        monkeypatch.setattr(flo.requests, "get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("called")))
+        assert flo.resolve_tennis_keys(["icehockey_nhl"], "k") == ["icehockey_nhl"]
+
+    def test_the_static_fallback_names_only_real_provider_keys(self):
+        for bad in ("tennis_atp_australian_open", "tennis_wta_miami", "tennis_atp_monte_carlo", "tennis_atp_finals"):
+            assert bad not in flo.DEFAULT_SPORTS
+        assert set(flo.TENNIS_PROVIDER_KEYS) <= set(flo.DEFAULT_SPORTS)

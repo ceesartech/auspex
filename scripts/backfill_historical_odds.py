@@ -89,6 +89,7 @@ RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 FUZZY_THRESHOLD = 0.8
 
 MODES = ("insert", "cache-only", "replace")
+ANCHORS = ("espn", "provider")
 
 # Reuse fetch_live_odds.py helpers without a hard package import.
 # scripts/ isn't an installable package; we load by path.
@@ -226,32 +227,57 @@ def credits_per_call(markets: str, regions: str) -> int:
 
 # ── Tennis: one the-odds-api key per TOURNAMENT ─────────────────────────
 #
-# the-odds-api lists tennis per tournament (tennis_atp_wimbledon, ...), and only
-# the Slams, the 1000s and the tour finals — exactly the set the live fetch
-# prices (fetch_live_odds.SPORT_KEYS), so training and serving see the same
-# provider. Our ESPN tennis rows carry no tournament name, but every one has a
-# venue; (venue, date window) resolves the tournament. ESPN's "ATP Tour" feed
-# also carries the women's draw at the Slams, so combined events query BOTH
-# tour keys and let the player names decide. Windows are generous (qualifying
-# rounds in them simply never match) and never overlap for one venue.
+# the-odds-api lists tennis per tournament: the Slams, the 1000s and the
+# 500-level events (51 keys, `GET /v4/sports?all=true`, checked 2026-10-30).
+# Key names are the PROVIDER's: until 2026-10-30 this table (and the live
+# list) used tennis_*_australian_open / *_miami / atp_monte_carlo / *_finals,
+# which do not exist — every one of those 1,143 snapshot calls was a 404
+# UNKNOWN_SPORT, and the 500s were never requested at all. Our ESPN tennis
+# rows carry no tournament name, but every one has a venue; (venue, date
+# window) resolves the tournament. Combined events query BOTH tour keys and
+# let the player names decide. Windows are generous (qualifying rounds in them
+# simply never match) and never overlap for one venue; a venue whose event
+# moved (Hamburg to May in 2025, Monterrey/Guadalajara between seasons) gets
+# one row per window.
 TENNIS_EVENTS: tuple[tuple[tuple[str, ...], tuple[str, str], tuple[str, ...]], ...] = (
-    (("melbourne",), ("01-08", "02-05"), ("tennis_atp_australian_open", "tennis_wta_australian_open")),
+    (("melbourne",), ("01-08", "02-05"), ("tennis_atp_aus_open_singles", "tennis_wta_aus_open_singles")),
+    (("singapore",), ("01-20", "02-10"), ("tennis_wta_singapore_open",)),
+    (("doha",), ("02-03", "02-28"), ("tennis_atp_qatar_open", "tennis_wta_qatar_open")),
+    (("dubai",), ("02-10", "03-05"), ("tennis_atp_dubai", "tennis_wta_dubai")),
+    (("monterrey",), ("02-24", "03-10"), ("tennis_wta_monterrey_open",)),
     (("indian wells",), ("03-01", "03-24"), ("tennis_atp_indian_wells", "tennis_wta_indian_wells")),
-    (("miami",), ("03-15", "04-08"), ("tennis_atp_miami", "tennis_wta_miami")),
-    (("monte carlo", "monte-carlo"), ("04-01", "04-20"), ("tennis_atp_monte_carlo",)),
+    (("miami",), ("03-15", "04-08"), ("tennis_atp_miami_open", "tennis_wta_miami_open")),
+    (("charleston",), ("03-25", "04-12"), ("tennis_wta_charleston_open",)),
+    (("monte carlo", "monte-carlo"), ("04-01", "04-20"), ("tennis_atp_monte_carlo_masters",)),
+    (("barcelona",), ("04-08", "04-27"), ("tennis_atp_barcelona_open",)),
+    (("munich",), ("04-08", "04-27"), ("tennis_atp_munich",)),
+    (("stuttgart",), ("04-08", "04-27"), ("tennis_wta_stuttgart_open",)),
     (("madrid",), ("04-18", "05-12"), ("tennis_atp_madrid_open", "tennis_wta_madrid_open")),
     (("rome", "roma"), ("05-01", "05-25"), ("tennis_atp_italian_open", "tennis_wta_italian_open")),
+    (("strasbourg",), ("05-12", "05-31"), ("tennis_wta_strasbourg",)),
+    (("hamburg",), ("05-12", "05-31"), ("tennis_atp_hamburg_open",)),
     (("paris",), ("05-18", "06-12"), ("tennis_atp_french_open", "tennis_wta_french_open")),
+    (("london",), ("06-05", "06-25"), ("tennis_atp_queens_club_champ", "tennis_wta_queens_club_champ")),
+    (("halle",), ("06-10", "06-28"), ("tennis_atp_halle_open",)),
+    (("berlin",), ("06-10", "06-28"), ("tennis_wta_german_open",)),
+    (("bad homburg",), ("06-17", "07-03"), ("tennis_wta_bad_homburg_open",)),
     (("london", "wimbledon"), ("06-26", "07-18"), ("tennis_atp_wimbledon", "tennis_wta_wimbledon")),
+    (("hamburg",), ("07-10", "07-31"), ("tennis_atp_hamburg_open",)),
+    (("washington",), ("07-18", "08-06"), ("tennis_atp_washington_open", "tennis_wta_washington_open")),
     (("toronto", "montreal"), ("07-25", "08-20"), ("tennis_atp_canadian_open", "tennis_wta_canadian_open")),
     (("cincinnati", "mason"), ("08-05", "08-28"), ("tennis_atp_cincinnati_open", "tennis_wta_cincinnati_open")),
+    (("monterrey",), ("08-12", "08-30"), ("tennis_wta_monterrey_open",)),
     (("new york", "flushing"), ("08-18", "09-14"), ("tennis_atp_us_open", "tennis_wta_us_open")),
-    (("beijing",), ("09-20", "10-10"), ("tennis_wta_china_open",)),
+    (("guadalajara",), ("08-28", "09-30"), ("tennis_wta_guadalajara_open",)),
+    (("tokyo",), ("09-15", "10-31"), ("tennis_atp_japan_open", "tennis_wta_pan_pacific_open")),
+    (("beijing",), ("09-20", "10-10"), ("tennis_atp_china_open", "tennis_wta_china_open")),
     (("shanghai",), ("09-28", "10-22"), ("tennis_atp_shanghai_masters",)),
     (("wuhan",), ("10-01", "10-22"), ("tennis_wta_wuhan_open",)),
+    (("ningbo",), ("10-01", "10-25"), ("tennis_wta_ningbo_open",)),
+    (("guadalajara",), ("10-10", "10-30"), ("tennis_wta_guadalajara_open",)),
+    (("basel",), ("10-15", "11-02"), ("tennis_atp_swiss_indoors",)),
+    (("vienna",), ("10-15", "11-02"), ("tennis_atp_vienna_open",)),
     (("paris",), ("10-25", "11-08"), ("tennis_atp_paris_masters",)),
-    (("riyadh", "cancun", "fort worth"), ("10-25", "11-12"), ("tennis_wta_finals",)),
-    (("turin", "torino"), ("11-08", "11-25"), ("tennis_atp_finals",)),
 )
 
 
@@ -288,6 +314,53 @@ def plan_tennis_snapshots(
     for keys, gs in by_keys.items():
         for snap in plan_snapshots(gs, window_hours, lead_minutes):
             tasks.extend((k, snap) for k in keys)
+    tasks.sort(key=lambda t: (t[1].requested, t[0]))
+    return tasks
+
+
+# Provider-anchored planning. ESPN's tennis times run hours LATER than the
+# provider's commence_time (Paris 2025-10-29: +2.3 h, +3.2 h — the provider
+# lists the order-of-play slot, ESPN the real start), so a snapshot taken
+# just before ESPN's time finds the event already "started" and the
+# strictly-pre-game rule rightly rejects it (~6k listed-tournament events on
+# 2026-10-30). Listing the provider's own events first and clustering on
+# ITS commence_time puts every snapshot before the provider's start.
+EVENT_LISTING_OFFSETS_HOURS = (-8, 0, 8)  # relative to 00:00 UTC of the match day
+
+
+def tennis_listing_tasks(games: list[Game]) -> list[tuple[str, str]]:
+    """(sport_key, listing_iso) event-list calls covering every game's day."""
+    seen: set[tuple[str, str]] = set()
+    for g in games:
+        day0 = datetime(g.match_date.year, g.match_date.month, g.match_date.day, tzinfo=timezone.utc)
+        for key in tennis_keys_for(g.venue, g.match_date):
+            for h in EVENT_LISTING_OFFSETS_HOURS:
+                seen.add((key, (day0 + timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")))
+    return sorted(seen, key=lambda t: (t[1], t[0]))
+
+
+def plan_tennis_anchored(
+    games: list[Game],
+    events_by_key: dict[str, list[dict]],
+    window_hours: float = DEFAULT_WINDOW_HOURS,
+    lead_minutes: int = DEFAULT_LEAD_MINUTES,
+    max_offset_hours: float = 12.0,
+) -> list[tuple[str, Snapshot]]:
+    """(sport_key, Snapshot) tasks clustered on the PROVIDER's commence_time.
+    Each game is paired with a listed event (either player order, within
+    max_offset_hours of ESPN's time); the snapshot's games carry the
+    provider's start as match_date so the later match is offset-tight."""
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    tasks: list[tuple[str, Snapshot]] = []
+    for key, events in sorted(events_by_key.items()):
+        key_games = [g for g in games if key in tennis_keys_for(g.venue, g.match_date)]
+        pairs, _ = match_tennis_events(events, epoch, key_games, max_offset_hours)
+        anchored = [
+            Game(g.match_id, commence, g.home, g.away, g.venue)
+            for ev, g, _swapped in pairs
+            if (commence := _parse_ts(ev.get("commence_time"))) is not None
+        ]
+        tasks.extend((key, snap) for snap in plan_snapshots(anchored, window_hours, lead_minutes))
     tasks.sort(key=lambda t: (t[1].requested, t[0]))
     return tasks
 
@@ -371,6 +444,12 @@ def cache_path(cache_dir: str | None, sport_key: str, snap: Snapshot, markets: s
     return Path(cache_dir) / sport_key / f"{snap.iso}_{tag}.json"
 
 
+def events_cache_path(cache_dir: str | None, sport_key: str, listing_iso: str) -> Path | None:
+    if not cache_dir:
+        return None
+    return Path(cache_dir) / sport_key / f"{listing_iso}_events.json"
+
+
 def fetch_historical_snapshot(
     sport_key: str, snapshot_iso: str, markets: str, api_key: str, regions: str
 ) -> tuple[dict | None, int | None]:
@@ -386,6 +465,19 @@ def fetch_historical_snapshot(
         "dateFormat": "iso",
         "date": snapshot_iso,
     }
+    return _get_with_retry(url, params, sport_key, snapshot_iso)
+
+
+def fetch_historical_events(sport_key: str, listing_iso: str, api_key: str) -> tuple[dict | None, int | None]:
+    """The provider's EVENT LIST for a key as of `listing_iso` (1 credit):
+    ids, players and commence_time, no prices. Same return contract as
+    fetch_historical_snapshot."""
+    url = f"{BASE_URL}/historical/sports/{sport_key}/events"
+    params = {"apiKey": api_key, "dateFormat": "iso", "date": listing_iso}
+    return _get_with_retry(url, params, sport_key, listing_iso)
+
+
+def _get_with_retry(url: str, params: dict, sport_key: str, snapshot_iso: str) -> tuple[dict | None, int | None]:
     r = None
     for attempt in range(1, FETCH_ATTEMPTS + 1):
         if attempt > 1:
@@ -635,9 +727,14 @@ def run_tennis(
     max_offset_hours: float = 12.0,
     quota_floor: int = DEFAULT_QUOTA_FLOOR,
     confirm_replace: bool = False,
+    anchor: str = "espn",
 ) -> dict[str, int]:
     """run() for tennis: snapshots are per TOURNAMENT key (TENNIS_EVENTS), the
-    matcher ignores player order, and prices are written in OUR orientation."""
+    matcher ignores player order, and prices are written in OUR orientation.
+    anchor="provider" first lists the provider's events per tournament-day
+    (1 credit each, cached) and clusters snapshots on ITS commence_time."""
+    if anchor not in ANCHORS:
+        raise ValueError(f"anchor must be one of {ANCHORS}")
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
     if mode == "replace" and not (confirm_replace or dry_run):
@@ -648,7 +745,37 @@ def run_tennis(
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             games = load_games(cur, "tennis", start, end, mode)
-    tasks = plan_tennis_snapshots(games, window_hours, lead_minutes)
+    listing_counts = {"event_listings_planned": 0, "event_listings_fetched": 0, "event_listings_skipped": 0}
+    if anchor == "provider":
+        listings = tennis_listing_tasks(games)
+        listing_counts["event_listings_planned"] = len(listings)
+        if dry_run:
+            logger.info(
+                "Tennis provider-anchored dry run: %d event-list calls (1 credit each) before planning", len(listings)
+            )
+            return {"games": len(games), **listing_counts}
+        events_by_key: dict[str, dict[str, dict]] = {}
+        for key, listing_iso in listings:
+            lpath = events_cache_path(cache_dir, key, listing_iso)
+            if lpath is not None and lpath.exists():
+                listing = json.loads(lpath.read_text())
+            else:
+                listing, _remaining = fetch_historical_events(key, listing_iso, api_key)
+                if listing is None:
+                    listing_counts["event_listings_skipped"] += 1
+                    continue
+                listing_counts["event_listings_fetched"] += 1
+                if lpath is not None:
+                    lpath.parent.mkdir(parents=True, exist_ok=True)
+                    lpath.write_text(json.dumps(listing))
+            for ev in listing.get("data") or []:
+                if ev.get("id"):
+                    events_by_key.setdefault(key, {})[ev["id"]] = ev  # later listing wins
+        tasks = plan_tennis_anchored(
+            games, {k: list(v.values()) for k, v in events_by_key.items()}, window_hours, lead_minutes, max_offset_hours
+        )
+    else:
+        tasks = plan_tennis_snapshots(games, window_hours, lead_minutes)
     mapped = {g.match_id for _, snap in tasks for g in snap.games}
     per_call = credits_per_call(markets, regions)
     cached = sum(1 for key, snap in tasks if (p := cache_path(cache_dir, key, snap, markets, regions)) and p.exists())
@@ -670,8 +797,9 @@ def run_tennis(
         "odds_rows_written": 0,
         "rows_archived": 0,
         "stopped_on_quota": 0,
+        **listing_counts,
     }
-    logger.info("Tennis plan: %s; calls per key: %s", totals, dict(sorted(per_key.items())))
+    logger.info("Tennis plan (anchor=%s): %s; calls per key: %s", anchor, totals, dict(sorted(per_key.items())))
     if dry_run or not tasks:
         return totals
 
@@ -773,6 +901,13 @@ def parse_args(argv=None):
     p.add_argument("--quota-floor", type=int, default=DEFAULT_QUOTA_FLOOR)
     p.add_argument("--confirm-replace", action="store_true", help="Required for --mode replace (destructive).")
     p.add_argument(
+        "--anchor",
+        choices=ANCHORS,
+        default="espn",
+        help="tennis only: cluster snapshots on ESPN's times (espn) or on the provider's listed "
+        "commence_time (provider: +1 credit per tournament-day listing, recovers events ESPN times late).",
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help="Plan and estimate quota cost without API calls or writes. Always run this first.",
@@ -814,6 +949,8 @@ def main(argv=None):
             lead_minutes=args.lead_minutes,
             quota_floor=args.quota_floor,
             confirm_replace=args.confirm_replace,
+            anchor=args.anchor,
+            max_offset_hours=max(args.max_offset_hours, 12.0),
         )
         print(json.dumps(totals, indent=2))
         return 0

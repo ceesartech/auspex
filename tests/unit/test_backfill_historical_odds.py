@@ -277,19 +277,110 @@ class TestTennisKeys:
 
     def test_accents_and_case_do_not_matter_and_unlisted_events_map_to_nothing(self):
         when = datetime(2023, 4, 10, tzinfo=UTC)
-        assert backfill.tennis_keys_for("Monte-Carlo, Monaco", when) == ("tennis_atp_monte_carlo",)
+        assert backfill.tennis_keys_for("Monte-Carlo, Monaco", when) == ("tennis_atp_monte_carlo_masters",)
         assert backfill.tennis_keys_for("Santiago de Querétaro, Mexico", when) == ()
         assert backfill.tennis_keys_for("Paris, France", datetime(2025, 3, 1, tzinfo=UTC)) == ()
 
     def test_combined_events_plan_one_call_per_tour_key(self):
         g = [_tg("a", datetime(2025, 1, 20, 0, tzinfo=UTC), "Novak Djokovic", "Carlos Alcaraz", "Melbourne, Australia")]
         tasks = backfill.plan_tennis_snapshots(g)
-        assert [k for k, _ in tasks] == ["tennis_atp_australian_open", "tennis_wta_australian_open"]
+        assert [k for k, _ in tasks] == ["tennis_atp_aus_open_singles", "tennis_wta_aus_open_singles"]
         assert tasks[0][1].requested == datetime(2025, 1, 19, 23, 50, tzinfo=UTC)
 
     def test_unlisted_tournaments_cost_nothing(self):
         g = [_tg("a", datetime(2025, 3, 1, tzinfo=UTC), "A B", "C D", "Santiago de Querétaro, Mexico")]
         assert backfill.plan_tennis_snapshots(g) == []
+
+
+class TestTennisKeyTable:
+    def test_every_key_is_a_real_provider_key(self):
+        keys = {k for _, _, ks in backfill.TENNIS_EVENTS for k in ks}
+        assert keys <= set(fetch_live_odds.TENNIS_PROVIDER_KEYS)
+
+    def test_500_level_events_resolve(self):
+        oct_ = datetime(2025, 10, 22, tzinfo=UTC)
+        assert backfill.tennis_keys_for("Basel, Switzerland", oct_) == ("tennis_atp_swiss_indoors",)
+        assert backfill.tennis_keys_for("Vienna, Austria", oct_) == ("tennis_atp_vienna_open",)
+        assert backfill.tennis_keys_for("Tokyo, Japan", oct_) == (
+            "tennis_atp_japan_open",
+            "tennis_wta_pan_pacific_open",
+        )
+
+    def test_queens_and_wimbledon_share_london_without_overlapping(self):
+        assert backfill.tennis_keys_for("London, Great Britain", datetime(2025, 6, 18, tzinfo=UTC)) == (
+            "tennis_atp_queens_club_champ",
+            "tennis_wta_queens_club_champ",
+        )
+        assert backfill.tennis_keys_for("London, Great Britain", datetime(2025, 7, 2, tzinfo=UTC)) == (
+            "tennis_atp_wimbledon",
+            "tennis_wta_wimbledon",
+        )
+
+    def test_a_venue_whose_event_moved_resolves_in_both_windows(self):
+        for when in (datetime(2025, 5, 20, tzinfo=UTC), datetime(2023, 7, 20, tzinfo=UTC)):
+            assert backfill.tennis_keys_for("Hamburg, Germany", when) == ("tennis_atp_hamburg_open",)
+
+
+class TestProviderAnchoredPlanning:
+    """ESPN's tennis times run hours after the provider's commence_time, so
+    snapshots must be clustered on the provider's time (Paris 2025-10-29:
+    ESPN 13:30 / 17:40 vs provider 11:10 / 14:30)."""
+
+    def _ev(self, eid, home, away, when):
+        return {
+            "id": eid,
+            "home_team": home,
+            "away_team": away,
+            "commence_time": when.isoformat().replace("+00:00", "Z"),
+        }
+
+    def test_listing_calls_cover_each_game_day_per_key(self):
+        g = [_tg("a", datetime(2025, 10, 29, 13, 30, tzinfo=UTC), "A B", "C D", "Paris, France")]
+        tasks = backfill.tennis_listing_tasks(g)
+        assert tasks == [
+            ("tennis_atp_paris_masters", "2025-10-28T16:00:00Z"),
+            ("tennis_atp_paris_masters", "2025-10-29T00:00:00Z"),
+            ("tennis_atp_paris_masters", "2025-10-29T08:00:00Z"),
+        ]
+
+    def test_snapshots_sit_before_the_providers_start_not_espns(self):
+        day = datetime(2025, 10, 29, tzinfo=UTC)
+        games = [
+            _tg("m1", day.replace(hour=13, minute=30), "Camilo Ugo Carabelli", "Alexander Zverev", "Paris, France"),
+            _tg("m2", day.replace(hour=17, minute=40), "Lorenzo Musetti", "Lorenzo Sonego", "Paris, France"),
+        ]
+        events = {
+            "tennis_atp_paris_masters": [
+                self._ev("e1", "Alexander Zverev", "Camilo Ugo Carabelli", day.replace(hour=11, minute=10)),
+                self._ev("e2", "Lorenzo Musetti", "Lorenzo Sonego", day.replace(hour=14, minute=30)),
+            ]
+        }
+        tasks = backfill.plan_tennis_anchored(games, events, window_hours=3.0, lead_minutes=10)
+        # 11:10 and 14:30 are 3 h 20 apart: two clusters, each 10 min before the PROVIDER's start
+        assert [(k, snap.requested) for k, snap in tasks] == [
+            ("tennis_atp_paris_masters", day.replace(hour=11, minute=0)),
+            ("tennis_atp_paris_masters", day.replace(hour=14, minute=20)),
+        ]
+        for (_k, snap), eid in zip(tasks, ("e1", "e2")):
+            # the snapshot's game carries the provider's start, and its event is strictly pre-game there
+            ev = [e for e in events["tennis_atp_paris_masters"] if e["id"] == eid]
+            pairs, counts = backfill.match_tennis_events(ev, snap.requested, snap.games)
+            assert len(pairs) == 1 and counts["in_play_or_started"] == 0
+        # under the old ESPN anchor, a snapshot at 13:20 finds Zverev's match already started
+        late = backfill.match_tennis_events(
+            events["tennis_atp_paris_masters"][:1], day.replace(hour=13, minute=20), games
+        )
+        assert late[1]["in_play_or_started"] == 1
+
+    def test_games_the_provider_never_listed_plan_nothing(self):
+        g = [_tg("m1", datetime(2025, 10, 29, 13, tzinfo=UTC), "A B", "C D", "Paris, France")]
+        assert backfill.plan_tennis_anchored(g, {"tennis_atp_paris_masters": []}) == []
+
+    def test_anchor_is_a_cli_choice(self):
+        args = backfill.parse_args(
+            ["--sport", "tennis", "--start", "2025-01-01", "--end", "2025-12-31", "--anchor", "provider"]
+        )
+        assert args.anchor == "provider"
 
 
 class TestTennisMatcher:
