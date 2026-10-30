@@ -695,6 +695,18 @@ def _resolve_match_id(
          within +/- `window_hours` that carries no ESPN id yet. This is
          what re-attaches the pre-fix orphans instead of forking a new row.
 
+    Step 1 has one exception, for 1v1 sports: ESPN keeps a competition id
+    when it re-fills a draw slot (a withdrawal, a lucky loser, a replacement
+    opponent), so the id can point at a row for a pairing that will never be
+    played (prod 2026-10-28: comp 185138 stayed on "Fritz v Tsitsipas" after
+    Hijikata replaced Tsitsipas; every later time change of the real match
+    then forked a new unidentified row, ~25-50 a week). When the id's row is
+    still 'scheduled' and shares not even the same two players, the slot was
+    re-drawn: the stale row is released (id removed, status 'cancelled',
+    the re-draw recorded in metadata) and resolution continues by pair. A
+    swapped pair (same two players) is NOT a re-draw and keeps the old
+    refuse-and-log behaviour in _realign_match_date.
+
     Step 3 refuses to resolve when two or more rows qualify: a same-pair
     rematch inside 72 h is routine (playoff series, back-to-backs,
     two-legged ties) and guessing would corrupt a fixture. It logs the
@@ -717,7 +729,7 @@ def _resolve_match_id(
         # instead of self-healing. LIMIT 2 so the duplicate is detectable.
         cur.execute(
             """
-            SELECT m.id
+            SELECT m.id, m.home_team_id, m.away_team_id, m.status
               FROM matches m
               JOIN leagues l ON l.id = m.league_id
              WHERE m.external_ids->>'espn' = %s
@@ -737,7 +749,11 @@ def _resolve_match_id(
                 len(rows),
                 rows[0]["id"],
             )
-        if rows:
+        if rows and not (
+            cfg.is_individual
+            and _is_redrawn_slot(rows[0], home_id, away_id)
+            and _release_redrawn_slot(cur, cfg, espn_id, rows[0])
+        ):
             return rows[0]["id"], "espn"
 
     cur.execute(
@@ -784,6 +800,53 @@ def _resolve_match_id(
             ", ".join(f"{c['id']}@{c['match_date']}" for c in candidates),
         )
     return None, None
+
+
+def _is_redrawn_slot(row: dict, home_id, away_id) -> bool:
+    """True when the row an ESPN id resolved to is for a DIFFERENT pairing
+    than this parse — not merely the same two players with sides swapped."""
+    if row.get("home_team_id") is None or row.get("away_team_id") is None:
+        return False
+    stored = {str(row["home_team_id"]), str(row["away_team_id"])}
+    return stored != {str(home_id), str(away_id)}
+
+
+def _release_redrawn_slot(cur, cfg: SportConfig, espn_id, row: dict) -> bool:
+    """Detach an ESPN id from a scheduled row whose draw slot ESPN re-filled
+    with another player, and cancel that pairing (it will never be played).
+    Finished/live rows are never touched. Returns True when released, so the
+    caller resolves the new pairing by pair instead of by the stale row."""
+    if row.get("status") != "scheduled":
+        logger.error(
+            "ESPN %s id %s resolves to %s row %s for a different pairing — not releasing a non-scheduled row; "
+            "this competition stays unidentified",
+            cfg.sport,
+            espn_id,
+            row.get("status"),
+            row["id"],
+        )
+        return False
+    cur.execute(
+        """
+        UPDATE matches
+           SET external_ids = COALESCE(external_ids, '{}'::jsonb) - 'espn',
+               status = 'cancelled',
+               metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb,
+               updated_at = NOW()
+         WHERE id = %s
+           AND status = 'scheduled'
+        """,
+        (json.dumps({"redrawn_espn_id": str(espn_id)}), row["id"]),
+    )
+    if cur.rowcount == 0:
+        return False
+    logger.warning(
+        "ESPN %s competition %s was re-drawn (different players): released it from row %s and cancelled that pairing",
+        cfg.sport,
+        espn_id,
+        row["id"],
+    )
+    return True
 
 
 def resolve_match_id(

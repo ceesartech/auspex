@@ -82,16 +82,33 @@ class FakeCursor:
 
         if "JOIN leagues" in sql:  # step 1 — espn id, scoped to the sport
             espn_id, sport = params
-            self._result = [{"id": r["id"]} for r in self.rows if r["espn"] == espn_id and self.sport == sport][:1]
+            self._result = [
+                {
+                    "id": r["id"],
+                    "home_team_id": r["home_team_id"],
+                    "away_team_id": r["away_team_id"],
+                    "status": r["status"],
+                }
+                for r in self.rows
+                if r["espn"] == espn_id and self.sport == sport
+            ][:1]
         elif sql.startswith("SELECT id FROM matches WHERE home_team_id"):  # step 2 — exact triple
-            _h, _a, when = params
-            self._result = [{"id": r["id"]} for r in self.rows if r["match_date"] == when]
-        elif "AND status = 'scheduled'" in sql:  # step 3 — healing candidates
-            _h, _a, lo, hi = params
+            h, a, when = params
+            self._result = [
+                {"id": r["id"]}
+                for r in self.rows
+                if r["home_team_id"] == h and r["away_team_id"] == a and r["match_date"] == when
+            ]
+        elif "AND status = 'scheduled'" in sql and sql.startswith("SELECT"):  # step 3 — healing candidates
+            h, a, lo, hi = params
             self._result = [
                 {"id": r["id"], "match_date": r["match_date"]}
                 for r in sorted(self.rows, key=lambda r: r["match_date"])
-                if r["status"] == "scheduled" and r["espn"] is None and lo <= r["match_date"] <= hi
+                if r["home_team_id"] == h
+                and r["away_team_id"] == a
+                and r["status"] == "scheduled"
+                and r["espn"] is None
+                and lo <= r["match_date"] <= hi
             ]
         elif sql.startswith("SELECT home_team_id, away_team_id, match_date FROM matches WHERE id"):
             self._result = [
@@ -101,7 +118,13 @@ class FakeCursor:
             ]
         elif sql.startswith("UPDATE matches"):
             self.updates.append((sql, params))
-            if "dup.match_date" in sql:  # realignment — honour the NOT EXISTS guard
+            if "- 'espn'" in sql:  # re-drawn slot release — only a still-scheduled row
+                rid = params[1]
+                hit = [r for r in self.rows if r["id"] == rid and r["status"] == "scheduled"]
+                for r in hit:
+                    r["espn"], r["status"] = None, "cancelled"
+                self.rowcount = len(hit)
+            elif "dup.match_date" in sql:  # realignment — honour the NOT EXISTS guard
                 new_date, rid = params[0], params[1]
                 blocked = any(r["match_date"] == new_date and r["id"] != rid for r in self.rows)
                 self.rowcount = 0 if blocked else 1
@@ -265,6 +288,50 @@ class TestResolveMatchId:
         cur = FakeCursor([_row("orphan", KICKOFF - timedelta(hours=10))])
         assert fu.resolve_match_id(cur, SOCCER, "401", HOME, AWAY, KICKOFF, window_hours=4) is None
         assert fu.resolve_match_id(cur, SOCCER, "401", HOME, AWAY, KICKOFF, window_hours=24) == "orphan"
+
+
+class TestRedrawnSlot:
+    """ESPN keeps a tennis/MMA competition id when it re-fills the draw slot
+    (prod comp 185138: Fritz v Tsitsipas -> Fritz v Hijikata). The id must
+    move to the real pairing instead of pinning a pairing that never plays."""
+
+    def test_the_stale_pairing_is_released_and_the_real_one_resolves_by_pair(self):
+        cur = FakeCursor(
+            [
+                _row("stale", KICKOFF - timedelta(hours=30), espn="185138", away="withdrawn-player"),
+                _row("real", KICKOFF),
+            ],
+            sport="tennis",
+        )
+        assert fu.resolve_match_id(cur, TENNIS, "185138", HOME, AWAY, KICKOFF) == "real"
+        stale = cur.rows[0]
+        assert stale["espn"] is None and stale["status"] == "cancelled"
+        release = [p for s, p in cur.updates if "- 'espn'" in s][0]
+        assert json.loads(release[0]) == {"redrawn_espn_id": "185138"}
+
+    def test_the_new_pairing_gets_the_id_when_it_has_no_row_yet(self):
+        cur = FakeCursor([_row("stale", KICKOFF, espn="185138", away="withdrawn-player")], sport="tennis")
+        # nothing resolves for the new pair -> the insert that follows lands
+        # on an empty slot and stamping the id there is safe
+        assert fu._reconcile_match_row(cur, TENNIS, "185138", HOME, AWAY, KICKOFF) is True
+        assert cur.rows[0]["status"] == "cancelled"
+
+    def test_a_swapped_pair_is_not_a_redraw(self):
+        cur = FakeCursor([_row("same-fight", KICKOFF, espn="185138", home=AWAY, away=HOME)], sport="tennis")
+        assert fu.resolve_match_id(cur, TENNIS, "185138", HOME, AWAY, KICKOFF) == "same-fight"
+        assert cur.updates == [] and cur.rows[0]["status"] == "scheduled"
+
+    def test_team_sports_never_release(self):
+        cur = FakeCursor([_row("fixture", KICKOFF, espn="401", away="someone-else")])
+        assert fu.resolve_match_id(cur, SOCCER, "401", HOME, AWAY, KICKOFF) == "fixture"
+        assert cur.updates == []
+
+    def test_a_finished_row_is_never_released(self):
+        cur = FakeCursor(
+            [_row("played", KICKOFF, status="finished", espn="185138", away="someone-else")], sport="tennis"
+        )
+        assert fu.resolve_match_id(cur, TENNIS, "185138", HOME, AWAY, KICKOFF) == "played"
+        assert cur.updates == [] and cur.rows[0]["espn"] == "185138"
 
 
 # ── Realignment (the de-fragmentation step) ───────────────────────────
