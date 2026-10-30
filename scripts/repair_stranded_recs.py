@@ -839,10 +839,16 @@ def validate_request(
 def default_out_csv(sports: Optional[Iterable[str]] = None) -> str:
     """Timestamped + scoped so two runs on the same day cannot collide.
     The old date-only name meant a verification dry-run after an apply
-    silently overwrote the only reversal record with an empty file."""
+    silently overwrote the only reversal record with an empty file.
+
+    ABSOLUTE, in the /app/backups volume backup_postgres.py writes to: a
+    relative "backups/..." resolved against the CWD, and the 2026-10-30
+    tennis cleanup (run from /app/scripts) aborted on PermissionError
+    because appuser cannot create /app/scripts/backups."""
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
     scope = "-".join(sorted(sports)) if sports else "all"
-    return f"backups/repaired_rec_ids_{scope}_{stamp}.csv"
+    base = os.environ.get("BACKUP_LOCAL_DIR", "/app/backups")
+    return f"{base}/repaired_rec_ids_{scope}_{stamp}.csv"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -880,7 +886,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--out-csv",
         default=None,
-        help="CSV of affected rows (default backups/repaired_rec_ids_<sports>_<utc timestamp>.csv). "
+        help="CSV of affected rows (default /app/backups/repaired_rec_ids_<sports>_<utc timestamp>.csv). "
         "Write-once: an existing path is an error, never an overwrite.",
     )
     mode = p.add_mutually_exclusive_group()

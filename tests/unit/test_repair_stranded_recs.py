@@ -407,9 +407,17 @@ def test_main_returns_2_without_a_database_url(monkeypatch):
     assert rs.main([]) == 2
 
 
-def test_default_out_csv_shape():
-    assert rs.default_out_csv().startswith("backups/repaired_rec_ids_")
+def test_default_out_csv_shape(monkeypatch):
+    monkeypatch.delenv("BACKUP_LOCAL_DIR", raising=False)
+    # Absolute: a relative path resolves against the CWD (the 2026-10-30
+    # cleanup ran from /app/scripts and died on PermissionError).
+    assert rs.default_out_csv().startswith("/app/backups/repaired_rec_ids_")
     assert rs.default_out_csv().endswith(".csv")
+
+
+def test_default_out_csv_follows_backup_local_dir(monkeypatch):
+    monkeypatch.setenv("BACKUP_LOCAL_DIR", "/mnt/elsewhere")
+    assert rs.default_out_csv(["tennis"]).startswith("/mnt/elsewhere/repaired_rec_ids_tennis_")
 
 
 def test_settle_repoints_the_rec_onto_the_finished_twin(tmp_path):
@@ -569,10 +577,11 @@ def test_csv_is_write_once_and_never_clobbers_a_previous_audit(tmp_path):
     assert out.read_text(encoding="utf-8") == before
 
 
-def test_default_out_csv_is_unique_per_run_and_scoped():
+def test_default_out_csv_is_unique_per_run_and_scoped(monkeypatch):
+    monkeypatch.delenv("BACKUP_LOCAL_DIR", raising=False)
     a = rs.default_out_csv(["tennis"])
     b = rs.default_out_csv(["soccer", "tennis"])
     assert "tennis" in a and a != b
-    assert a.startswith("backups/repaired_rec_ids_") and a.endswith(".csv")
+    assert a.startswith("/app/backups/repaired_rec_ids_") and a.endswith(".csv")
     # A same-day second run must not resolve to the same path as the first.
     assert "T" in a and a.endswith(".csv")

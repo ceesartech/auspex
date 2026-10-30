@@ -14,6 +14,8 @@
 #   5. grade the predictions moved onto finished twins (tennis only — a wide
 #      --days run would also touch ~3k soccer/NHL/NFL matches);
 #   6. print the after-state.
+# Re-runnable: the first run (23:12Z) aborted at step 2 BEFORE any write —
+# the audit CSV defaulted to a CWD-relative backups/ (now /app/backups).
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/cleanup_tennis_orphans.sh 2>&1 | tee -a ~/cleanup_tennis_orphans.log
 set -uo pipefail
