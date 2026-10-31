@@ -3,44 +3,82 @@
 # repairs need a verified backup first, which step 1 takes).
 # Clean up the stale 'scheduled' soccer fixture rows left by the
 # fixture-identity bug (pre-2026-09-04 kickoff-time forks) and the 2026 World
-# Cup knockout placeholders, with scripts/repair_fixture_orphans.py.
+# Cup knockout placeholders, and mark the ESPN-verified postponed ones, with
+# scripts/repair_fixture_orphans.py.
 #
-# RUN FIRST (its own approval; it now voids recs written after kickoff):
-#   docker compose exec -T api python /app/scripts/repair_stranded_recs.py --sport soccer --apply
-# It settles/voids the pending recs on orphans that have a twin and re-points
-# them onto the twin. Replica of prod 2026-10-31: 15 pending soccer recs ->
-# 7 voided (written after the twin's kickoff) + re-pointed, 8 left pending on
-# rows with no twin. Until it has run, step 2 aborts (blocked_pending_recs).
+# RUN ORDER (decided 2026-10-31; each step has its own approval):
+#   1. team merge:                 scripts/ops/merge_soccer_teams.sh
+#   2. football-data kickoffs:     scripts/ops/repair_football_data_kickoffs.sh
+#      (folds each 1 h-late football-data copy INTO the stale row at its
+#      corrected kickoff, then shifts the rest);
+#   3. stranded recs:
+#      docker compose exec -T api python /app/scripts/repair_stranded_recs.py --sport soccer --apply
+#      It settles/voids the pending recs on orphans that have a twin and
+#      re-points them onto the twin. Replica of prod 2026-10-31: 15 pending
+#      soccer recs -> 7 voided (written after the twin's kickoff) and
+#      re-pointed, 8 left pending on rows with no twin. Until it has run,
+#      step 2 below aborts (blocked_pending_recs);
+#   4. this script.
 #
-# Plan, read-only against a replica of prod 2026-10-31 (449 stale rows) after
-# that step:
-#   merge_delete        203  pre-game odds/snapshots/predictions moved onto the
+# Plan, against a fresh replica of prod 2026-10-31 07:21Z (449 stale rows),
+# after step 3 of the run order but BEFORE steps 1-2 (those tools are not on
+# main yet):
+#   merge_delete        185  pre-game odds/snapshots/predictions moved onto the
 #                            finished twin (cutoff LEAST(orphan, twin kickoff)),
 #                            orphan deleted
-#   merge_cancel         28  same merge, but recs reference the orphan (by
+#   merge_cancel         19  same merge, but recs reference the orphan (by
 #                            match_id or by prediction): status 'cancelled' +
 #                            metadata.orphan_of = twin, recs untouched
 #   delete_placeholder   65  World Cup bracket slots / team-vs-itself rows, no rec
-#   left alone          153  no twin: replayed_later 65, other_identity 42
-#                            (football-data / renamed-club rows), never_resulted
-#                            43, flipped 3 (33 of them pinned by recs)
+#   mark_postponed        6  scripts/data/soccer_postponed_stale_rows.csv: the
+#                            original date of a fixture ESPN moved out of its
+#                            round (Panathinaikos v Kifisia, 5 pending recs;
+#                            Chicago Fire v Vancouver; 4 CSL rows of 07-11/12).
+#                            status 'postponed' + metadata.postponed_kickoff /
+#                            postponed_at; grade_completed_matches then voids
+#                            their open recs (still 'postponed' 72 h after
+#                            kickoff)
+#   left alone          174  fd_copy_awaiting_repair 27 (9 pinned): the twin is
+#                            a football-data row (no ESPN identity) exactly 1 h
+#                            later — run-order step 2 folds it into the orphan,
+#                            so after it these rows are finished and gone from
+#                            this set; one still held means the fold refused it.
+#                            No twin: replayed_later 59, other_identity 42,
+#                            never_resulted 43, flipped 3. Of the 7
+#                            replayed_later rows with recs, 6 are the listed
+#                            postponements; J1 Urawa v Fagiano Okayama
+#                            (2026-06-06) was played on its date (ESPN
+#                            401873698, 0-2): never resulted, not postponed —
+#                            the jpn.1 backfill below heals it.
+#   moved: 2,369 odds rows, 23,311 snapshots, 1,754 predictions onto 197 twins.
+# Rehearsed end to end (this wrapper, through a docker shim) on that replica:
+# after-state exact, re-plan zero, every rec row byte-identical before/after.
+# Steps 1-2 should only lower the merge count (the team merge folds the forks
+# it creates itself; the fold finishes the held rows); if they raise it past a
+# ceiling below, step 2 aborts and the plan needs a new review.
 #   1. verified backup (B2) — abort if it does not land;
-#   2. before-state + dry run (write-once audit CSV) — abort if the tool fails,
-#      a pending rec blocks it, or the plan exceeds the reviewed set
-#      (merges <= 231, placeholders <= 65, no no-twin deletes);
+#   2. START = now (one instant for every run and state query below:
+#      --as-of START); before-state + dry run (write-once audit CSV) — abort
+#      if the tool fails, a pending rec blocks it, the postponed list no
+#      longer matches, or the plan exceeds the reviewed set (merges <= 204,
+#      placeholders <= 65, postponed <= 6, no no-twin deletes);
 #   3. apply, pinned to the dry run's counts (--expect-plan: any drift refuses
 #      before a write); the archive (gzip JSONL) lands before the first write;
 #      batches commit separately, every write guarded on the observed values;
-#   4. after-state, EXPECTED: stale rows fall by exactly merges + placeholders,
-#      orphan_of rows rise by exactly merge_cancel, the recs on past fixtures
-#      are all still there (the rec generators only ever delete pending recs on
-#      UPCOMING fixtures), and a fresh dry run plans nothing;
+#   4. after-state, EXPECTED: stale rows fall by exactly merges + placeholders
+#      + postponed, orphan_of rows rise by exactly merge_cancel, postponed rows
+#      set by this tool rise by exactly mark_postponed, the recs on past
+#      fixtures are all still there (the rec generators only ever delete
+#      pending recs on UPCOMING fixtures), and a fresh dry run plans nothing;
 #   5. recompute features for the twins that received prices;
 #   6. grade the predictions moved onto those twins (predictions only — no rec
 #      is written by any step of this script).
+# Exit: 0 all done; 1 aborted or the after-state failed; 2 the cleanup is
+# verified (steps 1-4) but step 5 or 6 failed — re-run those by hand.
 # Each tool step writes its output to a log file and exits with the tool's own
 # status; a pipe through tail would report tail's 0.
-# Re-runnable: merged rows are gone, cancelled rows leave the candidate set.
+# Re-runnable: merged rows are gone, cancelled/postponed rows leave the
+# candidate set, and a listed row already marked counts as done.
 #
 # AFTERWARDS (separate approval): the 43 never_resulted rows are real matches
 # ESPN has full-time results for (39 in these leagues); a results backfill
@@ -50,7 +88,7 @@
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/cleanup_soccer_orphans.sh 2>&1 | tee -a ~/cleanup_soccer_orphans.log
 set -uo pipefail
-cd /opt/auspex
+cd "${AUSPEX_DIR:-/opt/auspex}" || exit 1
 DC="docker compose"
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
 latest_dump() {
@@ -66,27 +104,19 @@ plan_num() {  # plan_num <PLAN line> <key>: the count, or "missing"
   v=$(echo "$1" | grep -o "$2=[0-9]*" | cut -d= -f2)
   if [[ "$v" =~ ^[0-9]+$ ]]; then echo "$v"; else echo missing; fi
 }
-TOOL="python /app/scripts/repair_fixture_orphans.py --sport soccer --delete-placeholders"
+POSTPONED_LIST=/app/scripts/data/soccer_postponed_stale_rows.csv
+TOOL="python /app/scripts/repair_fixture_orphans.py --sport soccer --delete-placeholders --postponed-list $POSTPONED_LIST"
 # The reviewed set (replica of prod 2026-10-31). repair_stranded_recs can move
 # a row between merge_cancel and merge_delete, so the merge ceiling is shared.
-MAX_MERGES=231
+MAX_MERGES=204
 MAX_PLACEHOLDERS=65
-
-START=$(date -u +%FT%TZ)
-STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-APPLY_CSV=/app/backups/fixture_orphans_soccer_apply_$STAMP.csv
-# One fixed cutoff for before and after, so the arithmetic is exact.
-cat > /tmp/soccer_orphans_state.sql <<'SQLEOF'
-SELECT (SELECT count(*) FROM matches m JOIN leagues l ON l.id = m.league_id
-         WHERE l.sport = 'soccer' AND m.status = 'scheduled'
-           AND m.match_date < TIMESTAMPTZ '__START__' - interval '96 hours') AS stale,
-       (SELECT count(*) FROM matches m JOIN leagues l ON l.id = m.league_id
-         WHERE l.sport = 'soccer' AND m.status = 'cancelled' AND m.metadata ? 'orphan_of') AS orphan_of,
-       (SELECT count(*) FROM betting_recommendations br JOIN matches m ON m.id = br.match_id
-         WHERE br.created_at < TIMESTAMPTZ '__START__'
-           AND m.match_date < TIMESTAMPTZ '__START__' - interval '4 days') AS recs;
-SQLEOF
-sed -i "s/__START__/$START/g" /tmp/soccer_orphans_state.sql
+MAX_POSTPONED=6
+STATE_SQL=$(mktemp /tmp/soccer_orphans_state.XXXXXX) || exit 1
+cleanup() {
+  rm -f "$STATE_SQL"
+  $DC exec -T postgres rm -f /tmp/soccer_orphans_q.sql >/dev/null 2>&1
+}
+trap cleanup EXIT
 
 log "1/6 backup"
 before=$(date -u +%s)
@@ -100,74 +130,110 @@ done
 if [ -z "$landed" ]; then log "ABORT: backup did not land in B2 within 20 min — nothing changed"; exit 1; fi
 log "backup landed: $landed"
 
-log "2/6 before-state + dry run"
-state=$(psql_file /tmp/soccer_orphans_state.sql -At | tr -d '[:space:]')
-IFS='|' read -r stale0 orphan0 recs0 <<< "$state"
-if ! [[ "$stale0" =~ ^[0-9]+$ && "$orphan0" =~ ^[0-9]+$ && "$recs0" =~ ^[0-9]+$ ]]; then
+# One instant for the before-state, the dry run, the apply, the re-plan and
+# the after-state: every run gets --as-of START and the state query measures
+# staleness from it too, so a row crossing the 96 h line mid-run is in all or
+# none of them. Taken after the backup wait, right before the first read.
+START=$(date -u +%FT%TZ)
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+APPLY_CSV=/app/backups/fixture_orphans_soccer_apply_$STAMP.csv
+cat > "$STATE_SQL" <<SQLEOF
+SELECT (SELECT count(*) FROM matches m JOIN leagues l ON l.id = m.league_id
+         WHERE l.sport = 'soccer' AND m.status = 'scheduled'
+           AND m.match_date < TIMESTAMPTZ '$START' - interval '96 hours') AS stale,
+       (SELECT count(*) FROM matches m JOIN leagues l ON l.id = m.league_id
+         WHERE l.sport = 'soccer' AND m.status = 'cancelled' AND m.metadata ? 'orphan_of') AS orphan_of,
+       (SELECT count(*) FROM betting_recommendations br JOIN matches m ON m.id = br.match_id
+         WHERE br.created_at < TIMESTAMPTZ '$START'
+           AND m.match_date < TIMESTAMPTZ '$START' - interval '4 days') AS recs,
+       (SELECT count(*) FROM matches m JOIN leagues l ON l.id = m.league_id
+         WHERE l.sport = 'soccer' AND m.status = 'postponed'
+           AND m.metadata->>'status_source' = 'repair_fixture_orphans') AS postponed;
+SQLEOF
+
+log "2/6 before-state + dry run (as of $START)"
+state=$(psql_file "$STATE_SQL" -At | tr -d '[:space:]')
+IFS='|' read -r stale0 orphan0 recs0 postponed0 <<< "$state"
+if ! [[ "$stale0" =~ ^[0-9]+$ && "$orphan0" =~ ^[0-9]+$ && "$recs0" =~ ^[0-9]+$ && "$postponed0" =~ ^[0-9]+$ ]]; then
   log "ABORT at step 2: the before-state query failed (got '$state') — nothing changed"; exit 1
 fi
-log "before: stale soccer rows=$stale0, cancelled orphan_of rows=$orphan0, recs on past fixtures=$recs0"
-$DC exec -T api sh -c "$TOOL --out-csv /app/backups/fixture_orphans_soccer_dryrun_$STAMP.csv > /tmp/rfo_soccer_dry.log 2>&1; rc=\$?; grep -E 'candidates=| PLAN |PENDING|ERROR|Traceback|Error' /tmp/rfo_soccer_dry.log | tail -12; echo \"tool exit \$rc\"; exit \$rc"
+log "before: stale soccer rows=$stale0, cancelled orphan_of rows=$orphan0, recs on past fixtures=$recs0, postponed by this tool=$postponed0"
+$DC exec -T api sh -c "$TOOL --as-of $START --out-csv /app/backups/fixture_orphans_soccer_dryrun_$STAMP.csv > /tmp/rfo_soccer_dry.log 2>&1; rc=\$?; grep -E 'candidates=| PLAN |postponed list|PENDING|ERROR|Traceback|Error' /tmp/rfo_soccer_dry.log | tail -15; echo \"tool exit \$rc\"; exit \$rc"
 rc=$?
 log "step 2 exit $rc"
 if [ "$rc" -ne 0 ]; then log "ABORT at step 2: the dry run failed (see above; full log /tmp/rfo_soccer_dry.log in the api container) — nothing changed"; exit 1; fi
 plan=$($DC exec -T api sh -c "grep -o 'PLAN .*' /tmp/rfo_soccer_dry.log | tail -1")
 md=$(plan_num "$plan" merge_delete); mc=$(plan_num "$plan" merge_cancel)
 dp=$(plan_num "$plan" delete_placeholder); dn=$(plan_num "$plan" delete_no_twin)
+mp=$(plan_num "$plan" mark_postponed); lm=$(plan_num "$plan" list_mismatch)
 blocked=$(plan_num "$plan" blocked_pending_recs)
-if ! [[ "$md $mc $dp $dn $blocked" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]]; then
+if ! [[ "$md $mc $dp $dn $mp $lm $blocked" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]]; then
   log "ABORT at step 2: could not read the PLAN line (got '$plan') — nothing changed"; exit 1
 fi
 if [ "$blocked" -ne 0 ]; then
   log "ABORT at step 2: $blocked orphan(s) with a twin still hold pending recs — run repair_stranded_recs.py --sport soccer --apply first (see header) — nothing changed"; exit 1
 fi
-if [ "$dn" -ne 0 ] || [ $((md + mc)) -gt "$MAX_MERGES" ] || [ "$dp" -gt "$MAX_PLACEHOLDERS" ]; then
-  log "ABORT at step 2: plan ($plan) is outside the reviewed set (merges <= $MAX_MERGES, placeholders <= $MAX_PLACEHOLDERS, no no-twin deletes) — review the dry-run CSV; nothing changed"; exit 1
+if [ "$lm" -ne 0 ]; then
+  log "ABORT at step 2: $lm row(s) of $POSTPONED_LIST no longer match the data (see the ERROR lines above) — review the list; nothing changed"; exit 1
 fi
-log "plan: merge_delete=$md merge_cancel=$mc delete_placeholder=$dp"
+if [ "$dn" -ne 0 ] || [ $((md + mc)) -gt "$MAX_MERGES" ] || [ "$dp" -gt "$MAX_PLACEHOLDERS" ] || [ "$mp" -gt "$MAX_POSTPONED" ]; then
+  log "ABORT at step 2: plan ($plan) is outside the reviewed set (merges <= $MAX_MERGES, placeholders <= $MAX_PLACEHOLDERS, postponed <= $MAX_POSTPONED, no no-twin deletes) — review the dry-run CSV; nothing changed"; exit 1
+fi
+log "plan: merge_delete=$md merge_cancel=$mc delete_placeholder=$dp mark_postponed=$mp"
 
-log "3/6 apply (pinned to the dry run's counts)"
-$DC exec -T api sh -c "$TOOL --apply --expect-plan merge_delete=$md,merge_cancel=$mc,delete_placeholder=$dp,delete_no_twin=0 --out-csv $APPLY_CSV > /tmp/rfo_soccer_apply.log 2>&1; rc=\$?; grep -E 'candidates=| PLAN |archived|DONE|ERROR|Traceback|Error' /tmp/rfo_soccer_apply.log | tail -15; echo \"tool exit \$rc\"; exit \$rc"
+log "3/6 apply (pinned to the dry run's counts, as of $START)"
+$DC exec -T api sh -c "$TOOL --as-of $START --apply --expect-plan merge_delete=$md,merge_cancel=$mc,delete_placeholder=$dp,mark_postponed=$mp,delete_no_twin=0 --out-csv $APPLY_CSV > /tmp/rfo_soccer_apply.log 2>&1; rc=\$?; grep -E 'candidates=| PLAN |archived|DONE|ERROR|Traceback|Error' /tmp/rfo_soccer_apply.log | tail -15; echo \"tool exit \$rc\"; exit \$rc"
 rc=$?
 log "step 3 exit $rc"
 if [ "$rc" -ne 0 ]; then
-  # Refused before any write (plan drift, pending recs, an argument), or after
-  # some committed batches when a row changed under its lock (it says so).
+  # Refused before any write (plan drift, pending recs, a list mismatch, an
+  # argument), or after some committed batches when a row changed under its
+  # lock (it says so).
   log "ABORT at step 3 (see above; full log /tmp/rfo_soccer_apply.log in the api container): if it refused or raised before 'archived', nothing changed; otherwise the committed batches stand and the archive holds every planned row — inspect before re-running"
   exit 1
 fi
 
-log "4/6 after-state"
-state=$(psql_file /tmp/soccer_orphans_state.sql -At | tr -d '[:space:]')
-IFS='|' read -r stale1 orphan1 recs1 <<< "$state"
-want_stale=$((stale0 - md - mc - dp)); want_orphan=$((orphan0 + mc))
-log "after: stale soccer rows=$stale1 (expected $want_stale), cancelled orphan_of rows=$orphan1 (expected $want_orphan), recs on past fixtures=$recs1 (expected $recs0)"
-$DC exec -T api sh -c "$TOOL --out-csv /app/backups/fixture_orphans_soccer_verify_$STAMP.csv > /tmp/rfo_soccer_verify.log 2>&1; rc=\$?; grep -E 'candidates=| PLAN ' /tmp/rfo_soccer_verify.log; exit \$rc"
+log "4/6 after-state (as of $START)"
+state=$(psql_file "$STATE_SQL" -At | tr -d '[:space:]')
+IFS='|' read -r stale1 orphan1 recs1 postponed1 <<< "$state"
+want_stale=$((stale0 - md - mc - dp - mp)); want_orphan=$((orphan0 + mc)); want_postponed=$((postponed0 + mp))
+log "after: stale soccer rows=$stale1 (expected $want_stale), cancelled orphan_of rows=$orphan1 (expected $want_orphan), postponed by this tool=$postponed1 (expected $want_postponed), recs on past fixtures=$recs1 (expected $recs0)"
+$DC exec -T api sh -c "$TOOL --as-of $START --out-csv /app/backups/fixture_orphans_soccer_verify_$STAMP.csv > /tmp/rfo_soccer_verify.log 2>&1; rc=\$?; grep -E 'candidates=| PLAN |postponed list' /tmp/rfo_soccer_verify.log; exit \$rc"
 rc=$?
 replan=$($DC exec -T api sh -c "grep -o 'PLAN .*' /tmp/rfo_soccer_verify.log | tail -1")
-replanned="$(plan_num "$replan" merge_delete) $(plan_num "$replan" merge_cancel) $(plan_num "$replan" delete_placeholder)"
-if [ "$rc" -ne 0 ] || [ "$stale1" != "$want_stale" ] || [ "$orphan1" != "$want_orphan" ] || [ "$recs1" != "$recs0" ] || [ "$replanned" != "0 0 0" ]; then
-  log "FAILED after-state: stale $stale1/$want_stale, orphan_of $orphan1/$want_orphan, recs $recs1/$recs0, re-plan '$replan' (exit $rc) — inspect (the archive and audit CSVs are in /app/backups)"
+replanned="$(plan_num "$replan" merge_delete) $(plan_num "$replan" merge_cancel) $(plan_num "$replan" delete_placeholder) $(plan_num "$replan" mark_postponed) $(plan_num "$replan" list_mismatch)"
+if [ "$rc" -ne 0 ] || [ "$stale1" != "$want_stale" ] || [ "$orphan1" != "$want_orphan" ] || [ "$postponed1" != "$want_postponed" ] || [ "$recs1" != "$recs0" ] || [ "$replanned" != "0 0 0 0 0" ]; then
+  log "FAILED after-state: stale $stale1/$want_stale, orphan_of $orphan1/$want_orphan, postponed $postponed1/$want_postponed, recs $recs1/$recs0, re-plan '$replan' (exit $rc) — inspect (the archive and audit CSVs are in /app/backups)"
   exit 1
 fi
 log "after-state OK"
 
-log "5/6 recompute features for the twins that received prices"
-# The twins come from this run's write-once apply CSV.
-TWINS_PY="import csv, sys; print(','.join(sorted({r['twin_id'] for r in csv.DictReader(open(sys.argv[1])) if r['action'] in ('merge_delete', 'merge_cancel')})))"
-twins=$($DC exec -T api python -c "$TWINS_PY" "$APPLY_CSV")
-rc=$?
-if [ "$rc" -ne 0 ] || ! [[ "$twins" =~ ^[0-9a-f,-]+$ ]]; then
-  log "WARNING step 5: could not read the twins from $APPLY_CSV (exit $rc) — steps 5-6 skipped; the cleanup itself is verified, run them by hand"
+# Steps 5-6 only refresh derived data; a failure there leaves the verified
+# cleanup standing but must not look like success: exit 2, never DONE.
+followup_failed=""
+if [ $((md + mc)) -eq 0 ]; then
+  log "5/6 + 6/6 skipped: nothing was merged, no twin received prices"
 else
-  log "$(echo "$twins" | tr ',' '\n' | wc -l) twins"
-  $DC exec -T api python /app/scripts/compute_features.py --match-ids "$twins" > /tmp/rfo_soccer_features.log 2>&1
+  log "5/6 recompute features for the twins that received prices"
+  # The twins come from this run's write-once apply CSV.
+  TWINS_PY="import csv, sys; print(','.join(sorted({r['twin_id'] for r in csv.DictReader(open(sys.argv[1])) if r['action'] in ('merge_delete', 'merge_cancel')})))"
+  twins=$($DC exec -T api python -c "$TWINS_PY" "$APPLY_CSV")
   rc=$?
-  tail -3 /tmp/rfo_soccer_features.log
-  if [ "$rc" -ne 0 ]; then log "WARNING step 5 exit $rc: features not recomputed (full log /tmp/rfo_soccer_features.log); the cleanup itself is verified — re-run this step by hand"; fi
+  if [ "$rc" -ne 0 ] || ! [[ "$twins" =~ ^[0-9a-f,-]+$ ]]; then
+    log "ERROR step 5: could not read the twins from $APPLY_CSV (exit $rc) — steps 5-6 not run"
+    followup_failed="steps 5-6 (no twin list)"
+  else
+    log "$(echo "$twins" | tr ',' '\n' | wc -l) twins"
+    $DC exec -T api python /app/scripts/compute_features.py --match-ids "$twins" > /tmp/rfo_soccer_features.log 2>&1
+    rc=$?
+    tail -3 /tmp/rfo_soccer_features.log
+    if [ "$rc" -ne 0 ]; then
+      log "ERROR step 5 exit $rc: features not recomputed (full log /tmp/rfo_soccer_features.log)"
+      followup_failed="step 5"
+    fi
 
-  log "6/6 grade the predictions moved onto those twins"
-  $DC exec -T -e TWINS="$twins" api python - > /tmp/rfo_soccer_grade.log 2>&1 <<'PY'
+    log "6/6 grade the predictions moved onto those twins"
+    $DC exec -T -e TWINS="$twins" api python - > /tmp/rfo_soccer_grade.log 2>&1 <<'PY'
 import os, sys
 sys.path.insert(0, "/app/scripts")
 import psycopg2
@@ -192,11 +258,17 @@ with psycopg2.connect(os.environ["DATABASE_URL"]) as conn, conn.cursor(cursor_fa
     conn.commit()
 print(f"graded {graded} predictions on {len(twins)} soccer twins ({skipped} skipped: after kickoff / ungradable)")
 PY
-  rc=$?
-  tail -3 /tmp/rfo_soccer_grade.log
-  if [ "$rc" -ne 0 ]; then log "WARNING step 6 exit $rc: grading failed (full log /tmp/rfo_soccer_grade.log); the cleanup itself is verified — re-run this step by hand"; fi
+    rc=$?
+    tail -3 /tmp/rfo_soccer_grade.log
+    if [ "$rc" -ne 0 ]; then
+      log "ERROR step 6 exit $rc: grading failed (full log /tmp/rfo_soccer_grade.log)"
+      followup_failed="${followup_failed:+$followup_failed and }step 6"
+    fi
+  fi
 fi
 
-rm -f /tmp/soccer_orphans_state.sql
-$DC exec -T postgres rm -f /tmp/soccer_orphans_q.sql >/dev/null 2>&1
+if [ -n "$followup_failed" ]; then
+  log "INCOMPLETE (exit 2): the cleanup is verified (steps 1-4), but $followup_failed failed — steps 5/6 need a manual re-run (see the ERROR lines above)"
+  exit 2
+fi
 log "DONE. Next (separate approval): the never_resulted rows — see the results backfill command in this script's header."

@@ -48,6 +48,20 @@ status finished, both scores present, nearest kickoff within
                slot, a walkover); its prices have no result to train on.
                soccer: LEFT ALONE and reported by class (see below).
   ambiguous   -> left alone, counted.
+  soccer twin that is a football-data copy -> LEFT ALONE, whether or not
+               recs pin the orphan: fd_copy_awaiting_repair. The twin has
+               no ESPN identity (no external_ids.espn, result not from the
+               ESPN scoreboard) and kicks off exactly 1 h after the orphan:
+               promote_raw stored football-data's UK local time as UTC until
+               2026-10-31, so the orphan holds the real kickoff.
+               repair_football_data_kickoffs folds such a copy INTO the
+               stale row at its corrected kickoff (it runs before this tool,
+               see RUN ORDER); merging the other way round would delete or
+               cancel the row on the right slot and leave the training row
+               1 h late for good. A row still held here means the fold
+               refused it: nothing is written, the class says so. A twin
+               WITH ESPN identity 1 h later is an ESPN kickoff move and
+               merges as usual (the kickoff repair never moves an ESPN row).
 
 An orphan that still holds ANY betting_recommendations or betting_history
 row is never deleted (run repair_stranded_recs.py first; it re-points
@@ -83,6 +97,36 @@ those destroys a real fixture. They are left alone and reported:
                   within 120 days (postponed and replayed);
   never_resulted  none of the above: a results backfill can settle it.
 
+POSTPONED (--postponed-list, soccer)
+------------------------------------
+A replayed_later row whose postponement ESPN confirms (the replay is the
+same ESPN event, moved out of the original round) is not a fork: it is the
+original date of a postponed fixture, and recs priced for that date should
+be voided as books void them. --postponed-list names a reviewed CSV
+(scripts/data/soccer_postponed_stale_rows.csv: match_id, kickoff,
+replay_match_id, replay_kickoff, replay_espn_event, evidence, ...). Each
+listed row must still be a stale 'scheduled' candidate at the listed
+kickoff, with no twin, and its replay the listed finished row for the same
+pairing at the listed kickoff, beyond the twin window; it is then set to
+status 'postponed' with metadata.postponed_kickoff (its kickoff) and
+postponed_at (now), as fetch_upcoming._record_status_change records ESPN's
+STATUS_POSTPONED, plus replayed_as / replay_espn_event / postponed_evidence.
+Nothing moves and no rec is written: grade_completed_matches voids the open
+recs of a match still 'postponed' 72 h after its kickoff. A listed row that
+no longer matches is reported (list_mismatch on the PLAN line): the dry run
+exits 1 and --apply refuses before any write. A listed row already marked
+by an earlier run counts as done.
+
+RUN ORDER (soccer)
+------------------
+1. merge_soccer_teams (team merge): forks under an ESPN-spelling team row
+   become same-id rows, and it folds the twin clusters that creates;
+2. repair_football_data_kickoffs: folds the 1 h-late football-data copies
+   into the stale rows at their corrected kickoff, then shifts the rest;
+3. repair_stranded_recs --sport soccer: settles and re-points the pending
+   recs on orphans that have a twin (--apply here refuses until it has);
+4. this tool (scripts/ops/cleanup_soccer_orphans.sh).
+
 PLACEHOLDERS (--delete-placeholders)
 ------------------------------------
 Knockout-bracket slots ESPN publishes before the teams are known ('Round of
@@ -107,12 +151,15 @@ matches row is guarded on those values too. A row that changed is left as
 it is, logged, and the run exits 1. Batches of --batch-size twins commit
 separately, keeping locks short while the 15-min pipeline runs.
 --expect-plan pins an apply to the counts its dry run printed (the PLAN
-line): any difference refuses the run before anything is written.
+line): any difference refuses the run before anything is written. --as-of
+fixes the instant staleness is measured from (default now), so a dry run,
+its apply, a re-plan and the wrapper's state queries share one cutoff.
 
 Usage (inside the api container; dry-run is the default):
     python /app/scripts/repair_fixture_orphans.py --sport tennis
     python /app/scripts/repair_fixture_orphans.py --sport tennis --apply
-    python /app/scripts/repair_fixture_orphans.py --sport soccer --delete-placeholders
+    python /app/scripts/repair_fixture_orphans.py --sport soccer --delete-placeholders \
+        --postponed-list /app/scripts/data/soccer_postponed_stale_rows.csv
 Soccer: scripts/ops/cleanup_soccer_orphans.sh wraps the whole sequence.
 Afterwards: compute_features_<sport>.py --all-finished --force, and
 grade_completed_matches.py --days <span> so moved predictions are graded.
@@ -168,8 +215,15 @@ ACTION_MERGE_DELETE = "merge_delete"
 ACTION_MERGE_CANCEL = "merge_cancel"  # soccer: pinned by recs, merged then marked cancelled
 ACTION_DELETE_NO_TWIN = "delete_no_twin"  # tennis/MMA only
 ACTION_DELETE_PLACEHOLDER = "delete_placeholder"
+ACTION_MARK_POSTPONED = "mark_postponed"  # soccer: on the reviewed, ESPN-verified postponed list
 ACTION_LEAVE = "leave"
-WRITE_ACTIONS = (ACTION_MERGE_DELETE, ACTION_MERGE_CANCEL, ACTION_DELETE_NO_TWIN, ACTION_DELETE_PLACEHOLDER)
+WRITE_ACTIONS = (
+    ACTION_MERGE_DELETE,
+    ACTION_MERGE_CANCEL,
+    ACTION_DELETE_NO_TWIN,
+    ACTION_DELETE_PLACEHOLDER,
+    ACTION_MARK_POSTPONED,
+)
 
 # Why a row is left alone (the `reason` of ACTION_LEAVE).
 LEFT_HAS_RECS = "has_recs"  # tennis/MMA: pinned by recs
@@ -180,6 +234,16 @@ NO_TWIN_FLIPPED = "flipped"
 NO_TWIN_OTHER_IDENTITY = "other_identity"
 NO_TWIN_REPLAYED_LATER = "replayed_later"
 NO_TWIN_NEVER_RESULTED = "never_resulted"
+# soccer: the twin is a football-data copy 1 h late; repair_football_data_kickoffs folds it
+HELD_FD_COPY = "fd_copy_awaiting_repair"
+LEFT_POSTPONED_MISMATCH = "postponed_list_mismatch"
+
+# promote_raw stored football-data's UK local Time as UTC until 2026-10-31:
+# a summer football-data row sits exactly this much after the real kickoff.
+FD_LEGACY_OFFSET = timedelta(hours=1)
+
+# The reviewed postponed list (--postponed-list): every column must be present.
+POSTPONED_LIST_FIELDS = ("match_id", "kickoff", "replay_match_id", "replay_kickoff", "replay_espn_event", "evidence")
 
 _HAS_RECS = """
     EXISTS (SELECT 1 FROM betting_recommendations r WHERE r.match_id = m.id)
@@ -202,8 +266,25 @@ LIST_CANDIDATES_SQL = f"""
       JOIN teams at ON at.id = m.away_team_id
      WHERE l.sport = %s
        AND m.status = ANY(%s)
-       AND m.match_date < NOW() - (%s || ' hours')::interval
+       AND m.match_date < %s::timestamptz - (%s || ' hours')::interval
      ORDER BY m.match_date
+"""
+
+# A twin's ESPN identity (promote_raw.has_espn_identity on the football-data
+# branch): an ESPN competition id (fetch_upcoming, since migration 023) or a
+# result off the ESPN scoreboard. A twin without either is a football-data row.
+TWIN_IDENTITY_SQL = """
+    SELECT external_ids->>'espn' AS espn_id, metadata->>'result_source' AS result_source
+      FROM matches
+     WHERE id = %s::uuid
+"""
+
+# Where the listed postponed rows that are not candidates stand (done, or a mismatch).
+LISTED_STATE_SQL = """
+    SELECT m.id::text AS id, m.status, m.match_date,
+           m.metadata->>'postponed_kickoff' AS postponed_kickoff, m.metadata->>'replayed_as' AS replayed_as
+      FROM matches m
+     WHERE m.id = ANY(%s::uuid[])
 """
 
 # Finished rows around one soccer no-twin candidate: the same league inside
@@ -291,6 +372,11 @@ MOVE_PREDICTIONS_SQL = f"""
           FROM predictions p
           JOIN cut ON cut.match_id = p.match_id
          WHERE COALESCE(p.updated_at, p.created_at) < cut.cutoff
+           -- a rec's prediction stays where the rec put it. Filtered HERE, before
+           -- DISTINCT ON picks: a pick that is rec-referenced (on a merge_cancel
+           -- sibling) would otherwise move nothing for its key, and the older
+           -- movable one on a merge_delete sibling would go down with its orphan.
+           AND NOT EXISTS (SELECT 1 FROM betting_recommendations r WHERE r.prediction_id = p.id)
          ORDER BY p.model_name, p.model_version, p.prediction_type, COALESCE(p.updated_at, p.created_at) DESC, p.id
     )
     UPDATE predictions p
@@ -303,8 +389,6 @@ MOVE_PREDICTIONS_SQL = f"""
                 AND t.model_name = p.model_name
                 AND t.model_version = p.model_version
                 AND t.prediction_type = p.prediction_type)
-       -- a rec's prediction stays where the rec put it
-       AND NOT EXISTS (SELECT 1 FROM betting_recommendations r WHERE r.prediction_id = p.id)
 """
 
 # Lock the planned orphans (and, separately, the twin) before anything moves;
@@ -325,7 +409,10 @@ PINS_SQL = f"""
 """
 
 LOCK_TWIN_SQL = """
-    SELECT status, match_date FROM matches WHERE id = %s::uuid FOR SHARE
+    SELECT status, match_date, external_ids->>'espn' AS espn_id, metadata->>'result_source' AS result_source
+      FROM matches
+     WHERE id = %s::uuid
+       FOR SHARE
 """
 
 # Guarded on every value the plan observed (parallel arrays), on the status
@@ -366,6 +453,35 @@ CANCEL_PINNED_SQL = """
        AND NOT EXISTS (SELECT 1 FROM betting_recommendations r WHERE r.match_id = m.id AND r.status = 'pending')
 """
 
+# Soccer: a listed, ESPN-verified postponed stale row. Guarded on the
+# observed values, on never having been marked (postponed_kickoff is
+# stamped once, as fetch_upcoming does), and on its replay still being the
+# finished row for the same pairing at the listed kickoff.
+MARK_POSTPONED_SQL = """
+    UPDATE matches m
+       SET status = 'postponed',
+           metadata = COALESCE(m.metadata, '{}'::jsonb)
+                      || jsonb_build_object('postponed_kickoff', %(postponed_kickoff)s::text,
+                                            'postponed_at', %(postponed_at)s::text,
+                                            'status_source', 'repair_fixture_orphans',
+                                            'replayed_as', %(replay)s::text,
+                                            'replay_espn_event', %(espn_event)s::text,
+                                            'postponed_evidence', %(evidence)s::text),
+           updated_at = NOW()
+     WHERE m.id = %(id)s::uuid
+       AND m.status = 'scheduled'
+       AND m.match_date = %(match_date)s
+       AND m.home_team_id = %(home)s::uuid
+       AND m.away_team_id = %(away)s::uuid
+       AND NOT (COALESCE(m.metadata, '{}'::jsonb) ? 'postponed_kickoff')
+       AND EXISTS (SELECT 1 FROM matches t
+                    WHERE t.id = %(replay)s::uuid
+                      AND t.status = 'finished'
+                      AND t.home_team_id = m.home_team_id
+                      AND t.away_team_id = m.away_team_id
+                      AND t.match_date = %(replay_kickoff)s)
+"""
+
 # What the archive captures per orphan: the row itself and everything a
 # move or the cascade can touch that carries data worth restoring
 # (features_cache is derived and recomputed).
@@ -402,13 +518,107 @@ class Policy:
     delete_no_twin: bool  # tennis/MMA: a pairing that never played. Soccer: never.
     cancel_pinned: bool  # soccer: merge a pinned orphan, then mark it cancelled
     delete_placeholders: bool
+    hold_fd_copies: bool = False  # soccer: a 1 h-late football-data twin waits for its fold
 
 
 def policy_for(sport: str, delete_placeholders: bool) -> Policy:
     if sport == "soccer":
-        return Policy(delete_no_twin=False, cancel_pinned=True, delete_placeholders=delete_placeholders)
+        return Policy(
+            delete_no_twin=False, cancel_pinned=True, delete_placeholders=delete_placeholders, hold_fd_copies=True
+        )
     # tennis/MMA: a placeholder has no twin and was always deleted with them
     return Policy(delete_no_twin=True, cancel_pinned=False, delete_placeholders=True)
+
+
+def has_espn_identity(espn_id: Optional[str], result_source: Optional[str]) -> bool:
+    """A row the ESPN path owns (promote_raw.has_espn_identity): an ESPN
+    competition id, or a result written off the ESPN scoreboard."""
+    return bool(espn_id) or result_source == "espn_scoreboard"
+
+
+def is_fd_copy_twin(orphan_kickoff: datetime, twin_kickoff: datetime, twin_is_espn: bool) -> bool:
+    """The twin is a football-data copy at the legacy UK-local kickoff:
+    no ESPN identity and exactly FD_LEGACY_OFFSET after the orphan."""
+    return not twin_is_espn and twin_kickoff - orphan_kickoff == FD_LEGACY_OFFSET
+
+
+@dataclass(frozen=True)
+class Postponement:
+    """One row of the reviewed, ESPN-verified postponed list."""
+
+    match_id: str
+    kickoff: datetime
+    replay_match_id: str
+    replay_kickoff: datetime
+    replay_espn_event: str
+    evidence: str
+
+
+def _aware(value: str, what: str) -> datetime:
+    try:
+        ts = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise UnsafeRequest(f"{what}: {value!r} is not an ISO-8601 timestamp") from exc
+    if ts.tzinfo is None:
+        raise UnsafeRequest(f"{what}: {value!r} has no time zone")
+    return ts
+
+
+def load_postponed_list(path: Path) -> dict[str, Postponement]:
+    """The reviewed postponed list, validated: every POSTPONED_LIST_FIELDS
+    column present and filled, zoned timestamps, one row per match, the
+    replay after the original kickoff. Anything else refuses the run."""
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        missing = [f for f in POSTPONED_LIST_FIELDS if f not in (reader.fieldnames or [])]
+        if missing:
+            raise UnsafeRequest(f"{path}: missing column(s) {missing}")
+        rows = list(reader)
+    out: dict[str, Postponement] = {}
+    for n, r in enumerate(rows, start=2):
+        empty = [f for f in POSTPONED_LIST_FIELDS if not (r.get(f) or "").strip()]
+        if empty:
+            raise UnsafeRequest(f"{path}:{n}: empty {empty} — only ESPN-verified rows, with their evidence, go here")
+        p = Postponement(
+            match_id=r["match_id"].strip(),
+            kickoff=_aware(r["kickoff"], f"{path}:{n} kickoff"),
+            replay_match_id=r["replay_match_id"].strip(),
+            replay_kickoff=_aware(r["replay_kickoff"], f"{path}:{n} replay_kickoff"),
+            replay_espn_event=r["replay_espn_event"].strip(),
+            evidence=r["evidence"].strip(),
+        )
+        if p.match_id in out:
+            raise UnsafeRequest(f"{path}:{n}: {p.match_id} is listed twice")
+        if p.replay_kickoff <= p.kickoff:
+            raise UnsafeRequest(f"{path}:{n}: the replay kicks off before the postponed fixture")
+        out[p.match_id] = p
+    return out
+
+
+def postponed_problem(
+    c: dict, listed: Postponement, twin: Optional[dict], twin_reason: str, rows: list[dict], twin_window_hours: int
+) -> Optional[str]:
+    """Why a listed row may NOT be marked postponed (None: it may). Pure."""
+    if is_placeholder(c):
+        return "it is a placeholder row"
+    if c["match_date"] != listed.kickoff:
+        return f"its kickoff is {c['match_date']}, the list says {listed.kickoff}"
+    if twin is not None:
+        return f"it has a finished twin {twin['twin_id']} inside the window: a fork, not a postponement"
+    if twin_reason != rsr.REASON_NO_TWIN:
+        return f"its twins are ambiguous ({twin_reason})"
+    replay = next((t for t in rows if t["id"] == listed.replay_match_id), None)
+    if replay is None:
+        return (
+            f"replay {listed.replay_match_id} is not a finished row of this pairing within {REPLAY_LOOKAHEAD_DAYS} days"
+        )
+    if (replay["home_team_id"], replay["away_team_id"]) != (c["home_team_id"], c["away_team_id"]):
+        return f"replay {listed.replay_match_id} is another pairing"
+    if replay["match_date"] != listed.replay_kickoff:
+        return f"replay kicks off {replay['match_date']}, the list says {listed.replay_kickoff}"
+    if replay["match_date"] - c["match_date"] <= timedelta(hours=twin_window_hours):
+        return "the replay is inside the twin window"
+    return None
 
 
 def is_placeholder(c: dict) -> bool:
@@ -484,12 +694,18 @@ def plan(
     policy: Optional[Policy] = None,
     context_for: Optional[Callable[[dict], list[dict]]] = None,
     twin_window_hours: int = 72,
+    twin_is_espn: Optional[Callable[[str], bool]] = None,
+    postponed: Optional[dict[str, Postponement]] = None,
 ) -> dict:
     """Decide every candidate's action. `twins_for(candidate)` returns the
     already-orientation-checked twin list (find_twins); `context_for` the
-    finished rows around a soccer no-twin row (classification only). Pure
-    apart from them."""
+    finished rows around a soccer no-twin row (classification, and the
+    replay of a listed postponed row); `twin_is_espn(twin_id)` the twin's
+    ESPN identity (asked only for a twin exactly 1 h late; unknown counts as
+    none, which holds the row). `postponed`: the listed rows among the
+    candidates. Pure apart from the callables."""
     policy = policy or policy_for("tennis", False)
+    postponed = postponed or {}
     groups: dict[str, list[str]] = defaultdict(list)  # twin_id -> orphans to merge, then delete
     cancel: dict[str, list[str]] = defaultdict(list)  # twin_id -> orphans to merge, then mark cancelled
     kickoff: dict[str, datetime] = {}
@@ -497,6 +713,9 @@ def plan(
     observed: dict[str, tuple] = {}
     no_twin: list[str] = []
     placeholders: list[str] = []
+    to_postpone: list[str] = []
+    mismatches: list[str] = []
+    twin_espn: dict[str, bool] = {}  # the identity a 1 h twin's decision rested on, re-checked under the lock
     entries: list[dict] = []
     counts: Counter = Counter()
 
@@ -517,6 +736,21 @@ def plan(
         entries.append(e)
         observed[c["id"]] = _observed(c)
 
+        listed = postponed.get(c["id"])
+        if listed is not None:
+            twin, reason = rsr.select_twin(twins_for(c), c["match_date"])
+            rows = context_for(c) if context_for is not None else []
+            problem = postponed_problem(c, listed, twin, reason, rows, twin_window_hours)
+            if problem:
+                e["reason"] = LEFT_POSTPONED_MISMATCH
+                mismatches.append(f"{c['id']} ({c.get('home')} v {c.get('away')}): {problem}")
+            else:
+                e["action"] = ACTION_MARK_POSTPONED
+                e["reason"] = NO_TWIN_REPLAYED_LATER
+                e["twin_id"] = listed.replay_match_id
+                e["twin_match_date"] = listed.replay_kickoff
+                to_postpone.append(c["id"])
+            continue
         if is_placeholder(c):
             if c["has_recs"]:
                 e["reason"] = LEFT_PLACEHOLDER_HAS_RECS
@@ -549,6 +783,12 @@ def plan(
         e["twin_match_date"] = twin["match_date"]
         e["twin_delta_hours"] = round(abs((twin["match_date"] - c["match_date"]).total_seconds()) / 3600.0, 3)
         e["cutoff"] = min(c["match_date"], twin["match_date"])
+        if policy.hold_fd_copies and twin["match_date"] - c["match_date"] == FD_LEGACY_OFFSET:
+            espn = twin_is_espn(twin_id) if twin_is_espn is not None else False
+            if is_fd_copy_twin(c["match_date"], twin["match_date"], espn):
+                e["reason"] = HELD_FD_COPY  # pinned or not: repair_football_data_kickoffs folds it
+                continue
+            twin_espn[twin_id] = espn
         if c["has_recs"] and e["pending_recs"]:
             e["reason"] = LEFT_PENDING_RECS
             continue
@@ -575,16 +815,25 @@ def plan(
         "observed": observed,
         "no_twin": no_twin,
         "placeholders": placeholders,
+        "postponed": to_postpone,
+        "postponed_meta": {i: postponed[i] for i in to_postpone},
+        "mismatches": mismatches,
+        "twin_espn": twin_espn,
         "counts": counts,
     }
 
 
 def plan_line(counts: Counter) -> str:
     """The machine-readable plan summary the ops wrapper parses and pins.
-    blocked_pending_recs > 0 means --apply refuses (repair_stranded_recs first)."""
+    blocked_pending_recs > 0 means --apply refuses (repair_stranded_recs first);
+    list_mismatch > 0 that the reviewed postponed list no longer matches
+    (the dry run exits 1, --apply refuses)."""
     writes = " ".join(f"{a}={counts.get(a, 0)}" for a in WRITE_ACTIONS)
     left = sum(v for k, v in counts.items() if k.startswith("left_") and k != "left_pinned")
-    return f"PLAN {writes} left={left} blocked_pending_recs={counts.get(f'left_{LEFT_PENDING_RECS}', 0)}"
+    return (
+        f"PLAN {writes} left={left} blocked_pending_recs={counts.get(f'left_{LEFT_PENDING_RECS}', 0)} "
+        f"list_mismatch={counts.get('list_mismatch', 0)}"
+    )
 
 
 def parse_expect_plan(text: str) -> dict[str, int]:
@@ -717,7 +966,13 @@ def _merge_group(cur, p: dict, twin_id: str, done: Counter) -> None:
     planned = to_delete_planned + to_cancel_planned
     cur.execute(LOCK_TWIN_SQL, (twin_id,))
     twin = cur.fetchone()
-    if twin is None or twin["status"] != "finished" or twin["match_date"] != p["kickoff"][twin_id]:
+    espn_seen = p.get("twin_espn", {}).get(twin_id)
+    if (
+        twin is None
+        or twin["status"] != "finished"
+        or twin["match_date"] != p["kickoff"][twin_id]
+        or (espn_seen is not None and has_espn_identity(twin["espn_id"], twin["result_source"]) != espn_seen)
+    ):
         done["refused_changed_since_plan"] += len(planned)
         logger.error(
             "twin %s changed since the plan (%s) — its %d orphan(s) left as they are", twin_id, twin, len(planned)
@@ -772,11 +1027,50 @@ def apply_plan(conn, p: dict, batch_size: int) -> Counter:
                     done[f"deleted_{label}_orphans"] += cur.rowcount
                     _count_refused(done, len(live), cur.rowcount)
             conn.commit()
+    ids = p.get("postponed", [])
+    for i in range(0, len(ids), batch_size):
+        with conn.cursor() as cur:
+            for o in _lock_unchanged(cur, ids[i : i + batch_size], p["observed"], done):
+                _mark_postponed(cur, o, p["observed"][o], p["postponed_meta"][o], done)
+        conn.commit()
     return done
 
 
+def _mark_postponed(cur, match_id: str, observed: tuple, listed: Postponement, done: Counter) -> None:
+    _status, match_date, home, away = observed[:4]
+    cur.execute(
+        MARK_POSTPONED_SQL,
+        {
+            "id": match_id,
+            "match_date": match_date,
+            "home": home,
+            "away": away,
+            "postponed_kickoff": match_date.astimezone(timezone.utc).isoformat(),
+            "postponed_at": datetime.now(timezone.utc).isoformat(),
+            "replay": listed.replay_match_id,
+            "replay_kickoff": listed.replay_kickoff,
+            "espn_event": listed.replay_espn_event,
+            "evidence": listed.evidence,
+        },
+    )
+    if cur.rowcount == 1:
+        done["marked_postponed"] += 1
+    else:
+        done["postpone_refused"] += 1
+        logger.error(
+            "postpone guard refused %s (replay %s): the row or its replay changed under the lock",
+            match_id,
+            listed.replay_match_id,
+        )
+
+
 def refused(done: Counter) -> int:
-    return done["refused_changed_since_plan"] + done["delete_refused_has_recs"] + done["cancel_refused"]
+    return (
+        done["refused_changed_since_plan"]
+        + done["delete_refused_has_recs"]
+        + done["cancel_refused"]
+        + done["postpone_refused"]
+    )
 
 
 def _backup_dir() -> Path:
@@ -805,6 +1099,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="soccer: also delete stale draw-slot placeholder rows and team-vs-itself rows no rec references",
     )
+    ap.add_argument(
+        "--postponed-list",
+        type=Path,
+        default=None,
+        help="soccer: reviewed CSV of ESPN-verified postponed stale rows to mark 'postponed' (see POSTPONED)",
+    )
+    ap.add_argument(
+        "--as-of",
+        default=None,
+        help="measure staleness from this instant (ISO-8601 with a zone, not in the future; default now)",
+    )
     ap.add_argument("--out-csv", type=Path, default=None, help="write-once audit CSV of the plan (dry run included)")
     ap.add_argument("--archive", type=Path, default=None, help="gzip JSONL reversal record (write-once)")
     ap.add_argument(
@@ -822,8 +1127,49 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.batch_size < 1:
         raise UnsafeRequest("--batch-size must be >= 1")
+    if args.postponed_list is not None and args.sport != "soccer":
+        raise UnsafeRequest("--postponed-list is for soccer")
+    args.as_of = _aware(args.as_of, "--as-of") if args.as_of else datetime.now(timezone.utc)
+    if args.as_of > datetime.now(timezone.utc):
+        # a later instant would reach rows younger than the results path's look-back
+        raise UnsafeRequest(f"--as-of {args.as_of.isoformat()} is in the future")
     args.expected = parse_expect_plan(args.expect_plan) if args.expect_plan else None
     return args
+
+
+def listed_outside_candidates(cur, listed: dict[str, Postponement], candidate_ids: set[str]) -> tuple[int, list[str]]:
+    """(already marked, mismatches) for the listed rows the candidate query
+    did not return: done when an earlier run marked them for the listed
+    kickoff and replay, a mismatch otherwise."""
+    outside = sorted(i for i in listed if i not in candidate_ids)
+    if not outside:
+        return 0, []
+    cur.execute(LISTED_STATE_SQL, (outside,))
+    state = {r["id"]: r for r in cur.fetchall()}
+    done, problems = 0, []
+    for i in outside:
+        r, want = state.get(i), listed[i]
+        marked = None
+        if r is not None and r["postponed_kickoff"]:
+            try:
+                marked = _aware(r["postponed_kickoff"], "postponed_kickoff")
+            except UnsafeRequest:
+                marked = None
+        if (
+            r is not None
+            and r["status"] == "postponed"
+            and marked == want.kickoff
+            and r["replayed_as"] == want.replay_match_id
+        ):
+            done += 1
+        elif r is None:
+            problems.append(f"{i}: no such match")
+        else:
+            problems.append(
+                f"{i}: not a stale 'scheduled' candidate (status {r['status']}, kickoff {r['match_date']}) "
+                "and not marked postponed for the listed kickoff and replay"
+            )
+    return done, problems
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -831,11 +1177,17 @@ def main(argv: list[str] | None = None) -> int:
     if not args.database_url:
         raise UnsafeRequest("DATABASE_URL not set")
     policy = policy_for(args.sport, args.delete_placeholders)
+    listed = load_postponed_list(args.postponed_list) if args.postponed_list else {}
     conn = psycopg2.connect(args.database_url, cursor_factory=RealDictCursor)
     try:
         with conn.cursor() as cur:
-            cur.execute(LIST_CANDIDATES_SQL, (args.sport, CANDIDATE_STATUSES[args.sport], str(args.stale_after_hours)))
+            cur.execute(
+                LIST_CANDIDATES_SQL,
+                (args.sport, CANDIDATE_STATUSES[args.sport], args.as_of, str(args.stale_after_hours)),
+            )
             candidates = [dict(r) for r in cur.fetchall()]
+            candidate_ids = {c["id"] for c in candidates}
+            already_postponed, outside_problems = listed_outside_candidates(cur, listed, candidate_ids)
 
             def twins_for(c: dict) -> list[dict]:
                 return rsr.find_twins(
@@ -857,16 +1209,37 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return [dict(r) for r in cur.fetchall()]
 
+            def twin_is_espn(twin_id: str) -> bool:
+                cur.execute(TWIN_IDENTITY_SQL, (twin_id,))
+                r = cur.fetchone()
+                return r is not None and has_espn_identity(r["espn_id"], r["result_source"])
+
             p = plan(
                 candidates,
                 twins_for,
                 policy,
                 context_for=None if policy.delete_no_twin else context_for,
                 twin_window_hours=args.twin_window_hours,
+                twin_is_espn=twin_is_espn,
+                postponed={i: v for i, v in listed.items() if i in candidate_ids},
             )
         conn.rollback()  # end the read transaction
         counts = p["counts"]
-        logger.info("candidates=%d plan=%s", len(candidates), dict(sorted(counts.items())))
+        mismatches = p["mismatches"] + outside_problems
+        counts["list_mismatch"] = len(mismatches)
+        logger.info(
+            "as_of=%s candidates=%d plan=%s", args.as_of.isoformat(), len(candidates), dict(sorted(counts.items()))
+        )
+        if listed:
+            logger.info(
+                "postponed list: %d row(s), %d to mark, %d already marked, %d mismatch(es)",
+                len(listed),
+                len(p["postponed"]),
+                already_postponed,
+                len(mismatches),
+            )
+        for m in mismatches:
+            logger.error("postponed list does not match the data — %s", m)
         logger.info(plan_line(counts))
         pending = counts.get(f"left_{LEFT_PENDING_RECS}", 0)
         if pending:
@@ -880,9 +1253,14 @@ def main(argv: list[str] | None = None) -> int:
             check_expected(counts, args.expected)
         if args.apply and pending:
             raise UnsafeRequest(f"{pending} orphan(s) with a twin hold pending recs: run repair_stranded_recs.py first")
+        if args.apply and mismatches:
+            raise UnsafeRequest(f"{len(mismatches)} postponed-list row(s) no longer match: review the list first")
         default_csv, default_archive = default_paths(args.sport, args.apply)
         write_csv(args.out_csv or default_csv, args.sport, p["entries"])
         if not args.apply:
+            if mismatches:
+                logger.error("dry-run: %d postponed-list row(s) no longer match — exit 1", len(mismatches))
+                return 1
             logger.info("dry-run: nothing written (re-run with --apply)")
             return 0
         targets = [e for e in p["entries"] if e["action"] in WRITE_ACTIONS]
