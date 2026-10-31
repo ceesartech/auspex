@@ -50,8 +50,8 @@ prediction_id was ON DELETE CASCADE, so deleting that orphan deleted the rec
 with it — the 2026-10-31 tennis run lost 45 settled recs exactly that way
 (restored by restore_cascaded_recs.py); the twin usually already holds the
 same (model, version, type), so the rec's prediction is never the one moved.
-Since 025 (NO ACTION) the DELETE would fail instead; the guard keeps the
-batch from aborting.
+Since 025/026 (both rec FKs NO ACTION) such a DELETE fails instead of
+cascading; the guard keeps the batch from aborting.
 
 Every row the run moves or deletes is written to --archive (gzip JSONL,
 write-once) BEFORE the first write, so the run is reversible offline.

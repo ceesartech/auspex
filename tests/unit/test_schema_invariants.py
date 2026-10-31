@@ -25,3 +25,11 @@ def test_deleting_a_prediction_never_cascades_to_its_recs():
     assert "REFERENCES predictions(id)" in clause and "ON DELETE NO ACTION" in clause
     model = (ROOT / "services" / "api" / "src" / "models" / "database_models.py").read_text()
     assert 'ForeignKey("predictions.id", ondelete="NO ACTION")' in model
+
+
+def test_deleting_a_match_never_cascades_to_its_recs():
+    # migration 026: a fixture with recs must have them re-pointed or removed first, explicitly
+    clause = _last_definition("betting_recommendations_match_id_fkey")
+    assert "REFERENCES matches(id)" in clause and "ON DELETE NO ACTION" in clause
+    model = (ROOT / "services" / "api" / "src" / "models" / "database_models.py").read_text()
+    assert 'ForeignKey("matches.id", ondelete="NO ACTION")' in model
