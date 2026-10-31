@@ -1,19 +1,42 @@
 #!/bin/bash
 # NOT YET APPROVED — run only on explicit operator approval (CLAUDE.md: data
 # repairs need a verified backup first, which step 1 takes).
-# Relabel the soccer matches.season values promote_raw mislabelled, with
-# scripts/backfill_season_labels.py. Read-only check 2026-10-31: 32,794 rows
-# carry a 'YYYY-YYYY' that does not span one year ('2020-2116' for a 2016
-# calendar season) and 26,890 carry 'YYYY/YYYY'. All 59,684 tie back to a
-# raw_football_data row at the kickoff promote_raw wrote. Calendar-year
-# leagues (promote_raw.CALENDAR_SEASON_LEAGUES) get the single year ('2016');
-# cross-year leagues get 'YYYY-YYYY'.
+# Relabel soccer matches.season to the one season scheme
+# (scripts/soccer_seasons.py) with scripts/backfill_season_labels.py.
+# DEPLOY THE COMMIT THAT SHIPS scripts/soccer_seasons.py FIRST: until then
+# fetch_upcoming keeps writing the Aug->May label on calendar-year leagues and
+# promote_raw the 'YYZZ' misreading, so new wrong rows keep arriving.
+#
+# Reviewed plan: read-only prod export 2026-10-31 07:13Z, rehearsed with this
+# script on a local replica (171,677 soccer rows, 168,077 raw rows, all tied):
+#   relabel_promote_raw 62,430  the old promote_raw label of the raw season:
+#                               32,794 '2020-2116'-style, 26,890 'YYYY/YYYY',
+#                               2,746 '2020-2021' for a 2021 calendar season
+#                               (AR1 AT1 BR1 CH1 CN1 DK1 FI1 IE1 JP1 MLS MX1
+#                               NO1 PL1 RO1 RU1 SE1)
+#   relabel_espn         1,792  fetch_upcoming's Aug->May label on a
+#                               calendar-year league: AR1 274, BR1 196, CL1
+#                               119, CN1 139, CO1 249, JP1 20 (its 2026
+#                               special season), LIB 38, MLS 305, NO1 131, SE1
+#                               151, WC 170
+#   already_correct    107,455  left alone 0 (no unknown writer, no raw
+#                               disagreement, no row without a date rule)
+# MAX_RELABEL_ESPN allows ~4-5 weeks of new calendar-league fixture rows
+# (~80-100 a week in Oct 2026) written before the deploy; promote_raw is not
+# scheduled, so its count can only shrink. Past either ceiling, re-plan
+# read-only and review before raising it.
 #   1. verified backup (B2) — abort if it does not land;
-#   2. before-state + dry run (plan + write-once audit CSV) — abort if the tool fails;
-#   3. apply (one transaction, every UPDATE guarded on the old value);
-#   4. after-state — expects 0 soccer rows with a 'YYYY/YYYY' label, a
-#      'YYYY-YYYY' label that does not span exactly one year, or a single-year
-#      label outside the calendar-year leagues (where it is the right label).
+#   2. before-state + dry run (write-once audit CSV) — abort if the tool fails
+#      or the plan is outside the reviewed set (the ceilings below, and only
+#      the reviewed leagues per kind);
+#   3. apply, pinned to the dry run's counts (--expect-plan: any drift refuses
+#      before a write); one transaction, every UPDATE guarded on the old
+#      label, a row changed since the plan rolls everything back;
+#   4. after-state, EXPECTED: every row of the apply CSV holds its new label
+#      (--verify), the soccer rows with a label only the old promote_raw wrote
+#      ('YYYY/YYYY', a 'YYYY-YYYY' not spanning one year) fell by exactly the
+#      plan's relabel_bad_shape, and a fresh dry run plans 0 relabels with the
+#      same left-alone counts.
 # Each tool step writes its output to a log file inside the api container and
 # exits with the tool's own status; a pipe through tail would report tail's 0.
 # Re-runnable: a relabelled row plans as already_correct.
@@ -31,39 +54,46 @@ psql_file() {  # psql_file <local.sql> [extra psql flags]
   $DC cp "$f" postgres:/tmp/season_labels_q.sql >/dev/null 2>&1 || return 1
   $DC exec -T postgres sh -c "psql -v ON_ERROR_STOP=1 -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" $* -f /tmp/season_labels_q.sql"
 }
+plan_num() {  # plan_num <PLAN line> <key>: the count, or "missing"
+  local v
+  v=$(echo "$1" | grep -o " $2=[0-9]*" | cut -d= -f2)
+  if [[ "$v" =~ ^[0-9]+$ ]]; then echo "$v"; else echo missing; fi
+}
+within() {  # within <comma list> <comma list>: every item of $1 is in $2 ('-' is empty)
+  local item
+  [ "$1" = "-" ] && return 0
+  for item in ${1//,/ }; do [[ ",$2," == *",$item,"* ]] || return 1; done
+}
 TOOL="python /app/scripts/backfill_season_labels.py"
+MAX_RELABEL_PROMOTE_RAW=62430
+MAX_RELABEL_ESPN=2200
+REVIEWED_PROMOTE_RAW_LEAGUES="AR1,AT1,BR1,CH1,CN1,DK1,FI1,IE1,JP1,MLS,MX1,NO1,PL1,RO1,RU1,SE1"
+REVIEWED_ESPN_LEAGUES="AR1,BR1,CL1,CN1,CO1,JP1,LIB,MLS,NO1,SE1,WC"
+LEFT_KEYS="left_unknown_writer left_no_date_rule left_raw_disagree left_league_mismatch left_no_league_code"
 
-# The calendar-year leagues come from the code that writes the labels, so this
-# check cannot drift from it.
-CAL=$($DC exec -T api python -c "import sys; sys.path.insert(0,'/app/scripts'); import promote_raw as pr; print(','.join(sorted(pr.CALENDAR_SEASON_LEAGUES)))" 2>/dev/null | tail -1)
-if ! [[ "$CAL" =~ ^[A-Z0-9]+(,[A-Z0-9]+)+$ ]]; then log "ABORT: could not read promote_raw.CALENDAR_SEASON_LEAGUES (got '$CAL') — nothing changed"; exit 1; fi
-log "calendar-year leagues: $CAL"
-
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+APPLY_CSV=/app/backups/season_labels_apply_$STAMP.csv
 cat > /tmp/season_labels_shapes.sql <<'SQLEOF'
-SELECT CASE WHEN m.season ~ '^[0-9]{4}/[0-9]{4}$' THEN 'YYYY/YYYY (bad)'
+SELECT CASE WHEN m.season ~ '^[0-9]{4}/[0-9]{4}$' THEN 'YYYY/YYYY (old promote_raw)'
             WHEN m.season ~ '^[0-9]{4}-[0-9]{4}$'
                  AND split_part(m.season, '-', 2)::int - split_part(m.season, '-', 1)::int = 1 THEN 'YYYY-YYYY one year'
-            WHEN m.season ~ '^[0-9]{4}-[0-9]{4}$' THEN 'YYYY-YYYY other span (bad)'
-            WHEN m.season ~ '^[0-9]{4}$' AND l.external_ids->>'football_data' = ANY (string_to_array('__CAL__', ','))
-                 THEN 'YYYY, calendar-year league'
-            WHEN m.season ~ '^[0-9]{4}$' THEN 'YYYY, cross-year league (bad)'
+            WHEN m.season ~ '^[0-9]{4}-[0-9]{4}$' THEN 'YYYY-YYYY other span (old promote_raw)'
+            WHEN m.season ~ '^[0-9]{4}$' THEN 'YYYY'
             ELSE coalesce('other: ' || m.season, 'NULL') END AS label_shape,
        count(*) AS rows
   FROM matches m JOIN leagues l ON l.id = m.league_id
  WHERE l.sport = 'soccer'
  GROUP BY 1 ORDER BY 1;
 SQLEOF
+# The same test as backfill_season_labels.is_bad_shape.
 cat > /tmp/season_labels_bad.sql <<'SQLEOF'
 SELECT count(*)
   FROM matches m JOIN leagues l ON l.id = m.league_id
  WHERE l.sport = 'soccer'
    AND (m.season ~ '^[0-9]{4}/[0-9]{4}$'
         OR (m.season ~ '^[0-9]{4}-[0-9]{4}$'
-            AND split_part(m.season, '-', 2)::int - split_part(m.season, '-', 1)::int <> 1)
-        OR (m.season ~ '^[0-9]{4}$'
-            AND NOT coalesce(l.external_ids->>'football_data' = ANY (string_to_array('__CAL__', ',')), false)));
+            AND split_part(m.season, '-', 2)::int - split_part(m.season, '-', 1)::int <> 1));
 SQLEOF
-sed -i "s/__CAL__/$CAL/g" /tmp/season_labels_shapes.sql /tmp/season_labels_bad.sql
 
 log "1/4 backup"
 before=$(date -u +%s)
@@ -79,26 +109,59 @@ log "backup landed: $landed"
 
 log "2/4 before-state + dry run"
 psql_file /tmp/season_labels_shapes.sql || { log "ABORT at step 2: the before-state query failed — nothing changed"; exit 1; }
-$DC exec -T api sh -c "$TOOL --out-csv /app/backups/season_labels_dryrun_\$(date -u +%Y%m%dT%H%M%SZ).csv > /tmp/season_labels_dry.log 2>&1; rc=\$?; grep -E 'Loaded|Planned|ERROR|DRY-RUN|Done:|Traceback|Error' /tmp/season_labels_dry.log | tail -12; echo \"tool exit \$rc\"; exit \$rc"
+bad0=$(psql_file /tmp/season_labels_bad.sql -At | tr -d '[:space:]')
+if ! [[ "$bad0" =~ ^[0-9]+$ ]]; then log "ABORT at step 2: the bad-label count failed (got '$bad0') — nothing changed"; exit 1; fi
+log "before: soccer rows with a label only the old promote_raw wrote: $bad0"
+$DC exec -T api sh -c "$TOOL --out-csv /app/backups/season_labels_dryrun_$STAMP.csv > /tmp/season_labels_dry.log 2>&1; rc=\$?; grep -E '^PLAN|Loaded|Planned|  [A-Z0-9]+ +(promote_raw|espn)|ERROR|DRY-RUN|Traceback|Error' /tmp/season_labels_dry.log | tail -40; echo \"tool exit \$rc\"; exit \$rc"
 rc=$?
 log "step 2 exit $rc"
 if [ "$rc" -ne 0 ]; then log "ABORT at step 2: the dry run failed (see above; full log /tmp/season_labels_dry.log in the api container) — nothing changed"; exit 1; fi
+plan=$($DC exec -T api sh -c "grep '^PLAN ' /tmp/season_labels_dry.log | tail -1")
+leagues=$($DC exec -T api sh -c "grep '^PLAN_LEAGUES ' /tmp/season_labels_dry.log | tail -1")
+rp=$(plan_num "$plan" relabel_promote_raw); re=$(plan_num "$plan" relabel_espn)
+rb=$(plan_num "$plan" relabel_bad_shape); ac=$(plan_num "$plan" already_correct)
+if ! [[ "$rp $re $rb $ac" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]]; then
+  log "ABORT at step 2: could not read the PLAN line (got '$plan') — nothing changed"; exit 1
+fi
+left0=""
+for k in $LEFT_KEYS; do left0="$left0 $k=$(plan_num "$plan" "$k")"; done
+lp=$(echo "$leagues" | grep -o 'promote_raw=[^ ]*' | cut -d= -f2); le=$(echo "$leagues" | grep -o 'espn=[^ ]*' | cut -d= -f2)
+if [ -z "$lp" ] || [ -z "$le" ]; then log "ABORT at step 2: could not read the PLAN_LEAGUES line (got '$leagues') — nothing changed"; exit 1; fi
+if [ "$rp" -gt "$MAX_RELABEL_PROMOTE_RAW" ] || [ "$re" -gt "$MAX_RELABEL_ESPN" ] \
+   || ! within "$lp" "$REVIEWED_PROMOTE_RAW_LEAGUES" || ! within "$le" "$REVIEWED_ESPN_LEAGUES"; then
+  log "ABORT at step 2: plan ($plan; $leagues) is outside the reviewed set (relabel_promote_raw <= $MAX_RELABEL_PROMOTE_RAW in $REVIEWED_PROMOTE_RAW_LEAGUES, relabel_espn <= $MAX_RELABEL_ESPN in $REVIEWED_ESPN_LEAGUES) — review the dry-run CSV; nothing changed"; exit 1
+fi
+log "plan: relabel_promote_raw=$rp relabel_espn=$re (bad-shape labels among them: $rb), already_correct=$ac;$left0"
 
-log "3/4 apply"
-$DC exec -T api sh -c "$TOOL --apply > /tmp/season_labels_apply.log 2>&1; rc=\$?; grep -E 'Planned|ERROR|Done:|Traceback|Error' /tmp/season_labels_apply.log | tail -12; echo \"tool exit \$rc\"; exit \$rc"
+log "3/4 apply (pinned to the dry run's counts)"
+$DC exec -T api sh -c "$TOOL --apply --expect-plan relabel_promote_raw=$rp,relabel_espn=$re,relabel_bad_shape=$rb --out-csv $APPLY_CSV > /tmp/season_labels_apply.log 2>&1; rc=\$?; grep -E '^PLAN |Planned|Relabelled|ERROR|Traceback|Error' /tmp/season_labels_apply.log | tail -12; echo \"tool exit \$rc\"; exit \$rc"
 rc=$?
 log "step 3 exit $rc"
 if [ "$rc" -ne 0 ]; then
-  # An exception rolls the whole transaction back; exit 1 after a commit means
-  # some rows changed between plan and write and were left as they were.
-  log "ABORT at step 3 (see above; full log /tmp/season_labels_apply.log in the api container): if the tool raised, nothing changed; if it reported changed_since_plan, the other relabels are committed — inspect before re-running"
+  # A plan drift refuses before any write; a row changed between plan and
+  # write raises and rolls the one transaction back.
+  log "ABORT at step 3 (see above; full log /tmp/season_labels_apply.log in the api container): nothing was written"
   exit 1
 fi
 
 log "4/4 after-state"
+$DC exec -T api sh -c "$TOOL --verify $APPLY_CSV > /tmp/season_labels_verify.log 2>&1; rc=\$?; grep -E '^VERIFY|ERROR|Traceback|Error' /tmp/season_labels_verify.log; exit \$rc"
+vrc=$?
+verify=$($DC exec -T api sh -c "grep '^VERIFY ' /tmp/season_labels_verify.log | tail -1")
 psql_file /tmp/season_labels_shapes.sql
-bad=$(psql_file /tmp/season_labels_bad.sql -At | tr -d '[:space:]')
-log "soccer rows still carrying a bad season label: ${bad:-unknown}"
+bad1=$(psql_file /tmp/season_labels_bad.sql -At | tr -d '[:space:]')
+want_bad=$((bad0 - rb)); want_rows=$((rp + re))
+$DC exec -T api sh -c "$TOOL --out-csv /app/backups/season_labels_verify_$STAMP.csv > /tmp/season_labels_replan.log 2>&1; rc=\$?; grep '^PLAN ' /tmp/season_labels_replan.log; exit \$rc"
+prc=$?
+replan=$($DC exec -T api sh -c "grep '^PLAN ' /tmp/season_labels_replan.log | tail -1")
+left1=""
+for k in $LEFT_KEYS; do left1="$left1 $k=$(plan_num "$replan" "$k")"; done
+log "after: verify '$verify' (expected rows=$want_rows now_new=$want_rows), bad-shape labels $bad1 (expected $want_bad), re-plan relabel=$(plan_num "$replan" relabel) (expected 0),$left1 (expected$left0)"
 rm -f /tmp/season_labels_shapes.sql /tmp/season_labels_bad.sql
 $DC exec -T postgres rm -f /tmp/season_labels_q.sql >/dev/null 2>&1
-if [ "$bad" = "0" ]; then log "DONE"; else log "FAILED: ${bad:-unknown} soccer row(s) still carry a bad season label — the dry-run counters above (raw_row_unresolved, no_matches_row, raw_duplicates_disagree, season_not_from_this_raw_row) say why; inspect"; exit 1; fi
+if [ "$vrc" -ne 0 ] || [ "$(plan_num "$verify" rows)" != "$want_rows" ] || [ "$(plan_num "$verify" now_new)" != "$want_rows" ] \
+   || [ "$bad1" != "$want_bad" ] || [ "$prc" -ne 0 ] || [ "$(plan_num "$replan" relabel)" != "0" ] || [ "$left1" != "$left0" ]; then
+  log "FAILED after-state — inspect (the apply CSV $APPLY_CSV is the rollback record: old_season per match_id)"
+  exit 1
+fi
+log "DONE"

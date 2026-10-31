@@ -122,7 +122,7 @@ class TestSeasonLabel:
 
     def test_european_leagues_keep_their_labels(self):
         legacy = _load("backfill_season_labels", "backfill_season_labels.py").legacy_season_label
-        for league in set(pr.LEAGUE_MAP) - pr.CALENDAR_SEASON_LEAGUES:
+        for league in set(pr.LEAGUE_MAP) - pr.YEAR_CODED_LEAGUES:
             for start in range(93, 127):
                 code = f"{start % 100:02d}{(start + 1) % 100:02d}"
                 assert pr.season_label(code, league) == legacy(code), (league, code)
@@ -134,7 +134,7 @@ class TestSeasonLabel:
     def test_every_new_format_league_is_calendar_aware(self):
         extra = _load("load_football_data_extra", "load_football_data_extra.py")
         codes = {code for code, _name, _country in extra.COUNTRY_MAP.values()}
-        assert codes <= pr.CALENDAR_SEASON_LEAGUES, codes - pr.CALENDAR_SEASON_LEAGUES
+        assert codes <= pr.YEAR_CODED_LEAGUES, codes - pr.YEAR_CODED_LEAGUES
 
 
 def _sqlite_ts(value):

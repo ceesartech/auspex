@@ -443,29 +443,47 @@ class TestRecordStatusChange:
 class TestSoccerSeasonLabels:
     JULY = datetime(2026, 7, 20, tzinfo=timezone.utc)
     MARCH = datetime(2026, 3, 20, tzinfo=timezone.utc)
+    # The calendar-year leagues ESPN carries (scripts/soccer_seasons.py has the evidence).
+    CALENDAR_SLUGS = (
+        "usa.1",
+        "bra.1",
+        "arg.1",
+        "chn.1",
+        "nor.1",
+        "swe.1",
+        "chi.1",
+        "col.1",
+        "fifa.world",
+        "concacaf.gold",
+        "conmebol.libertadores",
+    )
 
-    @pytest.mark.parametrize("slug", sorted(fu.SOCCER_CALENDAR_SEASON_SLUGS))
+    @pytest.mark.parametrize("slug", CALENDAR_SLUGS)
     def test_calendar_year_leagues_label_by_the_year(self, slug):
         assert fu._season_soccer(self.MARCH, slug) == fu._season_soccer(self.JULY, slug) == "2026"
 
-    @pytest.mark.parametrize("slug", ["eng.1", "mex.1", "jpn.1", "aus.1", "uefa.champions", None])
+    @pytest.mark.parametrize("slug", ["eng.1", "mex.1", "aus.1", "uefa.champions", None])
     def test_other_leagues_keep_aug_to_may(self, slug):
         assert fu._season_soccer(self.MARCH, slug) == "2025-2026"
         assert fu._season_soccer(self.JULY, slug) == "2026-2027"
 
-    def test_the_slugs_are_real_espn_leagues(self):
-        assert fu.SOCCER_CALENDAR_SEASON_SLUGS <= set(fu.SOCCER_LEAGUES)
+    def test_j1_switched_to_aug_may_after_its_2026_special_season(self):
+        assert fu._season_soccer(datetime(2026, 2, 14, 5, tzinfo=timezone.utc), "jpn.1") == "2026"
+        assert fu._season_soccer(datetime(2026, 6, 6, 5, tzinfo=timezone.utc), "jpn.1") == "2026"
+        assert fu._season_soccer(datetime(2026, 8, 8, 10, tzinfo=timezone.utc), "jpn.1") == "2026-2027"
+        assert fu._season_soccer(datetime(2027, 3, 6, 5, tzinfo=timezone.utc), "jpn.1") == "2026-2027"
 
-    def test_every_code_is_a_promote_raw_calendar_league(self):
-        # The season-label checks (scripts/ops/backfill_season_labels.sh) read
-        # promote_raw.CALENDAR_SEASON_LEAGUES: a 'YYYY' label outside it is bad.
-        pr = _load("promote_raw_for_seasons", "promote_raw.py")
-        codes = {fu.SOCCER_LEAGUES[slug][0] for slug in fu.SOCCER_CALENDAR_SEASON_SLUGS}
-        assert codes <= pr.CALENDAR_SEASON_LEAGUES
-        left_out = {
-            slug for slug, (code, _n, _c) in fu.SOCCER_LEAGUES.items() if code in pr.CALENDAR_SEASON_LEAGUES
-        } - fu.SOCCER_CALENDAR_SEASON_SLUGS
-        assert left_out == {"mex.1", "jpn.1"}  # cross-year, see the comment on SOCCER_CALENDAR_SEASON_SLUGS
+    @pytest.mark.parametrize("slug", sorted(fu.SOCCER_LEAGUES))
+    def test_every_espn_league_uses_the_shared_scheme(self, slug):
+        ss = _load("soccer_seasons_for_fetch", "soccer_seasons.py")
+        code = fu.SOCCER_LEAGUES[slug][0]
+        for when in (self.MARCH, self.JULY, datetime(2026, 12, 1, tzinfo=timezone.utc)):
+            assert fu._season_soccer(when, slug) == ss.season_for_kickoff(code, when)
+
+    def test_an_irregular_era_falls_back_loudly(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            assert fu._season_soccer(datetime(2019, 10, 1, tzinfo=timezone.utc), "arg.1") == "2019-2020"
+        assert any("No date rule labels" in r.getMessage() for r in caplog.records)
 
     def test_season_label_reads_the_slug_from_the_context(self):
         assert fu.season_label(SOCCER, self.JULY, {"league_slug": "nor.1"}) == "2026"

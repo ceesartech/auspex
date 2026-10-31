@@ -44,6 +44,7 @@ import requests
 from psycopg2.extras import Json, RealDictCursor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import soccer_seasons  # noqa: E402
 import team_identity  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
@@ -53,15 +54,25 @@ ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 
 
 def _season_soccer(dt: datetime, league_slug: str | None = None) -> str:
-    """A calendar-year league (SOCCER_CALENDAR_SEASON_SLUGS) labels its
-    season by the year: '2026'. Every other league runs Aug→May:
-    Jul-Dec → YYYY-YYYY+1; Jan-Jun → YYYY-1-YYYY. Without a slug (a caller
-    that does not know the league) the Aug→May rule applies."""
-    if league_slug in SOCCER_CALENDAR_SEASON_SLUGS:
-        return str(dt.year)
-    if dt.month >= 7:
-        return f"{dt.year}-{dt.year + 1}"
-    return f"{dt.year - 1}-{dt.year}"
+    """The season label of a soccer fixture of ESPN league `league_slug`, by
+    the scheme every soccer loader shares (soccer_seasons.season_for_kickoff,
+    keyed by the league's football-data code): '2026' for a calendar-year
+    league, Jul-Dec -> YYYY-YYYY+1 / Jan-Jun -> YYYY-1-YYYY otherwise. Without
+    a slug (a caller that does not know the league) the cross-year rule
+    applies. A kickoff in an era the scheme cannot label by date (none in
+    ESPN's live window) falls back to the cross-year rule, loudly."""
+    code = SOCCER_LEAGUES[league_slug][0] if league_slug in SOCCER_LEAGUES else None
+    label = soccer_seasons.season_for_kickoff(code, dt)
+    if label is None:
+        label = soccer_seasons.cross_year_label(dt)
+        logger.warning(
+            "No date rule labels a %s (%s) fixture at %s (an irregular season, see soccer_seasons); labelled %s",
+            code,
+            league_slug,
+            dt,
+            label,
+        )
+    return label
 
 
 def _season_nhl(dt: datetime) -> str:
@@ -180,34 +191,6 @@ SOCCER_LEAGUES: dict[str, tuple[str, str, str]] = {
     "uefa.europa": ("UEL", "UEFA Europa League", "International"),
     "conmebol.libertadores": ("LIB", "Copa Libertadores", "International"),
 }
-
-
-# ESPN slugs of the leagues whose season is one calendar year, labelled
-# '2026' the way promote_raw.season_label labels football-data's calendar-year
-# files. Until 2026-10-31 these took the Aug→May label, which split one
-# Brasileirão / MLS / Eliteserien season across '2025-2026' and '2026-2027'
-# at July. Every code here is in promote_raw.CALENDAR_SEASON_LEAGUES (pinned
-# by tests/unit/test_fetch_soccer_results.py), so the season-label checks
-# (scripts/ops/backfill_season_labels.sh) agree.
-# Two codes in that set stay on Aug→May here: Liga MX (MX1) plays Apertura
-# Jul-Dec + Clausura Jan-May and football-data labels it 'YYYY/YYYY'; J1
-# (JP1) moved to an Aug-May season from 2026-27. promote_raw lists both only
-# because it reads a 4-digit football-data code as a year. Chile and
-# Colombia also play calendar years, but promote_raw does not list CL1/CO1
-# yet, so they stay on Aug→May until it does.
-SOCCER_CALENDAR_SEASON_SLUGS: frozenset[str] = frozenset(
-    {
-        "usa.1",  # MLS
-        "bra.1",  # BR1
-        "arg.1",  # AR1
-        "chn.1",  # CN1
-        "nor.1",  # NO1
-        "swe.1",  # SE1
-        "fifa.world",  # WC
-        "concacaf.gold",  # GOLD
-        "conmebol.libertadores",  # LIB
-    }
-)
 
 
 SOCCER_CLUB_SUFFIXES = frozenset(

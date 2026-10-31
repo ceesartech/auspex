@@ -129,13 +129,17 @@ LEAGUE_MAP: dict[str, tuple[str, str]] = {
 # league that plays within one ('2016': Brazil, MLS, Norway...) and
 # 'YYYY/YYYY' for one that straddles two (Austria, Mexico...); the
 # international loader uses the year too. '2021' reads both ways, so the
-# league decides: a 4-digit season from one of these leagues is a calendar
-# year. Must cover every league code in load_football_data_extra.COUNTRY_MAP
-# (pinned by tests/unit/test_promote_raw.py).
-CALENDAR_SEASON_LEAGUES: frozenset[str] = frozenset(
-    {"AR1", "AT1", "BR1", "CH1", "CN1", "DK1", "FI1", "IE1", "JP1", "MLS", "MX1", "NO1", "PL1", "RO1", "RU1", "SE1"}
-    | {code for code, (_name, country) in LEAGUE_MAP.items() if country == "International"}
-)
+# league decides: a 4-digit season from a league whose files name years
+# (YEAR_CODED_LEAGUES) is a year. Which leagues those are, and which leagues
+# play calendar-year seasons (what fetch_upcoming labels by), is decided in
+# one place, scripts/soccer_seasons.py; YEAR_CODED_LEAGUES must cover every
+# league code in load_football_data_extra.COUNTRY_MAP (pinned by
+# tests/unit/test_promote_raw.py). Until 2026-10-31 this set was named
+# CALENDAR_SEASON_LEAGUES, although Liga MX and Austria are cross-year.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import soccer_seasons  # noqa: E402
+
+YEAR_CODED_LEAGUES: frozenset[str] = soccer_seasons.FOOTBALL_DATA_YEAR_CODED
 _CROSS_YEAR_SEASON = re.compile(r"(\d{4})/(\d{4})")
 
 
@@ -892,7 +896,7 @@ def season_label(code: str, league: str | None = None) -> str:
     2026-10-31; scripts/backfill_season_labels.py corrects them).
 
     '2021' is both the 2020-21 code and a calendar year, so `league`
-    decides (CALENDAR_SEASON_LEAGUES). Without one, a 4-digit code expands
+    decides (YEAR_CODED_LEAGUES). Without one, a 4-digit code expands
     only when its halves are consecutive years; anything else is a year.
     """
     code = (code or "").strip()
@@ -901,7 +905,7 @@ def season_label(code: str, league: str | None = None) -> str:
         return f"{cross_year.group(1)}-{cross_year.group(2)}"
     if len(code) != 4 or not code.isdigit():
         return code
-    if league in CALENDAR_SEASON_LEAGUES:
+    if league in YEAR_CODED_LEAGUES:
         return code
     start, end = int(code[:2]), int(code[2:])
     if end != (start + 1) % 100:
