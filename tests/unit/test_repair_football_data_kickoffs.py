@@ -687,7 +687,8 @@ class TestMain:
             raise rfk.PlanDrift("batch 2: 1 of 5000 row(s) changed")
 
         monkeypatch.setattr(rfk, "run", drift)
-        assert rfk.main(["--shift", "--apply", "--database-url", "postgres://fake"]) == 1
+        argv = ["--shift", "--apply", "--expect-plan", "shift=5000,refuse=0", "--database-url", "postgres://fake"]
+        assert rfk.main(argv) == 1
         assert "batch 2: 1 of 5000" in caplog.text
 
     @pytest.mark.parametrize(
@@ -698,6 +699,7 @@ class TestMain:
             (Counter(planned=3, refused=2), 0),
             (Counter(plan_mismatch=1), 1),
             (Counter(planned=3, shift_blocked=1), 1),
+            (Counter(planned=3, unsettled_unpinned=1), 1),
         ],
     )
     def test_exit_codes(self, monkeypatch, counts, code):
@@ -726,6 +728,30 @@ class TestMain:
         ):
             with pytest.raises(SystemExit):
                 rfk.parse_args([mode, "--expect-plan", pin])
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["--dedupe", "--apply"],
+            ["--dedupe", "--apply", "--expect-plan", "merge=68,fold=26,refuse=0"],  # a pre-alias-merge pin
+            ["--shift", "--apply", "--expect-plan", "shift=63533"],
+        ],
+    )
+    def test_an_apply_must_pin_every_key_of_its_mode(self, argv):
+        with pytest.raises(SystemExit):
+            rfk.parse_args(argv)
+
+    def test_a_full_pin_applies_and_fold_unsettled_recs_is_an_extra_dedupe_pin(self):
+        args = rfk.parse_args(
+            ["--dedupe", "--apply", "--expect-plan", "merge=68,alias_merge=4,fold=26,refuse=0,fold_unsettled_recs=0"]
+        )
+        assert args.expect_plan["fold_unsettled_recs"] == 0 and args.apply
+        assert rfk.parse_args(["--shift", "--apply", "--expect-plan", "shift=1,refuse=0"]).expect_plan == {
+            "shift": 1,
+            "refuse": 0,
+        }
+        with pytest.raises(SystemExit):
+            rfk.parse_args(["--shift", "--expect-plan", "shift=1,refuse=0,fold_unsettled_recs=0"])
 
     def test_one_mode_at_a_time(self):
         with pytest.raises(SystemExit):
@@ -1261,6 +1287,28 @@ class TestFoldUnsettledRecs:
         rfk.run(_Conn(), "dedupe", False, out_csv=str(tmp_path / "d.csv"))
         assert "fold_unsettled_recs=2" in caplog.text and "2 without a profit_loss" in caplog.text
         assert _rows(tmp_path / "d.csv")[0]["fold_unsettled_recs"] == "2"
+
+    def test_an_apply_refuses_folds_holding_them_unless_pinned(self, offline, tmp_path, caplog):
+        offline["snap"] = _snap([SHANDONG], [dict(STALE), dict(COPY)])
+        offline["facts"] = {"stale": _facts(unsettled=2)}
+        pin = {"merge": 0, "alias_merge": 0, "fold": 1, "refuse": 0}
+        counts = rfk.run(_Conn(), "dedupe", True, out_csv=str(tmp_path / "d.csv"), expect_plan=pin)
+        assert counts["unsettled_unpinned"] == 1 and offline["applied"] == []
+        assert "pin fold_unsettled_recs=2" in caplog.text
+
+    def test_a_wrong_unsettled_pin_is_a_plan_mismatch(self, offline, tmp_path):
+        offline["snap"] = _snap([SHANDONG], [dict(STALE), dict(COPY)])
+        offline["facts"] = {"stale": _facts(unsettled=2)}
+        pin = {"merge": 0, "alias_merge": 0, "fold": 1, "refuse": 0, "fold_unsettled_recs": 0}
+        counts = rfk.run(_Conn(), "dedupe", True, out_csv=str(tmp_path / "d.csv"), expect_plan=pin)
+        assert counts["plan_mismatch"] == 1 and offline["applied"] == []
+
+    def test_the_pinned_count_folds(self, offline, tmp_path):
+        offline["snap"] = _snap([SHANDONG], [dict(STALE), dict(COPY)])
+        offline["facts"] = {"stale": _facts(unsettled=2)}
+        pin = {"merge": 0, "alias_merge": 0, "fold": 1, "refuse": 0, "fold_unsettled_recs": 2}
+        counts = rfk.run(_Conn(), "dedupe", True, out_csv=str(tmp_path / "d.csv"), expect_plan=pin)
+        assert not counts["unsettled_unpinned"] and not counts["plan_mismatch"] and len(offline["applied"]) == 1
 
     def test_the_fact_counts_recs_through_predictions_without_a_profit_loss(self):
         assert "br.profit_loss IS NULL AND (br.match_id = m.id OR br.prediction_id IN" in rfk.FOLD_FACTS_SQL

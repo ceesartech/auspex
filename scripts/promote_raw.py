@@ -586,7 +586,13 @@ def find_alias_slot_rows(cur, home_id, away_id, match_dt: datetime, fixture_day:
     promote run from inserting the copy again until scripts/
     repoint_team_matches.py has moved that row onto the right club; it does
     the same for a club ESPN minted a second row for that merge_soccer_teams
-    has not folded yet."""
+    has not folded yet. It needs a SHARED CLUB: a fixture filed under two
+    other team ids (both sides aliased) does not trip it, and promote_raw
+    would insert it beside that row. The re-point map's two-sided rows (Santos
+    v Guadalajara, 2026-08-17: 4a31da6c, da444426) are that shape, which is why
+    scripts/ops/repoint_team_matches.sh --pass 1 (runbook step 1) must have
+    moved them before any MX1 raw row for that date is promoted; prod had no
+    football-data copy of them on 2026-10-31."""
     lo, hi = existing_match_window(match_dt, fixture_day)
     cur.execute(ALIAS_SLOT_SQL, (home_id, away_id, home_id, away_id, home_id, away_id, lo, hi))
     return [dict(r) for r in cur.fetchall()]

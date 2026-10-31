@@ -14,27 +14,35 @@ near the kickoff instead of beside it (find_existing_matches), and refuses
 to run while any row is left at a legacy kickoff (check_legacy_kickoffs).
 This tool merges and moves them; until it has run, promote_raw stays blocked.
 
-RUN ORDER (decided 2026-10-31, each step its own approval):
-  1. scripts/ops/repoint_team_matches.sh, right after the team-identity
-     deploy: it moves the Liga MX rows ESPN filed under Santos (the
-     Brazilian club's row) and Guadalajara (the Spanish club's row) onto
-     Santos Laguna and Guadalajara Chivas, and refuses a row while
+RUN ORDER (scripts/ops/soccer_repair_runbook.sh runs it, each step through
+its own wrapper with its own verified backup and checks; 2026-10-31):
+  1. scripts/ops/repoint_team_matches.sh --pass 1, right after the
+     team-identity deploy: it moves the Liga MX rows ESPN filed under Santos
+     (the Brazilian club's row) and Guadalajara (the Spanish club's row)
+     onto Santos Laguna and Guadalajara Chivas, and refuses a row while
      football-data's copy sits on the target pair (6 sides on 2026-10-31:
      4 ESPN rows and 2 stale rows moving with them);
-  2. scripts/ops/merge_soccer_teams.sh: folds the 160 alias pairs where
+  2. scripts/ops/migrate_027_outcome_trigger.sh;
+  3. scripts/ops/merge_soccer_teams.sh: folds the 160 alias pairs where
      ESPN minted its own team row (keeps the ESPN row, deletes about 171
      football-data rows; promote_raw then writes those fixtures onto the
      surviving ESPN row, never beside it);
-  3. this tool (scripts/ops/repair_football_data_kickoffs.sh): --dedupe
+  4. this tool (scripts/ops/repair_football_data_kickoffs.sh): --dedupe
      alias-merges the 4 copies step 1 refused for (below), folds and
      merges the rest, --shift moves every other BST row;
-  4. scripts/repoint_team_matches.py again (re-pinned): its refused sides
-     have no twin left; until it has moved them, promote_raw refuses those
-     fixtures (find_alias_slot_rows), loudly;
-  5. the soccer orphan cleanup (scripts/ops/cleanup_soccer_orphans.sh): the
-     26 stale rows this tool folds are finished by then and leave its set.
+  5. scripts/ops/repoint_team_matches.sh --pass 2 (never a bare --apply):
+     its refused sides have no twin left and move (6); until then
+     promote_raw refuses those fixtures (find_alias_slot_rows), loudly;
+  6. scripts/ops/repair_stranded_recs_soccer.sh;
+  7. scripts/ops/cleanup_soccer_orphans.sh: the 26 stale rows this tool
+     folds are finished by then and leave its set;
+  8. scripts/ops/backfill_soccer_regulation_scores.sh (+ its re-grade);
+  9. scripts/ops/backfill_season_labels.sh;
+ 10. compute_features.py --backfill-finished soccer;
+ 11. merge_soccer_teams.py --check-after ... --odds-since ... once a
+     fetch_live_odds run has finished after step 3.
 If step 1 moves every row (football-data twins allowed), --dedupe merges
-those 4 copies like the 68 and step 4 has nothing to do. If the team merge
+those 4 copies like the 68 and step 5 has nothing to do. If the team merge
 has NOT run, its 160 pairs are left for it: --shift refuses each copy whose
 new kickoff is the exact kickoff of the same fixture under other team ids
 (see below), so this tool never creates a pair the merge would trip over,
@@ -71,9 +79,10 @@ The rows the reviewed re-point map is about to move onto the pair count
     club and the map moves it onto the copy's pair (the 4 Liga MX copies on
     2026-10-31; repoint_team_matches refused to move their rows while the
     copy sat on the target pair, and --shift refused the copy beside them).
-    The row keeps its team ids (step 4 moves it); the copy's match_stats
+    The row keeps its team ids (step 5 moves it); the copy's match_stats
     move only for a club in that row (STATS_FREE_ON_TWIN), the other is
-    archived with the copy and promote_raw writes it again after step 4.
+    archived with the copy and promote_raw writes it again after step 5
+    (a separate approval: run promote_raw once the second pass is done).
     Every write is guarded on the row's team ids too: a row re-pointed
     between plan and write stops the batch. Never a fold across team ids.
   fold: that row is a stale 'scheduled' fixture row without ESPN identity
@@ -88,8 +97,9 @@ The rows the reviewed re-point map is about to move onto the pair count
     CSV lists, per fold, the row's recommendations by status, those
     without a profit_loss (fold_unsettled_recs: grade_completed_matches.py
     --match-id would settle them by the final score; the PLAN line sums
-    them and the wrapper refuses unless 0) and its ungraded predictions;
-    the run logs what the trigger graded.
+    them; --apply refuses folds holding any unless --expect-plan pins
+    fold_unsettled_recs=N to that sum, and the wrapper refuses unless 0)
+    and its ungraded predictions; the run logs what the trigger graded.
 Then, for all: the copy's odds move where the kept row has no price under
 the same key (uq_odds_current_price_key), its match_stats where the kept
 row has none for that team and that team plays in it; the copy row, the
@@ -140,8 +150,11 @@ alias twins, and the rows the re-point map has still to move
 Both writing modes plan first and write every planned row, refusals
 included, to a write-once audit CSV, dry run included, and log one line
 'PLAN mode=<mode> <action>=<n> ...' for the wrapper. --expect-plan pins the
-plan an operator reviewed (dedupe: merge=,alias_merge=,fold=,refuse=;
-shift: shift=,refuse=): a plan that differs writes nothing and exits 1.
+plan an operator reviewed (dedupe: merge=,alias_merge=,fold=,refuse= and,
+optionally, fold_unsettled_recs=; shift: shift=,refuse=): a plan that
+differs writes nothing and exits 1. --apply needs --expect-plan naming every
+one of its mode's keys (an old pin that leaves out alias_merge cannot let
+alias merges through unpinned).
 --apply writes the planned rows in bounded batches, one transaction each,
 every UPDATE and DELETE guarded on the values the plan observed; refused
 rows are left alone (exit 1 unless the refusals were pinned). A batch whose
@@ -152,7 +165,7 @@ Usage (inside the api container; scripts/ops/repair_football_data_kickoffs.sh
 runs the whole sequence with a verified backup first):
     python /app/scripts/repair_football_data_kickoffs.py --dedupe            # dry run
     python /app/scripts/repair_football_data_kickoffs.py --dedupe --apply \\
-        --expect-plan merge=68,alias_merge=4,fold=26,refuse=0
+        --expect-plan merge=68,alias_merge=4,fold=26,refuse=0,fold_unsettled_recs=0
     python /app/scripts/repair_football_data_kickoffs.py --shift             # dry run
     python /app/scripts/repair_football_data_kickoffs.py --shift --apply --expect-plan shift=63533,refuse=0
     python /app/scripts/repair_football_data_kickoffs.py --check
@@ -204,6 +217,8 @@ GUARD_TABLES = frozenset({"predictions", "betting_recommendations", "betting_his
 DEFAULT_BATCH_SIZE = {"dedupe": 100, "shift": 5000}
 # The actions each mode plans; --expect-plan pins any of them (refuse included).
 PLAN_KEYS = {"dedupe": ("merge", "alias_merge", "fold", "refuse"), "shift": ("shift", "refuse")}
+# Optional --expect-plan keys beyond PLAN_KEYS: the open-rec sum of the folds (dedupe only).
+EXTRA_PIN_KEYS = {"dedupe": ("fold_unsettled_recs",), "shift": ()}
 # The dedupe actions that delete a copy into the row it keeps.
 DEDUPE_WRITES = ("merge", "alias_merge", "fold")
 # scripts/repoint_team_matches.py's reviewed map (one row per match side, each proven by its ESPN event): the
@@ -1434,12 +1449,18 @@ def plan_mismatch(counts: dict[str, int], expect: Optional[dict[str, int]]) -> s
 def parse_expect_plan(text: str, mode: str) -> dict[str, int]:
     """'merge=68,fold=26,refuse=0' -> {'merge': 68, 'fold': 26, 'refuse': 0}; ValueError on anything else."""
     out: dict[str, int] = {}
+    allowed = PLAN_KEYS[mode] + EXTRA_PIN_KEYS[mode]
     for part in (p.strip() for p in text.split(",")):
         key, sep, value = part.partition("=")
-        if not sep or key not in PLAN_KEYS[mode] or not value.isdigit() or key in out:
-            raise ValueError(f"--expect-plan {text!r}: want KEY=N pairs with KEY one of {', '.join(PLAN_KEYS[mode])}")
+        if not sep or key not in allowed or not value.isdigit() or key in out:
+            raise ValueError(f"--expect-plan {text!r}: want KEY=N pairs with KEY one of {', '.join(allowed)}")
         out[key] = int(value)
     return out
+
+
+def missing_pins(expect: Optional[dict[str, int]], mode: str) -> list[str]:
+    """The PLAN_KEYS of `mode` an --apply's --expect-plan leaves out. Pure."""
+    return [k for k in PLAN_KEYS[mode] if k not in (expect or {})]
 
 
 def _log_plan(
@@ -1596,13 +1617,14 @@ def run(
     _log_plan(
         mode, planned, refused, batches, counts, out_csv, pinned=(expect_plan or {}).get("refuse") == len(refused)
     )
+    unsettled = sum(e.get("fold_unsettled_recs", 0) for e in planned if e["action"] == "fold")
     if mode == "shift":
         extra = f" dedupe_pending={counts['dedupe_pending']}"
     else:
-        extra = f" fold_unsettled_recs={sum(e.get('fold_unsettled_recs', 0) for e in planned if e['action'] == 'fold')}"
+        extra = f" fold_unsettled_recs={unsettled}"
     logger.info("PLAN mode=%s %s%s", mode, " ".join(f"{k}={v}" for k, v in plan.items()), extra)
 
-    mismatch = plan_mismatch(plan, expect_plan)
+    mismatch = plan_mismatch({**plan, "fold_unsettled_recs": unsettled} if mode == "dedupe" else plan, expect_plan)
     if mismatch:
         counts["plan_mismatch"] = 1
         logger.error("The plan is not the one pinned (%s): nothing written; review the audit CSV", mismatch)
@@ -1610,6 +1632,16 @@ def run(
     counts["refused_unexpected"] = 0 if "refuse" in (expect_plan or {}) else len(refused)
     if not apply_changes:
         logger.info("DRY-RUN: re-run with --apply to write %d row(s)", len(planned))
+        return counts
+    if mode == "dedupe" and unsettled and "fold_unsettled_recs" not in (expect_plan or {}):
+        counts["unsettled_unpinned"] = 1
+        logger.error(
+            "Refusing to fold: the fold rows hold %d rec(s) without a profit_loss (fold_unsettled_recs in the audit "
+            "CSV), which grade_completed_matches.py --match-id would settle by the final score — review them, then "
+            "pin fold_unsettled_recs=%d in --expect-plan to fold anyway (nothing written)",
+            unsettled,
+            unsettled,
+        )
         return counts
     if mode == "shift" and counts["dedupe_pending"]:
         counts["shift_blocked"] = 1
@@ -1662,8 +1694,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--expect-plan",
         default=None,
-        help="Write nothing unless the plan has exactly these counts: dedupe merge=N,alias_merge=N,fold=N,refuse=N; "
-        "shift shift=N,refuse=N (any subset).",
+        help="Write nothing unless the plan has exactly these counts: dedupe merge=N,alias_merge=N,fold=N,refuse=N "
+        "[,fold_unsettled_recs=N]; shift shift=N,refuse=N. A dry run takes any subset; --apply needs every key.",
     )
     p.add_argument("--out-csv", default=None, help="Audit CSV (default $BACKUP_LOCAL_DIR or /app/backups).")
     p.add_argument("--archive-dir", default=None, help="Archive/CSV dir (default $BACKUP_LOCAL_DIR or /app/backups).")
@@ -1683,6 +1715,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             args.expect_plan = parse_expect_plan(args.expect_plan, args.mode)
         except ValueError as e:
             p.error(str(e))
+    if args.apply and missing_pins(args.expect_plan, args.mode):
+        p.error(
+            f"--apply needs --expect-plan naming every {args.mode} key ({', '.join(PLAN_KEYS[args.mode])}); "
+            f"missing: {', '.join(missing_pins(args.expect_plan, args.mode))}"
+        )
     if args.batch_size is not None and args.batch_size < 1:
         p.error("--batch-size must be at least 1")
     return args
@@ -1719,7 +1756,8 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("Stopped, batch rolled back (earlier batches are committed; a re-run re-plans): %s", e)
             return 1
     logger.info("Done: %s", dict(sorted(counts.items())))
-    return 1 if counts["plan_mismatch"] or counts["refused_unexpected"] or counts["shift_blocked"] else 0
+    failed = ("plan_mismatch", "refused_unexpected", "shift_blocked", "unsettled_unpinned")
+    return 1 if any(counts[k] for k in failed) else 0
 
 
 if __name__ == "__main__":
