@@ -6,7 +6,14 @@
 #
 # THE SOCCER REPAIR RUNBOOK (2026-10-31): team identity, team merge, results
 # path / grading / seasons, football-data kickoffs, soccer orphans, trigger
-# 027 — the whole sequence, in order, one wrapper per step:
+# 027 — the whole sequence, in order, one wrapper per step. Expected counts
+# are prod's (read only, 2026-10-31) and the rehearsal's: this runbook and the
+# real wrappers and tools, end to end through a docker/Airflow shim, against
+# a local Postgres built from the migrations (011's trigger restored) and a
+# read-only export of prod taken 11:08Z (compute_features stubbed).
+# Start it right after the deploy: until step 1 runs, results for the mapped
+# upcoming Liga MX fixtures are refused as identity drift, and the results
+# sweep only looks back 3 days.
 #
 #  1 scripts/ops/repoint_team_matches.sh --pass 1
 #    Moves 33 Liga MX sides (31 match rows) off Santos FC's 'Santos' and CD
@@ -20,10 +27,11 @@
 #    "m027 pre_pred=true post_pred=null pre_rec=won post_rec=pending".
 #  3 scripts/ops/merge_soccer_teams.sh
 #    Drains then pauses auspex_pipeline + fetch_live_odds while it runs.
-#    171 pairs merge (0 refused, 0 kickoffs adopted): ~2,470 match sides
-#    re-pointed, ~308 twin fixtures folded (Lecce v Roma and Olympiakos v OFI
+#    171 pairs merge (0 refused, 0 kickoffs adopted): 2,469 match sides
+#    re-pointed, 308 twin fixtures folded (Lecce v Roma and Olympiakos v OFI
 #    Crete take their ESPN twins' results), 171 team rows deleted, aliases and
-#    ESPN ids recorded (168 stamped), 47 odds-feed spellings held.
+#    ESPN ids recorded (168 stamped), 47 odds-feed spellings held (0 unmatched
+#    before the merge; any would fail the step).
 #  4 scripts/ops/repair_football_data_kickoffs.sh
 #    dedupe merge 68, alias_merge 4, fold 26, refuse 0, fold_unsettled_recs 0;
 #    shift <= 63,533 (63,532 on the 11:08Z export). Soccer rows fall by 98,
@@ -41,15 +49,17 @@
 #  7 scripts/ops/cleanup_soccer_orphans.sh
 #    Stale soccer rows: merges <= 204 (merge_delete + merge_cancel), World Cup
 #    placeholders <= 65, ESPN-verified postponements <= 6, no no-twin delete,
-#    0 blocked; recs untouched. Then features + grading for the twins.
+#    0 blocked; recs untouched. Rehearsal: merge_delete 94, merge_cancel 19,
+#    placeholders 65, postponed 6 (stale rows 288 -> 104). Then features +
+#    grading for the twins (107; 800 predictions graded).
 #  8 scripts/ops/backfill_soccer_regulation_scores.sh, then its re-grade
 #    15 AET/PENS rows get their 90-minute score (5 change basis). The
 #    re-grade (prediction rows only) is applied here ONLY when its dry run
-#    plans 132-138 changes, pinned to that exact count (--expect-changes); a
-#    fresh dry run must then plan 0.
+#    plans 132-138 changes (138 on the rehearsal), pinned to that exact count
+#    (--expect-changes); a fresh dry run must then plan 0.
 #  9 scripts/ops/backfill_season_labels.sh
 #    relabel_promote_raw <= 62,430 and relabel_espn <= 2,200, reviewed leagues
-#    only; after: re-plan 0.
+#    only (rehearsal: 62,156 and 1,603); after: re-plan 0.
 # 10 compute_features.py --backfill-finished soccer
 #    Recomputes features_cache for every finished soccer match (replaces the
 #    per-step feature commands steps 1, 3 and 7 print). Skipped as already
@@ -76,6 +86,12 @@
 #     it is unpaused (drained first; Airflow 3.3 never advances a paused DAG's
 #     runs) and unpaused again on every exit (trap); a DAG paused before the
 #     run stays paused.
+#
+# AFTERWARDS (separate approvals, not run here): the never_resulted results
+# backfill in cleanup_soccer_orphans.sh's header, then grade_completed_matches
+# --days N; a promote_raw run, to re-write the 4 match_stats rows step 4
+# archived for the alias-merged Liga MX fixtures (it refuses nothing once step
+# 5 has run); the optional grading of the 26 folded rows (step 4 prints them).
 #
 # It stops at the first step that exits non-zero and prints "fix, then re-run
 # with --from N". Every step is safe to re-run after it succeeded: each

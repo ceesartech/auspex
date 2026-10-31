@@ -32,7 +32,10 @@ its own wrapper with its own verified backup and checks; 2026-10-31):
      merges the rest, --shift moves every other BST row;
   5. scripts/ops/repoint_team_matches.sh --pass 2 (never a bare --apply):
      its refused sides have no twin left and move (6); until then
-     promote_raw refuses those fixtures (find_alias_slot_rows), loudly;
+     promote_raw refuses those fixtures (find_alias_slot_rows), loudly. That
+     guard needs a SHARED CLUB: a fixture filed under two other team ids does
+     not trip it, so step 1 must have moved the map's two-sided rows (Santos v
+     Guadalajara 2026-08-17) before any MX1 raw for that date is promoted;
   6. scripts/ops/repair_stranded_recs_soccer.sh;
   7. scripts/ops/cleanup_soccer_orphans.sh: the 26 stale rows this tool
      folds are finished by then and leave its set;
