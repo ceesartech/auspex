@@ -30,7 +30,7 @@ Dispatch table — what each prediction_type means and how it grades:
   winning_margin    ensemble (soccer derived)      draw / {side}_{1|2|3plus}
   result_btts       ensemble (soccer derived)      {result}_{yes|no}
   result_over_under ensemble (soccer derived)      {result}_{over|under} at 2.5
-  *_ht, ht_ft_…     ensemble (soccer halftime)     metadata.halftime_{home,away}_score
+  *_ht, ht_ft_…     ensemble (soccer halftime)     matches.half_time_{home,away}
 
 Returns None when the outcome can't be determined — caller leaves
 is_correct NULL and the grading script tries again on the next run.
@@ -338,12 +338,14 @@ def result_over_under_outcome(home_score: int, away_score: int) -> str:
     return f"{soccer_match_result(home_score, away_score)}_{side}"
 
 
-def halftime_scores(metadata: Optional[dict]) -> Optional[tuple[int, int]]:
-    """(home, away) at half-time from metadata.halftime_{home,away}_score,
-    which the ESPN results path derives from the scoring plays. None when
-    absent, so HT markets stay ungraded rather than guessed."""
-    md = metadata or {}
-    h, a = md.get("halftime_home_score"), md.get("halftime_away_score")
+def halftime_scores(match: Optional[dict]) -> Optional[tuple[int, int]]:
+    """(home, away) at half-time from a matches row's half_time_home /
+    half_time_away — the one home of the half-time score (football-data
+    loads and the ESPN results path both write it; the HT trainers and the
+    match API read it). None when absent, so HT markets stay ungraded
+    rather than guessed."""
+    row = match or {}
+    h, a = row.get("half_time_home"), row.get("half_time_away")
     if h is None or a is None:
         return None
     try:
@@ -357,12 +359,11 @@ def halftime_outcome(
     predicted_outcome: Optional[str],
     home_score: int,
     away_score: int,
-    metadata: Optional[dict],
+    halftime: Optional[tuple[int, int]],
 ) -> Optional[str]:
-    ht = halftime_scores(metadata)
-    if ht is None:
+    if halftime is None:
         return None
-    ht_home, ht_away = ht
+    ht_home, ht_away = halftime
     if ht_home > home_score or ht_away > away_score:
         # A half-time score above the final one is a data error — don't
         # grade four markets off it.
@@ -394,6 +395,7 @@ def actual_outcome(
     away_score: Optional[int],
     metadata: Optional[dict] = None,
     features: Optional[dict] = None,
+    halftime: Optional[tuple[int, int]] = None,
 ) -> Optional[str]:
     """Compute the canonical actual_outcome for one prediction. Returns
     None for ungradable rows (missing scores, regulation_winner not
@@ -491,7 +493,7 @@ def actual_outcome(
     if prediction_type == "result_over_under":
         return result_over_under_outcome(home_score, away_score)
     if prediction_type in HALFTIME_TYPES:
-        return halftime_outcome(prediction_type, predicted_outcome, home_score, away_score, metadata)
+        return halftime_outcome(prediction_type, predicted_outcome, home_score, away_score, halftime)
 
     # Markets we don't grade (player_prop, lottery, ...) fall through to None.
     return None

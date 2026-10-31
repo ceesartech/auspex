@@ -168,6 +168,30 @@ class TestGradeMatchSoccer:
         # P/L = 25 × (2.0 - 1) = 25.00
         assert cur.recs["r1"]["profit_loss"] == Decimal("25.00")
 
+    def test_halftime_market_grades_from_the_match_columns(self):
+        match = {
+            "match_id": "m1",
+            "home_score": 2,
+            "away_score": 2,
+            "metadata": {},
+            "half_time_home": 1,
+            "half_time_away": 0,
+        }
+        cur = FakeCursor([_pred("p1", "m1", "match_result_ht", "ensemble", "home")], [])
+
+        gcm.grade_match(cur, match)
+
+        assert cur.predictions["p1"]["actual_outcome"] == "home"
+        assert cur.predictions["p1"]["is_correct"] is True
+
+    def test_halftime_market_without_the_columns_stays_ungraded(self):
+        match = {"match_id": "m1", "home_score": 2, "away_score": 2, "metadata": {}}
+        cur = FakeCursor([_pred("p1", "m1", "match_result_ht", "ensemble", "home")], [])
+
+        counts = gcm.grade_match(cur, match)
+
+        assert counts["predictions_skipped"] == 1 and cur.predictions["p1"]["is_correct"] is None
+
     def test_soccer_match_result_wrong_pick(self):
         match = {"match_id": "m1", "home_score": 0, "away_score": 1, "metadata": {}}
         preds = [_pred("p1", "m1", "match_result", "ensemble", "home")]

@@ -57,6 +57,7 @@ from grading_outcomes import (  # noqa: E402
     actual_outcome,
     grade_prediction,
     grade_rec_selection,
+    halftime_scores,
     is_nba_spread,
     is_nba_total,
     is_nfl_spread,
@@ -82,7 +83,7 @@ def list_finished_matches(cur, days: int, match_id: Optional[str]) -> list[dict]
         cur.execute(
             """
             SELECT id::text AS match_id,
-                   home_score, away_score, status, metadata
+                   home_score, away_score, status, metadata, half_time_home, half_time_away
             FROM matches
             WHERE id = %s AND status = 'finished'
             """,
@@ -93,7 +94,7 @@ def list_finished_matches(cur, days: int, match_id: Optional[str]) -> list[dict]
     cur.execute(
         """
         SELECT m.id::text AS match_id,
-               m.home_score, m.away_score, m.status, m.metadata
+               m.home_score, m.away_score, m.status, m.metadata, m.half_time_home, m.half_time_away
         FROM matches m
         WHERE m.status = 'finished'
           AND m.match_date >= NOW() - (%s || ' days')::interval
@@ -401,6 +402,7 @@ def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
             away_score=match["away_score"],
             metadata=match["metadata"],
             features=features,
+            halftime=halftime_scores(match),
         )
         if actual is None:
             counts["predictions_skipped"] += 1

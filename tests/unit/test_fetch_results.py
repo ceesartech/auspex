@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -31,6 +32,7 @@ def _load(name: str, filename: str):
 
 
 fu = _load("fetch_upcoming_results", "fetch_upcoming.py")
+_REAL_INSERT_FINISHED_MATCH = fu.insert_finished_match
 
 
 def _comp(
@@ -83,7 +85,7 @@ class TestRecordResult:
         fu.ensure_team = MagicMock(return_value="team-uuid")
         captured = {}
 
-        def fake_insert(cur, cfg, league_id, home_id, away_id, match_dt, venue, hs, as_, meta):
+        def fake_insert(cur, cfg, league_id, home_id, away_id, match_dt, venue, hs, as_, meta, halftime=None):
             captured.update(home_score=hs, away_score=as_, meta=meta)
             return 1
 
@@ -184,31 +186,54 @@ class TestHalftimeScores:
 
 
 class TestRecordResultHalftime:
-    def _meta(self, cfg, comp):
-        fu.ensure_team = MagicMock(return_value="team-uuid")
+    def _record(self, monkeypatch, cfg, comp):
+        monkeypatch.setattr(fu, "ensure_team", MagicMock(return_value="team-uuid"))
         captured = {}
 
-        def fake_insert(cur, cfg, league_id, home_id, away_id, match_dt, venue, hs, as_, meta):
-            captured.update(meta=meta)
+        def fake_insert(cur, cfg, league_id, home_id, away_id, match_dt, venue, hs, as_, meta, halftime=None):
+            captured.update(meta=meta, halftime=halftime)
             return 1
 
-        fu.insert_finished_match = fake_insert
+        monkeypatch.setattr(fu, "insert_finished_match", fake_insert)
         assert fu._record_result(MagicMock(), cfg, "league-uuid", comp) is True
-        return captured["meta"]
+        return captured
 
-    def test_soccer_result_carries_halftime(self):
+    def test_soccer_result_carries_halftime_to_the_columns(self, monkeypatch):
         comp = _soccer_comp(2, 1, [_goal("10", "17'"), _goal("20", "50'"), _goal("10", "80'")])
-        meta = self._meta(fu.SPORT_CONFIGS["soccer"], comp)
-        assert (meta["halftime_home_score"], meta["halftime_away_score"]) == (1, 0)
+        got = self._record(monkeypatch, fu.SPORT_CONFIGS["soccer"], comp)
+        assert got["halftime"] == (1, 0)
+        assert "halftime_home_score" not in got["meta"]  # the retired metadata keys
 
-    def test_soccer_result_without_usable_plays_has_no_halftime(self):
-        meta = self._meta(fu.SPORT_CONFIGS["soccer"], _soccer_comp(2, 1, [_goal("10", "17'")]))
-        assert "halftime_home_score" not in meta
+    def test_soccer_result_without_usable_plays_has_no_halftime(self, monkeypatch):
+        got = self._record(monkeypatch, fu.SPORT_CONFIGS["soccer"], _soccer_comp(2, 1, [_goal("10", "17'")]))
+        assert got["halftime"] is None
 
-    def test_nhl_result_has_no_halftime(self):
-        comp = _soccer_comp(4, 3, [_goal("10", "17'")])
-        meta = self._meta(fu.SPORT_CONFIGS["nhl"], comp)
-        assert "halftime_home_score" not in meta
+    def test_nhl_result_has_no_halftime(self, monkeypatch):
+        got = self._record(monkeypatch, fu.SPORT_CONFIGS["nhl"], _soccer_comp(4, 3, [_goal("10", "17'")]))
+        assert got["halftime"] is None
+
+
+class TestInsertFinishedMatchHalftime:
+    def _sql_and_params(self, halftime):
+        cur = MagicMock()
+        kickoff = datetime(2026, 10, 25, 15, 0, tzinfo=timezone.utc)
+        # the real function: other tests here replace fu.insert_finished_match
+        _REAL_INSERT_FINISHED_MATCH(
+            cur, fu.SPORT_CONFIGS["soccer"], "lg", "h", "a", kickoff, None, 2, 1, {}, halftime=halftime
+        )
+        return cur.execute.call_args.args
+
+    def test_halftime_fills_the_columns(self):
+        sql, params = self._sql_and_params((1, 0))
+        assert "half_time_home, half_time_away" in sql and params[-2:] == (1, 0)
+
+    def test_an_existing_pair_is_never_overwritten_or_split(self):
+        sql, _ = self._sql_and_params((1, 0))
+        assert sql.count("CASE WHEN matches.half_time_home IS NULL") == 2
+
+    def test_no_halftime_writes_nulls(self):
+        _, params = self._sql_and_params(None)
+        assert params[-2:] == (None, None)
 
 
 class TestFindTeamNeverWrites:

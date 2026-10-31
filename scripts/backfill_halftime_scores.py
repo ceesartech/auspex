@@ -1,10 +1,12 @@
-"""Backfill metadata.halftime_{home,away}_score on finished soccer matches.
+"""Backfill matches.half_time_home/away on finished soccer matches.
 
-grading_outcomes grades the four half-time markets (match_result_ht,
-btts_ht, over_under_ht, ht_ft_double_result) from those two keys, which
-the ESPN results path stamps from 2026-10-30 on (fetch_upcoming.
-halftime_scores). Earlier matches never had them, so ~30k half-time
-predictions sat is_correct NULL on every grading run.
+Those two columns are the one home of the half-time score: football-data
+loads (promote_raw) fill them, the HT / second-half Dixon-Coles trainers
+and the match API read them, grading_outcomes grades the four half-time
+markets (match_result_ht, btts_ht, over_under_ht, ht_ft_double_result)
+from them, and the ESPN results path fills them from 2026-10-31 on
+(fetch_upcoming.halftime_scores). ESPN-ingested matches before that never
+had them (the football-data columns stop at 2026-08-03).
 
 Only the (league, day) scoreboards holding a finished match that still
 lacks the keys are fetched, plus the day before (ESPN files a late-UTC
@@ -14,14 +16,22 @@ team, away team, kickoff) triple the results path wrote — and written
 only when that row's final score equals ESPN's. Never inserts a match,
 team or league: teams resolve through fetch_upcoming.find_team.
 
-The write is additive (two metadata keys), and the match-outcome trigger
-fires only on a status flip, so nothing re-grades or re-settles here —
+The write only fills an empty pair, and the match-outcome trigger fires
+only on a status flip, so nothing re-grades or re-settles here —
 grade_completed_matches picks the rows up afterwards. Every planned row
 goes to a write-once CSV first, dry run included.
+
+--from-metadata (one-off, 2026-10-31): the first version of this tool and
+of the results path wrote metadata.halftime_{home,away}_score instead of
+the columns (2,684 matches), invisible to everything that reads the
+columns. This mode moves each into the columns and drops the two keys in
+one guarded UPDATE: refused when the columns already hold a different
+score, never touches a row whose keys changed since the plan. No ESPN.
 
 Usage (inside the api container):
     python /app/scripts/backfill_halftime_scores.py --days-back 160            # dry run
     python /app/scripts/backfill_halftime_scores.py --days-back 160 --apply
+    python /app/scripts/backfill_halftime_scores.py --from-metadata [--apply]
 """
 
 from __future__ import annotations
@@ -54,32 +64,51 @@ PENDING_DAYS_SQL = """
     WHERE l.sport = 'soccer'
       AND m.status = 'finished'
       AND m.match_date >= NOW() - (%s || ' days')::interval
-      AND NOT (COALESCE(m.metadata, '{}'::jsonb) ? 'halftime_home_score')
+      AND m.half_time_home IS NULL
     GROUP BY 1, 2, 3
 """
 
 LEAGUE_ID_SQL = "SELECT id::text AS id FROM leagues WHERE name = %s AND country = %s AND sport = 'soccer'"
 
 ROW_BY_ESPN_SQL = """
-    SELECT m.id::text AS id, m.home_score, m.away_score, m.metadata
+    SELECT m.id::text AS id, m.home_score, m.away_score, m.half_time_home
     FROM matches m
     JOIN leagues l ON l.id = m.league_id
     WHERE l.sport = 'soccer' AND m.status = 'finished' AND m.external_ids->>'espn' = %s
 """
 
 ROW_BY_TRIPLE_SQL = """
-    SELECT id::text AS id, home_score, away_score, metadata
+    SELECT id::text AS id, home_score, away_score, half_time_home
     FROM matches
     WHERE home_team_id = %s AND away_team_id = %s AND match_date = %s AND status = 'finished'
 """
 
 UPDATE_SQL = """
     UPDATE matches
-    SET metadata = COALESCE(metadata, '{}'::jsonb)
-                   || jsonb_build_object('halftime_home_score', %s::int, 'halftime_away_score', %s::int)
+    SET half_time_home = %s, half_time_away = %s
     WHERE id = %s
       AND status = 'finished'
-      AND NOT (COALESCE(metadata, '{}'::jsonb) ? 'halftime_home_score')
+      AND half_time_home IS NULL
+"""
+
+META_KEYS_SQL = """
+    SELECT m.id::text AS id, m.match_date, m.home_score, m.away_score, m.half_time_home, m.half_time_away,
+           m.metadata->>'halftime_home_score' AS meta_home, m.metadata->>'halftime_away_score' AS meta_away
+    FROM matches m
+    WHERE m.metadata ? 'halftime_home_score' OR m.metadata ? 'halftime_away_score'
+    ORDER BY m.match_date
+"""
+
+# Guarded on the plan's values: keys unchanged, columns empty or already equal.
+MOVE_FROM_METADATA_SQL = """
+    UPDATE matches
+    SET half_time_home = %(h)s,
+        half_time_away = %(a)s,
+        metadata = metadata - 'halftime_home_score' - 'halftime_away_score'
+    WHERE id = %(id)s
+      AND metadata->>'halftime_home_score' = %(h)s::text
+      AND metadata->>'halftime_away_score' = %(a)s::text
+      AND (half_time_home IS NULL OR (half_time_home = %(h)s AND half_time_away = %(a)s))
 """
 
 CSV_FIELDS = ("match_id", "league", "match_date", "home", "away", "espn_id", "halftime_home", "halftime_away")
@@ -148,7 +177,7 @@ def plan_competition(cur, league_id: Optional[str], comp: dict, counts: Counter)
     if (row["home_score"], row["away_score"]) != final:
         counts["score_mismatch"] += 1
         return None
-    if "halftime_home_score" in (row["metadata"] or {}):
+    if row["half_time_home"] is not None:
         counts["already_set"] += 1
         return None
     counts[f"matched_by_{how}"] += 1
@@ -163,21 +192,68 @@ def plan_competition(cur, league_id: Optional[str], comp: dict, counts: Counter)
     }
 
 
-def default_out_csv() -> str:
+def plan_metadata_move(row: dict, counts: Counter) -> Optional[dict]:
+    """One move of metadata keys into the columns, or None (counted). Pure."""
+    try:
+        h, a = int(row["meta_home"]), int(row["meta_away"])
+    except (TypeError, ValueError):
+        counts["meta_unparseable"] += 1
+        return None
+    if row["home_score"] is None or h > row["home_score"] or a > row["away_score"]:
+        counts["meta_exceeds_final"] += 1
+        return None
+    if row["half_time_home"] is not None and (row["half_time_home"], row["half_time_away"]) != (h, a):
+        counts["columns_disagree"] += 1
+        return None
+    counts["columns_already_equal" if row["half_time_home"] is not None else "columns_empty"] += 1
+    return {"match_id": row["id"], "match_date": str(row["match_date"]), "halftime_home": h, "halftime_away": a}
+
+
+def default_out_csv(kind: str = "halftime_backfill") -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
     base = os.environ.get("BACKUP_LOCAL_DIR", "/app/backups")
-    return f"{base}/halftime_backfill_{stamp}.csv"
+    return f"{base}/{kind}_{stamp}.csv"
 
 
-def write_csv(path: str, entries: list[dict]) -> None:
+def write_csv(path: str, entries: list[dict], fields=CSV_FIELDS) -> None:
     out = Path(path)
     if out.exists():
         raise FileExistsError(f"{out} exists — the audit CSV is write-once")
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+        w = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         w.writerows(entries)
+
+
+MOVE_CSV_FIELDS = ("match_id", "match_date", "halftime_home", "halftime_away")
+
+
+def run_from_metadata(conn, apply_changes: bool, out_csv: Optional[str] = None) -> Counter:
+    counts: Counter = Counter()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(META_KEYS_SQL)
+        rows = cur.fetchall()
+    conn.rollback()
+    entries = [e for e in (plan_metadata_move(dict(r), counts) for r in rows) if e is not None]
+    refused = len(rows) - len(entries)
+    if refused:
+        logger.error("%d row(s) refused — keys left in metadata: %s", refused, dict(counts))
+    out_csv = out_csv or default_out_csv("halftime_from_metadata")
+    write_csv(out_csv, entries, MOVE_CSV_FIELDS)
+    logger.info("Planned %d move(s) of %d row(s) with keys; audit CSV %s", len(entries), len(rows), out_csv)
+    counts["with_keys"], counts["planned"] = len(rows), len(entries)
+    if not apply_changes:
+        logger.info("DRY-RUN: re-run with --apply to move %d row(s)", len(entries))
+        return counts
+    with conn.cursor() as cur:
+        for e in entries:
+            cur.execute(MOVE_FROM_METADATA_SQL, {"id": e["match_id"], "h": e["halftime_home"], "a": e["halftime_away"]})
+            counts["moved" if cur.rowcount == 1 else "changed_since_plan"] += 1
+    conn.commit()
+    if counts["changed_since_plan"]:
+        logger.error("%d row(s) changed between plan and write — left as they were", counts["changed_since_plan"])
+    return counts
 
 
 def run(conn, days_back: int, apply_changes: bool, out_csv: Optional[str] = None) -> Counter:
@@ -233,7 +309,12 @@ def run(conn, days_back: int, apply_changes: bool, out_csv: Optional[str] = None
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--days-back", type=int, default=160, help="Finished matches this recent (default 160).")
-    p.add_argument("--apply", action="store_true", help="Write the keys (default: dry run).")
+    p.add_argument("--apply", action="store_true", help="Write (default: dry run).")
+    p.add_argument(
+        "--from-metadata",
+        action="store_true",
+        help="One-off: move metadata.halftime_* keys into the columns (no ESPN).",
+    )
     p.add_argument("--out-csv", default=None, help="Audit CSV (default /app/backups/halftime_backfill_<utc>.csv).")
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
@@ -245,8 +326,13 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("DATABASE_URL not set")
         return 2
     with psycopg2.connect(args.database_url) as conn:
-        counts = run(conn, args.days_back, args.apply, args.out_csv)
+        if args.from_metadata:
+            counts = run_from_metadata(conn, args.apply, args.out_csv)
+        else:
+            counts = run(conn, args.days_back, args.apply, args.out_csv)
     logger.info("Done: %s", dict(sorted(counts.items())))
+    if args.from_metadata and (counts["planned"] < counts["with_keys"] or counts["changed_since_plan"]):
+        return 1
     return 0
 
 

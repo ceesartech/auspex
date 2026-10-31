@@ -843,7 +843,7 @@ class TestAsianHandicapPredictionGrading:
         assert go.grade_prediction("-0.75_home", a, prediction_type="asian_handicap") is None
 
 
-def _actual(prediction_type, predicted, h, a, model_name="ensemble", metadata=None):
+def _actual(prediction_type, predicted, h, a, model_name="ensemble", metadata=None, halftime=None):
     return go.actual_outcome(
         prediction_type=prediction_type,
         model_name=model_name,
@@ -851,6 +851,7 @@ def _actual(prediction_type, predicted, h, a, model_name="ensemble", metadata=No
         home_score=h,
         away_score=a,
         metadata=metadata,
+        halftime=halftime,
     )
 
 
@@ -930,7 +931,7 @@ class TestNhlDerivedMarketGrading:
 
 
 class TestHalftimeMarketGrading:
-    HT = {"halftime_home_score": 1, "halftime_away_score": 0}
+    HT = (1, 0)
 
     def test_without_halftime_scores_every_ht_market_is_ungraded(self):
         for pt, pick in (
@@ -939,15 +940,21 @@ class TestHalftimeMarketGrading:
             ("over_under_ht", "over_0.5"),
             ("ht_ft_double_result", "home_home"),
         ):
-            assert _actual(pt, pick, 2, 1, metadata={}) is None
+            assert _actual(pt, pick, 2, 1, halftime=None) is None
 
     def test_halftime_markets(self):
-        assert _actual("match_result_ht", "draw", 2, 2, metadata=self.HT) == "home"
-        assert _actual("btts_ht", "no", 2, 2, metadata=self.HT) == "no"
-        assert _actual("over_under_ht", "over_0.5", 2, 2, metadata=self.HT) == "over_0.5"
-        assert _actual("over_under_ht", "under_1.5", 2, 2, metadata=self.HT) == "under_1.5"
-        assert _actual("ht_ft_double_result", "home_home", 2, 2, metadata=self.HT) == "home_draw"
+        assert _actual("match_result_ht", "draw", 2, 2, halftime=self.HT) == "home"
+        assert _actual("btts_ht", "no", 2, 2, halftime=self.HT) == "no"
+        assert _actual("over_under_ht", "over_0.5", 2, 2, halftime=self.HT) == "over_0.5"
+        assert _actual("over_under_ht", "under_1.5", 2, 2, halftime=self.HT) == "under_1.5"
+        assert _actual("ht_ft_double_result", "home_home", 2, 2, halftime=self.HT) == "home_draw"
 
     def test_halftime_above_final_is_a_data_error(self):
-        md = {"halftime_home_score": 3, "halftime_away_score": 0}
-        assert _actual("match_result_ht", "home", 2, 1, metadata=md) is None
+        assert _actual("match_result_ht", "home", 2, 1, halftime=(3, 0)) is None
+
+    def test_halftime_comes_from_the_matches_columns_only(self):
+        assert go.halftime_scores({"half_time_home": 1, "half_time_away": 0}) == (1, 0)
+        assert go.halftime_scores({"half_time_home": 1, "half_time_away": None}) is None
+        # the retired metadata keys are not a source any more
+        assert go.halftime_scores({"metadata": {"halftime_home_score": 1, "halftime_away_score": 0}}) is None
+        assert go.halftime_scores(None) is None

@@ -475,6 +475,7 @@ def insert_finished_match(
     home_score: int,
     away_score: int,
     result_meta: dict,
+    halftime: tuple[int, int] | None = None,
 ) -> int:
     """Record a final result (audit doc §2.1 — the missing half of the
     feedback loop). Updates the row fetch_upcoming created — callers run
@@ -483,17 +484,25 @@ def insert_finished_match(
     as a fixture (grows the corpus). grade_completed_matches
     (already on the 15-min cadence) settles predictions + recs from here.
     Score columns follow the corpus conventions: real scores for team
-    sports, winner-flag 1/0 for tennis/MMA."""
+    sports, winner-flag 1/0 for tennis/MMA. `halftime` (soccer) fills
+    half_time_home/away only while that pair is empty: a football-data load
+    may already hold it, and the pair is never split."""
+    ht_home, ht_away = halftime if halftime is not None else (None, None)
     cur.execute(
         """
         INSERT INTO matches (league_id, home_team_id, away_team_id, match_date,
-                             status, venue, season, home_score, away_score, metadata)
-        VALUES (%s, %s, %s, %s, 'finished', %s, %s, %s, %s, %s::jsonb)
+                             status, venue, season, home_score, away_score, metadata,
+                             half_time_home, half_time_away)
+        VALUES (%s, %s, %s, %s, 'finished', %s, %s, %s, %s, %s::jsonb, %s, %s)
         ON CONFLICT (home_team_id, away_team_id, match_date) DO UPDATE
             SET status = 'finished',
                 home_score = EXCLUDED.home_score,
                 away_score = EXCLUDED.away_score,
                 metadata = COALESCE(matches.metadata, '{}'::jsonb) || EXCLUDED.metadata,
+                half_time_home = CASE WHEN matches.half_time_home IS NULL
+                                      THEN EXCLUDED.half_time_home ELSE matches.half_time_home END,
+                half_time_away = CASE WHEN matches.half_time_home IS NULL
+                                      THEN EXCLUDED.half_time_away ELSE matches.half_time_away END,
                 venue = COALESCE(matches.venue, EXCLUDED.venue),
                 updated_at = NOW()
         """,
@@ -507,6 +516,8 @@ def insert_finished_match(
             home_score,
             away_score,
             json.dumps(result_meta),
+            ht_home,
+            ht_away,
         ),
     )
     return cur.rowcount
@@ -1222,12 +1233,10 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
         # 2026-10) graded every correct tie pick as a miss and silently
         # dropped every live-season regulation tie from the training frame.
         result_meta["regulation_winner"] = "tie" if went_extra else ("home" if home_score > away_score else "away")
-    if cfg.sport == "soccer":
-        # The four half-time markets grade from these (grading_outcomes.
-        # halftime_scores); absent when the plays don't add up.
-        ht = halftime_scores(comp, home, away, (home_score, away_score))
-        if ht is not None:
-            result_meta["halftime_home_score"], result_meta["halftime_away_score"] = ht
+    # Soccer half-time goes to matches.half_time_home/away, where the HT
+    # trainers, the match API and the HT-market grader read it; None when
+    # the plays don't reproduce the final score.
+    ht = halftime_scores(comp, home, away, (home_score, away_score)) if cfg.sport == "soccer" else None
 
     home_id = ensure_team(cur, cfg, home_name, league_id)
     away_id = ensure_team(cur, cfg, away_name, league_id)
@@ -1250,7 +1259,7 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
     )
     written = bool(
         insert_finished_match(
-            cur, cfg, league_id, home_id, away_id, match_dt, venue, home_score, away_score, result_meta
+            cur, cfg, league_id, home_id, away_id, match_dt, venue, home_score, away_score, result_meta, halftime=ht
         )
     )
     _stamp_identity(cur, home_id, away_id, match_dt, espn_id if identity_safe else None, season_type)

@@ -1460,6 +1460,25 @@ with the growth-rate driver (WAL) eliminated.
 > match_id FK (odds, snapshots, predictions, features, stats, weather) still
 > cascades — derived or re-fetchable; `betting_history` is SET NULL (0 rows).
 
+> **Update (2026-10-31) — half-time score: one home, and a correction.** The
+> 2026-10-30 night entry's half-time work wrote `metadata.halftime_{home,away}_score`
+> — but `matches.half_time_home/away` already existed (105k football-data rows
+> via `promote_raw`, ending 2026-08-03) and is what the HT and second-half
+> Dixon-Coles trainers and the match API read. The two sources were disjoint
+> (1 match in both, agreeing), so the 2,684 stamped matches were invisible to
+> all of those readers. Now the columns are the only source: the ESPN results
+> path fills them (only while the pair is empty — never overwriting a
+> football-data value, never splitting the pair), the grader reads them, and
+> `backfill_halftime_scores.py` fills them; its one-off `--from-metadata` mode
+> moves the keys into the columns and drops them in one guarded UPDATE per row
+> (refused when the columns hold a different score; tested on a scratch
+> Postgres). Run by `scripts/ops/move_halftime_to_columns.sh` (backup first).
+> Grading results are unchanged (same values). Not done: the HT Dixon-Coles
+> model (`dixon_coles_ht_soccer`, trained 2026-06-04, not in the weekly
+> retrain, pinned until an HT A/B exists) has not been retrained on the extra
+> rows — that is a model change and goes through the §4.3 gate, alongside the
+> HT-draw under-weighting finding above.
+
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
 > fixed in one push. (1) `GET /predictions/upcoming` applied `LIMIT` to
