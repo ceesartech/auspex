@@ -31,7 +31,9 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone, tzinfo
+from typing import Iterable
+from zoneinfo import ZoneInfo
 
 import psycopg2
 from psycopg2.extras import Json, RealDictCursor, execute_values
@@ -121,23 +123,59 @@ CALENDAR_SEASON_LEAGUES: frozenset[str] = frozenset(
 _CROSS_YEAR_SEASON = re.compile(r"(\d{4})/(\d{4})")
 
 
-def parse_match_date(raw_date: str, raw_time: str | None) -> datetime | None:
-    """football-data uses DD/MM/YYYY (newer) or DD/MM/YY (older)."""
+# football-data's Time column is UK local time, the /new/ country files
+# included. Verified on prod 2026-10-31: in July/August each of the 65 soccer
+# fixtures that both the ESPN results path and promote_raw wrote is exactly
+# 1 h later on the promote_raw row (CN1, BR1, NO1, MLS, AR1, MX1, SE1, SC0).
+FOOTBALL_DATA_TZ = ZoneInfo("Europe/London")
+
+
+def _kickoff_time(raw_time: str | None) -> tuple[int, int] | None:
+    """(hour, minute) from football-data's HH:MM Time, or None."""
+    if not raw_time:
+        return None
+    try:
+        t = datetime.strptime(raw_time, "%H:%M")
+    except ValueError:
+        return None
+    return t.hour, t.minute
+
+
+def parse_wall_clock(raw_date: str, raw_time: str | None) -> datetime | None:
+    """football-data's Date (+ Time) as the NAIVE UK wall clock it spells.
+    Date is DD/MM/YYYY (newer) or DD/MM/YY (older); a Time that is not HH:MM
+    is ignored. Until 2026-10-31 promote_raw stored exactly this, and
+    Postgres read it in the session TimeZone (UTC on prod), so every
+    summer-time kickoff landed 1 h late. Kept for finding those rows."""
     if not raw_date:
         return None
     for fmt in ("%d/%m/%Y", "%d/%m/%y"):
         try:
             d = datetime.strptime(raw_date, fmt)
-            if raw_time:
-                try:
-                    t = datetime.strptime(raw_time, "%H:%M")
-                    d = d.replace(hour=t.hour, minute=t.minute)
-                except ValueError:
-                    pass
-            return d
         except ValueError:
             continue
+        hm = _kickoff_time(raw_time)
+        return d.replace(hour=hm[0], minute=hm[1]) if hm else d
     return None
+
+
+def parse_match_date(raw_date: str, raw_time: str | None) -> datetime | None:
+    """The kickoff of a football-data row.
+
+    A timed row is UK local time, returned as an aware UTC datetime: 15:00
+    on a BST date is 14:00Z, and on a GMT date it is 15:00Z. In the repeated
+    hour of the October change the first (BST) reading wins, and a time in
+    the skipped March hour is read as GMT (zoneinfo's fold=0). A date-only
+    row (or one whose Time is not HH:MM) stays a naive midnight, which
+    Postgres reads in its session TimeZone exactly as before.
+
+    Rows written before this change sit at the naive wall clock
+    (parse_wall_clock). promote() refuses to run while any of them would get a
+    corrected twin (check_legacy_kickoffs); moving them is an operator task."""
+    d = parse_wall_clock(raw_date, raw_time)
+    if d is None or _kickoff_time(raw_time) is None:
+        return d
+    return d.replace(tzinfo=FOOTBALL_DATA_TZ).astimezone(timezone.utc)
 
 
 def to_int(v: str | None) -> int | None:
@@ -212,6 +250,71 @@ def raw_result(row: dict) -> RawResult | None:
 def fixture_label(row: dict) -> str:
     """'F2 05/12/2025 Bastia v Red Star' — names a raw row in log lines."""
     return f"{row.get('league')} {row.get('Date')} {row.get('HomeTeam')} v {row.get('AwayTeam')}"
+
+
+# Every soccer kickoff already in matches, for check_legacy_kickoffs.
+EXISTING_SOCCER_KICKOFFS_SQL = """
+    SELECT m.home_team_id::text AS home_id, m.away_team_id::text AS away_id, m.match_date
+      FROM matches m
+      JOIN leagues l ON l.id = m.league_id
+     WHERE l.sport = 'soccer'
+"""
+
+
+class LegacyKickoffsPresent(RuntimeError):
+    """promote() would insert a corrected-kickoff twin of a row it wrote at the legacy kickoff."""
+
+
+def stranded_legacy_kickoffs(
+    rows: Iterable[dict],
+    league_ids: dict[str, str],
+    team_ids: dict[str, str],
+    existing: set[tuple[str, str, datetime]],
+    db_tz: tzinfo,
+) -> list[dict]:
+    """Raw rows that promote() would now insert as a SECOND matches row: the
+    corrected (UTC) kickoff is free, while the row promote_raw wrote for the
+    same pair at the legacy kickoff (the UK wall clock read in `db_tz`)
+    exists. `existing` holds (home_id, away_id, UTC kickoff). Pure."""
+    stranded = []
+    for r in rows:
+        if r.get("league") not in league_ids or raw_result(r) is None:
+            continue
+        home_id = team_ids.get(normalize_team_name(r.get("HomeTeam") or ""))
+        away_id = team_ids.get(normalize_team_name(r.get("AwayTeam") or ""))
+        wall = parse_wall_clock(r.get("Date") or "", r.get("Time"))
+        corrected = parse_match_date(r.get("Date") or "", r.get("Time"))
+        if not (home_id and away_id) or wall is None or corrected is None or corrected.tzinfo is None:
+            continue  # unresolved, or date-only: its kickoff did not change
+        legacy = wall.replace(tzinfo=db_tz).astimezone(timezone.utc)
+        if legacy == corrected:
+            continue
+        key_home, key_away = str(home_id), str(away_id)
+        if (key_home, key_away, legacy) in existing and (key_home, key_away, corrected) not in existing:
+            stranded.append(r)
+    return stranded
+
+
+def check_legacy_kickoffs(cur, rows: list[dict], league_ids: dict[str, str], team_ids: dict[str, str]) -> None:
+    """Raise LegacyKickoffsPresent, before promote() writes a single match,
+    when any raw row would get a corrected-kickoff twin
+    (stranded_legacy_kickoffs). Every run re-promotes the whole raw table,
+    and on 2026-10-31 about 63,800 timed summer-time rows still sat at the
+    legacy kickoff, so one run after the timezone fix would have inserted
+    that many duplicate finished matches into the training corpus."""
+    cur.execute("SHOW TimeZone")
+    db_tz = ZoneInfo(cur.fetchone()["TimeZone"])  # loud if Postgres reports a zone Python cannot load
+    cur.execute(EXISTING_SOCCER_KICKOFFS_SQL)
+    existing = {(r["home_id"], r["away_id"], r["match_date"].astimezone(timezone.utc)) for r in cur.fetchall()}
+    stranded = stranded_legacy_kickoffs(rows, league_ids, team_ids, existing, db_tz)
+    if stranded:
+        sample = "; ".join(f"{fixture_label(r)} {r.get('Time')}" for r in stranded[:5])
+        raise LegacyKickoffsPresent(
+            f"{len(stranded)} raw row(s) would be promoted as a second matches row: promote_raw wrote them at the "
+            f"UK wall clock read as {db_tz} (before 2026-10-31) and their corrected UTC kickoff is free. Move "
+            f"those rows' match_date from UK local time to UTC first (an operator task), then re-run. "
+            f"First {min(5, len(stranded))}: {sample}"
+        )
 
 
 def upsert_leagues(cur, codes: set[str]) -> dict[str, str]:
@@ -479,6 +582,9 @@ def promote(database_url: str, *, batch_size: int = 1000) -> Promotion:
             stats.teams = len(team_ids)
             logger.info("Upserted %d teams", stats.teams)
 
+            # Before any match is written: the loop below commits in batches.
+            check_legacy_kickoffs(cur, rows, league_ids, team_ids)
+
             # Insert matches one-by-one (we need the returned id for stats/odds)
             for r in rows:
                 code = r.get("league")
@@ -571,7 +677,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.database_url:
         logger.error("DATABASE_URL not set and --database-url not provided")
         return 2
-    stats = promote(args.database_url, batch_size=args.batch_size)
+    try:
+        stats = promote(args.database_url, batch_size=args.batch_size)
+    except LegacyKickoffsPresent as e:
+        logger.error("Refusing to promote — nothing written: %s", e)
+        return 1
     logger.info(
         "Promotion complete: leagues=%d teams=%d matches=%d match_stats=%d odds=%d "
         "skipped_no_result=%d ht_dropped=%d left_cancelled=%d",

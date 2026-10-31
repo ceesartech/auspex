@@ -148,6 +148,26 @@ class TestPlan:
         )
         assert [e["match_id"] for e in entries] == ["m1"]
 
+    def test_a_summer_row_is_found_where_promote_raw_wrote_it(self):
+        # promote_raw stored the UK wall clock (19:00) as 19:00Z until
+        # 2026-10-31; parse_match_date now reads it as 18:00Z. The row still
+        # sits at the legacy kickoff, so that is where the backfill looks first.
+        legacy = datetime(2016, 7, 10, 19, 0, tzinfo=timezone.utc)
+        entries, _ = _plan(
+            [_raw("BR1", "2016", "Chapecoense-SC", "Santos", date="10/07/2016")],
+            [_match("m1", "lg-br1", "t-chape", "t-santos", legacy, "2020-2116")],
+        )
+        assert [(e["match_id"], e["new_season"]) for e in entries] == [("m1", "2016")]
+
+    def test_a_summer_row_already_moved_to_utc_is_found_too(self):
+        # The operator's UK-time shift may run before this backfill.
+        shifted = datetime(2016, 7, 10, 18, 0, tzinfo=timezone.utc)
+        entries, _ = _plan(
+            [_raw("BR1", "2016", "Chapecoense-SC", "Santos", date="10/07/2016")],
+            [_match("m1", "lg-br1", "t-chape", "t-santos", shifted, "2020-2116")],
+        )
+        assert [(e["match_id"], e["new_season"]) for e in entries] == [("m1", "2016")]
+
 
 class _Cursor:
     def __init__(self, conn):

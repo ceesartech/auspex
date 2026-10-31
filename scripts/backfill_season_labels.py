@@ -20,8 +20,10 @@ orchestrator, and turned into fbref URLs by scrape_fbref_venues (fbref
 spells these seasons '2016' and '2016-2017').
 
 Each matches row is tied to its raw_football_data row the way promote_raw
-ties them — league code, normalised team names, kickoff parsed by
-promote_raw.parse_match_date in the database's TimeZone — and relabelled
+tied them — league code, normalised team names, and the kickoff as
+promote_raw wrote it until 2026-10-31 (the UK wall clock,
+promote_raw.parse_wall_clock, read in the database's TimeZone), falling back
+to the corrected UTC kickoff (promote_raw.parse_match_date) — and relabelled
 only when its season is still the label the old code produced from that
 raw season. A row the ESPN path created, or one edited since, is left
 alone and counted. Raw duplicates that disagree on the new label leave
@@ -130,11 +132,16 @@ def plan(
         league_id = league_ids.get(code)
         home_id = team_ids.get(pr.normalize_team_name(r.get("HomeTeam") or ""))
         away_id = team_ids.get(pr.normalize_team_name(r.get("AwayTeam") or ""))
-        match_dt = pr.parse_match_date(r.get("Date") or "", r.get("Time"))
-        if not (league_id and home_id and away_id and match_dt):
+        wall_clock = pr.parse_wall_clock(r.get("Date") or "", r.get("Time"))
+        if not (league_id and home_id and away_id and wall_clock):
             counts["raw_row_unresolved"] += 1
             continue
-        m = matches_by_key.get((home_id, away_id, kickoff_key(match_dt, db_tz)))
+        # The legacy kickoff first (where promote_raw wrote the row), then the
+        # corrected one, in case the operator's UK-time shift has run already.
+        m = matches_by_key.get((home_id, away_id, kickoff_key(wall_clock, db_tz)))
+        if m is None:
+            corrected = pr.parse_match_date(r.get("Date") or "", r.get("Time"))
+            m = matches_by_key.get((home_id, away_id, kickoff_key(corrected, db_tz))) if corrected else None
         if m is None:
             counts["no_matches_row"] += 1
             continue

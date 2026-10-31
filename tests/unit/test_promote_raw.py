@@ -11,7 +11,9 @@ import importlib.util
 import logging
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -270,8 +272,9 @@ def promote_with(monkeypatch):
     insert_match calls."""
     calls: list[dict] = []
 
-    def run(rows, insert_returns="m-1"):
+    def run(rows, insert_returns="m-1", legacy_check=lambda cur, rows, league_ids, team_ids: None):
         monkeypatch.setattr(pr.psycopg2, "connect", lambda url: _FakeConn(rows))
+        monkeypatch.setattr(pr, "check_legacy_kickoffs", legacy_check)
         monkeypatch.setattr(pr, "upsert_leagues", lambda cur, codes: {c: f"lg-{c}" for c in codes})
         monkeypatch.setattr(
             pr, "upsert_teams", lambda cur, names, by_team: {pr.normalize_team_name(n): f"t-{n}" for n in names}
@@ -309,3 +312,140 @@ class TestPromote:
             stats, _calls = promote_with([NORMAL], insert_returns=None)
         assert (stats.matches, stats.left_cancelled, stats.match_stats) == (0, 1, 0)
         assert "is 'cancelled'" in caplog.text
+
+    def test_the_legacy_kickoff_check_runs_before_any_match_is_written(self, promote_with):
+        def refuse(cur, rows, league_ids, team_ids):
+            assert set(league_ids) == {"F2"} and team_ids  # after the league/team upserts
+            raise pr.LegacyKickoffsPresent("1 raw row(s) would be promoted as a second matches row")
+
+        with pytest.raises(pr.LegacyKickoffsPresent):
+            promote_with([NORMAL], legacy_check=refuse)
+        _stats, calls = promote_with([NORMAL])
+        assert len(calls) == 1  # the same rows promote once nothing is stranded
+
+    def test_main_reports_the_refusal_and_exits_1(self, monkeypatch, caplog):
+        def refuse(url, batch_size):
+            raise pr.LegacyKickoffsPresent("63768 raw row(s) would be promoted as a second matches row")
+
+        monkeypatch.setattr(pr, "promote", refuse)
+        assert pr.main(["--database-url", "postgres://fake"]) == 1
+        assert "Refusing to promote — nothing written: 63768 raw row(s)" in caplog.text
+
+
+UTC = timezone.utc
+
+
+class TestParseMatchDate:
+    """football-data's Time is UK local time. Until 2026-10-31 it was stored
+    as if it were UTC, so every summer kickoff landed 1 h late (65 fixtures
+    the ESPN results path also wrote sit exactly 1 h apart on prod)."""
+
+    def test_a_bst_kickoff_is_an_hour_earlier_in_utc(self):
+        assert pr.parse_match_date("05/07/2025", "15:00") == datetime(2025, 7, 5, 14, 0, tzinfo=UTC)
+
+    def test_a_gmt_kickoff_is_the_same_in_utc(self):
+        assert pr.parse_match_date("05/12/2025", "19:00") == datetime(2025, 12, 5, 19, 0, tzinfo=UTC)
+
+    def test_the_prod_duplicate_now_lands_on_the_espn_kickoff(self):
+        # Shandong Taishan v Yunnan Yukun (CN1): ESPN row e77e612a is
+        # 2026-07-10 11:35Z; the football-data row (90455957) sits at 12:35.
+        assert pr.parse_match_date("10/07/2026", "12:35") == datetime(2026, 7, 10, 11, 35, tzinfo=UTC)
+
+    def test_a_uk_after_midnight_kickoff_moves_back_a_day(self):
+        # Internacional v Cruzeiro (BR1), 00:30 UK on 23/07 = 22/07 23:30Z.
+        assert pr.parse_match_date("23/07/2026", "00:30") == datetime(2026, 7, 22, 23, 30, tzinfo=UTC)
+
+    def test_the_two_digit_year_format_converts_too(self):
+        assert pr.parse_match_date("13/08/16", "15:00") == datetime(2016, 8, 13, 14, 0, tzinfo=UTC)
+
+    def test_the_repeated_october_hour_reads_as_bst(self):
+        assert pr.parse_match_date("26/10/2025", "01:30") == datetime(2025, 10, 26, 0, 30, tzinfo=UTC)
+
+    @pytest.mark.parametrize("raw_time", [None, "", "TBC", "25:99"])
+    def test_a_date_only_row_keeps_its_naive_midnight(self, raw_time):
+        # Unchanged: Postgres reads it in the session TimeZone, as before.
+        got = pr.parse_match_date("05/07/2025", raw_time)
+        assert got == datetime(2025, 7, 5) and got.tzinfo is None
+
+    @pytest.mark.parametrize("raw_date", ["", None, "2025-07-05", "32/07/2025"])
+    def test_an_unreadable_date_is_none(self, raw_date):
+        assert pr.parse_match_date(raw_date, "15:00") is None
+
+    def test_parse_wall_clock_is_the_legacy_naive_reading(self):
+        assert pr.parse_wall_clock("05/07/2025", "15:00") == datetime(2025, 7, 5, 15, 0)
+        assert pr.parse_wall_clock("05/07/2025", None) == datetime(2025, 7, 5)
+
+
+SUMMER = {**NORMAL, "Date": "05/07/2025", "Time": "15:00"}  # 14:00Z; legacy row at 15:00Z
+WINTER = {**NORMAL, "Date": "05/12/2025", "Time": "19:00"}  # 19:00Z either way
+LEAGUE_IDS = {"F2": "lg-F2"}
+TEAM_IDS = {"bastia": "t-bastia", "red star": "t-red-star"}
+
+
+def _key(when):
+    return ("t-bastia", "t-red-star", when)
+
+
+class TestStrandedLegacyKickoffs:
+    """A football-data run re-promotes the whole raw table. Without this check
+    the first run after the timezone fix would miss ON CONFLICT on every
+    summer row promote_raw wrote at the legacy kickoff and insert a second
+    finished match for each: about 63,800 rows on prod (2026-10-31)."""
+
+    def _stranded(self, rows, existing, db_tz=UTC):
+        return pr.stranded_legacy_kickoffs(rows, LEAGUE_IDS, TEAM_IDS, set(existing), db_tz)
+
+    def test_a_summer_row_at_the_legacy_kickoff_is_stranded(self):
+        assert self._stranded([SUMMER], [_key(datetime(2025, 7, 5, 15, 0, tzinfo=UTC))]) == [SUMMER]
+
+    def test_a_winter_row_is_unchanged_in_a_utc_database(self):
+        assert self._stranded([WINTER], [_key(datetime(2025, 12, 5, 19, 0, tzinfo=UTC))]) == []
+
+    def test_a_row_already_moved_to_utc_is_fine(self):
+        assert self._stranded([SUMMER], [_key(datetime(2025, 7, 5, 14, 0, tzinfo=UTC))]) == []
+
+    def test_a_legacy_row_beside_an_espn_twin_does_not_block(self):
+        # The upsert lands on the ESPN row; the old twin is the operator's job.
+        legacy, espn = datetime(2025, 7, 5, 15, 0, tzinfo=UTC), datetime(2025, 7, 5, 14, 0, tzinfo=UTC)
+        assert self._stranded([SUMMER], [_key(legacy), _key(espn)]) == []
+
+    def test_date_only_unresolved_and_unfinished_rows_are_ignored(self):
+        midnight = datetime(2025, 7, 5, 0, 0, tzinfo=UTC)
+        rows = [{**SUMMER, "Time": ""}, {**SUMMER, "HomeTeam": "Nowhere"}, {**SUMMER, "FTHG": ""}]
+        assert self._stranded(rows, [_key(midnight), _key(datetime(2025, 7, 5, 15, 0, tzinfo=UTC))]) == []
+
+    def test_the_legacy_kickoff_is_read_in_the_database_timezone(self):
+        # A naive 15:00 in a Europe/Paris session was stored as 13:00Z.
+        assert self._stranded(
+            [SUMMER], [_key(datetime(2025, 7, 5, 13, 0, tzinfo=UTC))], db_tz=ZoneInfo("Europe/Paris")
+        ) == [SUMMER]
+
+
+class _GuardCursor:
+    def __init__(self, existing, tz="UTC"):
+        self._existing, self._tz, self._last = existing, tz, ""
+
+    def execute(self, sql, params=None):
+        self._last = sql
+
+    def fetchone(self):
+        return {"TimeZone": self._tz}
+
+    def fetchall(self):
+        return [{"home_id": h, "away_id": a, "match_date": when} for h, a, when in self._existing]
+
+
+class TestCheckLegacyKickoffs:
+    def test_raises_with_the_count_and_a_sample(self):
+        cur = _GuardCursor([_key(datetime(2025, 7, 5, 15, 0, tzinfo=UTC))])
+        with pytest.raises(pr.LegacyKickoffsPresent, match=r"^1 raw row\(s\).*F2 05/07/2025 Bastia v Red Star 15:00"):
+            pr.check_legacy_kickoffs(cur, [SUMMER, WINTER], LEAGUE_IDS, TEAM_IDS)
+
+    def test_passes_once_the_rows_sit_at_utc(self):
+        cur = _GuardCursor([_key(datetime(2025, 7, 5, 14, 0, tzinfo=UTC))])
+        assert pr.check_legacy_kickoffs(cur, [SUMMER, WINTER], LEAGUE_IDS, TEAM_IDS) is None
+
+    def test_postgres_timestamps_in_another_zone_compare_by_instant(self):
+        paris = datetime(2025, 7, 5, 17, 0, tzinfo=ZoneInfo("Europe/Paris"))  # 15:00Z
+        with pytest.raises(pr.LegacyKickoffsPresent):
+            pr.check_legacy_kickoffs(_GuardCursor([_key(paris)]), [SUMMER], LEAGUE_IDS, TEAM_IDS)
