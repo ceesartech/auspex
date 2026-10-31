@@ -106,6 +106,28 @@ class TestPlanRegrade:
         changes, counts = rp.plan_regrade(rows, {})
         assert changes == [] and counts["skipped_ungradable"] == 1
 
+    def test_a_verdict_is_never_nulled_without_a_push(self, caplog):
+        # An 'other' pick without its scoreline keys grades (actual, NULL):
+        # what 'other' excluded is unknown. The old False stays, counted + logged.
+        rows = [_row("cs0", "correct_score", "dixon_coles_nhl", "other", "5-2", False, h=5, a=2)]
+        assert rows[0]["probabilities"] is None
+
+        with caplog.at_level("WARNING", logger="regrade_predictions"):
+            changes, counts = rp.plan_regrade(rows, {})
+
+        assert changes == []
+        assert counts["skipped_would_ungrade"] == 1 and counts["changed"] == 0
+        assert any("cs0" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)
+
+    def test_a_push_may_replace_a_verdict(self):
+        # 2-1 against over_3 is a push: NULL is the right verdict there,
+        # not an un-grade.
+        rows = [_row("ou3", "over_under", "ensemble", "over_3", "under", False, h=2, a=1, metadata={})]
+        changes, counts = rp.plan_regrade(rows, {})
+        assert counts["skipped_would_ungrade"] == 0 and counts["changed"] == 1
+        assert changes[0]["new_is_correct"] is None
+        assert changes[0]["new_actual_outcome"].startswith("push")
+
     def test_line_dependent_rows_need_their_context(self):
         rows = [_row("t", "total", "ensemble_nfl_tot", "over", "over", True, h=30, a=20)]
         with pytest.raises(ValueError, match="no grading context"):
@@ -186,6 +208,16 @@ class TestCsv:
 # ── run(): ordering + scope guarantees ───────────────────────────────
 
 
+# Both halves of the plan-time guard, as GUARDED_UPDATE_SQL must spell
+# them (whitespace-normalised). Dropping either lets a stale plan
+# overwrite a row something else rewrote since.
+UPDATE_GUARDS = (
+    "WHERE id = %(prediction_id)s",
+    "AND actual_outcome IS NOT DISTINCT FROM %(old_actual_outcome)s",
+    "AND is_correct IS NOT DISTINCT FROM %(old_is_correct)s",
+)
+
+
 class FakeCursor:
     def __init__(self, conn):
         self.conn = conn
@@ -208,8 +240,12 @@ class FakeCursor:
             return
         if sql_norm.startswith("UPDATE predictions"):
             assert not self.conn.readonly
+            for guard in UPDATE_GUARDS:
+                assert guard in sql_norm, f"UPDATE lacks its guard {guard!r}"
             # The audit CSV must already be on disk.
             assert Path(self.conn.out_csv).exists()
+            if params["prediction_id"] in self.conn.boom:
+                raise RuntimeError("connection lost")
             self.conn.updates.append(params)
             self.rowcount = 0 if params["prediction_id"] in self.conn.stale else 1
             return
@@ -220,13 +256,14 @@ class FakeCursor:
 
 
 class FakeConn:
-    def __init__(self, rows, out_csv, stale=()):
-        self.rows, self.out_csv, self.stale = rows, out_csv, set(stale)
+    def __init__(self, rows, out_csv, stale=(), boom=()):
+        self.rows, self.out_csv, self.stale, self.boom = rows, out_csv, set(stale), set(boom)
         self.readonly = False
         self.updates: list = []
         self.log: list = []
         self.commits = 0
         self.read_params = None
+        self.stale_file_at_commit = None
 
     def set_session(self, readonly=False):
         self.readonly = readonly
@@ -239,6 +276,8 @@ class FakeConn:
 
     def commit(self):
         self.commits += 1
+        stale_file = Path(rp.stale_ids_path(self.out_csv))
+        self.stale_file_at_commit = stale_file.read_text() if stale_file.exists() else None
 
 
 class TestRun:
@@ -256,6 +295,7 @@ class TestRun:
         }
         assert len(list(csv.DictReader(out.open()))) == 2
         assert counts["changed"] == 2 and counts["scanned"] == 5
+        assert not Path(rp.stale_ids_path(str(out))).exists()
 
     def test_apply_updates_only_changed_rows_guarded_on_old_values(self, tmp_path):
         out = tmp_path / "apply.csv"
@@ -269,6 +309,67 @@ class TestRun:
         assert (dc["new_actual_outcome"], dc["new_is_correct"]) == ("draw", False)
         assert counts["updated"] == 1 and counts["changed_since_plan"] == 1
         assert conn.commits == 1
+
+    def test_stale_ids_are_logged_and_listed_before_the_commit(self, tmp_path, caplog):
+        out = tmp_path / "apply.csv"
+        conn = FakeConn(_nhl_rows(), str(out), stale={"cs"})
+
+        with caplog.at_level("ERROR", logger="regrade_predictions"):
+            rp.run(conn, 30, "dixon_coles_nhl", None, True, str(out))
+
+        stale_file = Path(str(out) + ".stale.txt")
+        assert stale_file.read_text() == "cs\n"
+        assert conn.stale_file_at_commit == "cs\n"
+        errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1 and "cs" in errors[0] and str(stale_file) in errors[0]
+        # The rollback CSV still carries the stale row; the list says to skip it.
+        assert {r["prediction_id"] for r in csv.DictReader(out.open())} == {"dc", "cs"}
+
+    def test_a_clean_apply_leaves_an_empty_stale_list(self, tmp_path, caplog):
+        out = tmp_path / "clean.csv"
+        conn = FakeConn(_nhl_rows(), str(out))
+
+        with caplog.at_level("ERROR", logger="regrade_predictions"):
+            counts = rp.run(conn, 30, "dixon_coles_nhl", None, True, str(out))
+
+        assert counts["updated"] == 2 and counts["changed_since_plan"] == 0
+        assert Path(rp.stale_ids_path(str(out))).read_text() == ""
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+    def test_an_existing_stale_list_refuses_before_any_update(self, tmp_path):
+        out = tmp_path / "taken_stale.csv"
+        stale_file = Path(rp.stale_ids_path(str(out)))
+        stale_file.write_text("earlier run\n")
+        conn = FakeConn(_nhl_rows(), str(out))
+
+        with pytest.raises(FileExistsError, match="write-once"):
+            rp.run(conn, 30, "dixon_coles_nhl", None, True, str(out))
+
+        assert conn.updates == [] and conn.commits == 0
+        assert stale_file.read_text() == "earlier run\n"
+
+    def test_a_run_that_dies_mid_way_leaves_no_stale_list(self, tmp_path):
+        # Nothing commits, so an empty list ("every row written") would lie.
+        out = tmp_path / "boom.csv"
+        conn = FakeConn(_nhl_rows(), str(out), boom={"cs"})
+
+        with pytest.raises(RuntimeError, match="connection lost"):
+            rp.run(conn, 30, "dixon_coles_nhl", None, True, str(out))
+
+        assert conn.commits == 0
+        assert not Path(rp.stale_ids_path(str(out))).exists()
+
+    def test_the_fake_cursor_rejects_an_update_missing_a_guard(self, tmp_path, monkeypatch):
+        # The guard assertions above have teeth: an UPDATE without either
+        # IS NOT DISTINCT FROM clause never reaches the "database".
+        for i, guard in enumerate(UPDATE_GUARDS[1:]):
+            unguarded = " ".join(rp.GUARDED_UPDATE_SQL.split()).replace(guard, "")
+            monkeypatch.setattr(rp, "GUARDED_UPDATE_SQL", unguarded)
+            out = tmp_path / f"unguarded_{i}.csv"
+            conn = FakeConn(_nhl_rows(), str(out))
+            with pytest.raises(AssertionError, match="lacks its guard"):
+                rp.run(conn, 30, "dixon_coles_nhl", None, True, str(out))
+            assert conn.updates == [] and conn.commits == 0
 
     def test_existing_csv_refuses_before_any_update(self, tmp_path):
         out = tmp_path / "taken.csv"

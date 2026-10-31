@@ -286,7 +286,12 @@ def list_open_recs_for_match(cur, match_id: str) -> list[dict]:
         DB TRIGGER, which sets status/actual_result but computes NO
         profit_loss — without this branch those rows stay P&L-less
         forever and every ROI rollup silently understates. The settle
-        loop recomputes the same status and fills the money columns."""
+        loop recomputes the same status and fills the money columns.
+
+    `sport` (leagues.sport) and `p_model_name` tell grade_rec_selection
+    an NHL rec from a soccer one: NHL double_chance is the regulation
+    3-way and must not settle on the final score. LEFT JOINs, so a rec
+    never drops out of settlement over a missing league or prediction."""
     cur.execute(
         """
         SELECT br.id::text AS rec_id,
@@ -294,9 +299,13 @@ def list_open_recs_for_match(cur, match_id: str) -> list[dict]:
                br.bet_type, br.selection,
                br.recommended_stake, br.odds_at_recommendation, br.status,
                p.actual_outcome AS p_actual_outcome,
-               p.is_correct AS p_is_correct
+               p.is_correct AS p_is_correct,
+               p.model_name AS p_model_name,
+               l.sport AS sport
         FROM betting_recommendations br
         LEFT JOIN predictions p ON p.id = br.prediction_id
+        LEFT JOIN matches m ON m.id = br.match_id
+        LEFT JOIN leagues l ON l.id = m.league_id
         WHERE br.match_id = %s
           AND (
                 br.status IN ('pending', 'placed')
@@ -447,7 +456,14 @@ def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
     for rec in list_open_recs_for_match(cur, match["match_id"]):
         if match["home_score"] is None or match["away_score"] is None:
             continue
-        outcome = grade_rec_selection(rec["bet_type"], rec["selection"], match["home_score"], match["away_score"])
+        outcome = grade_rec_selection(
+            rec["bet_type"],
+            rec["selection"],
+            match["home_score"],
+            match["away_score"],
+            sport=rec["sport"],
+            model_name=rec["p_model_name"],
+        )
         if outcome is None:
             continue
         new_status, pl = rec_status_and_pl(outcome, rec["recommended_stake"], rec["odds_at_recommendation"])

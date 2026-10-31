@@ -141,10 +141,24 @@ def main():
     # train_all_models entirely, so no promote gate and no derived-market
     # guard would ever see the result — it would just start serving 8 NHL
     # markets. Pinned to the pre-refit values until an NHL-specific A/B
-    # exists. (The separately-tracked NHL defect — max_goals=6 and
-    # home_advantage=0.25 against league_avg_goals ~3.10, truncating ~3.4%
-    # of per-side mass — is deliberately NOT fixed here for the same
-    # reason: it needs its own measurement, not a drive-by.)
+    # exists. The NHL defects (as corrected 2026-10-31 in model_config.py,
+    # next to dixon_coles_config_pinned_to_legacy_fit) are deliberately NOT
+    # fixed here for the same reason — each needs its own measurement, not
+    # a drive-by:
+    #   * level inflation: the served artifact predates the scale-gauge
+    #     correction in PoissonMatchPredictor.train, so its lambdas carry
+    #     that positive level bias until it is retrained;
+    #   * a stale fit: no 2025-26 data, so 'Utah Mammoth' is an unknown
+    #     team and serves attack = defense = 1.0;
+    #   * rho forced to 0 (below): final scores are never 0-0 or 1-1, so
+    #     the rho NLL runs away instead of fitting;
+    #   * a regulation-tie deficit: fitted on FINAL scores (OT/SO
+    #     included), its draw cells — what regulation_1x2 and double_chance
+    #     price — held 15.5% on average vs a 23.4% observed regulation-tie
+    #     rate over the 286 graded matches to 2026-10-31.
+    # (max_goals=6 is not one: precompute_predictions_nhl builds every
+    # served matrix at market_derivation.MAX_GOALS_DERIVE=10, and
+    # home_advantage=0.25 roughly matches NHL's observed home edge.)
     model = DixonColesPredictor(dixon_coles_config_pinned_to_legacy_fit("dixon_coles_nhl"))
     result = model.train(train_df, val_df=val_df)
     LOGGER.info(

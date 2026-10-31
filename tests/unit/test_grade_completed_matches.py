@@ -84,19 +84,24 @@ class FakeCursor:
                 if r["status"] not in ("pending", "placed"):
                     continue
                 p = self.predictions.get(r["prediction_id"], {})
-                rows.append(
-                    {
-                        "rec_id": r["id"],
-                        "prediction_id": r["prediction_id"],
-                        "recommended_stake": r["recommended_stake"],
-                        "odds_at_recommendation": r["odds_at_recommendation"],
-                        "bet_type": r.get("bet_type"),
-                        "selection": r.get("selection"),
-                        "status": r["status"],
-                        "p_actual_outcome": p.get("actual_outcome"),
-                        "p_is_correct": p.get("is_correct"),
-                    }
-                )
+                row = {
+                    "rec_id": r["id"],
+                    "prediction_id": r["prediction_id"],
+                    "recommended_stake": r["recommended_stake"],
+                    "odds_at_recommendation": r["odds_at_recommendation"],
+                    "bet_type": r.get("bet_type"),
+                    "selection": r.get("selection"),
+                    "status": r["status"],
+                    "p_actual_outcome": p.get("actual_outcome"),
+                    "p_is_correct": p.get("is_correct"),
+                }
+                # Only when the query selects them (as for probabilities
+                # above), so dropping either column fails the NHL rec tests.
+                if "p.model_name AS p_model_name" in sql_norm:
+                    row["p_model_name"] = p.get("model_name")
+                if "l.sport AS sport" in sql_norm and "JOIN leagues l" in sql_norm:
+                    row["sport"] = r.get("sport")
+                rows.append(row)
             self._last = ("recs", rows)
             return
         if sql_norm.startswith("UPDATE betting_recommendations"):
@@ -136,11 +141,12 @@ def _pred(
     }
 
 
-def _rec(rid, match_id, prediction_id, stake, odds, bet_type="1x2", selection="home", status="pending"):
+def _rec(rid, match_id, prediction_id, stake, odds, bet_type="1x2", selection="home", status="pending", sport="soccer"):
     return {
         "id": rid,
         "bet_type": bet_type,
         "selection": selection,
+        "sport": sport,
         "match_id": match_id,
         "prediction_id": prediction_id,
         "recommended_stake": Decimal(str(stake)),
@@ -394,6 +400,68 @@ class TestGradeMatchEdgeCases:
         assert cur.predictions["p1"]["is_correct"] is True
         assert cur.recs["r1"]["status"] == "won"
         assert cur.recs["r1"]["profit_loss"] == Decimal("25.00")
+
+
+class TestRecSettlementGuards:
+    """Recs the final score alone cannot settle stay open — never a
+    guessed won/lost."""
+
+    OT_GAME = {"match_id": "m1", "home_score": 4, "away_score": 3, "metadata": {"regulation_winner": "tie"}}
+
+    def test_nhl_double_chance_rec_is_never_settled_on_the_final_score(self):
+        # 4-3 in OT: on the final score '12' would win; regulation was tied.
+        preds = [_pred("p1", "m1", "double_chance", "dixon_coles_nhl", "12")]
+        recs = [_rec("r1", "m1", "p1", stake=20, odds=1.25, bet_type="double_chance", selection="12", sport="nhl")]
+        cur = FakeCursor(preds, recs)
+
+        counts = gcm.grade_match(cur, self.OT_GAME)
+
+        assert counts["recs_settled"] == 0
+        assert cur.recs["r1"]["status"] == "pending" and cur.recs["r1"]["profit_loss"] is None
+        # The prediction row still grades — from regulation_winner.
+        assert cur.predictions["p1"]["is_correct"] is False
+
+    def test_the_league_alone_marks_an_nhl_rec(self):
+        # No prediction row to name the model: leagues.sport is enough.
+        recs = [_rec("r1", "m1", None, stake=20, odds=1.25, bet_type="double_chance", selection="12", sport="nhl")]
+        cur = FakeCursor([], recs)
+        assert gcm.grade_match(cur, self.OT_GAME)["recs_settled"] == 0
+        assert cur.recs["r1"]["status"] == "pending"
+
+    def test_the_model_alone_marks_an_nhl_rec(self):
+        # League sport unknown (NULL from the LEFT JOIN): the NHL model is enough.
+        preds = [_pred("p1", "m1", "double_chance", "dixon_coles_nhl", "12")]
+        recs = [_rec("r1", "m1", "p1", stake=20, odds=1.25, bet_type="double_chance", selection="12", sport=None)]
+        cur = FakeCursor(preds, recs)
+        assert gcm.grade_match(cur, self.OT_GAME)["recs_settled"] == 0
+        assert cur.recs["r1"]["status"] == "pending"
+
+    def test_soccer_double_chance_rec_still_settles(self):
+        match = {"match_id": "m1", "home_score": 1, "away_score": 1, "metadata": {}}
+        preds = [_pred("p1", "m1", "double_chance", "ensemble", "X2")]
+        recs = [_rec("r1", "m1", "p1", stake=10, odds=1.5, bet_type="double_chance", selection="X2")]
+        cur = FakeCursor(preds, recs)
+
+        assert gcm.grade_match(cur, match)["recs_settled"] == 1
+        assert cur.recs["r1"]["status"] == "won"
+        assert cur.recs["r1"]["profit_loss"] == Decimal("5.0")
+
+    def test_correct_score_other_rec_is_never_settled(self):
+        # 5-2 is not among the prediction's listed keys, so the prediction
+        # row credits 'other' — but the rec cannot see those keys.
+        probs = {"3-2": 0.055, "2-2": 0.052, "4-3": 0.039, "other": 0.854}
+        match = {"match_id": "m1", "home_score": 5, "away_score": 2, "metadata": {}}
+        preds = [_pred("p1", "m1", "correct_score", "dixon_coles_nhl", "other", probabilities=probs)]
+        recs = [
+            _rec("r1", "m1", "p1", stake=10, odds=1.2, bet_type="correct_score", selection="other", sport="nhl"),
+            _rec("r2", "m1", "p1", stake=10, odds=9.0, bet_type="correct_score", selection="5-2", sport="nhl"),
+        ]
+        cur = FakeCursor(preds, recs)
+
+        assert gcm.grade_match(cur, match)["recs_settled"] == 1
+        assert cur.recs["r1"]["status"] == "pending" and cur.recs["r1"]["profit_loss"] is None
+        assert cur.recs["r2"]["status"] == "won"
+        assert cur.predictions["p1"]["is_correct"] is True
 
 
 # ── profit_loss math ─────────────────────────────────────────────────

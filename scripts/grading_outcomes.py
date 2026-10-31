@@ -679,10 +679,31 @@ def _extract_ah_line(predicted_outcome):
         return None
 
 
-def grade_rec_selection(bet_type: str, selection: str, home_score: int, away_score: int):
+def grade_rec_selection(
+    bet_type: str,
+    selection: str,
+    home_score: int,
+    away_score: int,
+    *,
+    sport: Optional[str] = None,
+    model_name: Optional[str] = None,
+):
     """Settlement verdict for one recommendation from ITS OWN selection and
     the final score. Returns REC_* or None (ungradable: unknown format, or
-    a market needing data we don't grade yet — *_ht, team_total)."""
+    a market needing data we don't grade yet — *_ht, team_total).
+
+    `sport` (leagues.sport of the rec's match) and `model_name` (the model
+    of the rec's prediction) say whether the rec is on an NHL match; either
+    one naming NHL is enough. Both default to None, which settles as
+    soccer. Two selections the final score cannot settle are refused
+    (None, never settled), whatever the caller passes:
+      * double_chance on an NHL match: it is the REGULATION 3-way, and the
+        final score (OT/SO included) is never a draw, so every '12' would
+        win (the same defect the prediction grader had: 286/286 to
+        2026-10-31). The prediction grader reads metadata.regulation_winner;
+        this function only sees the final score.
+      * correct_score 'other': it covers whatever that prediction did not
+        list, and the rec does not carry the prediction's key set."""
     bt = (bet_type or "").strip().lower()
     side, line = _split_sel_line(selection)
     margin = home_score - away_score
@@ -720,6 +741,15 @@ def grade_rec_selection(bet_type: str, selection: str, home_score: int, away_sco
         covers = DOUBLE_CHANCE_COVERS.get((selection or "").strip().upper())
         if covers is None:
             return None
+        if (sport or "").strip().lower() == "nhl" or is_nhl_model(model_name):
+            logger.warning(
+                "double_chance rec %r on an NHL match (sport=%r, model=%r) is the regulation 3-way; "
+                "the final score cannot settle it — left open",
+                selection,
+                sport,
+                model_name,
+            )
+            return None
         return REC_WON if soccer_match_result(home_score, away_score) in covers else REC_LOST
 
     if bt == "draw_no_bet":
@@ -732,6 +762,13 @@ def grade_rec_selection(bet_type: str, selection: str, home_score: int, away_sco
 
     if bt == "correct_score":
         sel = (selection or "").strip()
+        if sel.lower() == CORRECT_SCORE_OTHER:
+            logger.warning(
+                "correct_score 'other' rec (sport=%r, model=%r) needs its prediction's scoreline keys; left open",
+                sport,
+                model_name,
+            )
+            return None
         return REC_WON if sel == correct_score_outcome(home_score, away_score) else REC_LOST
 
     # *_ht, team_total, anything unknown: leave open rather than guess.

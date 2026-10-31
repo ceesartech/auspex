@@ -25,9 +25,16 @@ Guarantees:
   * Rows written after kickoff are skipped, as in the grader.
   * Rewrites a verdict into another verdict, never un-grades: a row the
     current code cannot grade (phantom line, regulation_winner or
-    half-time score missing, ...) is left as it is and counted.
+    half-time score missing, ...) is left as it is and counted, and so is
+    a graded row the current code would NULL without a push (a
+    correct_score 'other' pick whose probabilities lack its scoreline
+    keys, ...): skipped_would_ungrade, each one logged.
   * Each UPDATE is guarded on the values it was planned from; a row that
-    changed since the plan is left alone and logged as an error.
+    changed since the plan is left alone, logged as an error, and its
+    prediction_id written to a second write-once file, <csv>.stale.txt
+    (one id per line, empty when every planned row was written). A CSV
+    rollback must exclude those ids: their old values are not this run's
+    to restore.
 
 The before/after accuracy summary is per ROW, not deduped per match:
 weekly retrains can write several rows per (match, prediction_type), so
@@ -57,6 +64,7 @@ from psycopg2.extras import RealDictCursor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import grade_completed_matches as gcm  # noqa: E402
+from grading_outcomes import is_push  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("regrade_predictions")
@@ -129,7 +137,10 @@ def matches_needing_context(rows: list[dict]) -> set[str]:
 def plan_regrade(rows: list[dict], contexts: dict[str, dict]) -> tuple[list[dict], Counter]:
     """Re-grade every row through compute_prediction_grade. Returns the
     rows whose (actual_outcome, is_correct) changes, as CSV-shaped dicts,
-    plus counts. Rows the current code skips are left out entirely.
+    plus counts. Rows the current code skips are left out entirely, as
+    are verdicts it would turn into NULL without a push
+    (skipped_would_ungrade): "the current code cannot say" is not a
+    reason to erase what an earlier grade said.
 
     `contexts` maps match_id -> fetch_match_grading_context dict and must
     cover every match in matches_needing_context(rows): a line-dependent
@@ -149,6 +160,20 @@ def plan_regrade(rows: list[dict], contexts: dict[str, dict]) -> tuple[list[dict
             continue
         if (actual, correct) == (row["actual_outcome"], row["is_correct"]):
             counts["unchanged"] += 1
+            continue
+        if correct is None and row["is_correct"] is not None and not is_push(actual):
+            counts["skipped_would_ungrade"] += 1
+            logger.warning(
+                "Not un-grading prediction %s (%s/%s, pick %r): the current code grades (%r, NULL), "
+                "the row holds (%r, %r) — left as it is",
+                row["prediction_id"],
+                row["model_name"],
+                row["prediction_type"],
+                row["predicted_outcome"],
+                actual,
+                row["actual_outcome"],
+                row["is_correct"],
+            )
             continue
         counts["changed"] += 1
         changes.append(
@@ -216,15 +241,26 @@ def default_out_csv() -> str:
     return f"{base}/regrade_{stamp}.csv"
 
 
-def write_csv(path: str, entries: list[dict]) -> None:
-    """Write-once: mode 'x' refuses an existing file atomically, so a
-    re-run can never overwrite the rollback record of an earlier one."""
+def stale_ids_path(out_csv: str) -> str:
+    """Where --apply lists the prediction_ids whose guarded UPDATE matched
+    no row: the audit CSV's path plus '.stale.txt'."""
+    return f"{out_csv}.stale.txt"
+
+
+def _open_write_once(path: str, what: str):
+    """Mode 'x' refuses an existing file atomically, so a re-run can never
+    overwrite the rollback record of an earlier one."""
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
-        fh = out.open("x", newline="")
+        return out.open("x", newline="")
     except FileExistsError:
-        raise FileExistsError(f"{out} exists — the regrade CSV is write-once") from None
+        raise FileExistsError(f"{out} exists — the regrade {what} is write-once") from None
+
+
+def write_csv(path: str, entries: list[dict]) -> None:
+    """Write-once (see _open_write_once)."""
+    fh = _open_write_once(path, "CSV")
     with fh:
         w = csv.DictWriter(fh, fieldnames=CSV_FIELDS, extrasaction="ignore")
         w.writeheader()
@@ -260,17 +296,43 @@ def run(
         logger.warning(
             "%d graded row(s) the current code cannot grade were left as they are", counts["skipped_ungradable"]
         )
+    if counts["skipped_would_ungrade"]:
+        logger.warning(
+            "%d graded row(s) the current code would un-grade were left as they are (ids logged above)",
+            counts["skipped_would_ungrade"],
+        )
 
     if not apply_changes:
         logger.info("DRY-RUN: re-run with --apply to rewrite %d row(s)", len(changes))
         return counts
+    # Checked before the first UPDATE, written after the last one and
+    # before the commit: a run whose stale list cannot be recorded commits
+    # nothing, and a run that dies mid-way leaves no (misleadingly empty)
+    # list behind.
+    stale_path = stale_ids_path(out_csv)
+    if Path(stale_path).exists():
+        raise FileExistsError(f"{stale_path} exists — the regrade stale-id list is write-once")
+    stale: list[str] = []
     with conn.cursor() as cur:
         for c in changes:
             cur.execute(GUARDED_UPDATE_SQL, c)
-            counts["updated" if cur.rowcount == 1 else "changed_since_plan"] += 1
+            if cur.rowcount == 1:
+                counts["updated"] += 1
+            else:
+                stale.append(c["prediction_id"])
+    with _open_write_once(stale_path, "stale-id list") as stale_fh:
+        stale_fh.writelines(f"{pid}\n" for pid in stale)
+    counts["changed_since_plan"] = len(stale)
     conn.commit()
-    if counts["changed_since_plan"]:
-        logger.error("%d row(s) changed between plan and write — left as they were", counts["changed_since_plan"])
+    if stale:
+        logger.error(
+            "%d row(s) changed between plan and write — left as they were; exclude them from any rollback "
+            "of %s (listed in %s): %s",
+            len(stale),
+            out_csv,
+            stale_path,
+            ", ".join(stale),
+        )
     logger.info("Rewrote %d prediction row(s); betting_recommendations untouched", counts["updated"])
     return counts
 

@@ -6,6 +6,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 
 
@@ -806,6 +808,41 @@ class TestGradeRecSelection:
         assert go.grade_rec_selection("over_under_ht", "over_1.5", 2, 1) is None
         assert go.grade_rec_selection("team_total", "home_over_1.5", 2, 1) is None
         assert go.grade_rec_selection("asian_handicap", "garbage", 2, 1) is None
+
+    def test_nhl_double_chance_is_never_settled_on_the_final_score(self):
+        # 4-3 after OT: the final score has a winner, so '12' would always
+        # win. It is the regulation 3-way — the final score cannot settle it.
+        assert go.grade_rec_selection("double_chance", "12", 4, 3, sport="nhl") is None
+        assert go.grade_rec_selection("double_chance", "1X", 4, 3, sport=" NHL ") is None
+        assert go.grade_rec_selection("double_chance", "X2", 2, 3, model_name="dixon_coles_nhl") is None
+        assert go.grade_rec_selection("double_chance", "12", 4, 3, sport=None, model_name="ensemble_nhl_ml") is None
+        # Either signal is enough, even when the other says soccer.
+        assert go.grade_rec_selection("double_chance", "12", 4, 3, sport="soccer", model_name="dixon_coles_nhl") is None
+
+    def test_soccer_double_chance_settles_as_before(self):
+        # Default (no sport/model) keeps soccer behaviour, and so does soccer.
+        assert go.grade_rec_selection("double_chance", "12", 4, 3) == go.REC_WON
+        assert go.grade_rec_selection("double_chance", "12", 1, 1, sport="soccer", model_name="ensemble") == go.REC_LOST
+        assert go.grade_rec_selection("double_chance", "X2", 1, 1, sport="soccer") == go.REC_WON
+
+    def test_nhl_markets_other_than_double_chance_still_settle(self):
+        assert go.grade_rec_selection("moneyline", "home", 4, 3, sport="nhl") == go.REC_WON
+        assert go.grade_rec_selection("puck_line", "home -1.5", 4, 3, sport="nhl") == go.REC_LOST
+        assert go.grade_rec_selection("total", "over_5.5", 4, 3, sport="nhl") == go.REC_WON
+
+    def test_correct_score_other_is_never_settled(self):
+        # 'other' covers whatever that prediction did not list; the rec
+        # does not carry the key set, so neither won nor lost is knowable.
+        assert go.grade_rec_selection("correct_score", "other", 5, 2) is None
+        assert go.grade_rec_selection("correct_score", " Other ", 0, 0, sport="soccer") is None
+        assert go.grade_rec_selection("correct_score", "other", 5, 2, sport="nhl", model_name="dixon_coles_nhl") is None
+        # Scoreline selections still settle, NHL included.
+        assert go.grade_rec_selection("correct_score", "5-2", 5, 2, sport="nhl") == go.REC_WON
+        assert go.grade_rec_selection("correct_score", "2-1", 5, 2) == go.REC_LOST
+
+    def test_sport_and_model_are_keyword_only(self):
+        with pytest.raises(TypeError):
+            go.grade_rec_selection("double_chance", "12", 4, 3, "nhl")
 
     def test_status_and_pl_money_math(self):
         assert go.rec_status_and_pl(go.REC_WON, 25, 2.0) == ("won", 25)
