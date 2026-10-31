@@ -13,6 +13,11 @@ each row into the canonical schema the training pipeline expects:
 Idempotent: re-running only inserts rows that aren't already present.
 Uses ON CONFLICT on the existing UNIQUE constraints in 001_create_schema.
 
+A raw row without a full-time score is not promoted (see raw_result): it
+is an abandoned, awarded or unplayed fixture, never a finished match, and
+its HTHG/HTAG can hold the awarded score rather than a half-time one. A
+re-run never downgrades a row already written (see INSERT_MATCH_SQL).
+
 Usage (inside the api container or anywhere DATABASE_URL is set):
     python /app/scripts/promote_raw.py
     python /app/scripts/promote_raw.py --database-url postgres://...
@@ -23,6 +28,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -99,6 +105,21 @@ LEAGUE_MAP: dict[str, tuple[str, str]] = {
     "CONFED": ("FIFA Confederations Cup", "International"),
 }
 
+# football-data labels a season two ways. The per-season European files
+# (load_football_data.py) use a 'YYZZ' code: '1617' is 2016-17. The /new/
+# country files (load_football_data_extra.py) use the calendar year for a
+# league that plays within one ('2016': Brazil, MLS, Norway...) and
+# 'YYYY/YYYY' for one that straddles two (Austria, Mexico...); the
+# international loader uses the year too. '2021' reads both ways, so the
+# league decides: a 4-digit season from one of these leagues is a calendar
+# year. Must cover every league code in load_football_data_extra.COUNTRY_MAP
+# (pinned by tests/unit/test_promote_raw.py).
+CALENDAR_SEASON_LEAGUES: frozenset[str] = frozenset(
+    {"AR1", "AT1", "BR1", "CH1", "CN1", "DK1", "FI1", "IE1", "JP1", "MLS", "MX1", "NO1", "PL1", "RO1", "RU1", "SE1"}
+    | {code for code, (_name, country) in LEAGUE_MAP.items() if country == "International"}
+)
+_CROSS_YEAR_SEASON = re.compile(r"(\d{4})/(\d{4})")
+
 
 def parse_match_date(raw_date: str, raw_time: str | None) -> datetime | None:
     """football-data uses DD/MM/YYYY (newer) or DD/MM/YY (older)."""
@@ -148,6 +169,49 @@ class Promotion:
     matches: int = 0
     match_stats: int = 0
     odds: int = 0
+    skipped_no_result: int = 0  # raw rows without a full-time score (not promoted)
+    ht_dropped: int = 0  # promoted without the half-time value the raw row carried
+    left_cancelled: int = 0  # existing row is 'cancelled' — not resurrected
+
+
+@dataclass(frozen=True)
+class RawResult:
+    """The scores one football-data row may write (see raw_result)."""
+
+    home_score: int
+    away_score: int
+    ht_home: int | None = None
+    ht_away: int | None = None
+    ht_dropped: str | None = None  # why a half-time value present in the row was not used
+
+
+def raw_result(row: dict) -> RawResult | None:
+    """Scores from a raw row, or None when it has no full-time score.
+
+    A blank FTHG or FTAG is not a finished match: football-data leaves both
+    blank for abandoned, cancelled and unplayed fixtures, and for an awarded
+    one puts the awarded score in HTHG/HTAG with HTR 'A' (Panathinaikos v
+    Olympiakos 2019-03-17 and Bastia v Red Star 2025-12-05 carry "HT" 0-3;
+    neither was 0-3 at half-time). Such a row's half-time columns are never
+    used — the caller skips the whole row. The half-time pair is used only
+    whole and only when neither half exceeds the final score.
+    """
+    home, away = to_int(row.get("FTHG")), to_int(row.get("FTAG"))
+    if home is None or away is None:
+        return None
+    ht_home, ht_away = to_int(row.get("HTHG")), to_int(row.get("HTAG"))
+    if ht_home is None and ht_away is None:
+        return RawResult(home, away)
+    if ht_home is None or ht_away is None:
+        return RawResult(home, away, ht_dropped=f"half-time pair incomplete ({ht_home!r}/{ht_away!r})")
+    if ht_home > home or ht_away > away:
+        return RawResult(home, away, ht_dropped=f"half-time {ht_home}-{ht_away} exceeds full-time {home}-{away}")
+    return RawResult(home, away, ht_home, ht_away)
+
+
+def fixture_label(row: dict) -> str:
+    """'F2 05/12/2025 Bastia v Red Star' — names a raw row in log lines."""
+    return f"{row.get('league')} {row.get('Date')} {row.get('HomeTeam')} v {row.get('AwayTeam')}"
 
 
 def upsert_leagues(cur, codes: set[str]) -> dict[str, str]:
@@ -208,25 +272,52 @@ def upsert_teams(cur, team_names: set[str], league_id_by_team: dict[str, str]) -
     return {r["normalized_name"]: r["id"] for r in cur.fetchall()}
 
 
+# The conflict branch never downgrades the row already there: each score
+# pair is replaced only by a complete pair (a load without half-time
+# columns — the /new/ country files — used to NULL a half-time the ESPN
+# results path had written), 'finished' is set only with a full-time pair
+# in hand, season is left alone, and a 'cancelled' row is not touched at
+# all (RETURNING then yields no row): that status is recorded on purpose,
+# e.g. by scripts/fix_unplayed_soccer_rows.py.
+INSERT_MATCH_SQL = """
+    INSERT INTO matches (
+        league_id, home_team_id, away_team_id, match_date, status,
+        home_score, away_score, half_time_home, half_time_away, season
+    )
+    VALUES (%s, %s, %s, %s, 'finished', %s, %s, %s, %s, %s)
+    ON CONFLICT (home_team_id, away_team_id, match_date) DO UPDATE
+        SET home_score = CASE WHEN EXCLUDED.home_score IS NOT NULL AND EXCLUDED.away_score IS NOT NULL
+                              THEN EXCLUDED.home_score ELSE matches.home_score END,
+            away_score = CASE WHEN EXCLUDED.home_score IS NOT NULL AND EXCLUDED.away_score IS NOT NULL
+                              THEN EXCLUDED.away_score ELSE matches.away_score END,
+            half_time_home = CASE WHEN EXCLUDED.half_time_home IS NOT NULL AND EXCLUDED.half_time_away IS NOT NULL
+                                  THEN EXCLUDED.half_time_home ELSE matches.half_time_home END,
+            half_time_away = CASE WHEN EXCLUDED.half_time_home IS NOT NULL AND EXCLUDED.half_time_away IS NOT NULL
+                                  THEN EXCLUDED.half_time_away ELSE matches.half_time_away END,
+            status = CASE WHEN EXCLUDED.home_score IS NOT NULL AND EXCLUDED.away_score IS NOT NULL
+                          THEN 'finished' ELSE matches.status END,
+            updated_at = NOW()
+        WHERE matches.status <> 'cancelled'
+    RETURNING id
+"""
+
+
 def insert_match(
     cur, *, league_id, home_id, away_id, match_dt, season, home_score, away_score, ht_home, ht_away
 ) -> str | None:
+    """Upsert one finished fixture; returns its id, or None when the existing
+    row is 'cancelled' and was left as it is.
+
+    Refuses (ValueError) a fixture without a full-time score — not a
+    finished match, see raw_result — and a split half-time pair, rather
+    than writing either.
+    """
+    if home_score is None or away_score is None:
+        raise ValueError(f"insert_match needs a full-time score, got {home_score!r}-{away_score!r}")
+    if (ht_home is None) != (ht_away is None):
+        raise ValueError(f"insert_match got a split half-time pair {ht_home!r}-{ht_away!r}")
     cur.execute(
-        """
-        INSERT INTO matches (
-            league_id, home_team_id, away_team_id, match_date, status,
-            home_score, away_score, half_time_home, half_time_away, season
-        )
-        VALUES (%s, %s, %s, %s, 'finished', %s, %s, %s, %s, %s)
-        ON CONFLICT (home_team_id, away_team_id, match_date) DO UPDATE
-            SET home_score = EXCLUDED.home_score,
-                away_score = EXCLUDED.away_score,
-                half_time_home = EXCLUDED.half_time_home,
-                half_time_away = EXCLUDED.half_time_away,
-                status = 'finished',
-                updated_at = NOW()
-        RETURNING id
-        """,
+        INSERT_MATCH_SQL,
         (league_id, home_id, away_id, match_dt, home_score, away_score, ht_home, ht_away, season),
     )
     r = cur.fetchone()
@@ -327,21 +418,35 @@ def odds_rows_for(row: dict) -> list[tuple]:
     return out
 
 
-def season_label(code: str) -> str:
-    """Convert football-data season code (e.g. '2425') to '2024-2025'.
+def season_label(code: str, league: str | None = None) -> str:
+    """Convert a football-data season to the stored label.
 
-    Y2K rollover: codes 50-99 → 19xx; codes 00-49 → 20xx. football-data
-    has been publishing since 1993 so the 1990s codes are real.
+    'YYZZ' code (per-season European files): '2425' -> '2024-2025'. Y2K
+    rollover: codes 50-99 → 19xx; codes 00-49 → 20xx. football-data has
+    been publishing since 1993 so the 1990s codes are real.
+    'YYYY/YYYY' (cross-year /new/ files): '2016/2017' -> '2016-2017', the
+    spelling every other loader writes.
+    Calendar year (/new/ files, internationals): '2016' stays '2016'. Read
+    as a 'YYZZ' code it became '2020-2116' (32,794 soccer rows by
+    2026-10-31; scripts/backfill_season_labels.py corrects them).
+
+    '2021' is both the 2020-21 code and a calendar year, so `league`
+    decides (CALENDAR_SEASON_LEAGUES). Without one, a 4-digit code expands
+    only when its halves are consecutive years; anything else is a year.
     """
-    if not code or len(code) != 4 or not code.isdigit():
-        return code or ""
-    start = int(code[:2])
-    end = int(code[2:])
+    code = (code or "").strip()
+    cross_year = _CROSS_YEAR_SEASON.fullmatch(code)
+    if cross_year and int(cross_year.group(2)) - int(cross_year.group(1)) == 1:
+        return f"{cross_year.group(1)}-{cross_year.group(2)}"
+    if len(code) != 4 or not code.isdigit():
+        return code
+    if league in CALENDAR_SEASON_LEAGUES:
+        return code
+    start, end = int(code[:2]), int(code[2:])
+    if end != (start + 1) % 100:
+        return code  # not a 'YYZZ' code: a calendar year
     start_year = (1900 if start >= 50 else 2000) + start
-    end_year = (1900 if end >= 50 else 2000) + end
-    if end_year < start_year:
-        end_year += 100
-    return f"{start_year}-{end_year}"
+    return f"{start_year}-{start_year + 1}"
 
 
 def promote(database_url: str, *, batch_size: int = 1000) -> Promotion:
@@ -388,19 +493,42 @@ def promote(database_url: str, *, batch_size: int = 1000) -> Promotion:
                 match_dt = parse_match_date(r.get("Date", ""), r.get("Time"))
                 if match_dt is None:
                     continue
+                result = raw_result(r)
+                if result is None:
+                    stats.skipped_no_result += 1
+                    logger.warning(
+                        "Not promoting %s: no full-time score (FTHG=%r FTAG=%r) — abandoned, awarded or "
+                        "unplayed, not a finished match; its HTHG/HTAG (%r/%r, HTR %r) are not a half-time score",
+                        fixture_label(r),
+                        r.get("FTHG"),
+                        r.get("FTAG"),
+                        r.get("HTHG"),
+                        r.get("HTAG"),
+                        r.get("HTR"),
+                    )
+                    continue
+                if result.ht_dropped:
+                    stats.ht_dropped += 1
+                    logger.warning("Promoting %s without its half-time: %s", fixture_label(r), result.ht_dropped)
                 match_id = insert_match(
                     cur,
                     league_id=league_ids[code],
                     home_id=home_id,
                     away_id=away_id,
                     match_dt=match_dt,
-                    season=season_label(r.get("season", "")),
-                    home_score=to_int(r.get("FTHG")),
-                    away_score=to_int(r.get("FTAG")),
-                    ht_home=to_int(r.get("HTHG")),
-                    ht_away=to_int(r.get("HTAG")),
+                    season=season_label(r.get("season", ""), code),
+                    home_score=result.home_score,
+                    away_score=result.away_score,
+                    ht_home=result.ht_home,
+                    ht_away=result.ht_away,
                 )
                 if not match_id:
+                    stats.left_cancelled += 1
+                    logger.warning(
+                        "Left %s as it is: the existing row is 'cancelled' but football-data now has a "
+                        "full-time score for it — check which is right",
+                        fixture_label(r),
+                    )
                     continue
                 stats.matches += 1
 
@@ -445,12 +573,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     stats = promote(args.database_url, batch_size=args.batch_size)
     logger.info(
-        "Promotion complete: leagues=%d teams=%d matches=%d match_stats=%d odds=%d",
+        "Promotion complete: leagues=%d teams=%d matches=%d match_stats=%d odds=%d "
+        "skipped_no_result=%d ht_dropped=%d left_cancelled=%d",
         stats.leagues,
         stats.teams,
         stats.matches,
         stats.match_stats,
         stats.odds,
+        stats.skipped_no_result,
+        stats.ht_dropped,
+        stats.left_cancelled,
     )
     return 0
 
