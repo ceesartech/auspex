@@ -457,6 +457,20 @@ EXISTING_MATCH_SQL = """
        AND match_date >= %s AND match_date <= %s
 """
 
+# Rows for ANOTHER team pair that share a club with the fixture, in the same
+# window: no club plays twice in a few hours, so such a row is this fixture
+# filed under other team ids (a club ESPN minted a second row for, or a row it
+# filed under the wrong club), and inserting would put the match in the
+# corpus twice (find_alias_slot_rows).
+ALIAS_SLOT_SQL = """
+    SELECT id::text AS id, home_team_id::text AS home_id, away_team_id::text AS away_id, match_date, status,
+           home_score, away_score
+      FROM matches
+     WHERE (home_team_id IN (%s, %s) OR away_team_id IN (%s, %s))
+       AND NOT (home_team_id = %s AND away_team_id = %s)
+       AND match_date >= %s AND match_date <= %s
+"""
+
 # Guarded on every value update_existing_match decided from: a row that moved
 # after the lookup is not written (RETURNING yields no row).
 UPDATE_EXISTING_MATCH_SQL = """
@@ -529,6 +543,20 @@ def find_existing_matches(cur, home_id, away_id, match_dt: datetime, fixture_day
     """This team pair's rows in existing_match_window (choose_existing picks)."""
     lo, hi = existing_match_window(match_dt, fixture_day)
     cur.execute(EXISTING_MATCH_SQL, (home_id, away_id, lo, hi))
+    return [dict(r) for r in cur.fetchall()]
+
+
+def find_alias_slot_rows(cur, home_id, away_id, match_dt: datetime, fixture_day: date) -> list[dict]:
+    """Rows for another team pair sharing a club with this fixture in
+    existing_match_window (ALIAS_SLOT_SQL): write_match inserts nothing beside
+    one. After scripts/repair_football_data_kickoffs.py --dedupe has merged a
+    copy into an ESPN row still filed under the wrong club, this keeps every
+    promote run from inserting the copy again until scripts/
+    repoint_team_matches.py has moved that row onto the right club; it does
+    the same for a club ESPN minted a second row for that merge_soccer_teams
+    has not folded yet."""
+    lo, hi = existing_match_window(match_dt, fixture_day)
+    cur.execute(ALIAS_SLOT_SQL, (home_id, away_id, home_id, away_id, home_id, away_id, lo, hi))
     return [dict(r) for r in cur.fetchall()]
 
 
@@ -635,8 +663,10 @@ def write_match(
 ) -> str | None:
     """The matches row a raw row's result goes on: the existing row for the
     pair (find_existing_matches, choose_existing, update_existing_match) or a new one
-    (insert_match). Returns its id, or None when nothing was written (counted
-    in `stats` and logged; the caller then writes no stats or odds)."""
+    (insert_match), never a new one beside the same fixture under other team
+    ids (find_alias_slot_rows: refused). Returns its id, or None when nothing
+    was written (counted in `stats` and logged; the caller then writes no
+    stats or odds)."""
     label = fixture_label(row)
     fixture_day = parse_wall_clock(row.get("Date") or "", None)
     if fixture_day is None:
@@ -648,6 +678,23 @@ def write_match(
         logger.error("Not promoting %s: %s — merge them first", label, ambiguity)
         return None
     if existing is None:
+        aliases = find_alias_slot_rows(cur, home_id, away_id, match_dt, fixture_day.date())
+        if aliases:
+            stats.refused += 1
+            logger.error(
+                "Not promoting %s (%s): no row for this team pair, but %s share a club with it within %s of that "
+                "kickoff — no club plays twice in a few hours, so that is this match under other team ids; nothing "
+                "inserted. Unify the teams first (scripts/ops/merge_soccer_teams.sh, or "
+                "scripts/repoint_team_matches.py for a row filed under the wrong club), then re-run",
+                label,
+                match_dt,
+                ", ".join(
+                    f"{a['id']} at {a['match_date']} ({a['status']} {a['home_score']}-{a['away_score']})"
+                    for a in aliases
+                ),
+                EXISTING_MATCH_WINDOW,
+            )
+            return None
         match_id = insert_match(
             cur,
             league_id=league_id,
@@ -1004,8 +1051,9 @@ def main(argv: list[str] | None = None) -> int:
     if stats.refused or stats.duplicates:
         logger.error(
             "REFUSED %d raw row(s) and found %d duplicate(s) (ERROR lines above): an existing row's score "
-            "disagrees, it is a stale fixture row or ambiguous, or football-data's own row sits beside the ESPN "
-            "row. Everything else is committed; exiting %d until they are resolved.",
+            "disagrees, it is a stale fixture row or ambiguous, the match sits under other team ids (alias slot), "
+            "or football-data's own row sits beside the ESPN row. Everything else is committed; exiting %d until "
+            "they are resolved.",
             stats.refused,
             stats.duplicates,
             REFUSED_EXIT_CODE,

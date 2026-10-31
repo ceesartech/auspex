@@ -35,7 +35,7 @@ rfk = _load("repair_football_data_kickoffs", "repair_football_data_kickoffs.py")
 pr = rfk.pr
 UTC = timezone.utc
 
-LEAGUES = {"CN1": "lg-cn1", "MLS": "lg-mls", "E0": "lg-e0"}
+LEAGUES = {"CN1": "lg-cn1", "MLS": "lg-mls", "E0": "lg-e0", "MX1": "lg-mx1"}
 TEAMS = {
     "shandong taishan": "t-sha",
     "yunnan yukun": "t-yun",
@@ -44,6 +44,9 @@ TEAMS = {
     "arsenal": "t-ars",
     "chelsea": "t-che",
     "wuhan three towns": "t-wuh",
+    "monterrey": "t-mon",
+    "santos": "t-san",  # Santos FC (Brazil): ESPN filed Santos Laguna's Liga MX rows on it
+    "santos laguna": "t-sl",
 }
 
 
@@ -111,27 +114,32 @@ ESPN = _m("e77e612a", _t(2026, 7, 10, 11, 35), ht=(3, 1), result_source="espn_sc
 SHANDONG = _raw()
 
 
-def _facts(open_recs=0, post_kickoff_predictions=0, predictions=30, ungraded=30, recs=None):
+def _facts(open_recs=0, post_kickoff_predictions=0, predictions=30, ungraded=30, recs=None, unsettled=0):
     return {
         "open_recs": open_recs,
         "post_kickoff_predictions": post_kickoff_predictions,
         "predictions": predictions,
         "ungraded_predictions": ungraded,
         "recs_by_status": recs if recs is not None else {"void": 1},
+        "unsettled_recs": unsettled,
     }
 
 
-def _plan_dedupe(raw_rows, matches, refs=None, guards=("predictions", "betting_recommendations"), facts=None):
+def _plan_dedupe(
+    raw_rows, matches, refs=None, guards=("predictions", "betting_recommendations"), facts=None, repoint_map=None
+):
     snap = _snap(raw_rows, matches)
     counts: Counter = Counter()
+    snap.set_pending(rfk.pending_repoints(snap, repoint_map or {}, counts))
     links = rfk.link_rows(snap, counts)
     candidates = rfk.dedupe_candidates(snap, links, counts)
     return rfk.plan_dedupe(snap, candidates, refs or {}, guards, counts, facts), counts
 
 
-def _plan_shift(raw_rows, matches, db_tz=UTC, planned_away=frozenset()):
+def _plan_shift(raw_rows, matches, db_tz=UTC, planned_away=frozenset(), repoint_map=None):
     snap = _snap(raw_rows, matches, db_tz)
     counts: Counter = Counter()
+    snap.set_pending(rfk.pending_repoints(snap, repoint_map or {}, counts))
     return rfk.plan_shift(snap, rfk.link_rows(snap, counts), counts, planned_away), counts
 
 
@@ -955,7 +963,7 @@ class TestRunShiftAfterDedupe:
         counts = rfk.run(
             _Conn(), "dedupe", True, out_csv=str(tmp_path / "d.csv"), expect_plan={"merge": 1, "fold": 1, "refuse": 0}
         )
-        assert "PLAN mode=dedupe merge=1 fold=1 refuse=0" in caplog.text
+        assert "PLAN mode=dedupe merge=1 alias_merge=0 fold=1 refuse=0 fold_unsettled_recs=0" in caplog.text
         assert counts["planned"] == 2 and offline["applied"][0][2] == 2  # one batch, merge and fold together
 
 
@@ -1016,3 +1024,243 @@ class TestRunCheck:
     def test_the_repaired_state_passes(self, monkeypatch, caplog):
         assert self._check(monkeypatch, [ESPN]) == 0
         assert "CHECK legacy_kickoffs=PASS football_data_duplicates=0" in caplog.text
+
+    def test_a_copy_beside_its_espn_row_off_any_legacy_kickoff_fails_on_the_duplicate_alone(self, monkeypatch, caplog):
+        # Review finding (2026-10-31): --check's duplicate count was only ever tested beside a legacy failure. Here
+        # the copy already sits at its corrected kickoff (shifted earlier), 10 min from the ESPN row: no row is at a
+        # legacy kickoff, but the match is in the corpus twice.
+        shifted = {**COPY, "match_date": _t(2026, 7, 10, 11, 35)}
+        espn = {**ESPN, "match_date": _t(2026, 7, 10, 11, 25)}
+        assert self._check(monkeypatch, [shifted, espn]) == 1
+        assert "CHECK legacy_kickoffs=PASS football_data_duplicates=1" in caplog.text
+
+    def test_a_gmt_copy_beside_its_espn_row_fails_on_the_duplicate_alone(self, monkeypatch, caplog):
+        # 06/12/2025 08:00 UK is 08:00Z: no legacy offset, the copy is where promote_raw put it.
+        raw = _raw(date="06/12/2025", time="08:00")
+        copy = {**COPY, "match_date": _t(2025, 12, 6, 8, 0)}
+        espn = {**ESPN, "match_date": _t(2025, 12, 6, 7, 55)}
+        snap = _snap([raw], [copy, espn])
+        monkeypatch.setattr(rfk, "load_snapshot", lambda cur: snap)
+        assert rfk.run_check(_CheckConn([copy, espn])) == 1
+        assert "CHECK legacy_kickoffs=PASS football_data_duplicates=1" in caplog.text
+
+
+# --- the Liga MX rows ESPN filed under the wrong club: the reviewed re-point map and the alias merge ---------------
+
+# Monterrey v Santos Laguna (MX1), prod 2026-10-31: ESPN's row e78e7e49 (01:05Z, 3-2) sits on Santos FC's row
+# ('Santos', Brazil), with a stale 'scheduled' row a398e0fe at 01:00Z; football-data's copy df640b1b is on Santos
+# Laguna at its legacy 02:05Z. repoint_team_matches refused both rows (a same-pair twin: the copy), and --shift
+# refused the copy (alias slot): each waited for the other.
+MX_RAW = _raw(date="19/07/2026", time="02:05", home="Monterrey", away="Santos Laguna", ft=("3", "2"), league="MX1")
+MX_COPY = _m("df640b1b", _t(2026, 7, 19, 2, 5), home="t-mon", away="t-sl", score=(3, 2), league="lg-mx1")
+MX_ESPN = _m(
+    "e78e7e49",
+    _t(2026, 7, 19, 1, 5),
+    home="t-mon",
+    away="t-san",
+    score=(3, 2),
+    ht=(3, 1),
+    result_source="espn_scoreboard",
+    league="lg-mx1",
+)
+MX_STALE = _m(
+    "a398e0fe",
+    _t(2026, 7, 19, 1, 0),
+    home="t-mon",
+    away="t-san",
+    status="scheduled",
+    score=(None, None),
+    league="lg-mx1",
+)
+MX_MAP = {"e78e7e49": {"away": ("santos", "santos laguna")}, "a398e0fe": {"away": ("santos", "santos laguna")}}
+MAP_HEADER = "match_id,side,from_team,to_team,league,kickoff_utc,opponent,espn_event,evidence\n"
+
+
+class TestRepointMap:
+    def test_the_reviewed_map_loads(self, tmp_path):
+        path = tmp_path / "map.csv"
+        path.write_text(
+            MAP_HEADER
+            + "e78e7e49,away,Santos,Santos Laguna,Liga MX,2026-07-19 01:05,Monterrey,401877038,proof\n"
+            + "4a31da6c,home,Santos,Santos Laguna,Liga MX,2026-08-17 01:00,Guadalajara,401877013,proof\n"
+            + "4a31da6c,away,Guadalajara,Guadalajara  Chivas,Liga MX,2026-08-17 01:00,Santos,401877013,proof\n"
+        )
+        assert rfk.load_repoint_map(path) == {
+            "e78e7e49": {"away": ("santos", "santos laguna")},
+            "4a31da6c": {"home": ("santos", "santos laguna"), "away": ("guadalajara", "guadalajara chivas")},
+        }
+
+    @pytest.mark.parametrize(
+        "body, why",
+        [
+            ("match_id,side,from_team\nx,away,Santos\n", "missing column"),
+            (MAP_HEADER + "x,both,Santos,Santos Laguna,,,,,\n", "home/away"),
+            (MAP_HEADER + "x,away,,Santos Laguna,,,,,\n", "home/away"),
+            (MAP_HEADER + "x,away,Santos,Santos Laguna,,,,,\nx,away,Santos,Santos Laguna,,,,,\n", "listed twice"),
+        ],
+    )
+    def test_a_malformed_map_is_refused(self, tmp_path, body, why):
+        path = tmp_path / "map.csv"
+        path.write_text(body)
+        with pytest.raises(ValueError, match=why):
+            rfk.load_repoint_map(path)
+
+    def test_pending_done_and_unclear_rows(self, caplog):
+        moved = {**MX_ESPN, "id": "moved", "away_id": "t-sl"}
+        other = {**MX_ESPN, "id": "other", "away_id": "t-cin"}
+        unresolved = {**MX_ESPN, "id": "unresolved"}
+        half = {**MX_ESPN, "id": "half", "home_id": "t-cin"}  # home moved already, away not: a half-moved match
+        snap = _snap([], [MX_ESPN, moved, other, unresolved, half])
+        counts: Counter = Counter()
+        repoint_map = {
+            "e78e7e49": MX_MAP["e78e7e49"],
+            "moved": MX_MAP["e78e7e49"],
+            "other": MX_MAP["e78e7e49"],  # on neither club: drifted since the review
+            "gone": MX_MAP["e78e7e49"],
+            "unresolved": {"away": ("santos", "santos de guayaquil")},  # no such team
+            "half": {"home": ("monterrey", "fc cincinnati"), "away": ("santos", "santos laguna")},
+        }
+        assert rfk.pending_repoints(snap, repoint_map, counts) == {"e78e7e49": ("t-mon", "t-sl")}
+        assert (counts["repoint_done"], counts["repoint_unclear"], counts["repoint_row_absent"]) == (1, 3, 1)
+        assert "re-point map row other is drifted" in caplog.text and "row unresolved is unresolved" in caplog.text
+
+    def test_main_reads_the_map_and_passes_it_on(self, monkeypatch, tmp_path, caplog):
+        seen = {}
+        monkeypatch.setattr(rfk.psycopg2, "connect", lambda url: _ConnCtx())
+        monkeypatch.setattr(rfk, "run", lambda *a, **k: (seen.__setitem__("map", a[7]), Counter())[1])
+        path = tmp_path / "map.csv"
+        path.write_text(MAP_HEADER + "e78e7e49,away,Santos,Santos Laguna,,,,,\n")
+        rfk.main(["--dedupe", "--database-url", "postgres://fake", "--repoint-map", str(path)])
+        assert seen["map"] == {"e78e7e49": {"away": ("santos", "santos laguna")}}
+        seen.clear()
+        rfk.main(["--dedupe", "--database-url", "postgres://fake", "--repoint-map", str(tmp_path / "none.csv")])
+        assert seen["map"] == {} and "No re-point map" in caplog.text
+
+
+class TestAliasMerge:
+    def test_the_copy_merges_into_the_espn_row_about_to_be_re_pointed(self):
+        (entry,), counts = _plan_dedupe([MX_RAW], [MX_STALE, MX_ESPN, MX_COPY], repoint_map=MX_MAP)
+        assert (entry["action"], entry["copy_id"], entry["espn_row_id"], entry["other_row_ids"]) == (
+            "alias_merge",
+            "df640b1b",
+            "e78e7e49",
+            "a398e0fe",
+        )
+        assert entry["kept_row_repoint"] == "away: Santos -> Santos Laguna"
+        assert (entry["ht_action"], counts["dedupe_alias_merge"], counts["repoint_pending"]) == ("none_on_copy", 1, 2)
+
+    def test_without_the_map_it_stays_an_alias_slot(self):
+        assert _plan_dedupe([MX_RAW], [MX_STALE, MX_ESPN, MX_COPY])[0] == []
+        (entry,), _ = _plan_shift([MX_RAW], [MX_STALE, MX_ESPN, MX_COPY])
+        assert (entry["action"], entry["alias_slot_row_id"]) == ("refuse", "e78e7e49")
+
+    def test_once_re_pointed_it_is_an_ordinary_merge(self):
+        espn = {**MX_ESPN, "away_id": "t-sl"}
+        stale = {**MX_STALE, "away_id": "t-sl"}
+        (entry,), counts = _plan_dedupe([MX_RAW], [stale, espn, MX_COPY], repoint_map=MX_MAP)
+        assert (entry["action"], entry["kept_row_repoint"] if "kept_row_repoint" in entry else "") == ("merge", "")
+        assert counts["repoint_done"] == 2
+
+    def test_another_score_is_refused(self):
+        (entry,), _ = _plan_dedupe([MX_RAW], [MX_STALE, {**MX_ESPN, "home_score": 2}, MX_COPY], repoint_map=MX_MAP)
+        assert entry["action"] == "refuse" and entry["reason"].startswith("scores differ")
+
+    def test_never_folded_across_team_ids(self):
+        # the stale row sits exactly on the corrected kickoff and its facts would allow a fold on its own pair
+        stale = {**MX_STALE, "match_date": MX_ESPN["match_date"]}
+        (entry,), _ = _plan_dedupe([MX_RAW], [stale, MX_COPY], repoint_map=MX_MAP, facts={"a398e0fe": _facts()})
+        assert entry["action"] == "refuse" and "filed under other team ids" in entry["reason"]
+
+    def test_the_shift_waits_for_it_and_never_lands_beside_the_re_pointed_row(self):
+        entries, counts = _plan_shift(
+            [MX_RAW], [MX_STALE, MX_ESPN, MX_COPY], planned_away=frozenset({"df640b1b"}), repoint_map=MX_MAP
+        )
+        assert entries == [] and counts["left_to_dedupe"] == 1
+        # dedupe refused it, say: the row about to move onto its pair is a same-pair row for the shift too
+        (entry,), _ = _plan_shift([MX_RAW], [MX_STALE, MX_ESPN, MX_COPY], repoint_map=MX_MAP)
+        assert entry["action"] == "refuse" and "UNIQUE collision" in entry["reason"]
+
+    def test_check_counts_the_copy_as_a_duplicate(self, monkeypatch, caplog):
+        caplog.set_level(logging.INFO, logger="repair_football_data_kickoffs")
+        snap = _snap([MX_RAW], [MX_ESPN, MX_COPY])
+        monkeypatch.setattr(rfk, "load_snapshot", lambda cur: snap)
+        assert rfk.run_check(_CheckConn([MX_ESPN, MX_COPY]), MX_MAP) == 1
+        assert "football_data_duplicates=1" in caplog.text and "repoint_pending=1" in caplog.text
+
+
+def _alias_entry():
+    copy = {**MX_COPY, "kickoff": MX_COPY["match_date"]}
+    twin = {**MX_ESPN, "kickoff": MX_ESPN["match_date"], "half_time_home": None, "half_time_away": None}
+    return {
+        "copy_id": copy["id"],
+        "copy": copy,
+        "twin": twin,
+        "home_score": 3,
+        "away_score": 2,
+        "ht_write": (3, 1),
+        "action": "alias_merge",
+    }
+
+
+class TestApplyAliasMerge:
+    def test_archives_then_merges_like_a_merge(self, tmp_path, fake_values):
+        entry = _alias_entry()
+        conn = _Conn(locked=_locked(entry), archive=tmp_path / "a.jsonl.gz")
+        fake_values["returns"] = {"UPDATE stats": [("s1",)], "DELETE": [{"id": "df640b1b"}]}
+        done = rfk.apply_dedupe_batch(conn, [entry], 1, FKS, tmp_path / "a.jsonl.gz")
+        assert (done["ht_copied"], done["match_stats_moved"], done["copies_deleted"], conn.committed) == (1, 1, 1, 1)
+        assert all(conn.writes_after_archive)
+        roles = {r["role"] for r in map(json.loads, gzip.open(tmp_path / "a.jsonl.gz", "rt"))}
+        assert roles == {"copy", "espn_row_before", "references_copy"}
+
+    def test_a_row_re_pointed_since_the_plan_rolls_back_before_anything_is_written(self, tmp_path, fake_values):
+        entry = _alias_entry()
+        locked = _locked(entry)
+        locked[1]["away_id"] = "t-sl"  # repoint_team_matches moved it in between
+        conn = _Conn(locked=locked, archive=tmp_path / "a.jsonl.gz")
+        with pytest.raises(rfk.PlanDrift, match="twin e78e7e49 changed"):
+            rfk.apply_dedupe_batch(conn, [entry], 1, FKS, tmp_path / "a.jsonl.gz")
+        assert conn.rolled_back == 1 and fake_values["calls"] == [] and not (tmp_path / "a.jsonl.gz").exists()
+
+    def test_only_a_club_in_the_kept_match_takes_the_copys_stats(self):
+        for sql in (rfk.MOVE_STATS_SQL, rfk.MOVE_COUNTS_SQL):
+            assert "s.team_id IN (k.home_team_id, k.away_team_id)" in sql
+        assert "m.home_team_id::text AS home_id" in rfk.LOCK_SQL and {"home_id", "away_id"} <= set(rfk.OBSERVED)
+
+
+class TestRunAliasMerge:
+    def test_the_plan_line_and_the_next_step(self, offline, tmp_path, caplog):
+        caplog.set_level(logging.INFO, logger="repair_football_data_kickoffs")
+        offline["snap"] = _snap([MX_RAW], [dict(MX_STALE), dict(MX_ESPN), dict(MX_COPY)])
+        counts = rfk.run(
+            _Conn(),
+            "dedupe",
+            True,
+            out_csv=str(tmp_path / "d.csv"),
+            expect_plan={"merge": 0, "alias_merge": 1, "fold": 0, "refuse": 0},
+            repoint_map=MX_MAP,
+        )
+        assert (counts["planned"], counts["plan_mismatch"], offline["applied"][0][2]) == (1, 0, 1)
+        assert "PLAN mode=dedupe merge=0 alias_merge=1 fold=0 refuse=0 fold_unsettled_recs=0" in caplog.text
+        assert "NEXT: 1 kept row(s) are still filed under the wrong club (e78e7e49)" in caplog.text
+        ((row),) = _rows(tmp_path / "d.csv")
+        assert (row["action"], row["kept_row_repoint"]) == ("alias_merge", "away: Santos -> Santos Laguna")
+
+    def test_shift_counts_it_as_dedupe_pending(self, offline, tmp_path, caplog):
+        caplog.set_level(logging.INFO, logger="repair_football_data_kickoffs")
+        offline["snap"] = _snap([MX_RAW], [dict(MX_STALE), dict(MX_ESPN), dict(MX_COPY)])
+        counts = rfk.run(_Conn(), "shift", False, out_csv=str(tmp_path / "s.csv"), repoint_map=MX_MAP)
+        assert (counts["dedupe_pending"], counts["refused"]) == (1, 0)
+
+
+class TestFoldUnsettledRecs:
+    def test_counted_per_fold_and_on_the_plan_line(self, offline, tmp_path, caplog):
+        caplog.set_level(logging.INFO, logger="repair_football_data_kickoffs")
+        offline["snap"] = _snap([SHANDONG], [dict(STALE), dict(COPY)])
+        offline["facts"] = {"stale": _facts(unsettled=2)}
+        rfk.run(_Conn(), "dedupe", False, out_csv=str(tmp_path / "d.csv"))
+        assert "fold_unsettled_recs=2" in caplog.text and "2 without a profit_loss" in caplog.text
+        assert _rows(tmp_path / "d.csv")[0]["fold_unsettled_recs"] == "2"
+
+    def test_the_fact_counts_recs_through_predictions_without_a_profit_loss(self):
+        assert "br.profit_loss IS NULL AND (br.match_id = m.id OR br.prediction_id IN" in rfk.FOLD_FACTS_SQL

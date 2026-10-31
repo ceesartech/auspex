@@ -34,6 +34,16 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[4] / "scripts"
 UTC = timezone.utc
 
 
+def _utc_dsn(url: str) -> str:
+    """The test database URL with the session TimeZone pinned to UTC, prod's and CI's: the tool reads a legacy
+    kickoff in the session zone (the UK wall clock promote_raw stored as if UTC), and _seed writes them in UTC. In a
+    database left at, say, America/Denver the first check would otherwise see no legacy row at all."""
+    return url + ("&" if "?" in url else "?") + "options=-c%20TimeZone%3DUTC"
+
+
+DSN = _utc_dsn(os.environ["DATABASE_URL"])
+
+
 def _load(name: str):
     spec = importlib.util.spec_from_file_location(name, SCRIPTS_DIR / f"{name}.py")
     assert spec and spec.loader
@@ -235,7 +245,7 @@ def _count(engine, sql, **params):
 
 def test_merge_fold_shift_check_then_promote_inserts_nothing(engine, seeded, tmp_path):
     ids = _seed(engine)
-    with psycopg2.connect(os.environ["DATABASE_URL"]) as conn:
+    with psycopg2.connect(DSN) as conn:
         assert rfk.run_check(conn) == 1  # legacy rows and a duplicate
 
         # The pending rec on the held stale row's prediction keeps that copy where it is (pinned refusal).
@@ -295,21 +305,21 @@ def test_merge_fold_shift_check_then_promote_inserts_nothing(engine, seeded, tmp
     # Settle the held rec, then the rest folds and the check passes.
     with engine.begin() as c:
         c.execute(text("UPDATE betting_recommendations SET status = 'void' WHERE status = 'pending'"))
-    with psycopg2.connect(os.environ["DATABASE_URL"]) as conn:
+    with psycopg2.connect(DSN) as conn:
         counts = rfk.run(conn, "dedupe", True, out_csv=str(tmp_path / "d2.csv"), archive_dir=str(tmp_path / "b"))
         assert (counts["folded"], counts["refused"]) == (1, 0)
         assert rfk.run_check(conn) == 0
 
     # A full promote_raw run now writes every fixture onto its existing row: nothing inserted, nothing refused.
     before = _count(engine, "SELECT count(*) FROM matches")
-    stats = pr.promote(os.environ["DATABASE_URL"])
+    stats = pr.promote(DSN)
     assert (stats.matches, stats.refused, stats.duplicates) == (5, 0, 0)
     assert _count(engine, "SELECT count(*) FROM matches") == before
 
 
 def test_promote_raw_finds_the_espn_row_through_the_real_query(engine, seeded):
     ids = _seed(engine)
-    with psycopg2.connect(os.environ["DATABASE_URL"]) as conn, conn.cursor(cursor_factory=pr.RealDictCursor) as cur:
+    with psycopg2.connect(DSN) as conn, conn.cursor(cursor_factory=pr.RealDictCursor) as cur:
         cur.execute("SELECT home_team_id, away_team_id FROM matches WHERE id = %s", (ids["espn"],))
         pair = cur.fetchone()
         when = pr.parse_match_date("10/07/2026", "12:35")
@@ -326,3 +336,145 @@ def test_promote_raw_finds_the_espn_row_through_the_real_query(engine, seeded):
         assert (
             pr.find_existing_matches(cur, cur.fetchone()["home_team_id"], pair["away_team_id"], when, when.date()) == []
         )
+
+
+def _seed_alias(engine) -> dict:
+    """Monterrey v Santos Laguna as on prod 2026-10-31: ESPN's row filed under Santos (the Brazilian club's row) at
+    01:05Z with a stale 'scheduled' row at 01:00Z, football-data's copy on Santos Laguna at its legacy 02:05Z (with
+    a half-time and both clubs' match_stats), and the raw row."""
+    ids = {"league": _id()}
+    t = {name: _id() for name in ("Monterrey", "Santos", "Santos Laguna")}
+    ids.update({f"team:{k}": v for k, v in t.items()})
+    k = datetime(2026, 7, 19, 1, 5, tzinfo=UTC)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO leagues (id, name, country, sport, external_ids) "
+                "VALUES (:id, 'Chinese Super League', 'China', 'soccer', '{\"football_data\": \"CN1\"}')"
+            ),
+            {"id": ids["league"]},
+        )
+        for name, tid in t.items():
+            conn.execute(
+                text(
+                    "INSERT INTO teams (id, name, normalized_name, league_id, sport) "
+                    "VALUES (:id, :name, :norm, :lid, 'soccer')"
+                ),
+                {"id": tid, "name": name, "norm": pr.normalize_team_name(name), "lid": ids["league"]},
+            )
+        for key, away, when, status, score, ht, md in (
+            ("espn", "Santos", k, "finished", (3, 2), (None, None), {"result_source": "espn_scoreboard"}),
+            ("stale", "Santos", k - timedelta(minutes=5), "scheduled", (None, None), (None, None), {}),
+            ("copy", "Santos Laguna", k + timedelta(hours=1), "finished", (3, 2), (3, 1), {}),
+        ):
+            ids[key] = _id()
+            conn.execute(
+                text(
+                    "INSERT INTO matches (id, league_id, home_team_id, away_team_id, match_date, status, home_score, "
+                    "away_score, half_time_home, half_time_away, season, metadata) VALUES (:id, :lid, :h, :a, :d, "
+                    ":s, :hs, :as_, :hh, :ha, '2026', CAST(:md AS jsonb))"
+                ),
+                {
+                    "id": ids[key],
+                    "lid": ids["league"],
+                    "h": t["Monterrey"],
+                    "a": t[away],
+                    "d": when,
+                    "s": status,
+                    "hs": score[0],
+                    "as_": score[1],
+                    "hh": ht[0],
+                    "ha": ht[1],
+                    "md": json.dumps(md),
+                },
+            )
+        for team in ("Monterrey", "Santos Laguna"):
+            conn.execute(
+                text("INSERT INTO match_stats (match_id, team_id, shots) VALUES (:m, :t, 11)"),
+                {"m": ids["copy"], "t": t[team]},
+            )
+        conn.execute(
+            text(
+                'INSERT INTO raw_football_data ("Date", "Time", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "HTHG", '
+                "\"HTAG\", league, season) VALUES ('19/07/2026', '02:05', 'Monterrey', 'Santos Laguna', "
+                "'3', '2', '3', '1', 'CN1', '2026')"
+            )
+        )
+    ids["kickoff"] = k
+    return ids
+
+
+def test_alias_merge_then_promote_refuses_until_the_re_point(engine, seeded, tmp_path):
+    """The re-point / kickoff-repair deadlock (review finding, 2026-10-31): repoint_team_matches refuses to move
+    ESPN's row while football-data's copy sits on the target pair, and --shift refused to move the copy beside it.
+    --dedupe now merges the copy into that row (the reviewed map says where it is about to go); promote_raw refuses
+    to insert the fixture again until the row is re-pointed, then writes onto it."""
+    ids = _seed_alias(engine)
+    map_path = tmp_path / "repoint_team_matches.csv"
+    map_path.write_text(
+        "match_id,side,from_team,to_team,league,kickoff_utc,opponent,espn_event,evidence\n"
+        f"{ids['espn']},away,Santos,Santos Laguna,Liga MX,2026-07-19 01:05,Monterrey,401877038,test\n"
+        f"{ids['stale']},away,Santos,Santos Laguna,Liga MX,2026-07-19 01:00,Monterrey,401877038,test\n"
+    )
+    repoint_map = rfk.load_repoint_map(map_path)
+    with psycopg2.connect(DSN) as conn:
+        assert rfk.run_check(conn, repoint_map) == 1
+        # Without the map the copy is not a dedupe candidate, and the shift refuses it (alias slot).
+        counts = rfk.run(conn, "shift", False, out_csv=str(tmp_path / "s0.csv"))
+        assert (counts["refused"], counts["dedupe_pending"]) == (1, 0)
+
+        pin = {"merge": 0, "alias_merge": 1, "fold": 0, "refuse": 0}
+        counts = rfk.run(
+            conn,
+            "dedupe",
+            True,
+            out_csv=str(tmp_path / "d.csv"),
+            archive_dir=str(tmp_path),
+            expect_plan=pin,
+            repoint_map=repoint_map,
+        )
+        assert (
+            counts["copies_deleted"],
+            counts["match_stats_moved"],
+            counts["ht_copied"],
+            counts["plan_mismatch"],
+        ) == (
+            1,
+            1,
+            1,
+            0,
+        )
+        assert _row(engine, ids["copy"]) is None
+        with engine.connect() as c:
+            kept = c.execute(
+                text(
+                    "SELECT away_team_id::text, half_time_home, half_time_away, "
+                    "(SELECT array_agg(team_id::text) FROM match_stats WHERE match_id = m.id) AS stats "
+                    "FROM matches m WHERE id = :id"
+                ),
+                {"id": ids["espn"]},
+            ).one()
+        # Still on Santos (repoint_team_matches moves it); only Monterrey's stats came across.
+        assert (kept[0], kept[1], kept[2], kept[3]) == (ids["team:Santos"], 3, 1, [ids["team:Monterrey"]])
+        archived = [json.loads(line) for f in tmp_path.glob("*.jsonl.gz") for line in gzip.open(f, "rt")]
+        assert sum(1 for r in archived if r["table"] == "match_stats" and r["role"] == "references_copy") == 2
+
+        counts = rfk.run(conn, "shift", True, out_csv=str(tmp_path / "s.csv"), repoint_map=repoint_map)
+        assert (counts["planned"], counts["refused"], counts["dedupe_pending"]) == (0, 0, 0)
+        assert rfk.run_check(conn, repoint_map) == 0
+
+    before = _count(engine, "SELECT count(*) FROM matches")
+    stats = pr.promote(DSN)
+    assert (stats.matches, stats.refused) == (0, 1)  # the alias guard: nothing inserted beside ESPN's row
+    assert _count(engine, "SELECT count(*) FROM matches") == before
+
+    # repoint_team_matches moves both rows (the stale one with the ESPN one); then promote writes onto ESPN's row.
+    with engine.begin() as c:
+        c.execute(
+            text("UPDATE matches SET away_team_id = :sl WHERE id IN (:a, :b)"),
+            {"sl": ids["team:Santos Laguna"], "a": ids["espn"], "b": ids["stale"]},
+        )
+    stats = pr.promote(DSN)
+    assert (stats.matches, stats.refused, stats.duplicates) == (1, 0, 0)
+    assert _count(engine, "SELECT count(*) FROM matches") == before
+    assert _count(engine, "SELECT count(*) FROM match_stats WHERE match_id = :m", m=ids["espn"]) == 2

@@ -308,10 +308,12 @@ def promote_with(monkeypatch):
         insert_returns="m-1",
         legacy_check=lambda cur, rows, league_ids, team_ids: None,
         existing=lambda cur, home_id, away_id, match_dt, fixture_day: [],
+        aliases=lambda cur, home_id, away_id, match_dt, fixture_day: [],
     ):
         monkeypatch.setattr(pr.psycopg2, "connect", lambda url: _FakeConn(rows))
         monkeypatch.setattr(pr, "check_legacy_kickoffs", legacy_check)
         monkeypatch.setattr(pr, "find_existing_matches", existing)
+        monkeypatch.setattr(pr, "find_alias_slot_rows", aliases)
         monkeypatch.setattr(pr, "upsert_leagues", lambda cur, codes: {c: f"lg-{c}" for c in codes})
         monkeypatch.setattr(
             pr, "upsert_teams", lambda cur, names, by_team: {pr.normalize_team_name(n): f"t-{n}" for n in names}
@@ -910,3 +912,72 @@ class TestAfterTheTeamMerge:
         match_id, stats = _write(db, _fixture("26/07/2026", "00:30", ("1", "0")), home="old-h", away="old-a")
         assert (match_id, stats.refused) == (None, 1)
         assert [(r[0], r[5], r[6]) for r in _rows(db)] == [(espn, 0, 0)]
+
+
+# After repair_football_data_kickoffs --dedupe alias-merged a copy into the ESPN row still filed under the wrong club
+# (Monterrey v Santos, the Brazilian club's row; prod 2026-10-31), the raw row (Monterrey v Santos Laguna) has no row
+# for its own pair until repoint_team_matches moves that one. Inserting would put the match back in the corpus twice.
+MX_KICKOFF = datetime(2026, 7, 19, 1, 5, tzinfo=UTC)  # football-data 19/07/2026 02:05 UK
+
+
+class TestAliasSlotGuard:
+    """write_match never inserts a fixture beside a row for another team pair that shares a club with it in the
+    window: no club plays twice in a few hours (review finding, 2026-10-31: the re-point / kickoff-repair deadlock)."""
+
+    def _mx(self, db):
+        return _write(db, _fixture("19/07/2026", "02:05", ("3", "2")), home="mon", away="laguna")
+
+    def test_the_alias_merged_fixture_is_not_inserted_again(self, db, monkeypatch, caplog):
+        espn = _put(db, MX_KICKOFF, home="mon", away="santos-br", score=(3, 2), rs="espn_scoreboard")
+        with caplog.at_level(logging.ERROR, logger="promote_raw"):
+            match_id, stats = self._mx(db)
+        assert (match_id, stats.refused, stats.matches) == (None, 1, 0)
+        assert f"{espn} at" in caplog.text and "under other team ids" in caplog.text
+        assert [r[0] for r in _rows(db)] == [espn]
+        monkeypatch.setattr(pr, "promote", lambda url, batch_size: stats)
+        assert pr.main(["--database-url", "postgres://fake"]) == pr.REFUSED_EXIT_CODE
+
+    def test_a_shared_away_club_or_the_reverse_fixture_counts_too(self, db):
+        _put(db, MX_KICKOFF + timedelta(hours=2), home="other", away="laguna", score=(0, 0))
+        assert self._mx(db)[1].refused == 1
+        db.execute("DELETE FROM matches")
+        _put(db, MX_KICKOFF, home="laguna", away="mon", score=(2, 3))
+        assert self._mx(db)[1].refused == 1
+
+    def test_another_fixture_at_the_same_kickoff_is_no_alias(self, db):
+        _put(db, MX_KICKOFF, home="x", away="y", score=(3, 2), rs="espn_scoreboard")
+        match_id, stats = self._mx(db)
+        assert (stats.refused, stats.matches) == (0, 0) and match_id is not None and len(_rows(db)) == 2
+
+    def test_a_club_s_match_outside_the_window_is_no_alias(self, db):
+        _put(db, MX_KICKOFF - timedelta(hours=3, minutes=1), home="mon", away="z", score=(1, 1))
+        match_id, stats = self._mx(db)
+        assert (stats.refused, match_id is not None, len(_rows(db))) == (0, True, 2)
+
+    def test_once_re_pointed_it_writes_onto_the_row(self, db):
+        espn = _put(db, MX_KICKOFF, home="mon", away="laguna", score=(3, 2), rs="espn_scoreboard")
+        _put(db, MX_KICKOFF - timedelta(minutes=5), home="mon", away="laguna", status="scheduled")  # moved with it
+        match_id, stats = self._mx(db)
+        assert (match_id, stats.refused, stats.duplicates, len(_rows(db))) == (espn, 0, 0, 2)
+
+    def test_the_query_returns_other_pairs_sharing_a_club_and_never_the_pair_itself(self, db):
+        own = _put(db, MX_KICKOFF, home="mon", away="laguna", score=(3, 2))
+        alias = _put(db, MX_KICKOFF, home="mon", away="santos-br", score=(3, 2), rs="espn_scoreboard")
+        _put(db, MX_KICKOFF, home="x", away="y")
+        got = pr.find_alias_slot_rows(_SqliteCursor(db), "mon", "laguna", MX_KICKOFF, date(2026, 7, 19))
+        assert [r["id"] for r in got] == [alias] and own not in [r["id"] for r in got]
+
+    def test_the_guard_is_not_asked_when_the_pair_has_its_row(self, monkeypatch, promote_with):
+        asked: list = []
+        monkeypatch.setattr(pr, "update_existing_match", lambda cur, row, result: ("e77e612a", "updated"))
+        stats, inserts = promote_with(
+            [SHANDONG],
+            existing=lambda cur, h, a, dt, day: [dict(ESPN_ROW)],
+            aliases=lambda cur, h, a, dt, day: asked.append(1) or [{"id": "x"}],
+        )
+        assert (asked, inserts, stats.matches, stats.refused) == ([], [], 1, 0)
+
+    def test_promote_refuses_through_the_guard(self, promote_with):
+        alias = {"id": "e78e7e49", "match_date": MX_KICKOFF, "status": "finished", "home_score": 3, "away_score": 2}
+        stats, inserts = promote_with([SHANDONG], aliases=lambda cur, h, a, dt, day: [alias])
+        assert (stats.matches, stats.refused, inserts) == (0, 1, [])

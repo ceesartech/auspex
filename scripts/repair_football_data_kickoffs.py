@@ -14,22 +14,38 @@ near the kickoff instead of beside it (find_existing_matches), and refuses
 to run while any row is left at a legacy kickoff (check_legacy_kickoffs).
 This tool merges and moves them; until it has run, promote_raw stays blocked.
 
-RUN ORDER (decided 2026-10-31): scripts/ops/merge_soccer_teams.sh FIRST,
-then this tool (scripts/ops/repair_football_data_kickoffs.sh), then the
-soccer orphan cleanup (scripts/ops/cleanup_soccer_orphans.sh). The team
-merge folds the 160 alias pairs itself (it keeps the ESPN row and deletes
-about 171 football-data rows; promote_raw then writes those fixtures onto
-the surviving ESPN row, never beside it). If the merge has NOT run, those
-160 pairs are left for it: --shift refuses each copy whose new kickoff is
-the exact kickoff of the same fixture under other team ids (see below),
-so this tool never creates a pair the merge would trip over, and the
-wrapper aborts on the refusals before writing anything. The orphan cleanup
-runs after: the 26 stale rows this tool folds are finished by then and
-leave its candidate set. The same rule holds back the 6 football-data
-copies beside the 36 Liga MX rows ESPN filed under Santos (Brazil) and
-Guadalajara (Spain) (2026-10-31 rehearsal): the merge does not touch them
-(different clubs, not spellings); once a team-identity repair re-points
-them, --dedupe merges those 6 like the 68.
+RUN ORDER (decided 2026-10-31, each step its own approval):
+  1. scripts/ops/repoint_team_matches.sh, right after the team-identity
+     deploy: it moves the Liga MX rows ESPN filed under Santos (the
+     Brazilian club's row) and Guadalajara (the Spanish club's row) onto
+     Santos Laguna and Guadalajara Chivas, and refuses a row while
+     football-data's copy sits on the target pair (6 sides on 2026-10-31:
+     4 ESPN rows and 2 stale rows moving with them);
+  2. scripts/ops/merge_soccer_teams.sh: folds the 160 alias pairs where
+     ESPN minted its own team row (keeps the ESPN row, deletes about 171
+     football-data rows; promote_raw then writes those fixtures onto the
+     surviving ESPN row, never beside it);
+  3. this tool (scripts/ops/repair_football_data_kickoffs.sh): --dedupe
+     alias-merges the 4 copies step 1 refused for (below), folds and
+     merges the rest, --shift moves every other BST row;
+  4. scripts/repoint_team_matches.py again (re-pinned): its refused sides
+     have no twin left; until it has moved them, promote_raw refuses those
+     fixtures (find_alias_slot_rows), loudly;
+  5. the soccer orphan cleanup (scripts/ops/cleanup_soccer_orphans.sh): the
+     26 stale rows this tool folds are finished by then and leave its set.
+If step 1 moves every row (football-data twins allowed), --dedupe merges
+those 4 copies like the 68 and step 4 has nothing to do. If the team merge
+has NOT run, its 160 pairs are left for it: --shift refuses each copy whose
+new kickoff is the exact kickoff of the same fixture under other team ids
+(see below), so this tool never creates a pair the merge would trip over,
+and the wrapper aborts on the refusals before writing anything.
+
+The reviewed re-point map (scripts/data/repoint_team_matches.csv, step 1's:
+one row per match side, each proven by its ESPN event; --repoint-map) says
+where a row filed under the wrong club is about to be: a mapped row whose
+every mapped side is still on its from_team counts as a row of its
+to_team pair as well (pending_repoints). Without the map nothing does, and
+the 4 copies stay refused (alias slot).
 
 A matches row is tied to its raw_football_data row the way promote_raw tied
 them and backfill_season_labels ties them: league code, normalised team
@@ -41,7 +57,8 @@ the one it writes now.
 promote_raw would now write its fixture onto is another row for the same
 home and away team ids within 3 h of the corrected kickoff, on
 football-data's date (promote_raw.existing_match_window / choose_existing).
-Two kinds, both one guarded transaction per batch:
+The rows the reviewed re-point map is about to move onto the pair count
+(pending_repoints). Kinds, all one guarded transaction per batch:
   merge: that row is an ESPN row, finished with the copy's final score. On
     prod it sits 1 h (+-10 min) earlier for 67 of the 68 same-id pairs; the
     68th ESPN row kicked off 76 min after football-data's legacy time, and
@@ -50,6 +67,15 @@ Two kinds, both one guarded transaction per batch:
     the ESPN row when it has none, the pair is complete and neither half
     exceeds the ESPN final score (promote_raw.raw_result's check; it needs no
     ESPN plays).
+  alias_merge: the same, where that ESPN row is still filed under the wrong
+    club and the map moves it onto the copy's pair (the 4 Liga MX copies on
+    2026-10-31; repoint_team_matches refused to move their rows while the
+    copy sat on the target pair, and --shift refused the copy beside them).
+    The row keeps its team ids (step 4 moves it); the copy's match_stats
+    move only for a club in that row (STATS_FREE_ON_TWIN), the other is
+    archived with the copy and promote_raw writes it again after step 4.
+    Every write is guarded on the row's team ids too: a row re-pointed
+    between plan and write stops the batch. Never a fold across team ids.
   fold: that row is a stale 'scheduled' fixture row without ESPN identity
     (pre-migration 023) at EXACTLY the copy's corrected kickoff, with no
     score, no pending/placed recommendation (on the row or on one of its
@@ -59,15 +85,19 @@ Two kinds, both one guarded transaction per batch:
     the outcome trigger then grades its pre-kickoff predictions, identically
     under migration 011 and 027 because there is no post-kickoff row for 027
     to skip, and settles no recommendation because none is open. The audit
-    CSV lists, per fold, the row's recommendations by status and its
-    ungraded predictions; the run logs what the trigger graded.
-Then, for both: the copy's odds move where the kept row has no price under
+    CSV lists, per fold, the row's recommendations by status, those
+    without a profit_loss (fold_unsettled_recs: grade_completed_matches.py
+    --match-id would settle them by the final score; the PLAN line sums
+    them and the wrapper refuses unless 0) and its ungraded predictions;
+    the run logs what the trigger graded.
+Then, for all: the copy's odds move where the kept row has no price under
 the same key (uq_odds_current_price_key), its match_stats where the kept
-row has none for that team; the copy row, the kept row's before-state (for
-a fold also its predictions and recommendations), and every row that
-references the copy, moved rows included (every FK to matches, read from
-pg_constraint so a new table is never missed), go to a write-once gzip
-JSONL archive before the first write; and the copy is deleted, guarded:
+row has none for that team and that team plays in it; the copy row, the
+kept row's before-state (for a fold also its predictions and
+recommendations), and every row that references the copy, moved rows
+included (every FK to matches, read from pg_constraint so a new table is
+never missed), go to a write-once gzip JSONL archive before the first
+write; and the copy is deleted, guarded:
 never while a prediction, recommendation or betting_history row (or any FK
 that does not cascade) references it. Refused and reported: a copy that is
 not finished or has another score, a kept row that is ambiguous or wanted by
@@ -89,36 +119,40 @@ the same club (same_club_name; 'Inter Miami v Columbus Crew' 2-2 beside
 sharing a team that would both land on one kickoff are refused the same
 way. Shifting beside an alias pair would leave two rows of one match on one
 slot, and whatever later unifies the team ids would collide on UNIQUE. A
-copy --dedupe still plans to merge or fold is not shifted (counted as
-left_to_dedupe; the PLAN line's dedupe_pending counts every copy --dedupe
-still plans), and --shift --apply refuses to write anything while
-dedupe_pending is not 0. A shifted row that lands within 10 min of an
-ESPN row for a DIFFERENT team pair in the same league, with the same score,
-and is not refused as above, is a probable alias twin: shifted, and listed
-in alias_twin_id for whoever unifies the teams.
+copy --dedupe still plans to merge, alias-merge or fold is not shifted
+(counted as left_to_dedupe; the PLAN line's dedupe_pending counts every
+copy --dedupe still plans), and --shift --apply refuses to write anything
+while dedupe_pending is not 0. A row the re-point map is about to move onto
+the pair counts as a same-pair row here too. A shifted row that lands
+within 10 min of an ESPN row for a DIFFERENT team pair in the same league,
+with the same score, and is not refused as above, is a probable alias twin:
+shifted, and listed in alias_twin_id for whoever unifies the teams.
 
 --check (read-only). Runs promote_raw.check_legacy_kickoffs (every row at a
 legacy kickoff, whether its corrected slot is free or not) and counts the
 football-data rows that still have another FINISHED row for the pair where
-promote_raw looks; exits 1 unless both are clear. Also counts, for
-information, football-data rows beside an unfinished row (stale fixtures)
-and probable alias twins.
+promote_raw looks (a row the re-point map is about to move onto it
+included); exits 1 unless both are clear. Also counts, for information,
+football-data rows beside an unfinished row (stale fixtures), probable
+alias twins, and the rows the re-point map has still to move
+(repoint_pending).
 
 Both writing modes plan first and write every planned row, refusals
 included, to a write-once audit CSV, dry run included, and log one line
 'PLAN mode=<mode> <action>=<n> ...' for the wrapper. --expect-plan pins the
-plan an operator reviewed (dedupe: merge=,fold=,refuse=; shift: shift=,
-refuse=): a plan that differs writes nothing and exits 1. --apply writes the
-planned rows in bounded batches, one transaction each, every UPDATE and
-DELETE guarded on the values the plan observed; refused rows are left alone
-(exit 1 unless the refusals were pinned). A batch whose guard misses a row
-rolls back and stops the run; earlier batches stay committed and a re-run
-plans them as done.
+plan an operator reviewed (dedupe: merge=,alias_merge=,fold=,refuse=;
+shift: shift=,refuse=): a plan that differs writes nothing and exits 1.
+--apply writes the planned rows in bounded batches, one transaction each,
+every UPDATE and DELETE guarded on the values the plan observed; refused
+rows are left alone (exit 1 unless the refusals were pinned). A batch whose
+guard misses a row rolls back and stops the run; earlier batches stay
+committed and a re-run plans them as done.
 
 Usage (inside the api container; scripts/ops/repair_football_data_kickoffs.sh
 runs the whole sequence with a verified backup first):
     python /app/scripts/repair_football_data_kickoffs.py --dedupe            # dry run
-    python /app/scripts/repair_football_data_kickoffs.py --dedupe --apply --expect-plan merge=74,fold=26,refuse=0
+    python /app/scripts/repair_football_data_kickoffs.py --dedupe --apply \\
+        --expect-plan merge=68,alias_merge=4,fold=26,refuse=0
     python /app/scripts/repair_football_data_kickoffs.py --shift             # dry run
     python /app/scripts/repair_football_data_kickoffs.py --shift --apply --expect-plan shift=63533,refuse=0
     python /app/scripts/repair_football_data_kickoffs.py --check
@@ -169,7 +203,14 @@ GENERIC_CLUB_WORDS = frozenset(
 GUARD_TABLES = frozenset({"predictions", "betting_recommendations", "betting_history"})
 DEFAULT_BATCH_SIZE = {"dedupe": 100, "shift": 5000}
 # The actions each mode plans; --expect-plan pins any of them (refuse included).
-PLAN_KEYS = {"dedupe": ("merge", "fold", "refuse"), "shift": ("shift", "refuse")}
+PLAN_KEYS = {"dedupe": ("merge", "alias_merge", "fold", "refuse"), "shift": ("shift", "refuse")}
+# The dedupe actions that delete a copy into the row it keeps.
+DEDUPE_WRITES = ("merge", "alias_merge", "fold")
+# scripts/repoint_team_matches.py's reviewed map (one row per match side, each proven by its ESPN event): the
+# rows ESPN filed under the wrong club, and the club each side moves to. --dedupe reads it to see where such a
+# row is about to be (pending_repoints); absent, nothing is read from it.
+REPOINT_MAP_PATH = Path(__file__).resolve().parent / "data" / "repoint_team_matches.csv"
+REPOINT_MAP_FIELDS = ("match_id", "side", "from_team", "to_team")
 
 RAW_SQL = (
     'SELECT league, season, "Date", "Time", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "HTHG", "HTAG" '
@@ -216,7 +257,9 @@ FOLD_FACTS_SQL = f"""
                AS ungraded_predictions,
            (SELECT COALESCE(json_object_agg(x.status, x.n), '{{}}'::json)
               FROM (SELECT br.status, count(*) AS n FROM betting_recommendations br WHERE {_RECS_OF}
-                     GROUP BY br.status) x) AS recs_by_status
+                     GROUP BY br.status) x) AS recs_by_status,
+           (SELECT count(*) FROM betting_recommendations br WHERE br.profit_loss IS NULL AND {_RECS_OF})
+               AS unsettled_recs
       FROM matches m
      WHERE m.id = ANY(%s::uuid[])
 """
@@ -228,8 +271,11 @@ GRADED_SQL = """
      GROUP BY prediction_type
 """
 
-# What a row looked like when planned; every dedupe write is guarded on it.
+# What a row looked like when planned; every dedupe write is guarded on it (the team ids too: a row
+# repoint_team_matches moved after the plan is no longer the row the plan saw).
 OBSERVED = (
+    "home_id",
+    "away_id",
     "match_date",
     "status",
     "home_score",
@@ -240,7 +286,8 @@ OBSERVED = (
     "result_source",
 )
 LOCK_SQL = """
-    SELECT m.id::text AS id, m.match_date, m.status, m.home_score, m.away_score, m.half_time_home,
+    SELECT m.id::text AS id, m.home_team_id::text AS home_id, m.away_team_id::text AS away_id,
+           m.match_date, m.status, m.home_score, m.away_score, m.half_time_home,
            m.half_time_away, m.external_ids->>'espn' AS espn_id, m.metadata->>'result_source' AS result_source
       FROM matches m
      WHERE m.id = ANY(%s::uuid[])
@@ -269,8 +316,14 @@ ODDS_FREE_ON_TWIN = """NOT EXISTS (
            AND x.selection = o.selection AND COALESCE(x.line, -1) = COALESCE(o.line, -1)
            AND COALESCE(x.is_opening, false) = COALESCE(o.is_opening, false)
            AND COALESCE(x.is_live, false) = COALESCE(o.is_live, false))"""
+# ... and plays in it: an alias merge's kept row is still filed under the wrong club, so the copy's row for the
+# club it is about to be re-pointed to stays with the copy (archived; promote_raw writes it again once the row
+# is re-pointed) instead of landing on a match that club is not in, where repoint_team_matches would refuse it.
 STATS_FREE_ON_TWIN = """NOT EXISTS (
-        SELECT 1 FROM match_stats x WHERE x.match_id = v.twin_id::uuid AND x.team_id = s.team_id)"""
+        SELECT 1 FROM match_stats x WHERE x.match_id = v.twin_id::uuid AND x.team_id = s.team_id)
+       AND EXISTS (
+        SELECT 1 FROM matches k
+         WHERE k.id = v.twin_id::uuid AND s.team_id IN (k.home_team_id, k.away_team_id))"""
 
 MOVE_COUNTS_SQL = f"""
     SELECT v.copy_id,
@@ -382,6 +435,8 @@ DEDUPE_FIELDS = (
     "fold_predictions",
     "fold_ungraded_predictions",
     "fold_recs_by_status",
+    "fold_unsettled_recs",
+    "kept_row_repoint",
     "action",
     "reason",
     "batch",
@@ -436,7 +491,10 @@ def quote_ident(name: str) -> str:
 @dataclass
 class Snapshot:
     """Everything the plans read, from one read snapshot. Each match dict
-    gains 'kickoff' (aware UTC) and 'espn' (promote_raw.has_espn_identity)."""
+    gains 'kickoff' (aware UTC) and 'espn' (promote_raw.has_espn_identity).
+    `pending` (set_pending) is {match_id: (home_id, away_id) once
+    re-pointed} for the rows the reviewed re-point map is about to move;
+    pair_rows() lists them under that pair too."""
 
     db_tz: tzinfo
     raw_rows: list[dict]
@@ -446,6 +504,8 @@ class Snapshot:
     matches: list[dict]
     by_key: dict[tuple, dict] = field(init=False)
     by_pair: dict[tuple, list[dict]] = field(init=False)
+    pending: dict[str, tuple[str, str]] = field(init=False)
+    by_post_pair: dict[tuple, list[dict]] = field(init=False)
 
     def __post_init__(self) -> None:
         self.by_key, self.by_pair = {}, defaultdict(list)
@@ -454,6 +514,17 @@ class Snapshot:
             m["espn"] = pr.has_espn_identity(m.get("espn_id"), m.get("result_source"))
             self.by_key[(m["home_id"], m["away_id"], m["kickoff"])] = m
             self.by_pair[(m["home_id"], m["away_id"])].append(m)
+        self.set_pending({})
+
+    def set_pending(self, pending: dict[str, tuple[str, str]]) -> None:
+        self.pending, self.by_post_pair = dict(pending), defaultdict(list)
+        for m in self.matches:
+            if m["id"] in self.pending:
+                self.by_post_pair[self.pending[m["id"]]].append(m)
+
+    def pair_rows(self, pair: tuple) -> list[dict]:
+        """The rows for a team pair: on it now, or about to be (pending)."""
+        return self.by_pair.get(pair, []) + self.by_post_pair.get(pair, [])
 
 
 @dataclass
@@ -551,12 +622,79 @@ def link_rows(snap: Snapshot, counts: Counter) -> dict[str, Link]:
     return links
 
 
+def load_repoint_map(path: Path | str) -> dict[str, dict[str, tuple[str, str]]]:
+    """scripts/repoint_team_matches.py's reviewed map as {match_id: {side:
+    (from_team, to_team)}}, names normalised (promote_raw.normalize_team_name).
+    Raises ValueError on a malformed map: a missing column, a side that is not
+    home/away, an empty name, a side listed twice."""
+    path = Path(path)
+    out: dict[str, dict[str, tuple[str, str]]] = defaultdict(dict)
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        missing = [f for f in REPOINT_MAP_FIELDS if f not in (reader.fieldnames or [])]
+        if missing:
+            raise ValueError(f"{path}: missing column(s) {', '.join(missing)}")
+        for line, raw in enumerate(reader, start=2):
+            match_id, side, frm, to = (str(raw.get(f) or "").strip() for f in REPOINT_MAP_FIELDS)
+            if side not in ("home", "away") or not (match_id and frm and to):
+                raise ValueError(f"{path}:{line}: want match_id, side home/away, from_team and to_team")
+            if side in out[match_id]:
+                raise ValueError(f"{path}:{line}: {match_id} {side} is listed twice")
+            out[match_id][side] = (pr.normalize_team_name(frm), pr.normalize_team_name(to))
+    return dict(out)
+
+
+def pending_repoints(
+    snap: Snapshot, repoint_map: dict[str, dict[str, tuple[str, str]]], counts: Counter
+) -> dict[str, tuple[str, str]]:
+    """{match_id: (home_id, away_id) once re-pointed} for each mapped row
+    whose every mapped side is still on its from_team: where
+    repoint_team_matches will put it. A row it already moved is 'done'; a
+    row half moved, on another team, or naming a team that does not exist is
+    counted and left out (nothing is planned from it). Pure."""
+    by_id = {m["id"]: m for m in snap.matches}
+    pending: dict[str, tuple[str, str]] = {}
+    for match_id, sides in sorted(repoint_map.items()):
+        m = by_id.get(match_id)
+        if m is None:
+            counts["repoint_row_absent"] += 1
+            continue
+        post = {"home": m["home_id"], "away": m["away_id"]}
+        states = set()
+        for side, (frm, to) in sides.items():
+            to_id = snap.team_ids.get(to)
+            if to_id is None:
+                states.add("unresolved")
+            elif m[f"{side}_id"] == to_id:
+                states.add("done")
+            elif pr.normalize_team_name(snap.team_names.get(m[f"{side}_id"], "")) == frm:
+                states.add("pending")
+                post[side] = to_id
+            else:
+                states.add("drifted")
+        if states == {"done"}:
+            counts["repoint_done"] += 1
+        elif states == {"pending"} and post["home"] != post["away"]:
+            pending[match_id] = (post["home"], post["away"])
+        else:
+            counts["repoint_unclear"] += 1
+            logger.warning("re-point map row %s is %s: nothing planned from it", match_id, "/".join(sorted(states)))
+    counts["repoint_pending"] = len(pending)
+    return pending
+
+
 def window_rows(snap: Snapshot, link: Link) -> list[dict]:
     """The other rows for this pair where promote_raw now looks for the
-    fixture: promote_raw.existing_match_window around the corrected kickoff. Pure."""
+    fixture: promote_raw.existing_match_window around the corrected kickoff,
+    a row the reviewed re-point map is about to move onto the pair included
+    (Snapshot.pair_rows). Pure."""
     m = link.match
     lo, hi = pr.existing_match_window(link.corrected, link.fixture_day)
-    return [x for x in snap.by_pair[(m["home_id"], m["away_id"])] if x is not m and lo <= x["kickoff"] <= hi]
+    return [x for x in snap.pair_rows((m["home_id"], m["away_id"])) if x is not m and lo <= x["kickoff"] <= hi]
+
+
+def _on_other_pair(copy: dict, row: dict) -> bool:
+    return (row["home_id"], row["away_id"]) != (copy["home_id"], copy["away_id"])
 
 
 def _base_entry(snap: Snapshot, link: Link) -> dict:
@@ -642,8 +780,11 @@ def plan_dedupe(
     fold_facts: Optional[dict[str, dict]] = None,
 ) -> list[dict]:
     """One entry per candidate copy: action 'merge' (into the ESPN row
-    promote_raw.choose_existing picks among the nearby rows), 'fold' (into
-    the stale 'scheduled' row it picks, see fold_refusal) or 'refuse'.
+    promote_raw.choose_existing picks among the nearby rows), 'alias_merge'
+    (the same, into an ESPN row still filed under the wrong club that the
+    reviewed re-point map is about to move onto the copy's pair: Snapshot.
+    pending), 'fold' (into the stale 'scheduled' row it picks, see
+    fold_refusal) or 'refuse'.
     `refs` is {copy_id: {table: rows referencing it}}, `fold_facts`
     {row_id: FOLD_FACTS_SQL row} for the unfinished rows without ESPN
     identity. Pure."""
@@ -683,6 +824,15 @@ def plan_dedupe(
                 fold_predictions=facts["predictions"],
                 fold_ungraded_predictions=facts["ungraded_predictions"],
                 fold_recs_by_status=json.dumps(facts["recs_by_status"] or {}, sort_keys=True),
+                fold_unsettled_recs=facts.get("unsettled_recs", 0),
+            )
+        if twin is not None and _on_other_pair(copy, twin):
+            entry["kept_row_repoint"] = "; ".join(
+                f"{side}: {snap.team_names.get(now, now)} -> {snap.team_names.get(then, then)}"
+                for side, now, then in zip(
+                    ("home", "away"), (twin["home_id"], twin["away_id"]), snap.pending.get(twin["id"], ("", ""))
+                )
+                if now != then
             )
         blocking = sorted(t for t in copy_refs if t in guards)
         copy_score = (copy["home_score"], copy["away_score"])
@@ -694,6 +844,12 @@ def plan_dedupe(
             entry["reason"] = f"the copy is not a finished result ({copy['status']} {copy_score[0]}-{copy_score[1]})"
         elif blocking:
             entry["reason"] = "copy referenced by " + ", ".join(f"{t} ({copy_refs[t]})" for t in blocking)
+        elif _on_other_pair(copy, twin) and not twin["espn"]:
+            entry["reason"] = (
+                f"the row for this fixture is a '{twin['status']}' row without ESPN identity filed under other team "
+                f"ids ({entry['kept_row_repoint']}, per the reviewed re-point map): re-point it first "
+                "(scripts/repoint_team_matches.py), then re-run"
+            )
         elif twin["espn"]:
             if twin["status"] != "finished":
                 entry["reason"] = f"not both finished (copy {copy['status']}, ESPN row {twin['status']})"
@@ -703,7 +859,7 @@ def plan_dedupe(
                     f"ESPN row {twin['home_score']}-{twin['away_score']})"
                 )
             else:
-                entry["action"] = "merge"
+                entry["action"] = "alias_merge" if _on_other_pair(copy, twin) else "merge"
                 entry["ht_action"], entry["ht_write"] = ht_plan(copy, twin)
         elif twin["status"] == "finished":
             entry["reason"] = (
@@ -779,7 +935,7 @@ def load_refs(cur, fk_tables: list[FkTable], match_ids: list[str]) -> dict[str, 
 
 
 def add_move_counts(cur, entries: list[dict]) -> None:
-    merges = [e for e in entries if e["action"] in ("merge", "fold")]
+    merges = [e for e in entries if e["action"] in DEDUPE_WRITES]
     if not merges:
         return
     rows = execute_values(
@@ -821,7 +977,7 @@ def apply_dedupe_batch(conn, batch: list[dict], batch_no: int, fk_tables: list[F
     then write. Raises PlanDrift (rolled back) when a guard misses."""
     done: Counter = Counter()
     copy_ids = [e["copy_id"] for e in batch]
-    merge_ids = [e["twin"]["id"] for e in batch if e["action"] == "merge"]
+    merge_ids = [e["twin"]["id"] for e in batch if e["action"] in ("merge", "alias_merge")]
     folds = [e for e in batch if e["action"] == "fold"]
     fold_ids = [e["twin"]["id"] for e in folds]
     pairs = [(e["copy_id"], e["twin"]["id"]) for e in batch]
@@ -871,7 +1027,7 @@ def apply_dedupe_batch(conn, batch: list[dict], batch_no: int, fk_tables: list[F
             done["archived_records"] += len(records)
 
             for e in batch:
-                if e["action"] != "merge" or e["ht_write"] is None:
+                if e["action"] not in ("merge", "alias_merge") or e["ht_write"] is None:
                     continue
                 twin = e["twin"]
                 cur.execute(
@@ -1058,7 +1214,7 @@ def plan_shift(
         target = link.corrected
         near = [
             x
-            for x in snap.by_pair[(m["home_id"], m["away_id"])]
+            for x in snap.pair_rows((m["home_id"], m["away_id"]))
             if x is not m and abs(x["kickoff"] - target) <= NEAR_WINDOW
         ]
         slot = alias_slot_rows(index, m, target, planned_away, snap.team_names)
@@ -1195,7 +1351,7 @@ def probable_alias_twins(snap: Snapshot, links: dict[str, Link]) -> list[tuple[d
     return out
 
 
-def run_check(conn) -> int:
+def run_check(conn, repoint_map: Optional[dict] = None) -> int:
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         snap = load_snapshot(cur)
         legacy_error = None
@@ -1205,6 +1361,7 @@ def run_check(conn) -> int:
             legacy_error = str(e)
     conn.rollback()
     counts: Counter = Counter()
+    snap.set_pending(pending_repoints(snap, repoint_map or {}, counts))
     links = link_rows(snap, counts)
     duplicates, stale = football_data_neighbours(snap, links)
     aliases = probable_alias_twins(snap, links)
@@ -1220,11 +1377,12 @@ def run_check(conn) -> int:
         )
     logger.info(
         "CHECK legacy_kickoffs=%s football_data_duplicates=%d | info: beside_unfinished_rows=%d "
-        "probable_alias_twins=%d linked=%d",
+        "probable_alias_twins=%d repoint_pending=%d linked=%d",
         "FAIL" if legacy_error else "PASS",
         len(duplicates),
         len(stale),
         len(aliases),
+        len(snap.pending),
         len(links),
     )
     return 1 if legacy_error or duplicates else 0
@@ -1297,12 +1455,15 @@ def _log_plan(
     log_refusal = logger.warning if pinned else logger.error
     by_league = dict(sorted(Counter(e["league"] for e in planned).items()))
     if mode == "dedupe":
-        merges = [e for e in planned if e["action"] == "merge"]
+        merges = [e for e in planned if e["action"] in ("merge", "alias_merge")]
+        aliases = [e for e in planned if e["action"] == "alias_merge"]
         folds = [e for e in planned if e["action"] == "fold"]
         logger.info(
-            "Planned %d merge(s) and %d fold(s) in %d batch(es) %s: %d BST copies, offsets (copy - kept row, min) "
-            "%s, half-time to copy %d, odds to move %d of %d, match_stats to move %d of %d; audit CSV %s",
+            "Planned %d merge(s) (%d of them alias merges) and %d fold(s) in %d batch(es) %s: %d BST copies, offsets "
+            "(copy - kept row, min) %s, half-time to copy %d, odds to move %d of %d, match_stats to move %d of %d; "
+            "audit CSV %s",
             len(merges),
+            len(aliases),
             len(folds),
             len(batches),
             by_league,
@@ -1315,6 +1476,17 @@ def _log_plan(
             sum(e.get("copy_match_stats", 0) for e in planned),
             out_csv,
         )
+        for e in aliases:
+            logger.info(
+                "Alias merge: %s %s v %s copy %s into ESPN row %s, still filed under the wrong club (%s): "
+                "scripts/repoint_team_matches.py moves it once the copy is gone",
+                e["league"],
+                e["home"],
+                e["away"],
+                e["copy_id"],
+                e["twin"]["id"],
+                e["kept_row_repoint"],
+            )
         if folds:
             recs: Counter = Counter()
             for e in folds:
@@ -1322,12 +1494,14 @@ def _log_plan(
             logger.info(
                 "Folds: %d stale 'scheduled' rows take the copy's result and become 'finished' %s; on them %d "
                 "predictions (%d ungraded, 0 written after kickoff: the outcome trigger grades the pre-kickoff ones "
-                "it knows) and recommendations by status %s (none open: the trigger settles none)",
+                "it knows) and recommendations by status %s (none open: the trigger settles none; %d without a "
+                "profit_loss, which grade_completed_matches.py --match-id would settle by the final score)",
                 len(folds),
                 dict(sorted(Counter(e["league"] for e in folds).items())),
                 sum(e.get("fold_predictions", 0) for e in folds),
                 sum(e.get("fold_ungraded_predictions", 0) for e in folds),
                 dict(sorted(recs.items())),
+                sum(e.get("fold_unsettled_recs", 0) for e in folds),
             )
         for e in merges:
             if e["ht_action"] == "conflict_kept_espn":
@@ -1382,11 +1556,13 @@ def run(
     archive_dir: Optional[str] = None,
     batch_size: Optional[int] = None,
     expect_plan: Optional[dict[str, int]] = None,
+    repoint_map: Optional[dict[str, dict[str, tuple[str, str]]]] = None,
 ) -> Counter:
     counts: Counter = Counter()
     fk_tables: list[FkTable] = []
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         snap = load_snapshot(cur)
+        snap.set_pending(pending_repoints(snap, repoint_map or {}, counts))
         links = link_rows(snap, counts)
         if mode == "dedupe":
             entries, fk_tables = plan_dedupe_from_db(cur, snap, links, counts)
@@ -1394,20 +1570,22 @@ def run(
         else:
             # what --dedupe would still merge or fold, so the shift plan is the one after it
             pending, _fks = plan_dedupe_from_db(cur, snap, links, Counter())
-            planned_away = frozenset(e["copy_id"] for e in pending if e["action"] in ("merge", "fold"))
+            planned_away = frozenset(e["copy_id"] for e in pending if e["action"] in DEDUPE_WRITES)
             counts["dedupe_pending"] = len(planned_away)
             entries = plan_shift(snap, links, counts, planned_away)
     conn.rollback()  # close the read snapshot before writing
     logger.info(
-        "Loaded %d raw rows, %d soccer matches (db TimeZone %s); linked %d football-data rows",
+        "Loaded %d raw rows, %d soccer matches (db TimeZone %s); linked %d football-data rows; %d row(s) the "
+        "reviewed re-point map is about to move",
         len(snap.raw_rows),
         len(snap.matches),
         snap.db_tz,
         len(links),
+        len(snap.pending),
     )
 
     batches = assign_batches(
-        entries, ("merge", "fold") if mode == "dedupe" else ("shift",), batch_size or DEFAULT_BATCH_SIZE[mode]
+        entries, DEDUPE_WRITES if mode == "dedupe" else ("shift",), batch_size or DEFAULT_BATCH_SIZE[mode]
     )
     planned = [e for e in entries if e["action"] != "refuse"]
     refused = [e for e in entries if e["action"] == "refuse"]
@@ -1418,7 +1596,10 @@ def run(
     _log_plan(
         mode, planned, refused, batches, counts, out_csv, pinned=(expect_plan or {}).get("refuse") == len(refused)
     )
-    extra = f" dedupe_pending={counts['dedupe_pending']}" if mode == "shift" else ""
+    if mode == "shift":
+        extra = f" dedupe_pending={counts['dedupe_pending']}"
+    else:
+        extra = f" fold_unsettled_recs={sum(e.get('fold_unsettled_recs', 0) for e in planned if e['action'] == 'fold')}"
     logger.info("PLAN mode=%s %s%s", mode, " ".join(f"{k}={v}" for k, v in plan.items()), extra)
 
     mismatch = plan_mismatch(plan, expect_plan)
@@ -1454,6 +1635,16 @@ def run(
                 counts["trigger_graded_predictions"],
                 dict(sorted(graded.items())),
             )
+        alias_kept = sorted(e["twin"]["id"] for b in batches for e in b if e["action"] == "alias_merge")
+        if alias_kept:
+            logger.info(
+                "NEXT: %d kept row(s) are still filed under the wrong club (%s): re-run "
+                "scripts/repoint_team_matches.py (dry run first; the sides it refused for a same-pair twin now plan "
+                "as 'repoint'); until then "
+                "promote_raw refuses their fixtures (alias slot)",
+                len(alias_kept),
+                ", ".join(alias_kept),
+            )
     else:
         for n, batch in enumerate(batches, 1):
             counts["shifted"] += apply_shift_batch(conn, batch, n)
@@ -1471,12 +1662,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--expect-plan",
         default=None,
-        help="Write nothing unless the plan has exactly these counts: dedupe merge=N,fold=N,refuse=N; "
+        help="Write nothing unless the plan has exactly these counts: dedupe merge=N,alias_merge=N,fold=N,refuse=N; "
         "shift shift=N,refuse=N (any subset).",
     )
     p.add_argument("--out-csv", default=None, help="Audit CSV (default $BACKUP_LOCAL_DIR or /app/backups).")
     p.add_argument("--archive-dir", default=None, help="Archive/CSV dir (default $BACKUP_LOCAL_DIR or /app/backups).")
     p.add_argument("--batch-size", type=int, default=None, help="Rows per transaction (dedupe 100, shift 5000).")
+    p.add_argument(
+        "--repoint-map",
+        default=str(REPOINT_MAP_PATH),
+        help="scripts/repoint_team_matches.py's reviewed map (default: scripts/data/repoint_team_matches.csv; "
+        "absent, no row is taken as about to move).",
+    )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     args = p.parse_args(argv)
     if args.mode == "check" and (args.apply or args.expect_plan is not None):
@@ -1496,9 +1693,17 @@ def main(argv: list[str] | None = None) -> int:
     if not args.database_url:
         logger.error("DATABASE_URL not set")
         return 2
+    if Path(args.repoint_map).is_file():
+        repoint_map = load_repoint_map(args.repoint_map)  # loud on a malformed map
+        logger.info("Re-point map %s: %d match row(s)", args.repoint_map, len(repoint_map))
+    else:
+        repoint_map = {}
+        logger.warning(
+            "No re-point map at %s: a copy whose ESPN row is filed under the wrong club stays refused", args.repoint_map
+        )
     with psycopg2.connect(args.database_url) as conn:
         if args.mode == "check":
-            return run_check(conn)
+            return run_check(conn, repoint_map)
         try:
             counts = run(
                 conn,
@@ -1508,6 +1713,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.archive_dir,
                 args.batch_size,
                 args.expect_plan,
+                repoint_map,
             )
         except PlanDrift as e:
             logger.error("Stopped, batch rolled back (earlier batches are committed; a re-run re-plans): %s", e)
