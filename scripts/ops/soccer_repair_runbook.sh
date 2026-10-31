@@ -63,11 +63,12 @@
 # 10 compute_features.py --backfill-finished soccer
 #    Recomputes features_cache for every finished soccer match (replaces the
 #    per-step feature commands steps 1, 3 and 7 print). Skipped as already
-#    done when it completed after every data-changing step's last change
-#    (this runbook's state file, below).
+#    done when its last completion is recorded after every data-changing
+#    step's last change (this runbook's state file, below).
 # 11 merge_soccer_teams.py --check-after <plan> --odds-since <MERGED_AT> --after-later-steps
-#    Read-only. Waits (up to ODDS_WAIT_POLLS x AF_POLL_SECONDS, 2 h) for a
-#    fetch_live_odds run that started after the merge and finished; then
+#    Read-only. Waits (up to ODDS_WAIT_POLLS x AF_POLL_SECONDS = 240 x 30 s,
+#    2 h; fetch_live_odds runs every 90 min) for a fetch_live_odds run that
+#    started after the merge and finished; then
 #    teams_reminted, resolver_misses, odds_not_yet_observed and
 #    odds_fixtures_stopped must be 0 (and the merge's other after-state counts:
 #    only repoints_missing is reported, not failed — steps 4 and 7 delete some
@@ -75,17 +76,34 @@
 #    come from /app/backups/merge_soccer_teams_last_apply.env.
 #
 # Before step 1 (read-only) it REFUSES TO START unless:
-#   * the VM HEAD contains this runbook's own commit (the file being run is
-#     the one committed at HEAD, its commit is an ancestor of HEAD — git
-#     merge-base --is-ancestor — and scripts/ and services/ carry no local
-#     edits: the bind-mounted code is the deployed code);
+#   * the file being run is byte-identical to this runbook as committed at
+#     the VM HEAD (git rev-parse HEAD:<path> equals git hash-object of the
+#     file), so HEAD carries the commit that holds it, and scripts/ and
+#     services/ carry no local edits: the bind-mounted wrappers and tools are
+#     HEAD's (a git merge-base --is-ancestor test of the runbook's own commit
+#     would be true by construction, so none is made);
 #   * void_post_kickoff_recs.sh has run (>= 22 recs carry its 'void: written
 #     after kickoff (was ...)' label) and fix_unplayed_soccer_rows.sh has run
 #     (its 4 rows are 'cancelled');
-#   * retrain_models has no run in flight. It is paused for the whole run when
-#     it is unpaused (drained first; Airflow 3.3 never advances a paused DAG's
-#     runs) and unpaused again on every exit (trap); a DAG paused before the
-#     run stays paused.
+#   * neither retrain_models (Sun 04:00 UTC) nor retrain_halftime_dc (the 1st,
+#     05:30 UTC) has a run in flight. Both fit on the soccer corpus this
+#     sequence rewrites, so each one that is unpaused is drained and paused
+#     (Airflow 3.3 never advances a paused DAG's runs) — a DAG paused before
+#     the run stays paused and is never unpaused here.
+# They are unpaused when the runbook exits ONLY if the corpus is consistent:
+# no corpus step (1, 3, 4, 5, 7) failed or was cut short in this run, and the
+# state file records step 10's feature recompute after the last corpus change
+# (or no corpus change at all). Otherwise — a failed or interrupted corpus
+# step, or a run that leaves step 10 still to do — they STAY PAUSED and the
+# runbook prints an ALERT with the unpause commands: unpaused, either would
+# start its missed run at once and train on a half-repaired corpus with stale
+# features (retrain_models' swap_production then serves it and restarts the
+# api). A later runbook run (--from N) adopts them (their markers in
+# ~/.auspex_ops, scripts/ops/_airflow_lib.sh) and unpauses them once step 10
+# has completed. A failure in steps 2, 6, 8, 9 or 11 (none feeds the
+# training corpus or its features) leaves that decision to the state file.
+# Every pause, unpause and ALERT is also appended to
+# ~/.auspex_ops/airflow_pauses.log, which survives a dropped terminal.
 #
 # AFTERWARDS (separate approvals, not run here): the never_resulted results
 # backfill in cleanup_soccer_orphans.sh's header, then grade_completed_matches
@@ -96,21 +114,31 @@
 # It stops at the first step that exits non-zero and prints "fix, then re-run
 # with --from N". Every step is safe to re-run after it succeeded: each
 # wrapper first re-plans read-only and exits 0 ("ALREADY DONE") when it has
-# nothing left to do, without a backup or a write. A full re-run of a finished
+# nothing left to do, without a backup or a write (the merge and the cleanup
+# first finish follow-ups an earlier run of theirs left pending: the merge's
+# grading, the cleanup's features and grading). A full re-run of a finished
 # sequence therefore only reads.
 #
-# Usage (VM host; deploy the integrated branch to main first):
+# Usage (VM host; deploy the integrated branch to main first). Run it inside
+# tmux, so a dropped SSH session interrupts nothing (an interrupt is safe —
+# every wrapper's trap restores what it paused — but it stops the sequence):
+#   tmux new -s soccer_repair
 #   bash /opt/auspex/scripts/ops/soccer_repair_runbook.sh 2>&1 | tee -a ~/soccer_repair_runbook.log
 #   ... --from N     run steps N..11
 #   ... --only N     run step N alone
 # State: RUNBOOK_STATE (default ~/.soccer_repair_runbook.state) records each
-# step's completion ("changed", "already_done", or "checked" for step 11);
-# only step 10's skip reads it, and a missing file only means step 10 runs.
+# step's completion, in order ("changed", "already_done", or "checked" for
+# step 11); step 10's skip and the retrain unpause read it (a missing file
+# means step 10 runs; a record that cannot be written keeps the retrain DAGs
+# paused at the end).
 # Read-only check on prod 2026-10-31 ~12:10Z (VM HEAD a071d6a, not deployed):
 # the preflight reads 22 relabelled / 4 cancelled, 39 Liga MX sides sit on
 # santos/guadalajara, calculate_match_outcome is 011's.
-# (AUSPEX_DIR, TMPDIR, AF_POLL_SECONDS and ODDS_WAIT_POLLS exist for tests and rehearsals.)
+# (AUSPEX_DIR, TMPDIR, AF_POLL_SECONDS, AF_STATE_DIR and ODDS_WAIT_POLLS exist for tests and rehearsals.)
 set -uo pipefail
+# A dead terminal (Ctrl-C or an SSH drop with the output through tee) must not
+# kill the exit path by SIGPIPE before it has decided about the retrain DAGs.
+trap '' PIPE
 FROM=1
 ONLY=""
 usage() { echo "usage: $0 [--from N | --only N]   (N = 1..11; see the header)"; }
@@ -136,13 +164,43 @@ log() { echo "[$(date -u +%FT%TZ)] runbook: $*"; }
 # shellcheck source=scripts/ops/_airflow_lib.sh
 . "$OPS/_airflow_lib.sh" || { log "ABORT: cannot load $OPS/_airflow_lib.sh"; exit 1; }
 STATE_FILE="${RUNBOOK_STATE:-$HOME/.soccer_repair_runbook.state}"
-ODDS_WAIT_POLLS="${ODDS_WAIT_POLLS:-120}"
+ODDS_WAIT_POLLS="${ODDS_WAIT_POLLS:-240}"
+RETRAIN_DAGS="retrain_models retrain_halftime_dc"
+CURRENT_STEP=""
+STATE_WRITE_FAILED=""
+# The steps that change the training corpus or its features (step 10 recomputes the features after them).
+CORPUS_STEPS=" 1 3 4 5 7 "
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/soccer_runbook.XXXXXX") || { log "ABORT: mktemp failed"; exit 1; }
+# The state file's last record among step 10's completions and the corpus steps' 'changed' ones
+# (records are appended in order): 10, a corpus step, or nothing.
+last_corpus_record() {
+  [ -r "$STATE_FILE" ] || return 0
+  sed -nE 's/^step=(10) result=[a-z_]+ .*/\1/p; s/^step=(1|3|4|5|7) result=changed .*/\1/p' "$STATE_FILE" | tail -1
+}
+# 0 when step 10 recomputed the features after the last corpus change.
+step10_done_already() { [ "$(last_corpus_record)" = "10" ]; }
+# 0 when a retrain would fit a consistent corpus: no corpus step failed or was cut short in this run, the state
+# file was writable, and nothing changed the corpus after step 10's last recompute (or nothing ever did).
+corpus_consistent() {
+  local last
+  [ -z "$STATE_WRITE_FAILED" ] || return 1
+  if [ -n "$CURRENT_STEP" ]; then case "$CORPUS_STEPS" in *" $CURRENT_STEP "*) return 1 ;; esac; fi
+  last=$(last_corpus_record)
+  [ -z "$last" ] || [ "$last" = "10" ]
+}
 finish() {
-  af_resume
+  local rc=$?
+  trap '' INT TERM HUP
+  if [ -n "${AF_PAUSED_BY_US// /}" ]; then
+    if corpus_consistent; then
+      af_resume
+    else
+      af_keep_paused "the soccer repair is not complete (exit $rc${CURRENT_STEP:+ in step $CURRENT_STEP}; no feature recompute (step 10) since the last corpus change) and a retrain now would fit a half-repaired corpus. A later runbook run (--from N) unpauses it once step 10 has completed"
+    fi
+  fi
   rm -f "$RUN_DIR"/*.sql
-  $DC exec -T postgres rm -f /tmp/soccer_runbook_q.sql >/dev/null 2>&1
-  log "logs of this run: $RUN_DIR"
+  $DC exec -T postgres rm -f /tmp/soccer_runbook_q.sql </dev/null >/dev/null 2>&1
+  af_say "logs of this run: $RUN_DIR"
 }
 trap finish EXIT
 trap 'exit 130' INT TERM HUP
@@ -151,16 +209,15 @@ should_run() { if [ -n "$ONLY" ]; then [ "$1" = "$ONLY" ]; else [ "$1" -ge "$FRO
 log "start (from ${ONLY:-$FROM}${ONLY:+ only}); AUSPEX_DIR=$AUSPEX_DIR"
 
 # ---- preflight (read-only) -------------------------------------------------
+# The file being run must be HEAD's version of this runbook (so HEAD carries the commit that holds it), and the
+# bind-mounted scripts/ and services/ must be HEAD's too. (`merge-base --is-ancestor` of the commit that last
+# touched the runbook would be true by construction: that commit is found from HEAD.)
 head=$(git -C "$AUSPEX_DIR" rev-parse HEAD 2>/dev/null)
 head_blob=$(git -C "$AUSPEX_DIR" rev-parse "HEAD:$REL" 2>/dev/null)
 self_blob=$(git -C "$AUSPEX_DIR" hash-object "$SELF" 2>/dev/null)
-self_commit=$(git -C "$AUSPEX_DIR" log -1 --format=%H HEAD -- "$REL" 2>/dev/null)
-if [ -z "$head" ] || [ -z "$head_blob" ] || [ "$head_blob" != "$self_blob" ] || [ -z "$self_commit" ]; then
+self_commit=$(git -C "$AUSPEX_DIR" log -1 --format=%h HEAD -- "$REL" 2>/dev/null)
+if [ -z "$head" ] || [ -z "$head_blob" ] || [ "$head_blob" != "$self_blob" ]; then
   log "REFUSED: this runbook ($SELF) is not the one committed at the VM HEAD (${head:-no git HEAD} in $AUSPEX_DIR) — deploy the integrated branch (push to main, let CI deploy) and run /opt/auspex/$REL"
-  exit 1
-fi
-if ! git -C "$AUSPEX_DIR" merge-base --is-ancestor "$self_commit" HEAD; then
-  log "REFUSED: the runbook's commit $self_commit is not an ancestor of HEAD $head"
   exit 1
 fi
 if ! git -C "$AUSPEX_DIR" diff --quiet HEAD -- scripts services; then
@@ -168,7 +225,7 @@ if ! git -C "$AUSPEX_DIR" diff --quiet HEAD -- scripts services; then
   git -C "$AUSPEX_DIR" diff --stat HEAD -- scripts services | tail -5
   exit 1
 fi
-log "VM HEAD $head contains the runbook's commit $self_commit; scripts/ and services/ are clean"
+log "this runbook is HEAD's version (VM HEAD $head, last changed in $self_commit); scripts/ and services/ are clean"
 
 cat > "$RUN_DIR/preflight.sql" <<'SQLEOF'
 BEGIN READ ONLY;
@@ -194,26 +251,28 @@ if [ "$unplayed" != "4" ]; then
 fi
 log "void_post_kickoff_recs has run ($relabelled relabelled) and fix_unplayed_soccer_rows has run (4/4 cancelled)"
 
-if ! af_drain_and_pause 1 4 retrain_models; then
-  log "REFUSED: retrain_models has a run in flight or cannot be paused — start the runbook after it finishes"
+# shellcheck disable=SC2086  # $RETRAIN_DAGS is a word list
+if ! af_drain_and_pause 1 4 $RETRAIN_DAGS; then
+  log "REFUSED: $RETRAIN_DAGS: a run in flight or a DAG that cannot be paused (above) — start the runbook after it finishes"
   exit 1
 fi
 
 # ---- steps -----------------------------------------------------------------
-record() {  # record <step> <changed|already_done>
+record() {  # record <step> <changed|already_done|checked>
   echo "step=$1 result=$2 at=$(date -u +%s) head=$head" >> "$STATE_FILE" 2>/dev/null \
-    || log "WARNING: could not write $STATE_FILE (step 10's skip then re-runs it)"
+    || { STATE_WRITE_FAILED=1; log "WARNING: could not write $STATE_FILE (step 10's skip then re-runs it; the retrain DAGs stay paused at the end)"; }
 }
 run_step() {  # run_step <n> <label> <command...>
   local n="$1" label="$2" rc result
   shift 2
   should_run "$n" || return 0
+  CURRENT_STEP="$n"
   log "STEP $n/11 START: $label"
   "$@" 2>&1 | tee "$RUN_DIR/step$n.log"
   rc=${PIPESTATUS[0]}
   if [ "$rc" -ne 0 ]; then
     if [ "$n" = "7" ] && [ "$rc" = "2" ]; then
-      log "STEP 7 INCOMPLETE (exit 2): the cleanup is verified but its feature/grading follow-ups failed — re-run them by hand (commands above), then re-run with --from 8"
+      log "STEP 7 INCOMPLETE (exit 2): the cleanup is verified but its feature/grading follow-ups failed — fix, then re-run with --from 7 (the cleanup then runs only its pending follow-ups)"
     else
       log "STEP $n FAILED (exit $rc): $label — fix, then re-run with --from $n"
     fi
@@ -223,6 +282,7 @@ run_step() {  # run_step <n> <label> <command...>
   grep -q "ALREADY DONE" "$RUN_DIR/step$n.log" && result=already_done
   grep -q "CHECKED (read-only)" "$RUN_DIR/step$n.log" && result=checked
   record "$n" "$result"
+  CURRENT_STEP=""
   log "STEP $n/11 DONE ($result)"
 }
 
@@ -257,13 +317,6 @@ step8() {
   log "re-grade applied: $changes prediction row(s); a fresh dry run plans 0"
 }
 
-step10_done_already() {  # 0 when step 10 last completed after every data change of steps 1,3,4,5,7
-  [ -r "$STATE_FILE" ] || return 1
-  local last10 lastchg
-  last10=$(sed -nE 's/^step=10 result=[a-z_]+ at=([0-9]+).*/\1/p' "$STATE_FILE" | sort -n | tail -1)
-  lastchg=$(sed -nE 's/^step=(1|3|4|5|7) result=changed at=([0-9]+).*/\2/p' "$STATE_FILE" | sort -n | tail -1)
-  [ -n "$last10" ] && [ "$last10" -gt "${lastchg:-0}" ]
-}
 step10() {
   if step10_done_already; then
     log "ALREADY DONE: features were recomputed after the last data-changing step (state file $STATE_FILE)"
@@ -309,4 +362,8 @@ run_step 8 "backfill_soccer_regulation_scores + re-grade" step8
 run_step 9 "backfill_season_labels" bash "$OPS/backfill_season_labels.sh"
 run_step 10 "compute_features --backfill-finished soccer" step10
 run_step 11 "merge odds after-check" step11
-log "ALL STEPS DONE (${ONLY:+step $ONLY}${ONLY:-from step $FROM})"
+if corpus_consistent; then
+  log "ALL STEPS DONE (${ONLY:+step $ONLY}${ONLY:-from step $FROM})"
+else
+  log "ALL STEPS DONE (${ONLY:+step $ONLY}${ONLY:-from step $FROM}) — but no feature recompute (step 10) since the last corpus change: the repair is not complete"
+fi

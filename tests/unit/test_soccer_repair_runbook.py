@@ -1,8 +1,11 @@
 """scripts/ops/soccer_repair_runbook.sh, run for real in a throwaway git
 checkout whose wrappers are stand-ins (each logs its call; FAIL_<NAME>,
-ALREADY_<NAME> steer it) and against a scripted docker whose Airflow behaves
-like 3.3. The order, --from / --only, the stop at the first failing step,
-retrain_models paused and restored, the start refusals (VM HEAD, the two
+ALREADY_<NAME>, HANG_<NAME> steer it) and against a scripted docker whose
+Airflow behaves like 3.3. The order, --from / --only, the stop at the first
+failing step, retrain_models and retrain_halftime_dc paused and restored only
+once the corpus is consistent (kept paused, loudly, after a failed or
+interrupted corpus step; adopted and restored by the --from N run that
+finishes), Ctrl-C through a dead tee, the start refusals (VM HEAD, the two
 prior repairs, a retrain in flight), the re-grade gate, step 10's skip and
 step 11's wait. The real wrappers ran end to end through a docker shim
 against a replica of prod (scripts/ops/soccer_repair_runbook.sh header)."""
@@ -12,8 +15,10 @@ from __future__ import annotations
 import importlib.util
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -47,10 +52,18 @@ var=$(echo "$name" | tr 'a-z' 'A-Z')
 if [ "$name" = backfill_soccer_regulation_scores ]; then
   echo "REGRADE ids_file=/app/backups/ids.txt types=match_result,btts changes=${REGRADE_CHANGES:-135} min=132 max=138"
 fi
-fail="FAIL_$var"; already="ALREADY_$var"
+fail="FAIL_$var"; already="ALREADY_$var"; hang="HANG_$var"
+[ -n "${!hang:-}" ] && /bin/sleep 60
 [ -n "${!already:-}" ] && echo "[stub] ALREADY DONE: nothing to do"
 exit "${!fail:-0}"
 """
+RETRAIN = ("retrain_models", "retrain_halftime_dc")
+
+
+def RUNBOOK_IN(tmp_path):  # noqa: N802 — the runbook inside a test's checkout
+    return tmp_path / "auspex" / "scripts" / "ops" / "soccer_repair_runbook.sh"
+
+
 EXPECTED_ORDER = [
     "repoint_team_matches --pass 1",
     "migrate_027_outcome_trigger",
@@ -106,10 +119,11 @@ def _rules(pre="22|4", verify_left="0", check_rc=0):
     ]
 
 
-def _airflow(retrain=None, fetch_runs=None, fetch_paused=False):
+def _airflow(retrain=None, fetch_runs=None, fetch_paused=False, halftime=None):
     return {
         "dags": {
             "retrain_models": retrain or {"paused": False, "runs": []},
+            "retrain_halftime_dc": halftime or {"paused": False, "runs": []},
             "fetch_live_odds": {
                 "paused": fetch_paused,
                 "runs": (
@@ -124,6 +138,28 @@ def _airflow(retrain=None, fetch_runs=None, fetch_paused=False):
     }
 
 
+def _env(tmp_path, install=False):
+    """The env of the runbook in tmp_path (install=True: a fresh fake docker first); a second run with it keeps the
+    Airflow model, the state file and the markers."""
+    base = (
+        fd.install(tmp_path, _rules(), _airflow())
+        if install
+        else {
+            "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
+            "FAKE_DIR": str(tmp_path / "fake"),
+            "TMPDIR": str(tmp_path / "tmp"),
+            "AF_POLL_SECONDS": "0",
+            "AF_STATE_DIR": str(tmp_path / "afstate"),
+        }
+    )
+    return {
+        **base,
+        "AUSPEX_DIR": str(tmp_path / "auspex"),
+        "RUNBOOK_STATE": str(tmp_path / "state"),
+        "ODDS_WAIT_POLLS": "3",
+    }
+
+
 def _run(tmp_path, *args, rules=None, airflow=None, repo=None, **env):
     repo = repo or _repo(tmp_path)
     base = fd.install(tmp_path, rules or _rules(), airflow or _airflow())
@@ -134,15 +170,26 @@ def _run(tmp_path, *args, rules=None, airflow=None, repo=None, **env):
     return rc, out, steps, fd.calls(tmp_path), fd.airflow_state(tmp_path)
 
 
+def _paused(af) -> dict:
+    return {d: af["dags"][d]["paused"] for d in RETRAIN}
+
+
+def _markers(tmp_path) -> list[str]:
+    return sorted(m.name for m in (tmp_path / "afstate").glob("paused_*"))
+
+
 def test_a_full_run_goes_through_every_step_in_order_and_restores_retrain(tmp_path):
     rc, out, steps, calls, af = _run(tmp_path)
-    assert rc == 0 and "ALL STEPS DONE" in out, out
+    assert rc == 0 and "ALL STEPS DONE" in out and "not complete" not in out, out
     assert steps == EXPECTED_ORDER
     assert [c for c in calls if "compute_features.py --backfill-finished soccer" in c]
     assert [c for c in calls if "--after-later-steps" in c]
-    pause = next(i for i, c in enumerate(calls) if "dags pause -y retrain_models" in c)
-    unpause = next(i for i, c in enumerate(calls) if "dags unpause -y retrain_models" in c)
-    assert pause < unpause and not af["dags"]["retrain_models"]["paused"]
+    for dag in RETRAIN:
+        pause = next(i for i, c in enumerate(calls) if f"dags pause -y {dag}" in c)
+        unpause = next(i for i, c in enumerate(calls) if f"dags unpause -y {dag}" in c)
+        first_step = next(i for i, c in enumerate(calls) if "compute_features" in c)
+        assert pause < first_step < unpause
+    assert _paused(af) == {"retrain_models": False, "retrain_halftime_dc": False} and _markers(tmp_path) == []
     for n in range(1, 12):
         assert f"STEP {n}/11 START" in out and f"STEP {n}/11 DONE" in out
     assert "re-grade: applying 135 change(s), pinned (--expect-changes 135)" in out
@@ -163,18 +210,95 @@ def test_bad_arguments_exit_2(tmp_path, args):
     assert rc == 2 and "usage" in out and steps == []
 
 
-def test_the_first_failing_step_stops_the_run_with_the_from_hint(tmp_path):
+def test_a_failing_corpus_step_stops_keeps_the_retrains_paused_and_from_n_restores_them(tmp_path):
+    """Step 4 fails after steps 1-3 changed the corpus: unpausing the retrain
+    DAGs now would let a missed run fit a half-repaired corpus, so they stay
+    paused with an ALERT (in the ledger too) and their markers. The --from 4
+    run adopts them and unpauses them once step 10 has run."""
     rc, out, steps, _, af = _run(tmp_path, FAIL_REPAIR_FOOTBALL_DATA_KICKOFFS="1")
     assert rc == 1, out
     assert "STEP 4 FAILED (exit 1): repair_football_data_kickoffs — fix, then re-run with --from 4" in out
     assert steps == EXPECTED_ORDER[:4]
-    assert not af["dags"]["retrain_models"]["paused"]
+    assert _paused(af) == {"retrain_models": True, "retrain_halftime_dc": True}
+    assert "ALERT: retrain_models stays PAUSED" in out and "ALERT: retrain_halftime_dc stays PAUSED" in out
+    assert "airflow dags unpause -y retrain_models" in out
+    assert "stays PAUSED" in (tmp_path / "afstate" / "airflow_pauses.log").read_text()
+    assert _markers(tmp_path) == ["paused_retrain_halftime_dc", "paused_retrain_models"]
+
+    rc, out = fd.run(RUNBOOK_IN(tmp_path), _env(tmp_path), "--from", "4")
+    af = fd.airflow_state(tmp_path)
+    steps = [x.strip() for x in (tmp_path / "fake" / "steps.log").read_text().splitlines()]
+    assert rc == 0 and "ALL STEPS DONE" in out and "not complete" not in out, out
+    assert "adopted" in out and steps == EXPECTED_ORDER[:4] + EXPECTED_ORDER[3:]
+    assert _paused(af) == {"retrain_models": False, "retrain_halftime_dc": False} and _markers(tmp_path) == []
 
 
-def test_a_cleanup_whose_follow_ups_failed_says_to_continue_from_8(tmp_path):
+def test_a_failure_outside_the_corpus_steps_restores_the_retrains_when_step_10_is_recorded(tmp_path):
+    rc, out, steps, _, af = _run(tmp_path, "--only", "11", rules=_rules(check_rc=1))
+    assert rc == 1 and "STEP 11 FAILED" in out, out
+    assert _paused(af) == {"retrain_models": False, "retrain_halftime_dc": False}
+
+
+def test_a_single_corpus_step_leaves_the_retrains_paused_until_step_10(tmp_path):
+    rc, out, steps, _, af = _run(tmp_path, "--only", "3")
+    assert rc == 0 and "the repair is not complete" in out and "ALERT: retrain_models stays PAUSED" in out, out
+    assert _paused(af) == {"retrain_models": True, "retrain_halftime_dc": True}
+    rc, out = fd.run(RUNBOOK_IN(tmp_path), _env(tmp_path), "--only", "10")
+    assert rc == 0 and "not complete" not in out, out
+    assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": False, "retrain_halftime_dc": False}
+
+
+def test_a_cleanup_whose_follow_ups_failed_says_to_continue_from_7(tmp_path):
     rc, out, steps, _, _ = _run(tmp_path, FAIL_CLEANUP_SOCCER_ORPHANS="2")
-    assert rc == 2 and "STEP 7 INCOMPLETE" in out and "--from 8" in out, out
+    assert rc == 2 and "STEP 7 INCOMPLETE" in out and "re-run with --from 7" in out, out
+    assert "only its pending follow-ups" in out
     assert steps[-1] == "cleanup_soccer_orphans"
+
+
+def _wait_for(pred, timeout=30.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.parametrize(
+    "hang, step, args, kept",
+    [
+        ("HANG_MERGE_SOCCER_TEAMS", "merge_soccer_teams", [], True),
+        ("HANG_MIGRATE_027_OUTCOME_TRIGGER", "migrate", ["--only", "2"], False),
+    ],
+    ids=["corpus-step-cut-short-kept-paused", "trigger-step-alone-restored"],
+)
+def test_ctrl_c_through_a_dead_tee_decides_the_retrains_and_says_so_in_the_ledger(tmp_path, hang, step, args, kept):
+    """Ctrl-C while a step runs and the runbook's output goes through tee: tee
+    dies with the process group, and the exit path must still reach its
+    decision — kept paused (a corpus step was cut short) or unpaused — and
+    record it in the ledger, which survives the dead terminal."""
+    repo = _repo(tmp_path)
+    env = {**_env(tmp_path, install=True), "AUSPEX_DIR": str(repo), hang: "1"}
+    proc = subprocess.Popen(
+        ["bash", "-c", f'bash "{RUNBOOK_IN(tmp_path)}" {" ".join(args)} 2>&1 | tee "{tmp_path / "o"}"'],
+        env={**os.environ, **env},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    steps_log = tmp_path / "fake" / "steps.log"
+    try:
+        assert _wait_for(lambda: steps_log.exists() and step in steps_log.read_text())
+        os.killpg(proc.pid, signal.SIGINT)
+        proc.wait(timeout=30)
+        ledger = tmp_path / "afstate" / "airflow_pauses.log"
+        word = "stays PAUSED" if kept else "unpaused retrain_halftime_dc"
+        assert _wait_for(lambda: ledger.exists() and word in ledger.read_text()), ledger.read_text()
+        assert _wait_for(lambda: _paused(fd.airflow_state(tmp_path)) == {d: kept for d in RETRAIN})
+        assert _markers(tmp_path) == (["paused_retrain_halftime_dc", "paused_retrain_models"] if kept else [])
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
 
 
 def test_a_runbook_that_is_not_the_one_committed_at_head_is_refused(tmp_path):
@@ -202,17 +326,18 @@ def test_the_two_prior_repairs_must_have_run(tmp_path, pre, why):
     assert not [c for c in calls if "dags pause" in c]
 
 
-def test_a_retrain_in_flight_refuses_to_start(tmp_path):
-    retrain = {"paused": False, "runs": [{"run_id": "weekly", "state": "running", "ticks": 50}]}
-    rc, out, steps, _, af = _run(tmp_path, airflow=_airflow(retrain=retrain))
-    assert rc == 1 and "REFUSED: retrain_models has a run in flight" in out and steps == []
-    assert not af["dags"]["retrain_models"]["paused"]
+@pytest.mark.parametrize("which", ["retrain", "halftime"])
+def test_a_retrain_in_flight_refuses_to_start(tmp_path, which):
+    busy = {"paused": False, "runs": [{"run_id": "r", "state": "running", "ticks": 50}]}
+    rc, out, steps, _, af = _run(tmp_path, airflow=_airflow(**{which: busy}))
+    assert rc == 1 and "REFUSED: retrain_models retrain_halftime_dc: a run in flight" in out and steps == []
+    assert _paused(af) == {"retrain_models": False, "retrain_halftime_dc": False}
 
 
 def test_a_retrain_paused_before_the_run_stays_paused(tmp_path):
     rc, out, steps, calls, af = _run(tmp_path, airflow=_airflow(retrain={"paused": True, "runs": []}))
     assert rc == 0, out
-    assert af["dags"]["retrain_models"]["paused"]
+    assert af["dags"]["retrain_models"]["paused"] and not af["dags"]["retrain_halftime_dc"]["paused"]
     assert not [c for c in calls if "unpause -y retrain_models" in c]
 
 
