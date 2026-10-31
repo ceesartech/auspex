@@ -227,6 +227,7 @@ memory; this section makes it repo-canonical.
 | Soccer derived markets anchored to the market over/under 2.5 | **SHIPPED** (2026-10-26, `d2ccd32`) | `scripts/ab_soccer_ou_anchor.py`, monthly walk-forward 2019-07..2026-10, n=40,279, month-clustered SE, anchored − 1x2-only reconcile: over 2.5 **−0.00543 ± 0.00053** (team-aware base; −0.0088 identity-blind), better in all 8 years; over 1.5 −0.0032, over 3.5 −0.0047, BTTS −0.0037, correct score −0.0008, DC/DNB/AH±0.5 exactly 0. Live served-path check (n=966): over 2.5 −0.0061 ± 0.0041, no market worse than z 0.76. One cell degrades on the identity-blind base only (home win-to-nil +0.00074 ± 0.00024) and improves live; accepted | `("soccer","over_under")` rec gate stays OFF — a Brier win is not an ROI win. BTTS anchoring needs a BTTS feed |
 | Tennis market price as a model input (the-odds-api historical h2h, 2021-09..2026-10) | **PASSES the gate; does NOT beat the market** (2026-10-30) | `scripts/ab_tennis_market_odds.py` on the real frame (43,225 matches, 8,786 = 20.3% priced after the key fix + provider-anchored backfill; 13.6% before): with vs without market, all rows, holdout from 2026-04 **−0.0234 ± 0.0024** (n=6,484); walk-forward 2023 −0.0112 ± 0.0017, 2024 −0.0129 ± 0.0017, 2025 −0.0154 ± 0.0020, 2026 −0.0207 ± 0.0021. On PRICED rows the model with market is still worse than the de-vigged market itself: holdout +0.0152 ± 0.0031 (n=2,243), 2023..2026 +0.036 / +0.034 / +0.018 / +0.023 (accuracy 0.677 vs market 0.694) | Ships through the normal weekly retrain + promote gate (features recomputed). `("tennis","moneyline")` rec gate stays OFF: the model loses to the price it would bet against. Remaining unpriced matches are at tournaments the provider does not list (250s, Challengers); the next lever is serving the market where priced, through the §4.3 gate |
 | NHL probable starting goalie at serve time | **CLOSED — no gain** (2026-10-26) | `scripts/ab_nhl_projected_goalie.py`: "most starts in the last 7, rest the No. 1 on the 2nd night of a back-to-back" picks the real starter 65.7% (13,123 team-games; last-starter rule 47.0%). Paired ΔBrier on 1,300 held-out games vs default goalie features: ML −0.0009 ± 0.0011, regulation −0.0005 ± 0.0014, puck line −0.0024 ± 0.0018, total **+0.0012 ± 0.0007**; even the TRUE starter does no better. Shipped behind `NHL_GOALIE_MODE=actual_or_projected`, default off | A confirmed-starter feed (lines posted ~90 min pre-game) |
+| Soccer half-time Dixon-Coles refit (`dixon_coles_ht_soccer` on DIXON_COLES_CONFIG: per-league baselines, 20-match prior, decay, all data) | **SHIPPED** (2026-10-31, `bc41107`) | `scripts/ab_halftime_dixon_coles.py`, monthly walk-forward 2025-08..2026-10, n=8,144, fold-clustered SE, serve path incl. ht_ft through the served second-half artifact: HT 1x2 **−0.0160** vs the legacy artifact (cluster SE 0.0026, t-bound −0.0095), **−0.0130** vs a recency-matched per-league constant; frozen single fit −0.0138; every HT market and ht_ft (−0.0137) improve. The legacy pinned config DIVERGES on the full frame (13/13 folds, non-finite probabilities); the old trainer (oldest 80% only) was worse than served on the 2026 ESPN rows. ESPN era alone (n=2,702, 5 folds) −0.0089, 4/5 folds negative, not clear of noise on its own | Refit monthly if the frozen fit's lead decays — the harness measures it; the second-half and NHL Dixon-Coles artifacts are still ungated |
 
 ### 4.3 Validation methodology (house rules)
 
@@ -1478,6 +1479,30 @@ with the growth-rate driver (WAL) eliminated.
 > retrain, pinned until an HT A/B exists) has not been retrained on the extra
 > rows — that is a model change and goes through the §4.3 gate, alongside the
 > HT-draw under-weighting finding above.
+
+> **Update (2026-10-31, 03:55Z) — the half-time model, gated and replaced.** The
+> served `dixon_coles_ht_soccer` (written 2026-06-04, never gated: 175 teams, the
+> pre-fix double-normalising fitter, unknown teams on a configured 0.25 home bump
+> over a 0.60 base) picked home on ~89% of matches and scored WORSE than a
+> per-league constant (+0.0025 HT 1x2 Brier). Re-running its trainer as written
+> would not have used the backfill: it fitted the oldest 80% (cutoff 2023-02-03)
+> and its pinned config never converges. `scripts/ab_halftime_dixon_coles.py`
+> (reviewed by four independent lenses before it ran; registry row in §4)
+> measured DIXON_COLES_CONFIG on HT goals: −0.0160 vs served, −0.0130 vs the
+> recency-matched constant, frozen −0.0138, every HT market and ht_ft better;
+> the pinned config, refit on all data, diverged to non-finite probabilities.
+> `train_halftime_dixon_coles.py` now fits all 108,228 HT matches with that
+> config (converged in 27 iterations, 939 teams, 31 league baselines, fitted vs
+> observed HT goals −0.1%), refuses an unconverged fit or an invalid served
+> matrix, and writes to STAGING; `scripts/ops/promote_ht_model.sh` backed up the
+> legacy file (`/app/models/backup-dixon_coles_ht_soccer-20261031T035500Z`, plus
+> an earlier copy at `…-20261031T0330Z`) and promoted. First live tick (04:00):
+> 449 upcoming matches re-predicted at mean HT H/D/A 0.340/0.408/0.251 (eval-window
+> actuals 0.340/0.405/0.255), top pick draw 80.6% (was home 87%). Data defect
+> found on the way: 2 finished soccer matches carry a half-time score but no
+> full-time score (`d7d8a9b7…`, `ff74d919…`). Not done: the HT trainer is still
+> run by hand (not in the weekly DAG); the second-half artifact (ht_ft's other
+> half) is still the pinned legacy fit.
 
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
