@@ -214,9 +214,11 @@ POISSON_CONFIG = ModelConfig(
     training_config={},
 )
 
-# The SOCCER FULL-TIME Dixon-Coles config, and the only one the 2026-09 refit
-# was measured on. Anything else that wants a Dixon-Coles takes the pinned copy
-# below (dixon_coles_config_pinned_to_legacy_fit) rather than this object.
+# The SOCCER FULL-TIME Dixon-Coles config, the one the 2026-09 refit was
+# measured on. Since 2026-10-31 the half-time trainer (gated, shipped) and the
+# second-half trainer (measured, gate NOT passed, staging only) fit it under
+# their own names; the NHL trainer takes the pinned copy below
+# (dixon_coles_config_pinned_to_legacy_fit) until its own gate passes.
 #
 # NOTE: there is deliberately no "home_advantage" key here, so
 # PoissonMatchPredictor.__init__ falls back to its hard-coded 0.25. With
@@ -269,30 +271,45 @@ DIXON_COLES_CONFIG = ModelConfig(
 #     scripts/train_halftime_dixon_coles.py     -> dixon_coles_ht_soccer
 #     scripts/train_second_half_dixon_coles.py  -> dixon_coles_h2_soccer
 # None of the three goes through training/train_all_models.py, so neither the
-# 1x2 promote gate nor the derived-market guard ever sees them — whatever they
-# fit is what serves. The HALF-TIME one now has its own gate:
-# scripts/ab_halftime_dixon_coles.py measured DIXON_COLES_CONFIG on HT goals
-# (2026-10-31, HT 1x2 Brier -0.0160 vs the legacy artifact), so that trainer
-# uses it, writes to staging, and is promoted by scripts/ops/promote_ht_model.sh.
-# The hockey and second-half trainers stay pinned until each is measured.
+# 1x2 promote gate nor the derived-market guard ever sees them. Until 2026-10-31
+# each wrote straight into production — whatever it fit was what served. Now
+# each fits every row, refuses an unsound fit (train_halftime_dixon_coles.
+# fit_refusal) and writes model.bin + manifest.json into its OWN staging dir
+# (staging-ht / staging-h2 / staging-nhl), and only a gated artifact has a way
+# into production (scripts/promote_dc_model.py):
+#   * HALF-TIME: scripts/ab_halftime_dixon_coles.py measured DIXON_COLES_CONFIG
+#     on HT goals (2026-10-31, HT 1x2 Brier -0.0160 vs the legacy artifact); the
+#     trainer uses it and scripts/ops/promote_ht_model.sh promotes it.
+#   * SECOND-HALF: scripts/ab_second_half_dixon_coles.py (2026-10-31, n=8,144)
+#     did NOT pass — refit -0.0057 passed, refit_frozen -0.0046 failed, and the
+#     pre-registered rule needed both — so the served legacy file stays and the
+#     promoter has no "h2" entry. The trainer fits DIXON_COLES_CONFIG anyway
+#     (the pinned copy never converges on 2H goals, so a trainer that refuses
+#     unconverged fits could never write it) and only stages.
+#   * NHL: pinned until scripts/ab_nhl_dixon_coles.py passes (pre-registered,
+#     not yet run over its full window); no "nhl" promoter entry either.
 #
 # The four refit knobs above (max_goals 10, a LIVE time_decay, regularization as
-# a 20-effective-match prior, per_league_baselines) were measured on exactly one
-# object: the soccer FULL-TIME over-2.5 walk-forward. Nothing about hockey goals
-# or halftime goals was measured anywhere, and the tuned values do not obviously
+# a 20-effective-match prior, per_league_baselines) were TUNED on exactly one
+# object: the soccer FULL-TIME over-2.5 walk-forward. The half-time and
+# second-half gates measured them as they stand (never re-tuned); nothing about
+# hockey goals has been measured, and the tuned values do not obviously
 # transfer — a 20-effective-match prior is a materially stronger shrink against
-# halftime's ~0.6 goals/match than against full-time's ~2.65. So those
-# trainers are pinned back to the pre-refit values until each is separately
-# measured and gated (the half-time one was, above).
+# halftime's ~0.6 goals/match than against full-time's ~2.65. So a trainer
+# stays pinned to the pre-refit values until it is separately measured (the
+# half-time and second-half ones were, above; the NHL one is next).
 #
-# What this deliberately does NOT do: refit the NHL artifact. Its max_goals=6
-# never reaches a served market (precompute_predictions_nhl builds every NHL
-# matrix at market_derivation.MAX_GOALS_DERIVE=10 from lambdas_for_match), and
-# its home_advantage=0.25 roughly matches NHL's observed home edge (+0.10 to
+# What this deliberately does NOT do: replace the served NHL artifact. Its
+# max_goals=6 never reaches a served market (precompute_predictions_nhl builds
+# every NHL matrix at market_derivation.MAX_GOALS_DERIVE=10 from
+# lambdas_for_match), and its home_advantage=0.25 roughly matches NHL's
+# observed home edge (+0.10 to
 # +0.33 goals/game by season, 2020-26). The defects that DO reach its 8 served
 # markets (as corrected 2026-10-31):
 #   * level inflation: it was fitted before the scale-gauge correction below,
-#     so its lambdas carry that positive level bias until it is retrained;
+#     so its lambdas carry that positive level bias until it is retrained (a
+#     2026-10-31 smoke of scripts/ab_nhl_dixon_coles.py, Mar-Oct 2026, n=665:
+#     mean predicted P(over 5.5) 0.611 vs 0.574 realised — a smoke, not a gate);
 #   * a stale fit: no 2025-26 data, so 'Utah Mammoth' is an unknown team and
 #     serves attack = defense = 1.0;
 #   * rho forced to 0 by train_hockey_dixon_coles.py: final scores are never

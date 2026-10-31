@@ -542,8 +542,10 @@ class TestSharedConfigScoping:
     scripts build a Dixon-Coles straight from it and write the artifact
     themselves, bypassing train_all_models and therefore bypassing both the
     1x2 promote gate and the derived-market guard. The refit knobs were
-    measured on the soccer FULL-TIME over-2.5 walk-forward and nowhere
-    else, so those three take a pinned copy instead."""
+    measured on the soccer FULL-TIME over-2.5 walk-forward; since then on HT
+    goals (gated, shipped) and 2H goals (gate NOT passed). The NHL trainer
+    keeps a pinned copy until its own gate passes; all three write to their
+    own staging dir, and only the half-time one has a promoter."""
 
     def test_the_pinned_copy_turns_off_every_unmeasured_knob(self):
         from predictors.model_config import DIXON_COLES_CONFIG, dixon_coles_config_pinned_to_legacy_fit
@@ -590,17 +592,49 @@ class TestSharedConfigScoping:
         assert a.per_league_baselines is False and a.league_baselines == {}
         assert fitted_mean_total(a, df) == pytest.approx(fitted_mean_total(b, df), rel=1e-9)
 
-    def test_the_off_gate_trainers_do_not_use_the_soccer_config(self):
-        """A grep-level guard. The whole defect is that these read the SAME
-        object the soccer refit mutates."""
+    def test_the_nhl_trainer_does_not_use_the_soccer_config(self):
+        """A grep-level guard. The whole defect is that it would read the SAME
+        object the soccer refit mutates — and its gate,
+        scripts/ab_nhl_dixon_coles.py, has not passed."""
         repo = Path(__file__).resolve().parents[4]
-        for script in (
-            "train_hockey_dixon_coles.py",
-            "train_second_half_dixon_coles.py",
+        source = (repo / "scripts" / "train_hockey_dixon_coles.py").read_text()
+        assert "DixonColesPredictor(DIXON_COLES_CONFIG" not in source
+        assert "replace(DIXON_COLES_CONFIG" not in source
+        assert "dixon_coles_config_pinned_to_legacy_fit(MODEL_NAME)" in source
+        assert 'MODEL_NAME = "dixon_coles_nhl"' in source
+        assert "ab_nhl_dixon_coles.py" in source
+
+    def test_the_second_half_trainer_fits_the_measured_config_under_its_own_name(self):
+        """The pinned config never converges on the 2H frame (15/15 cutoffs in
+        scripts/ab_second_half_dixon_coles.py), so a trainer that refuses an
+        unconverged fit fits what that gate's refit arms measured instead."""
+        repo = Path(__file__).resolve().parents[4]
+        source = (repo / "scripts" / "train_second_half_dixon_coles.py").read_text()
+        assert 'MODEL_NAME = "dixon_coles_h2_soccer"' in source
+        assert "replace(DIXON_COLES_CONFIG, name=MODEL_NAME)" in source
+        assert "dixon_coles_config_pinned_to_legacy_fit" not in source
+        assert "ab_second_half_dixon_coles.py" in source
+
+    def test_the_side_trainers_stage_only_and_are_not_promotable(self):
+        """Neither the second-half nor the NHL artifact passed a gate: each
+        trainer refuses an unsound fit, writes a manifest atomically into its
+        OWN staging dir (never /app/models/staging, which the weekly retrain
+        auto-promotes, nor production), and promote_dc_model.py has no entry
+        for either."""
+        repo = Path(__file__).resolve().parents[4]
+        for script, staging in (
+            ("train_second_half_dixon_coles.py", "/app/models/staging-h2/dixon_coles_h2_soccer/1.0.0"),
+            ("train_hockey_dixon_coles.py", "/app/models/staging-nhl/dixon_coles_nhl/1.0.0"),
         ):
             source = (repo / "scripts" / script).read_text()
-            assert "DixonColesPredictor(DIXON_COLES_CONFIG)" not in source, script
-            assert "dixon_coles_config_pinned_to_legacy_fit" in source, script
+            assert f'DEFAULT_OUTPUT_DIR = Path("{staging}")' in source, script
+            assert 'Path("/app/models/production' not in source, script
+            assert "NOT PROMOTABLE" in source, script
+            for guard in ("halftime.output_dir_refusal(", "halftime.fit_refusal(", "halftime.write_artifact("):
+                assert guard in source, (script, guard)
+            assert "int(n * 0.8)" not in source, script  # every row is fitted; a holdout is diagnostic only
+        promoter = (repo / "scripts" / "promote_dc_model.py").read_text()
+        assert '"h2": DCModelSpec' not in promoter and '"nhl": DCModelSpec' not in promoter
 
     def test_the_halftime_trainer_uses_its_gated_config_and_never_writes_production(self):
         """The half-time artifact was gated on DIXON_COLES_CONFIG by

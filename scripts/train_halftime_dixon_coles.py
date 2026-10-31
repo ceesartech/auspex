@@ -194,15 +194,18 @@ def build_manifest(
     model_sha256: str,
     holdout_fraction: float,
     written_at: Optional[str] = None,
+    model_name: str = MODEL_NAME,
 ) -> Dict[str, Any]:
     """The provenance record written beside model.bin. promote_dc_model.py
     trusts a staged model.bin only when this manifest's model_sha256 is the
-    file's, and promotes only a fit on every row (holdout_fraction 0)."""
+    file's, and promotes only a fit on every row (holdout_fraction 0).
+    `model_name` lets the second-half and NHL trainers reuse this; the
+    half-time default is unchanged."""
     import pandas as pd
 
     newest = train_df["match_date"].max()
     return {
-        "model": MODEL_NAME,
+        "model": model_name,
         "run_id": run_id,
         "git_sha": git_sha,
         "n_rows": int(len(train_df)),
@@ -224,22 +227,25 @@ def _fsync(path: Path) -> None:
         os.fsync(f.fileno())
 
 
-def write_artifact(model: Any, output_dir: Path, manifest_fields: Dict[str, Any]) -> Dict[str, Any]:
+def write_artifact(
+    model: Any, output_dir: Path, manifest_fields: Dict[str, Any], *, model_name: str = MODEL_NAME
+) -> Dict[str, Any]:
     """Save model.bin + manifest.json into output_dir atomically.
 
     Both are written to *.tmp first and renamed into place only once both
     exist, so a reader never sees a half-written model.bin, and a crash
     between the two renames leaves a manifest whose model_sha256 no longer
     matches model.bin — which promote_dc_model.py refuses. `manifest_fields`
-    is build_manifest()'s arguments minus model + model_sha256; the hash is
-    taken here, from the bytes actually written.
+    is build_manifest()'s arguments minus model + model_sha256 + model_name;
+    the hash is taken here, from the bytes actually written, and model_name
+    (default: the half-time artifact's) is passed through to the manifest.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     model_tmp = output_dir / (MODEL_FILE + ".tmp")
     manifest_tmp = output_dir / (MANIFEST_FILE + ".tmp")
     model.save(str(model_tmp))
     _fsync(model_tmp)
-    manifest = build_manifest(model, model_sha256=sha256_file(model_tmp), **manifest_fields)
+    manifest = build_manifest(model, model_sha256=sha256_file(model_tmp), model_name=model_name, **manifest_fields)
     with open(manifest_tmp, "w") as f:
         json.dump(manifest, f, indent=2, allow_nan=False)
         f.flush()
