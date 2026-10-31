@@ -21,9 +21,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 
@@ -113,6 +116,17 @@ class FakeCursor:
         elif sql.startswith("SELECT home_team_id, away_team_id, match_date FROM matches WHERE id"):
             self._result = [
                 {"home_team_id": r["home_team_id"], "away_team_id": r["away_team_id"], "match_date": r["match_date"]}
+                for r in self.rows
+                if r["id"] == params[0]
+            ]
+        elif "JOIN teams th" in sql:  # _match_teams — the owner's pair, with names
+            self._result = [
+                {
+                    "home_team_id": r["home_team_id"],
+                    "away_team_id": r["away_team_id"],
+                    "home_name": f"name-{r['home_team_id']}",
+                    "away_name": f"name-{r['away_team_id']}",
+                }
                 for r in self.rows
                 if r["id"] == params[0]
             ]
@@ -482,13 +496,20 @@ class TestStampIdentity:
 
 class _RecordingPath:
     """Stubs the team/league writes so the two handlers can be driven
-    against FakeCursor while still exercising reconcile + stamp."""
+    against FakeCursor while still exercising reconcile + stamp. Records
+    every insert; `finished_returns=0` plays an existing 'cancelled' row and
+    `same_team=True` resolves both names to one team."""
+
+    def __init__(self, finished_returns: int = 1, same_team: bool = False):
+        self.inserts: list[str] = []
+        self._finished_returns = finished_returns
+        self._same_team = same_team
 
     def __enter__(self):
         self._team, self._sched, self._fin = fu.ensure_team, fu.insert_scheduled_match, fu.insert_finished_match
-        fu.ensure_team = lambda cur, cfg, name, league_id: HOME if name == "Home FC" else AWAY
-        fu.insert_scheduled_match = lambda *a, **k: 1
-        fu.insert_finished_match = lambda *a, **k: 1
+        fu.ensure_team = lambda cur, cfg, name, league_id: HOME if name == "Home FC" or self._same_team else AWAY
+        fu.insert_scheduled_match = lambda *a, **k: self.inserts.append("scheduled") or 1
+        fu.insert_finished_match = lambda *a, **k: self.inserts.append("finished") or self._finished_returns
         return self
 
     def __exit__(self, *exc):
@@ -594,6 +615,177 @@ class TestPlaceholderCompetitors:
         parts = fu._competition_parts(self._comp("Qualifier Cup Winner", "Jannik Sinner"), TENNIS)
         assert parts is not None
         assert parts[2] == "Qualifier Cup Winner"
+
+
+def _soccer_comp(home_name: str, away_name: str) -> dict:
+    comp = _comp()
+    comp["competitors"][0]["team"]["displayName"] = home_name
+    comp["competitors"][1]["team"]["displayName"] = away_name
+    return comp
+
+
+class TestKnockoutPlaceholders:
+    """The 2026 World Cup's bracket slots, as ESPN spelled them (prod teams
+    table, 2026-10-31). Fuzzy matching collapsed them into 8 team rows and 20
+    fixtures of a team against itself."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Group A 2nd Place",
+            "Group C Winner",
+            "Round of 32 1 Winner",
+            "Quarterfinal 1 Winner",
+            "Quarterfinal 2 Winner",
+            "Semifinal 1 Winner",
+            "Semifinal 1 Loser",
+            "Third Place Group C/E/F/H/I",
+            "Third Place Group A/B/C/D/F",
+            "Final Winner",
+            "Final",
+            "Match 73 Winner",
+            "Winner Match 49",
+            "Group B Runner-up",
+        ],
+    )
+    def test_the_slot_is_a_placeholder(self, name):
+        assert fu._is_placeholder_name(name)
+        assert fu._competition_parts(_soccer_comp(name, "Mexico"), SOCCER) is None
+
+    def test_matching_ignores_case_and_spacing(self):
+        assert fu._is_placeholder_name("  ROUND OF 16   3 winner ")
+        assert fu._is_placeholder_name("semi-final 2 loser")
+        assert fu._is_placeholder_name("third place group a/b/c/d/f")
+
+    @pytest.mark.parametrize(
+        "name",
+        ["Mexico", "Real Madrid", "Finn Harps", "Gamba Osaka", "Group Stage United", "Winners Chapel FC", "Matchday"],
+    )
+    def test_real_teams_are_kept(self, name):
+        assert not fu._is_placeholder_name(name)
+        assert fu._competition_parts(_soccer_comp(name, "Mexico"), SOCCER) is not None
+
+
+@pytest.fixture
+def identity_stats(monkeypatch):
+    monkeypatch.setitem(fu.IDENTITY_STATS, "forks_refused", 0)
+    monkeypatch.setitem(fu.IDENTITY_STATS, "same_team", 0)
+    return fu.IDENTITY_STATS
+
+
+class TestForkRefusal:
+    """The ESPN id resolves the row that owns the fixture, but that row's team
+    pair is not this parse's, so realignment is refused. Prod 2026-09-29 to
+    2026-10-10: ESPN 401876952's row is "FC Juarez" v Tijuana, while ESPN's
+    "FC Juárez" now resolves to an accented duplicate team. Every sweep upserted
+    a second row (09f82af5); it took the result, and the owner (4a8e9c81, 57
+    predictions) stayed 'scheduled' for good."""
+
+    def _owned_by_old_home(self):
+        return FakeCursor([_row("owner", KICKOFF - timedelta(hours=2), espn="401671789", home="old-home-uuid")])
+
+    def test_fixtures_path_writes_nothing_and_counts_it(self, identity_stats, caplog):
+        cur = self._owned_by_old_home()
+        with _RecordingPath() as rec:
+            assert fu._process_competition(cur, SOCCER, "league", _comp(), {"season_type": "regular"}) is False
+        assert rec.inserts == []
+        assert not any("external_ids" in s for s, _ in cur.updates)
+        assert identity_stats == {"forks_refused": 1, "same_team": 0}
+        refusal = [r for r in caplog.records if r.levelname == "ERROR" and "Refusing soccer ESPN" in r.message]
+        assert len(refusal) == 1
+        for both_pairs_and_the_id in ("401671789", "owner", "name-old-home-uuid", "Home FC", "Away FC", HOME):
+            assert both_pairs_and_the_id in refusal[0].message
+
+    def test_results_path_writes_nothing_and_counts_it(self, identity_stats):
+        cur = self._owned_by_old_home()
+        with _RecordingPath() as rec:
+            assert fu._record_result(cur, SOCCER, "league", _comp(state="post"), {"season_type": "regular"}) is False
+        assert rec.inserts == []
+        assert identity_stats["forks_refused"] == 1
+
+    def test_a_swapped_home_and_away_is_refused_too(self, identity_stats):
+        cur = FakeCursor([_row("owner", KICKOFF, espn="401671789", home=AWAY, away=HOME)])
+        with _RecordingPath() as rec:
+            assert fu._process_competition(cur, SOCCER, "league", _comp()) is False
+        assert rec.inserts == [] and identity_stats["forks_refused"] == 1
+
+    def test_a_slot_held_by_another_row_is_not_a_refusal(self, identity_stats):
+        # Same pair, but a pre-fix twin sits at ESPN's time: the upsert lands
+        # on that existing twin (no new row), unstamped, as before.
+        cur = FakeCursor([_row("orphan", KICKOFF - timedelta(hours=2), espn="401671789"), _row("twin", KICKOFF)])
+        with _RecordingPath() as rec:
+            fu._process_competition(cur, SOCCER, "league", _comp())
+        assert rec.inserts == ["scheduled"] and identity_stats["forks_refused"] == 0
+
+    def test_a_tennis_redraw_still_writes_the_new_pairing(self, identity_stats):
+        # 1v1: a different player under the same id is a re-drawn slot; a
+        # finished stale row cannot be released, and the real pairing's own
+        # row is still the right place for the result.
+        comp = _comp(comp_id="185138", state="post")
+        comp["competitors"][0]["winner"] = True
+        for c in comp["competitors"]:
+            c["athlete"] = c.pop("team")
+        cur = FakeCursor(
+            [_row("stale", KICKOFF, status="finished", espn="185138", away="withdrawn-player")], sport="tennis"
+        )
+        with _RecordingPath() as rec:
+            assert fu._record_result(cur, TENNIS, "league", comp) is True
+        assert rec.inserts == ["finished"] and identity_stats["forks_refused"] == 0
+
+
+class TestSameTeamRefusal:
+    def test_both_sides_resolving_to_one_team_is_refused_and_counted(self, identity_stats, caplog):
+        cur = FakeCursor()
+        with _RecordingPath(same_team=True) as rec:
+            assert fu._process_competition(cur, SOCCER, "league", _comp()) is False
+            assert fu._record_result(cur, SOCCER, "league", _comp(state="post")) is False
+        assert rec.inserts == [] and cur.statements == []
+        assert identity_stats == {"forks_refused": 0, "same_team": 2}
+        assert any(r.levelname == "ERROR" and "cannot play itself" in r.message for r in caplog.records)
+
+
+class TestCancelledRowOnTheResultsPath:
+    def test_a_cancelled_row_is_left_alone_and_not_stamped(self, caplog):
+        # Bastia v Red Star: ESPN fra.2 747597 reports STATUS_FULL_TIME 0-0, but
+        # the match was abandoned at 58' and awarded; an operator set 'cancelled'.
+        cur = FakeCursor([_row("abandoned", KICKOFF, status="cancelled")])
+        with caplog.at_level(logging.WARNING), _RecordingPath(finished_returns=0) as rec:
+            assert fu._record_result(cur, SOCCER, "league", _comp(state="post"), {"season_type": "regular"}) is False
+        assert rec.inserts == ["finished"]
+        assert not any("external_ids" in s for s, _ in cur.updates)
+        assert any("is 'cancelled'" in r.message for r in caplog.records)
+
+
+class TestExitCode:
+    """A refused competition fails the run (the DAG alerts on failure) after
+    everything else in the sweep was written and committed."""
+
+    def _main(self, monkeypatch, *, refuse: str | None, results: bool = False):
+        def sweep(*args, **kwargs):
+            if refuse:
+                fu.IDENTITY_STATS[refuse] += 1
+            return {"eng.1": 3}
+
+        monkeypatch.setattr(fu, "fetch_all", sweep)
+        monkeypatch.setattr(fu, "fetch_results_all", sweep)
+        monkeypatch.setitem(fu.FETCH_STATS, "ok", 1)
+        monkeypatch.setitem(fu.FETCH_STATS, "failed", 0)
+        argv = ["--sport", "soccer", "--database-url", "postgres://fake"] + (["--results"] if results else [])
+        return fu.main(argv)
+
+    def test_a_clean_sweep_exits_0(self, monkeypatch, identity_stats):
+        assert self._main(monkeypatch, refuse=None) == 0
+        assert self._main(monkeypatch, refuse=None, results=True) == 0
+
+    def test_a_refused_fork_exits_3(self, monkeypatch, identity_stats, caplog):
+        assert self._main(monkeypatch, refuse="forks_refused") == fu.IDENTITY_EXIT_CODE == 3
+        assert any("REFUSED 1 write(s)" in r.message for r in caplog.records)
+
+    def test_the_results_sweep_exits_3_too(self, monkeypatch, identity_stats):
+        assert self._main(monkeypatch, refuse="forks_refused", results=True) == 3
+
+    def test_a_same_team_refusal_exits_3(self, monkeypatch, identity_stats):
+        assert self._main(monkeypatch, refuse="same_team") == 3
 
 
 class TestSampleTimes:

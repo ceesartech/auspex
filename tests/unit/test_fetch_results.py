@@ -8,16 +8,21 @@ Locks the behaviors the graders depend on:
   * NHL games decided past regulation write metadata.regulation_winner
     = 'tie' (grading_outcomes.nhl_regulation_outcome reads it),
   * the fixtures path still skips non-'pre' events (the two paths
-    split on state, never double-handle).
+    split on state, never double-handle),
+  * a 'cancelled' row is never flipped to 'finished' (the upsert runs
+    for real against SQLite, as in test_promote_raw).
 """
 
 from __future__ import annotations
 
 import importlib.util
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 
@@ -33,6 +38,12 @@ def _load(name: str, filename: str):
 
 fu = _load("fetch_upcoming_results", "fetch_upcoming.py")
 _REAL_INSERT_FINISHED_MATCH = fu.insert_finished_match
+
+
+def _team_per_name(cur, cfg, name, league_id):
+    """ensure_team stub: one id per name (a single id for both sides is now
+    refused as a team playing itself)."""
+    return f"team-{name}"
 
 
 def _comp(
@@ -82,7 +93,7 @@ class TestRecordResult:
     def _run(self, cfg, comp):
         cur = MagicMock()
         # ensure_team + insert_finished_match hit the DB — stub them.
-        fu.ensure_team = MagicMock(return_value="team-uuid")
+        fu.ensure_team = MagicMock(side_effect=_team_per_name)
         captured = {}
 
         def fake_insert(cur, cfg, league_id, home_id, away_id, match_dt, venue, hs, as_, meta, halftime=None):
@@ -187,7 +198,7 @@ class TestHalftimeScores:
 
 class TestRecordResultHalftime:
     def _record(self, monkeypatch, cfg, comp):
-        monkeypatch.setattr(fu, "ensure_team", MagicMock(return_value="team-uuid"))
+        monkeypatch.setattr(fu, "ensure_team", MagicMock(side_effect=_team_per_name))
         captured = {}
 
         def fake_insert(cur, cfg, league_id, home_id, away_id, match_dt, venue, hs, as_, meta, halftime=None):
@@ -234,6 +245,103 @@ class TestInsertFinishedMatchHalftime:
     def test_no_halftime_writes_nulls(self):
         _, params = self._sql_and_params(None)
         assert params[-2:] == (None, None)
+
+
+class _SqliteCursor:
+    """Just enough of a RealDictCursor over SQLite for insert_finished_match.
+    SQLite 3.35+ speaks the same INSERT ... ON CONFLICT DO UPDATE ... WHERE
+    ... RETURNING; only the placeholder, NOW() and the jsonb casts are
+    translated (the metadata merge becomes a text concat, which these tests
+    do not read)."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._cur = conn.cursor()
+
+    def execute(self, sql, params=()):
+        sql = sql.replace("%s", "?").replace("NOW()", "CURRENT_TIMESTAMP").replace("::jsonb", "")
+        self._cur.execute(sql, [p.isoformat() if isinstance(p, datetime) else p for p in params])
+
+    def fetchone(self):
+        row = self._cur.fetchone()
+        return None if row is None else {"id": row[0]}
+
+
+RESULT_KICKOFF = datetime(2025, 12, 5, 19, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def results_db():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE matches (
+            id INTEGER PRIMARY KEY,
+            league_id TEXT, home_team_id TEXT, away_team_id TEXT, match_date TEXT,
+            status TEXT CHECK (status IN ('scheduled', 'live', 'finished', 'postponed', 'cancelled')),
+            venue TEXT, season TEXT, home_score INTEGER, away_score INTEGER, metadata TEXT,
+            half_time_home INTEGER, half_time_away INTEGER, updated_at TEXT,
+            UNIQUE (home_team_id, away_team_id, match_date)
+        )
+        """
+    )
+    yield conn
+    conn.close()
+
+
+class TestInsertFinishedMatchLeavesCancelledRows:
+    """Bastia v Red Star (2025-12-05, ESPN fra.2 747597) was abandoned at 58'
+    and awarded, yet ESPN reports STATUS_FULL_TIME 0-0. An operator recorded
+    'cancelled' on purpose; a deep results backfill must not flip it to
+    'finished' and hand the graders a 0-0."""
+
+    def _record(self, db, home_score=0, away_score=0):
+        return _REAL_INSERT_FINISHED_MATCH(
+            _SqliteCursor(db),
+            fu.SPORT_CONFIGS["soccer"],
+            "lg",
+            "bastia",
+            "red-star",
+            RESULT_KICKOFF,
+            None,
+            home_score,
+            away_score,
+            {"result_detail": "FT", "result_source": "espn_scoreboard"},
+        )
+
+    def _existing(self, db, status):
+        db.execute(
+            "INSERT INTO matches (league_id, home_team_id, away_team_id, match_date, status, season) "
+            "VALUES ('lg', 'bastia', 'red-star', ?, ?, '2025-2026')",
+            (RESULT_KICKOFF.isoformat(), status),
+        )
+
+    def _row(self, db):
+        return db.execute("SELECT status, home_score, away_score FROM matches").fetchone()
+
+    def test_a_cancelled_row_is_left_alone_and_reported_as_not_written(self, results_db):
+        self._existing(results_db, "cancelled")
+        assert self._record(results_db) == 0
+        assert self._row(results_db) == ("cancelled", None, None)
+
+    def test_a_scheduled_row_becomes_finished(self, results_db):
+        self._existing(results_db, "scheduled")
+        assert self._record(results_db, 2, 1) == 1
+        assert self._row(results_db) == ("finished", 2, 1)
+
+    def test_a_postponed_row_still_becomes_finished(self, results_db):
+        self._existing(results_db, "postponed")
+        assert self._record(results_db, 2, 1) == 1
+        assert self._row(results_db) == ("finished", 2, 1)
+
+    def test_an_unseen_fixture_is_inserted_finished(self, results_db):
+        assert self._record(results_db, 3, 1) == 1
+        assert self._row(results_db) == ("finished", 3, 1)
+
+    def test_the_guard_mirrors_promote_raw(self):
+        cur = MagicMock()
+        _REAL_INSERT_FINISHED_MATCH(cur, fu.SPORT_CONFIGS["soccer"], "lg", "h", "a", RESULT_KICKOFF, None, 1, 0, {})
+        sql = " ".join(cur.execute.call_args.args[0].split())
+        assert "WHERE matches.status <> 'cancelled' RETURNING id" in sql
 
 
 class TestFindTeamNeverWrites:

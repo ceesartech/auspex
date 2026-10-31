@@ -12,6 +12,11 @@ Usage:
     python scripts/fetch_upcoming.py --sport nhl                   # NHL, 14 days
     python scripts/fetch_upcoming.py --sport soccer --leagues eng.1,ger.1
     python scripts/fetch_upcoming.py --sport nhl --days 7
+
+Exit status: 0 ok; 1 every ESPN request failed (results mode, an outage);
+2 no database URL; 3 the sweep refused at least one competition because
+writing it would corrupt fixture identity (see IDENTITY_STATS). Everything
+else in the sweep is committed before the script exits 3.
 """
 
 from __future__ import annotations
@@ -486,7 +491,14 @@ def insert_finished_match(
     Score columns follow the corpus conventions: real scores for team
     sports, winner-flag 1/0 for tennis/MMA. `halftime` (soccer) fills
     half_time_home/away only while that pair is empty: a football-data load
-    may already hold it, and the pair is never split."""
+    may already hold it, and the pair is never split.
+
+    A 'cancelled' row is never touched (the same rule as promote_raw's
+    upsert). That status is set on purpose, by an operator or by
+    _release_redrawn_slot, and a deep results backfill must not flip it to
+    'finished'. Returns 1 when a row was written and 0 when the existing
+    row is 'cancelled' (the DO UPDATE's WHERE is false, so no row comes
+    back)."""
     ht_home, ht_away = halftime if halftime is not None else (None, None)
     cur.execute(
         """
@@ -505,6 +517,8 @@ def insert_finished_match(
                                       THEN EXCLUDED.half_time_away ELSE matches.half_time_away END,
                 venue = COALESCE(matches.venue, EXCLUDED.venue),
                 updated_at = NOW()
+            WHERE matches.status <> 'cancelled'
+        RETURNING id
         """,
         (
             league_id,
@@ -520,7 +534,7 @@ def insert_finished_match(
             ht_away,
         ),
     )
-    return cur.rowcount
+    return 0 if cur.fetchone() is None else 1
 
 
 def _competitor_name(competitor: dict, is_individual: bool) -> str | None:
@@ -592,6 +606,27 @@ IDENTITY_WINDOW_HOURS = 72
 # is worth an ERROR line even though the payload guard has cleared it.
 LARGE_SHIFT_HOURS = 24
 
+# Competitions a sweep REFUSED to write because the write would corrupt a
+# fixture's identity: forks_refused (see ForkRefused) and same_team (see
+# _resolve_teams). The rest of the sweep is still written and committed;
+# main() then exits IDENTITY_EXIT_CODE so the run fails, and the DAG's
+# failure callback alerts someone. An ERROR line alone was not enough: from
+# 2026-09-29 to 2026-10-10 the soccer fixtures path logged the same refusal on
+# about 1,075 runs while it forked FC Juarez v Tijuana into two rows.
+IDENTITY_STATS = {"forks_refused": 0, "same_team": 0}
+IDENTITY_EXIT_CODE = 3
+
+
+class ForkRefused(Exception):
+    """The ESPN id names an existing row for THIS fixture under another team
+    pair. That row cannot be realigned, and an upsert at the parsed (home,
+    away, match_date) would insert a second row for the same fixture."""
+
+    def __init__(self, match_id, owner: dict):
+        super().__init__(f"match {match_id} owns this ESPN competition under another team pair")
+        self.match_id = match_id
+        self.owner = owner
+
 
 def _pair_key(home_name: str, away_name: str) -> tuple[str, str]:
     """Index key for a fixture's ORDERED team pair.
@@ -632,15 +667,39 @@ def build_pair_index(cfg: SportConfig, events: list[dict]) -> dict[tuple[str, st
 
 _PLACEHOLDER_NAMES = {"tbd", "tba", "to be determined", "to be announced", "bye", "qualifier"}
 
+# Knockout-bracket slots ESPN publishes before the teams are known. Each name
+# is reused from tournament to tournament and fuzzy-matches its siblings
+# ("Round of 32 1 Winner" vs "Round of 32 2 Winner" scores above 0.85), so the
+# 2026 World Cup's slots collapsed into 8 team rows and 20 fixtures of a team
+# against itself. Matched against the whole, whitespace-collapsed name, so a
+# real club that merely contains one of these words is kept.
+_PLACEHOLDER_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        # "Group A 2nd Place", "Group C Winner", "Group B Runner-up"
+        r"group [a-z]{1,2} (?:winners?|runners?[- ]?up|\d+(?:st|nd|rd|th)(?: place)?)",
+        # "Third Place Group C/E/F/H/I", "3rd Place Group A/B/C/D/F"
+        r"(?:third|3rd|fourth|4th)(?: place)? group [a-z](?: ?[/,] ?[a-z])*",
+        # "Round of 32 1 Winner", "Quarterfinal 2 Winner", "Semifinal 1 Loser", "Match 73 Winner"
+        r"(?:round of \d+|(?:quarter|semi)[- ]?finals?|play[- ]?offs?|match|game)(?: \d+)? (?:winners?|losers?)",
+        # "Winner Match 73", "Loser of Semifinal 1", "Winner Group A"
+        r"(?:winners?|losers?|runners?[- ]?up) (?:of )?(?:match|game|group|round|quarter|semi|final|play)\b.*",
+        # "Final ...": the final's own slot, however the rest is spelled
+        r"finals?\b.*",
+    )
+)
+
 
 def _is_placeholder_name(name: str) -> bool:
     """True for ESPN's draw-slot placeholders, which are not real competitors.
 
     'Qualifier' is included: ESPN uses it for an unfilled qualifying slot, and
     like TBD it is reused across every such slot in the draw, so two unrelated
-    fixtures would collide on the same (home, away) identity.
+    fixtures would collide on the same (home, away) identity. The knockout
+    slots in _PLACEHOLDER_PATTERNS are refused for the same reason.
     """
-    return (name or "").strip().lower() in _PLACEHOLDER_NAMES
+    norm = " ".join((name or "").split()).lower()
+    return norm in _PLACEHOLDER_NAMES or any(p.fullmatch(norm) for p in _PLACEHOLDER_PATTERNS)
 
 
 def _sample_times(times: list[datetime], limit: int = 6) -> str:
@@ -1000,6 +1059,21 @@ def _stamp_identity(cur, home_id, away_id, match_dt, espn_id, season_type) -> bo
     return cur.rowcount > 0
 
 
+def _match_teams(cur, match_id) -> dict | None:
+    """A row's team pair, with names for the log line."""
+    cur.execute(
+        """
+        SELECT m.home_team_id, m.away_team_id, th.name AS home_name, ta.name AS away_name
+          FROM matches m
+          JOIN teams th ON th.id = m.home_team_id
+          JOIN teams ta ON ta.id = m.away_team_id
+         WHERE m.id = %s
+        """,
+        (match_id,),
+    )
+    return cur.fetchone()
+
+
 def _reconcile_match_row(cur, cfg: SportConfig, espn_id, home_id, away_id, match_dt, allow_heal: bool = True) -> bool:
     """Pre-insert half of the identity fix, shared by both insert paths:
     find the row this competition already owns and drag its match_date to
@@ -1009,13 +1083,85 @@ def _reconcile_match_row(cur, cfg: SportConfig, espn_id, home_id, away_id, match
     Returns True when the upsert that follows will land on the row this
     competition owns — i.e. when it is safe to stamp the ESPN id onto
     (home, away, match_dt). False means a row was resolved but could not be
-    put at that slot, so the slot belongs to someone else."""
+    put at that slot, so the slot belongs to someone else.
+
+    Raises ForkRefused, for team sports, when the ESPN id resolved a row
+    whose team pair is not this parse's. A team-sport ESPN competition id
+    is the fixture's stable identity, so a different pair means OUR team
+    resolution moved, not that the match changed. Prod example: ESPN's
+    "FC Juárez" began resolving to an accented duplicate of the stored
+    "FC Juarez" team, and every sweep from 2026-09-29 to 2026-10-10 upserted
+    a second, unidentified row. That row took the result while the original,
+    holding 57 predictions, stayed 'scheduled' for good. The caller writes
+    nothing. 1v1 sports are exempt: there a different pair is a re-drawn
+    slot (see _resolve_match_id), and the new pairing's own row is the right
+    place for the write."""
     match_id, source = _resolve_match_id(cur, cfg, espn_id, home_id, away_id, match_dt, allow_heal=allow_heal)
     if match_id is None:
         # Nothing to reconcile: step 2 already proved the slot is empty, so
         # the upsert inserts a fresh row there and the stamp is safe.
         return True
-    return _realign_match_date(cur, match_id, home_id, away_id, match_dt, healed=(source == "healed"))
+    if _realign_match_date(cur, match_id, home_id, away_id, match_dt, healed=(source == "healed")):
+        return True
+    if source == "espn" and not cfg.is_individual:
+        owner = _match_teams(cur, match_id)
+        if owner is not None and (owner["home_team_id"], owner["away_team_id"]) != (home_id, away_id):
+            raise ForkRefused(match_id, owner)
+    return False
+
+
+def _log_refused_fork(
+    cfg: SportConfig, espn_id, refusal: ForkRefused, home_name, home_id, away_name, away_id, match_dt
+) -> None:
+    """Count a ForkRefused and log both team pairs, so the repair is obvious."""
+    IDENTITY_STATS["forks_refused"] += 1
+    owner = refusal.owner
+    logger.error(
+        "Refusing %s ESPN competition %s at %s: it already owns match %s, %s [%s] vs %s [%s], but now parses as "
+        "%s [%s] vs %s [%s]. Writing it would insert a second row for the same fixture, splitting predictions/recs "
+        "from the result. Nothing written. Repair the team mapping (a duplicate team row?) or the fixture row; "
+        "this run exits %d.",
+        cfg.sport,
+        espn_id,
+        match_dt,
+        refusal.match_id,
+        owner.get("home_name"),
+        owner["home_team_id"],
+        owner.get("away_name"),
+        owner["away_team_id"],
+        home_name,
+        home_id,
+        away_name,
+        away_id,
+        IDENTITY_EXIT_CODE,
+    )
+
+
+def _resolve_teams(cur, cfg: SportConfig, league_id: str, home_name: str, away_name: str, espn_id, match_dt):
+    """(home_id, away_id) for a competition, or None when a side cannot be
+    resolved or both sides resolve to ONE team. A team playing itself is a
+    team-matching error (a fuzzy match, or a placeholder slot the filter
+    missed: the 2026 World Cup left 20 such rows), never a fixture, so it is
+    refused and counted."""
+    home_id = ensure_team(cur, cfg, home_name, league_id)
+    away_id = ensure_team(cur, cfg, away_name, league_id)
+    if not (home_id and away_id):
+        return None
+    if home_id == away_id:
+        IDENTITY_STATS["same_team"] += 1
+        logger.error(
+            "Refusing %s competition %s at %s: %r and %r both resolve to team %s — a team cannot play itself; "
+            "fix the team matching (fuzzy match or an unfiltered placeholder slot). This run exits %d.",
+            cfg.sport,
+            espn_id,
+            match_dt,
+            home_name,
+            away_name,
+            home_id,
+            IDENTITY_EXIT_CODE,
+        )
+        return None
+    return home_id, away_id
 
 
 def _iter_event_competitions(event: dict, cfg: SportConfig):
@@ -1115,21 +1261,25 @@ def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict, even
     if state != "pre":
         return False  # results path (--results) handles post events
 
-    home_id = ensure_team(cur, cfg, home_name, league_id)
-    away_id = ensure_team(cur, cfg, away_name, league_id)
-    if not (home_id and away_id):
+    teams = _resolve_teams(cur, cfg, league_id, home_name, away_name, espn_id, match_dt)
+    if teams is None:
         return False
+    home_id, away_id = teams
 
     season_type = (event_context or {}).get("season_type")
-    identity_safe = _reconcile_match_row(
-        cur,
-        cfg,
-        espn_id,
-        home_id,
-        away_id,
-        match_dt,
-        allow_heal=healing_allowed((event_context or {}).get("pair_index"), home_name, away_name, match_dt),
-    )
+    try:
+        identity_safe = _reconcile_match_row(
+            cur,
+            cfg,
+            espn_id,
+            home_id,
+            away_id,
+            match_dt,
+            allow_heal=healing_allowed((event_context or {}).get("pair_index"), home_name, away_name, match_dt),
+        )
+    except ForkRefused as refusal:
+        _log_refused_fork(cfg, espn_id, refusal, home_name, home_id, away_name, away_id, match_dt)
+        return False
     written = bool(insert_scheduled_match(cur, cfg, league_id, home_id, away_id, match_dt, venue))
     _stamp_identity(cur, home_id, away_id, match_dt, espn_id if identity_safe else None, season_type)
     if espn_id and not identity_safe:
@@ -1238,30 +1388,53 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
     # the plays don't reproduce the final score.
     ht = halftime_scores(comp, home, away, (home_score, away_score)) if cfg.sport == "soccer" else None
 
-    home_id = ensure_team(cur, cfg, home_name, league_id)
-    away_id = ensure_team(cur, cfg, away_name, league_id)
-    if not (home_id and away_id):
+    teams = _resolve_teams(cur, cfg, league_id, home_name, away_name, espn_id, match_dt)
+    if teams is None:
         return False
+    home_id, away_id = teams
 
     # The RESULTS path fragments fixtures too: 20 of the 119 prod twins were
     # inserted here, after kickoff, because ESPN had moved the time since we
     # ingested the fixture. Reconcile first so this writes to the row that
     # already carries the predictions/odds/recs.
     season_type = (event_context or {}).get("season_type")
-    identity_safe = _reconcile_match_row(
-        cur,
-        cfg,
-        espn_id,
-        home_id,
-        away_id,
-        match_dt,
-        allow_heal=healing_allowed((event_context or {}).get("pair_index"), home_name, away_name, match_dt),
-    )
+    try:
+        identity_safe = _reconcile_match_row(
+            cur,
+            cfg,
+            espn_id,
+            home_id,
+            away_id,
+            match_dt,
+            allow_heal=healing_allowed((event_context or {}).get("pair_index"), home_name, away_name, match_dt),
+        )
+    except ForkRefused as refusal:
+        _log_refused_fork(cfg, espn_id, refusal, home_name, home_id, away_name, away_id, match_dt)
+        return False
     written = bool(
         insert_finished_match(
             cur, cfg, league_id, home_id, away_id, match_dt, venue, home_score, away_score, result_meta, halftime=ht
         )
     )
+    if not written:
+        # insert_finished_match leaves a 'cancelled' row alone. That status
+        # is recorded on purpose (an abandoned or awarded match), and ESPN can
+        # still report a "full time" score for it: fra.2 747597, Bastia v Red
+        # Star, shows 0-0 STATUS_FULL_TIME although the match was abandoned at
+        # 58' and awarded.
+        logger.warning(
+            "Left %s %s vs %s at %s (ESPN %s) as it is: the existing row is 'cancelled' but ESPN reports a final "
+            "%d-%d (%s) — check which is right",
+            cfg.sport,
+            home_name,
+            away_name,
+            match_dt,
+            espn_id,
+            home_score,
+            away_score,
+            result_meta["result_detail"],
+        )
+        return False
     _stamp_identity(cur, home_id, away_id, match_dt, espn_id if identity_safe else None, season_type)
     if espn_id and not identity_safe:
         logger.error(
@@ -1417,11 +1590,30 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         total = sum(counts.values())
         logger.info("Recorded %d %s result(s) across %d leagues", total, cfg.sport, len(counts))
-        return 0
+        return identity_exit_code(cfg)
     counts = fetch_all(args.database_url, cfg, leagues, args.days)
     total = sum(counts.values())
     logger.info("Fetched %d upcoming %s fixtures across %d leagues", total, cfg.sport, len(counts))
-    return 0
+    return identity_exit_code(cfg)
+
+
+def identity_exit_code(cfg: SportConfig) -> int:
+    """0, or IDENTITY_EXIT_CODE when the sweep refused any competition (see
+    IDENTITY_STATS). The rest of the sweep has already been committed."""
+    forks, same_team = IDENTITY_STATS["forks_refused"], IDENTITY_STATS["same_team"]
+    if not (forks or same_team):
+        return 0
+    logger.error(
+        "%s sweep REFUSED %d write(s): %d would have forked an ESPN-identified fixture, %d resolved both sides to "
+        "one team. Everything else was written and committed; exiting %d so this run fails until the team "
+        "mapping is repaired (details in the ERROR lines above).",
+        cfg.sport,
+        forks + same_team,
+        forks,
+        same_team,
+        IDENTITY_EXIT_CODE,
+    )
+    return IDENTITY_EXIT_CODE
 
 
 if __name__ == "__main__":
