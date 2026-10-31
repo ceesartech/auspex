@@ -1348,6 +1348,95 @@ with the growth-rate driver (WAL) eliminated.
 > the last 160 days still hold ungraded predictions (the pipeline grades
 > `--days 14`), so a wide-window grader run should be a deliberate decision.
 
+> **Update (2026-10-30, night) — the ungraded backlog, and a correction.**
+> **Correction:** the "side finding" above blamed the grader's `--days 14`
+> window. Wrong: the pipeline grades every match while it is inside that
+> window. The rows were ungraded because their prediction types were never in
+> `grading_outcomes`' dispatch table — the soccer derived markets
+> (clean_sheet, win_to_nil, team_total, odd_even, total_goals,
+> winning_margin, result_btts, result_over_under, and the four half-time
+> markets) and the NHL Dixon-Coles markets (`puck_line`, `regulation_1x2`,
+> `total_goals`, `clean_sheet`, `win_to_nil`). Fixed in `40c40ef`:
+> multi-proposition markets grade the PICKED proposition (as `over_under`
+> does); NHL `puck_line` shares the asian_handicap keys and math;
+> `regulation_1x2` maps `regulation_winner` tie→draw. Half-time markets read
+> `metadata.halftime_{home,away}_score`, which the ESPN results path now
+> derives from the scoreboard's scoring plays (stamped only when the plays
+> reproduce the final score; ESPN's soccer scoreboard has no linescores);
+> `scripts/backfill_halftime_scores.py` stamps older rows (existing finished
+> rows only, ESPN id else the exact triple, final score must match,
+> write-once CSV). `1784861`: the grader never grades a prediction created
+> after kickoff — 467 rows written 2026-06-02/03 for 2023-25 NFL (366), NBA
+> (8) and tennis (83) matches sat ungraded only because they were older than
+> the window, and a wide run would have folded that hindsight into accuracy.
+> Backlog run (`grade_completed_matches.py --days 160`, 23:34Z): 64,098
+> predictions graded on 2,974 matches (incl. ~2k pushes that keep
+> `is_correct` NULL). Hit rates — soccer: clean_sheet 81.6%, team_total
+> 87.3%, win_to_nil 87.2%, odd_even 48.4%, result_over_under 31.6%,
+> winning_margin 25.9%, result_btts 24.7%, total_goals 22.2% (n=7,584 each);
+> NHL: clean_sheet / win_to_nil 96.8%, puck_line 80.2%, regulation_1x2
+> 48.1%, total_goals 24.4% (n=283; the model's argmax is always `8+`, a
+> cumulative band). 5 June NHL recs whose selections were stored as
+> `home -1.5` / `over 5.5` (unparseable, so won/lost with no P&L) now carry
+> P&L; one — `home -1.5` at 4-2 — was mis-settled lost by the old argmax path
+> and is now won (+35.92). Half-time backfill (23:39Z): 2,677 matches stamped (1,721 by ESPN id, 956
+> by the exact triple; 6 refused because the plays did not reproduce the
+> final, 147 ESPN competitions without a finished row); a random 100 of the
+> planned stamps agreed 100/100 with ESPN's independent summary-endpoint
+> linescores; HT draws 39.7% / home 34.4% / away 25.8%. Then 7,405 rows per HT
+> market graded: over_under_ht 85.9%, btts_ht 79.8%, match_result_ht 35.2%,
+> ht_ft 26.7% (27 each left NULL). Model finding, not acted on: the HT 1x2
+> derivation picks home on 93% of matches at an average 39.5% and hits 35.0%,
+> while the real HT draw rate is 39.7% — the HT draw is under-weighted.
+> Remaining NULLs are by design:
+> pushes (AH integer lines, DNB draws, NFL spread pushes), NFL ties, the
+> phantom-line guard (14), the 467 post-kickoff rows. Monitor preview of the new
+> slices (30d, the monitor's own drift logic, read-only): all inside thresholds
+> except NHL regulation_1x2 ECE 0.069 and soccer ht_ft ECE 0.054 (warn), and
+> soccer odd_even — accuracy 48.4% under the 52.4% break-even, an ALERT because
+> the derived soccer markets inherit the enabled soccer default gate. No odds feed
+> exists for any derived market (prod odds: 1x2 / AH / O-U / moneyline / spread /
+> total), so odd_even can never emit a rec: `rec_gating` now gates
+> (soccer, odd_even) off with that evidence (measured, not paged). The monitor
+> class map gained `regulation_1x2` (3) and `puck_line` (2-way multi-line).
+
+> **Update (2026-10-31, 00:47–00:54Z) — tennis orphan cleanup ran; it deleted
+> 45 settled recs, which are recoverable.** `scripts/ops/cleanup_tennis_orphans.sh`
+> (operator-run; the 23:12Z attempt had aborted at step 2 before any write —
+> CWD-relative CSV default, fixed `3ab4fb6`). Backup
+> `betting_system-2026-10-31T004703Z.dump` landed first. Step 2 settled the
+> 80 stranded tennis recs as the dry run said: 50 settled (18W/32L, net
+> +61.96 on 3,460.39 staked; 13 are duplicates of an already-covered fixture,
+> so n=37 real bets) and 30 voided (no twin). Step 3 merged 16,054 orphans
+> onto 3,210 finished twins (moved 18,450 odds, 130,869 CLV snapshots, 2,823
+> predictions — all graded in step 5) and deleted 3,386 never-played
+> pairings; archive `fixture_orphans_tennis_20261031T004915Z.jsonl.gz`
+> (273,534 rows). Stale tennis rows 19,470 → 30 (exactly the orphans the 30
+> voided recs point at); 0 tennis recs pending; 0 ungraded pre-kickoff tennis
+> predictions on finished matches.
+> **The incident:** only 5 of the 50 settled recs survived. Step 2 re-points a
+> rec's `match_id` onto the twin but not its `prediction_id`;
+> `betting_recommendations.prediction_id` is `ON DELETE CASCADE`, and the
+> orphan tool's has-recs guard looked only at `match_id`. The twin already
+> held the same (model, version, type) for all 45 — so the rec's own
+> prediction was never the one moved — and deleting the orphan deleted the
+> prediction and the rec with it (no accumulator legs or history rows were
+> attached). Fixes: `repair_fixture_orphans.py` now treats an orphan holding a
+> prediction any rec references as has-recs (plan and DELETE guard), and
+> counts + warns on a refused delete. `scripts/restore_cascaded_recs.py`
+> re-inserts each lost rec from the pre-repair dump with the repair's
+> settlement (status / actual_result / P&L from the audit CSV, match_id =
+> twin) and links it to the twin's own prediction of the same model, version
+> and type (the deleted prediction cannot be re-inserted beside it —
+> `predictions_match_model_version_type_key`; the twins' predictions were all
+> written pre-kickoff; max |Δp| vs the deleted ones 0.047, median 0.002).
+> Every row is refused unless the twin's score and a fresh grade of the rec's
+> own selection reproduce the CSV. Dry run: 45 planned, 0 refused (16W/29L,
+> net +218.76 — the CSV's figure exactly). Until it is applied, the recs P&L
+> widget is missing those 45 (it inner-joins predictions). Open: the CASCADE
+> itself — any prediction delete silently deletes recs; `ON DELETE RESTRICT`
+> (a migration, needs approval) would make this class fail loudly.
+
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
 > fixed in one push. (1) `GET /predictions/upcoming` applied `LIMIT` to

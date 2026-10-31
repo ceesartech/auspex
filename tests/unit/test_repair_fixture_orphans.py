@@ -95,6 +95,46 @@ class TestSqlInvariants:
         assert "betting_recommendations" in sql and "betting_history" in sql
         assert "m.status IN ('scheduled', 'cancelled')" in sql
 
+    def test_a_rec_whose_prediction_lives_on_the_orphan_protects_it(self):
+        # prediction_id is ON DELETE CASCADE: deleting the orphan would delete
+        # a rec that was already re-pointed onto the twin (2026-10-31: 45 lost)
+        guard = "JOIN predictions p ON p.id = r.prediction_id"
+        assert guard in rfo.DELETE_ORPHANS_SQL and "WHERE p.match_id = m.id" in rfo.DELETE_ORPHANS_SQL
+        assert guard in rfo.LIST_CANDIDATES_SQL
+
+
+class TestApplyPlan:
+    class _Cur:
+        def __init__(self, delete_rowcounts):
+            self.delete_rowcounts = list(delete_rowcounts)
+            self.rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params):
+            self.rowcount = self.delete_rowcounts.pop(0) if sql is rfo.DELETE_ORPHANS_SQL else 0
+
+    class _Conn:
+        def __init__(self, cur):
+            self.cur = cur
+
+        def cursor(self):
+            return self.cur
+
+        def commit(self):
+            pass
+
+    def test_a_refused_delete_is_counted_not_silent(self, caplog):
+        p = {"groups": {"real": ["o1", "o2"]}, "kickoff": {"real": KICK}, "no_twin": ["x1", "x2", "x3"]}
+        moved = rfo.apply_plan(self._Conn(self._Cur([1, 3])), p, batch_size=10)
+        assert moved["deleted_merged_orphans"] == 1 and moved["deleted_no_twin_orphans"] == 3
+        assert moved["delete_refused_has_recs"] == 1
+        assert "delete guard kept 1" in caplog.text
+
 
 class TestArgs:
     def test_dry_run_is_the_default(self):
