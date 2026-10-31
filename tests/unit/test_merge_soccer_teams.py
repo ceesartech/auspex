@@ -1255,10 +1255,13 @@ class TestOddsSpellingChecks:
             _apply(p, conn, odds={self.SPELLING: ("c", None)})
         assert conn.committed == 0 and conn.rolled_back == 1
 
-    def test_one_that_missed_before_is_not_held_to_anything(self):
+    def test_one_that_missed_before_is_not_held_to_anything(self, caplog):
         p = self._plan()
-        conn, done = _apply(p, odds={self.SPELLING: (None, None)})
+        with caplog.at_level("WARNING", logger="merge_soccer_teams"):
+            conn, done = _apply(p, odds={self.SPELLING: (None, None)})
         assert conn.committed == 1 and done["odds_spellings_unmatched_before"] == 1 and not done["odds_spelling_checks"]
+        (warning,) = [r for r in caplog.records if r.levelname == "WARNING" and "did not find" in r.getMessage()]
+        assert "'Hacken FC'" in warning.getMessage() and "BK Häcken -> Hacken" in warning.getMessage()
 
     def test_a_hit_on_a_dropped_twin_counts_as_its_kept_row(self):
         p = self._plan()
@@ -1283,6 +1286,41 @@ class TestArchivedChildren:
         conn = _Conn(p, children={"b": [("odds", "o1"), ("predictions", "p7")]})
         _, done = _apply(p, conn, archived={"b": {"odds": {"o1"}, "predictions": {"p7"}}})
         assert done["twins_dropped"] == 1 and conn.committed == 1
+
+    def test_pair_j_drops_the_row_pair_i_kept_after_rows_were_moved_onto_it(self):
+        """Pair i folds fd twin 'b' into ESPN row 'a' and moves b's price o1
+        onto 'a'; pair j (a second spelling of the opponent) then drops 'a'
+        into the rec holder 'd'. o1 was archived under 'b', yet it is in the
+        archive: pair j must go through, not roll back as 'written after the
+        archive'."""
+        teams = {k: v for k, v in _teams().items() if k != NEW2}
+        pair_j = ms.MapRow(OPP, OLD2, "Djurgarden", "Djurgarden IF", "", "exact-alias", "key_equal 1.000")
+        a, b, d = _espn_row("a", NEW, OPP), _m("b", OLD, OPP), _m("d", OLD, OLD2)
+        deps = {
+            "b": _deps(odds=[_odds("o1", T0 - timedelta(hours=1))]),
+            "a": _deps(odds=[_odds("oa", T0 - timedelta(hours=2), book="Bet365")]),
+            "d": _deps(holds_recs=True),
+        }
+        plan_i, plan_j = _plan([a, b, d], deps=deps, teams=teams, pairs=[_pair(), pair_j])
+        assert [(x.match_id, x.keep_id) for x in plan_i.drops] == [("b", "a")]
+        assert [(x.match_id, x.keep_id) for x in plan_j.drops] == [("a", "d")]
+        assert plan_i.drops[0].odds_ids == ["o1"]
+        # write_archive files each child under the twin it hung off at archive time, before any write
+        archived = {"b": {"odds": {"o1"}}, "a": {"odds": {"oa"}}}
+        conn_i = _Conn(plan_i, children={"b": []})  # o1 left 'b' in pair i's own move
+        _, done_i = _apply(plan_i, conn_i, archived=archived, match="a")
+        assert done_i["moved_odds"] == 1 and conn_i.committed == 1
+        conn_j = _Conn(plan_j, children={"a": [("odds", "o1"), ("odds", "oa")]})
+        _, done_j = _apply(plan_j, conn_j, archived=archived, team=OLD2, team_espn=OLD2, match="d")
+        assert done_j["twins_dropped"] == 1 and conn_j.committed == 1 and conn_j.rolled_back == 0
+        # a row no twin's archive holds still stops it
+        conn_x = _Conn(plan_j, children={"a": [("odds", "o1"), ("odds", "oa"), ("odds", "o9")]})
+        with pytest.raises(ms.GuardError, match="written after the archive.*odds:o9"):
+            _apply(plan_j, conn_x, archived=archived, team=OLD2, team_espn=OLD2, match="d")
+
+    def test_archived_ids_unions_every_twin(self):
+        got = ms.archived_ids({"b": {"odds": {"o1"}}, "a": {"odds": {"oa"}, "predictions": {"p1"}}, "c": {}})
+        assert got == {"odds": {"o1", "oa"}, "predictions": {"p1"}}
 
     def test_the_children_query_covers_every_child_table_the_schema_has(self):
         sql = ms.twin_children_sql(SCHEMA)

@@ -1585,6 +1585,18 @@ def _delta(want: Any, got: Any) -> str:
 Archived = dict[str, dict[str, set[str]]]  # dropped twin id -> child table -> archived row ids
 
 
+def archived_ids(archived: Archived) -> dict[str, set[str]]:
+    """child table -> every row id the archive holds for it, across all
+    dropped twins. A row archived under one twin can sit on another one by
+    the time that one is dropped: pair i moves it from its twin onto kept row
+    K, then pair j drops K. It is in the archive all the same. Pure."""
+    out: dict[str, set[str]] = defaultdict(set)
+    for tables in archived.values():
+        for table, ids in tables.items():
+            out[table] |= ids
+    return dict(out)
+
+
 def write_archive(cur, path: Path, plans: list[PairPlan], children: tuple[str, ...]) -> tuple[int, Archived]:
     """gzip JSONL of every row the run deletes or changes, written before the
     first write. Returns (record count, the child rows archived per dropped
@@ -2023,7 +2035,18 @@ def verify_resolution(cur, plan: PairPlan, resolvers: Resolvers, before: dict[st
         for spelling in plan.odds_names:
             prior = before.get(spelling)
             if keep_of.get(prior or "", prior) != probe["match_id"]:
-                done["odds_spellings_unmatched_before"] += 1  # nothing to keep: it missed before the merge too
+                # Nothing to keep: it missed before the merge too. Loud, and counted on the WRITTEN line, which
+                # scripts/ops/merge_soccer_teams.sh fails on: the in-transaction odds check shrank for this club.
+                done["odds_spellings_unmatched_before"] += 1
+                logger.warning(
+                    "%s -> %s: the odds feed's spelling %r did not find the probe fixture %s before the merge "
+                    "(found %r) — not checked after it",
+                    pair.new_name,
+                    pair.old_name,
+                    spelling,
+                    probe["match_id"],
+                    prior,
+                )
                 continue
             home, away, when = odds_event(probe, row, spelling)
             got = resolvers.find_match_id(cur, home, away, when)
@@ -2046,6 +2069,7 @@ def apply_pair(conn, plan: PairPlan, resolvers: Resolvers, schema: Schema, archi
     t = plan.team_patch
     done: Counter = Counter()
     window = f"{int(TWIN_WINDOW.total_seconds() // 3600)} hours"
+    held: Optional[dict[str, set[str]]] = None  # archived_ids(archived), built on the first dropped twin
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SET LOCAL lock_timeout = %s", (LOCK_TIMEOUT,))
@@ -2079,9 +2103,11 @@ def apply_pair(conn, plan: PairPlan, resolvers: Resolvers, schema: Schema, archi
                         done[f"moved_{label}"] += len(ids)
                 if schema.match_children:
                     # The twin row is locked FOR UPDATE, so no child row can be added before COMMIT; one added
-                    # between the archive and the lock would cascade away unarchived.
+                    # between the archive and the lock would cascade away unarchived. Any row the archive holds
+                    # passes, under whichever twin it was archived (an earlier pair may have moved it here).
                     cur.execute(twin_children_sql(schema), {"m": d.match_id})
-                    kept = archived.get(d.match_id, {})
+                    kept = held if held is not None else archived_ids(archived)
+                    held = kept
                     extra = sorted(
                         f"{r['tbl']}:{r['id']}" for r in cur.fetchall() if str(r["id"]) not in kept.get(r["tbl"], ())
                     )
@@ -2520,7 +2546,13 @@ def run(
                 str(e).strip().splitlines()[0],
             )
     logger.info("Written: %s", dict(sorted(written.items())))
-    logger.info("WRITTEN pairs_merged=%d pairs_failed=%d", written["pairs_merged"], len(failed))
+    logger.info(
+        "WRITTEN pairs_merged=%d pairs_failed=%d odds_spelling_checks=%d odds_spellings_unmatched_before=%d",
+        written["pairs_merged"],
+        len(failed),
+        written["odds_spelling_checks"],
+        written["odds_spellings_unmatched_before"],
+    )
     if failed or refused:
         logger.error(
             "%d pair(s) rolled back, %d refused — re-run after inspecting them (merged pairs plan as done)",
