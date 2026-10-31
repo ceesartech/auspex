@@ -179,6 +179,12 @@ AMENDMENT 2026-10-31, made after the 3-fold smoke run (n=665) and before the ful
   found no blocking regression for any challenger, and put correct_score_grid
   at -0.00026 (pinned) .. -0.00051 (refit) vs served, where the listed score
   had read +0.012 .. +0.015.
+  The smoke's 665 rows are 41% of the amended decision window's 1,603 rows (3
+  of its 8 folds), and A1, A2 and A3 only remove or loosen blocks while rule
+  (a), the primary over_5.5 ship_strict test, is untouched; the decision
+  restricted to the five folds the smoke never saw (2025-10..2026-02) is
+  reported alongside the full result, in the run's write-up, as context that
+  never decides.
 
 RULE AS AMENDED (what decide() implements)
   Decision window: the kept folds whose month starts on or after 2025-05-01.

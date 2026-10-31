@@ -509,6 +509,9 @@ class TestPreRegistrationRecord:
         assert "RULE AS AMENDED (what decide() implements)" in doc
         # The original rule stays in the record, marked as superseded.
         assert "> +0.002 with a 95% upper" in doc and "[A2: replaced by the lower-bound rule.]" in doc
+        # How much of the decision window the smoke saw, and that its unseen folds are reported (never deciding).
+        assert "41% of the amended decision window's 1,603 rows (3\n  of its 8 folds)" in doc
+        assert "the five folds the smoke never saw (2025-10..2026-02)" in doc
 
 
 class TestDecision:
