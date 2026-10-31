@@ -104,8 +104,11 @@
 #   ... --from N     run steps N..11
 #   ... --only N     run step N alone
 # State: RUNBOOK_STATE (default ~/.soccer_repair_runbook.state) records each
-# step's completion ("changed" or "already_done"); only step 10's skip reads
-# it, and a missing file only means step 10 runs.
+# step's completion ("changed", "already_done", or "checked" for step 11);
+# only step 10's skip reads it, and a missing file only means step 10 runs.
+# Read-only check on prod 2026-10-31 ~12:10Z (VM HEAD a071d6a, not deployed):
+# the preflight reads 22 relabelled / 4 cancelled, 39 Liga MX sides sit on
+# santos/guadalajara, calculate_match_outcome is 011's.
 # (AUSPEX_DIR, TMPDIR, AF_POLL_SECONDS and ODDS_WAIT_POLLS exist for tests and rehearsals.)
 set -uo pipefail
 FROM=1
