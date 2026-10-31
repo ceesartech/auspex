@@ -5,7 +5,10 @@ must DRAIN before it pauses (a run in flight when the DAG is paused would stay
 odds-feed spellings, record the plan, MERGED_AT, the rows to grade and the
 run's STATUS for the runbook, exit 0 at once when every pair is merged and the
 last apply finished, finish an apply whose grading failed, and unpause both
-DAGs when Ctrl-C kills the tee its output goes through."""
+DAGs when Ctrl-C kills the tee its output goes through.
+A DAG is on the run's list, with its marker, from before its pause: a read-back
+that fails, or an interrupt during it, still ends with the DAG unpaused (or an
+ALERT, marker kept)."""
 
 from __future__ import annotations
 
@@ -312,3 +315,76 @@ def test_an_unpause_that_does_not_take_is_an_alert_in_the_ledger_and_keeps_its_m
     assert (
         not (tmp_path / "afstate" / "paused_auspex_pipeline").exists() and not af["dags"]["auspex_pipeline"]["paused"]
     )
+
+
+def _ledger(tmp_path) -> str:
+    f = tmp_path / "afstate" / "airflow_pauses.log"
+    return f.read_text() if f.exists() else ""
+
+
+def _markers(tmp_path) -> list[str]:
+    return sorted(m.name for m in (tmp_path / "afstate").glob("paused_*"))
+
+
+# --- a pause whose read-back fails or is interrupted ------------------------------------------------------------------
+
+
+def test_a_failed_read_right_after_a_pause_still_ends_with_the_dag_unpaused(tmp_path):
+    """`dags pause` took, but the read that confirms it fails once (a transient CLI/DB error): the DAG is on this run's
+    list from before the pause, so the exit unpauses it. Before, it was listed only after that read — the DAG stayed
+    paused with no marker and no ALERT, and every later run said 'already paused — left as it is' for good."""
+    airflow = _airflow()
+    airflow["details_fail_after_pause"] = ["fetch_live_odds"]
+    rc, out, calls, af = _run(tmp_path, airflow=airflow)
+    assert rc == 1 and "ABORT: could not drain and pause" in out, out
+    assert "could not confirm that fetch_live_odds is paused" in out
+    assert not af["dags"]["fetch_live_odds"]["paused"] and not af["dags"]["auspex_pipeline"]["paused"]
+    ledger = _ledger(tmp_path)
+    assert "pausing fetch_live_odds" in ledger and "unpaused fetch_live_odds" in ledger, ledger
+    assert _markers(tmp_path) == [] and not [c for c in calls if "--apply" in c]
+
+
+def test_a_failed_read_after_a_pause_whose_unpause_fails_is_an_alert_with_its_marker_kept(tmp_path):
+    airflow = _airflow()
+    airflow["details_fail_after_pause"] = ["fetch_live_odds"]
+    airflow["unpause_fails"] = ["fetch_live_odds"]
+    rc, out, _, af = _run(tmp_path, airflow=airflow)
+    assert rc == 1 and af["dags"]["fetch_live_odds"]["paused"], out
+    assert "ALERT: fetch_live_odds is STILL PAUSED" in _ledger(tmp_path)
+    assert _markers(tmp_path) == ["paused_fetch_live_odds"]
+    assert not af["dags"]["auspex_pipeline"]["paused"]
+
+
+def test_ctrl_c_during_the_read_right_after_a_pause_still_unpauses_it(tmp_path):
+    """SIGINT to the process group (output through tee, as the operator runs it) while the read that confirms
+    fetch_live_odds' pause is in flight: bash runs the trap as soon as that read returns, before any bookkeeping
+    after it — so the bookkeeping is done before the pause."""
+    airflow = _airflow()
+    airflow["details_delay_after_pause"] = {"fetch_live_odds": 60}
+    env = _install(tmp_path, airflow=airflow)
+    proc = subprocess.Popen(
+        ["bash", "-c", f'bash "{WRAPPER}" 2>&1 | tee "{tmp_path / "out.log"}" >/dev/null'],
+        env={**os.environ, **env},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    def in_the_read():
+        c = fd.calls(tmp_path)
+        pause = [i for i, x in enumerate(c) if "dags pause -y fetch_live_odds" in x]
+        return bool(pause) and any("dags details fetch_live_odds" in x for x in c[pause[0] :])
+
+    try:
+        assert _wait_for(in_the_read)
+        time.sleep(0.3)
+        assert fd.airflow_state(tmp_path)["dags"]["fetch_live_odds"]["paused"]
+        os.killpg(proc.pid, signal.SIGINT)
+        proc.wait(timeout=30)
+        assert _wait_for(lambda: "unpaused fetch_live_odds" in _ledger(tmp_path)), _ledger(tmp_path)
+        af = fd.airflow_state(tmp_path)["dags"]
+        assert not af["fetch_live_odds"]["paused"] and not af["auspex_pipeline"]["paused"]
+        assert _markers(tmp_path) == [] and not [c for c in fd.calls(tmp_path) if "--apply" in c]
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)

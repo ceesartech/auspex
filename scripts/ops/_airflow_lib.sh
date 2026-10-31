@@ -22,6 +22,13 @@
 # wrapper paused it and never unpaused it (below). AF_POLL_SECONDS (default
 # 30) is the wait between polls.
 #
+# Pausing keeps its books BEFORE it acts: the DAG joins AF_PAUSED_BY_US and
+# gets its marker and a 'pausing' ledger line, then `dags pause` runs, then a
+# second read must say True. A read that fails, or an interrupt landing
+# anywhere in between (bash runs the trap as soon as the child returns),
+# leaves the DAG listed, so the exit path unpauses it — or ALERTs, marker
+# kept, when it still reads anything but False.
+#
 # Surviving a dead terminal (Ctrl-C or an SSH drop while the output goes
 # through `| tee`): the terminal signals the whole process group, tee dies,
 # and every later write to the pipe would kill the shell by SIGPIPE — in the
@@ -84,7 +91,7 @@ af_resume() {
       rm -f "$AF_STATE_DIR/paused_$d" 2>/dev/null
       af_note "unpaused $d"
     else
-      af_note "ALERT: $d is STILL PAUSED — unpause it now: docker compose exec -T airflow-scheduler airflow dags unpause -y $d"
+      af_note "ALERT: $d is STILL PAUSED (or unreadable) — unpause it now: docker compose exec -T airflow-scheduler airflow dags unpause -y $d"
     fi
   done
   AF_PAUSED_BY_US=""
@@ -124,30 +131,32 @@ af_drain_and_pause() {
     for d in "$@"; do
       st=$(af_dag_paused "$d")
       marker="$AF_STATE_DIR/paused_$d"
-      if [ "$st" = "True" ]; then
-        case " $AF_PAUSED_BY_US " in
-          *" $d "*) ;;
-          *)
-            if [ -f "$marker" ]; then
-              AF_PAUSED_BY_US="$AF_PAUSED_BY_US $d"
-              af_note "$d is paused by an earlier wrapper run that never unpaused it ($(cat "$marker" 2>/dev/null)) — adopted: this run unpauses it when it ends"
-            else
-              log "$d is already paused — left as it is"
-            fi
-            ;;
-        esac
-      elif [ "$st" = "False" ]; then
-        [ -f "$marker" ] && rm -f "$marker" 2>/dev/null  # stale: someone unpaused it since
-        $DC exec -T airflow-scheduler airflow dags pause -y "$d" </dev/null >/dev/null 2>&1
-        if [ "$(af_dag_paused "$d")" != "True" ]; then log "could not pause $d"; return 1; fi
-        AF_PAUSED_BY_US="$AF_PAUSED_BY_US $d"
-        { mkdir -p "$AF_STATE_DIR" && echo "paused by $(basename "$0") pid $$ at $(date -u +%FT%TZ)" > "$marker"; } 2>/dev/null \
-          || log "WARNING: could not write $marker (a run killed outright would leave $d paused unannounced)"
-        af_note "paused $d"
-      else
+      if [ "$st" != "True" ] && [ "$st" != "False" ]; then
         log "cannot read whether $d is paused"
         return 1
       fi
+      case " $AF_PAUSED_BY_US " in *" $d "*) continue ;; esac
+      if [ "$st" = "True" ]; then
+        if [ -f "$marker" ]; then
+          AF_PAUSED_BY_US="$AF_PAUSED_BY_US $d"
+          af_note "$d is paused by an earlier wrapper run that never unpaused it ($(cat "$marker" 2>/dev/null)) — adopted: this run unpauses it when it ends"
+        else
+          log "$d is already paused — left as it is"
+        fi
+        continue
+      fi
+      # Books first (a stale marker is overwritten): from here on, an interrupt or a failed read leaves $d listed.
+      AF_PAUSED_BY_US="$AF_PAUSED_BY_US $d"
+      { mkdir -p "$AF_STATE_DIR" && echo "paused by $(basename "$0") pid $$ at $(date -u +%FT%TZ)" > "$marker"; } 2>/dev/null \
+        || af_note "WARNING: could not write $marker (a run killed outright would leave $d paused unannounced)"
+      af_note "pausing $d"
+      $DC exec -T airflow-scheduler airflow dags pause -y "$d" </dev/null >/dev/null 2>&1
+      st=$(af_dag_paused "$d")
+      if [ "$st" != "True" ]; then
+        af_note "could not confirm that $d is paused (it reads '${st:-nothing}') — it stays on this run's list: the exit unpauses it, or ALERTs"
+        return 1
+      fi
+      af_note "paused $d"
     done
     n=$(af_runs_in_flight "$@") || n=""
     if [ "$n" = "0" ]; then

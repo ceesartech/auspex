@@ -8,11 +8,14 @@ interrupted corpus step; adopted and restored by the --from N run that
 finishes), Ctrl-C through a dead tee, the start refusals (VM HEAD, the two
 prior repairs, a retrain in flight), the re-grade gate, step 10's skip and
 step 11's wait. The real wrappers ran end to end through a docker shim
-against a replica of prod (scripts/ops/soccer_repair_runbook.sh header)."""
+against a replica of prod (scripts/ops/soccer_repair_runbook.sh header).
+A retrain DAG whose pause read-back fails or is interrupted still ends
+unpaused."""
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 import signal
@@ -413,3 +416,50 @@ def test_a_re_run_records_already_done_steps(tmp_path):
     assert "step=11 result=checked" in recorded
     assert not [c for c in calls if "compute_features" in c or "--apply" in c]
     assert os.path.exists(state)
+
+
+# --- a retrain DAG whose pause read-back fails or is interrupted -----------------------------------------------------
+
+
+def test_a_failed_read_right_after_pausing_a_retrain_dag_ends_with_it_unpaused(tmp_path):
+    """Before, retrain_halftime_dc stayed paused for good: unlisted, no marker, no ALERT, and every later runbook
+    'already paused — left as it is' (the monthly half-time retrain silently stopped)."""
+    airflow = _airflow()
+    airflow["details_fail_after_pause"] = ["retrain_halftime_dc"]
+    rc, out, steps, _, af = _run(tmp_path, airflow=airflow)
+    assert rc == 1 and "could not confirm that retrain_halftime_dc is paused" in out and steps == [], out
+    assert _paused(af) == {"retrain_models": False, "retrain_halftime_dc": False} and _markers(tmp_path) == []
+    assert "unpaused retrain_halftime_dc" in (tmp_path / "afstate" / "airflow_pauses.log").read_text()
+
+
+def test_ctrl_c_during_the_read_right_after_pausing_a_retrain_dag_ends_with_it_unpaused(tmp_path):
+    repo = _repo(tmp_path)
+    env = {**_env(tmp_path, install=True), "AUSPEX_DIR": str(repo)}
+    st = fd.airflow_state(tmp_path)
+    st["details_delay_after_pause"] = {"retrain_halftime_dc": 60}
+    (tmp_path / "fake" / "airflow.json").write_text(json.dumps(st))
+    proc = subprocess.Popen(
+        ["bash", "-c", f'bash "{RUNBOOK_IN(tmp_path)}" 2>&1 | tee "{tmp_path / "o"}"'],
+        env={**os.environ, **env},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    def in_the_read():
+        c = fd.calls(tmp_path)
+        pause = [i for i, x in enumerate(c) if "dags pause -y retrain_halftime_dc" in x]
+        return bool(pause) and any("dags details retrain_halftime_dc" in x for x in c[pause[0] :])
+
+    ledger = tmp_path / "afstate" / "airflow_pauses.log"
+    try:
+        assert _wait_for(in_the_read)
+        time.sleep(0.3)
+        os.killpg(proc.pid, signal.SIGINT)
+        proc.wait(timeout=30)
+        assert _wait_for(lambda: ledger.exists() and "unpaused retrain_halftime_dc" in ledger.read_text())
+        assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": False, "retrain_halftime_dc": False}
+        assert _markers(tmp_path) == []
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)

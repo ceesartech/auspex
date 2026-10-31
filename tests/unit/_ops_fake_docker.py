@@ -15,6 +15,10 @@ bin first on PATH. Every docker call is logged to calls.log, one per line.
   between a drain and a pause). `trigger db_backup_daily` lands a fake dump
   (see b2) unless `backup_fails` is set.
   `unpause_fails` [dag] makes `dags unpause` leave that DAG paused.
+  `details_fail_after_pause` [dag]: the first `dags details` of that DAG after
+  a pause fails (no output, exit 1: a transient CLI/DB error).
+  `details_delay_after_pause` {dag: seconds}: that read sleeps first (an
+  interrupt then lands during it).
 * `compose cp <file> postgres:/tmp/<name>` copies the file to cp/<name> and
   cp/<n>_<name> (so a test can read every SQL a wrapper sent, in order).
 * Container files: `exec -T <svc> sh -c "cat > F.tmp && mv F.tmp F"` (or
@@ -57,6 +61,14 @@ def _airflow(state_path: Path, cmd: str, fake: Path) -> tuple[str, int]:
         return "", 2
     verb, name, rest = m.group(1), m.group(2), m.group(3)
     d = dag(name)
+    if verb == "details" and d.get("pauses") and name in st.get("details_fail_after_pause", []):
+        st["details_fail_after_pause"].remove(name)
+        state_path.write_text(json.dumps(st))
+        return "", 1
+    if verb == "details" and d.get("pauses") and name in st.get("details_delay_after_pause", {}):
+        delay = st["details_delay_after_pause"].pop(name)
+        state_path.write_text(json.dumps(st))
+        time.sleep(float(delay))
     if verb == "details":
         out = json.dumps([{"dag_id": name, "is_paused": "True" if d["paused"] else "False"}])
     elif verb == "list-runs":
