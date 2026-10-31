@@ -45,6 +45,7 @@ fu = _load("fetch_upcoming_soccer_results", "fetch_upcoming.py")
 SOCCER = fu.SPORT_CONFIGS["soccer"]
 NHL = fu.SPORT_CONFIGS["nhl"]
 TENNIS = fu.SPORT_CONFIGS["tennis"]
+MMA = fu.SPORT_CONFIGS["mma"]
 
 
 def fixture(name: str) -> dict:
@@ -243,13 +244,14 @@ class StatusCursor:
         self.rows = [dict(r) for r in rows]
         self.sport = sport
         self.updates: list[tuple] = []
+        self.dropped_ids: list = []
         self.statements: list[str] = []
         self._result: list = []
 
     def execute(self, sql, params=None):
         sql = " ".join(sql.split())
         self.statements.append(sql)
-        if "external_ids->>'espn' = %s" in sql:
+        if "external_ids->>'espn' = %s" in sql and sql.startswith("SELECT"):
             espn_id, sport = params
             self._result = [r for r in self.rows if r.get("espn") == espn_id and sport == self.sport][:2]
         elif sql.startswith("SELECT id, status, home_team_id"):
@@ -258,12 +260,16 @@ class StatusCursor:
                 r for r in self.rows if (r["home_team_id"], r["away_team_id"], r["match_date"]) == (h, a, when)
             ]
         elif sql.startswith("UPDATE matches"):
-            status, patch, rid, old = params
+            status, patch, drop_espn_id, rid, old = params
+            assert "WHERE id = %s AND status = %s RETURNING id" in sql
             self.updates.append((status, json.loads(patch), rid, old))
+            self.dropped_ids.append(drop_espn_id)
             hit = [r for r in self.rows if r["id"] == rid and r["status"] == old]
             for r in hit:
                 r["status"] = status
                 r["metadata"] = {**(r.get("metadata") or {}), **json.loads(patch)}
+                if drop_espn_id is not None and r.get("espn") == drop_espn_id and "- 'espn'" in sql:
+                    r["espn"] = None
             self._result = [{"id": rid}] if hit else []
         else:
             raise AssertionError(f"unexpected SQL: {sql[:80]}")
@@ -275,9 +281,9 @@ class StatusCursor:
         return list(self._result)
 
 
-def _row(status="scheduled", *, espn="401896749", home=HOME, away=AWAY, metadata=None, match_date=KICKOFF):
+def _row(status="scheduled", *, espn="401896749", home=HOME, away=AWAY, metadata=None, match_date=KICKOFF, rid="row-1"):
     return {
-        "id": "row-1",
+        "id": rid,
         "status": status,
         "espn": espn,
         "home_team_id": home,
@@ -424,17 +430,81 @@ class TestRecordStatusChange:
         assert fu.identity_exit_code(SOCCER) == 3
         assert any("Refusing to record ESPN's status" in r.getMessage() for r in caplog.records)
 
-    def test_an_espn_id_on_two_rows_is_refused(self, stats, teams):
-        twin = {**_row(), "id": "row-2", "match_date": KICKOFF - timedelta(hours=2)}
+    def test_an_espn_id_on_two_rows_falls_back_to_the_exact_fixture(self, stats, teams, caplog):
+        twin = _row(rid="row-2", match_date=KICKOFF - timedelta(hours=2))
         cur = StatusCursor([_row(), twin])
+        with caplog.at_level(logging.ERROR):
+            fu._record_result(cur, SOCCER, "league", _postponed())
+        assert [u[2] for u in cur.updates] == ["row-1"]  # the row at this kickoff, not a guess
+        assert stats["status_refused"] == 0 and fu.identity_exit_code(SOCCER) == 0
+        assert any("is on 2 matches rows" in r.getMessage() for r in caplog.records)
+
+    def test_an_espn_id_naming_another_fixture_falls_back_to_the_exact_fixture(self, stats, teams, caplog):
+        # Both sides different: a knockout placeholder filled, or a re-used id.
+        # The fixture path lets the real fixture have its own row; so does this.
+        placeholder = _row(rid="row-9", home="winner-sf1", away="winner-sf2")
+        real = _row(rid="row-1", espn=None)
+        cur = StatusCursor([placeholder, real])
+        with caplog.at_level(logging.WARNING):
+            fu._record_result(cur, SOCCER, "league", _postponed())
+        assert [u[2] for u in cur.updates] == ["row-1"] and cur.rows[1]["status"] == "postponed"
+        assert cur.rows[0]["status"] == "scheduled" and stats["status_refused"] == 0
+        assert any("both teams differ" in r.getMessage() for r in caplog.records)
+
+    def test_a_swapped_team_sport_pair_is_drift_and_refused(self, stats, teams):
+        cur = StatusCursor([_row(home=AWAY, away=HOME)])
         fu._record_result(cur, SOCCER, "league", _postponed())
         assert cur.updates == [] and stats["status_refused"] == 1
 
-    def test_a_redrawn_tennis_slot_is_logged_not_counted(self, stats, teams):
+    def test_a_redrawn_tennis_slot_is_logged_not_counted(self, stats, teams, caplog):
         cur = StatusCursor([_row(away="withdrawn-player")], sport="tennis")
         parts = fu._competition_parts(_postponed(), SOCCER)
-        assert fu._record_status_change(cur, TENNIS, "league", parts, "cancelled", "STATUS_CANCELED") is False
+        with caplog.at_level(logging.WARNING):
+            assert fu._record_status_change(cur, TENNIS, "league", parts, "cancelled", "STATUS_CANCELED") is False
         assert cur.updates == [] and stats["status_refused"] == 0
+        assert any("a re-drawn slot" in r.getMessage() for r in caplog.records)
+
+    def test_a_swapped_mma_pair_is_the_same_bout(self, stats, teams):
+        # MMA competitors carry no homeAway and ESPN reorders them.
+        cur = StatusCursor([_row(home=AWAY, away=HOME)], sport="mma")
+        parts = fu._competition_parts(_postponed(), SOCCER)
+        assert fu._record_status_change(cur, MMA, "league", parts, "cancelled", "STATUS_CANCELED") is True
+        assert cur.rows[0]["status"] == "cancelled" and stats["status_refused"] == 0
+
+    def test_a_cancelled_1v1_competition_gives_up_its_espn_id(self, stats, teams):
+        # ESPN re-fills the slot under the same id; that pairing needs its own row.
+        cur = StatusCursor([_row()], sport="tennis")
+        parts = fu._competition_parts(_postponed(), SOCCER)
+        fu._record_status_change(cur, TENNIS, "league", parts, "cancelled", "STATUS_CANCELED")
+        assert cur.rows[0]["espn"] is None and cur.dropped_ids == ["401896749"]
+        assert cur.rows[0]["metadata"]["cancelled_espn_id"] == "401896749"
+
+    def test_a_team_sport_cancel_keeps_its_espn_id(self, stats, teams):
+        cur = StatusCursor([_row()])
+        comp = _postponed()
+        comp["status"]["type"]["name"] = "STATUS_CANCELED"
+        fu._record_result(cur, SOCCER, "league", comp)
+        assert cur.rows[0]["status"] == "cancelled" and cur.rows[0]["espn"] == "401896749"
+        assert cur.dropped_ids == [None] and "cancelled_espn_id" not in cur.rows[0]["metadata"]
+
+    def test_a_cancel_espn_reported_can_become_a_postponement(self, stats, teams):
+        espn_cancel = {"status_source": "espn_scoreboard", "espn_status": "STATUS_CANCELED"}
+        cur = StatusCursor([_row("cancelled", metadata=espn_cancel)])
+        fu._record_result(cur, SOCCER, "league", _postponed())
+        assert cur.rows[0]["status"] == "postponed"
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            {},
+            {"status_source": "espn_scoreboard", "espn_status": "STATUS_CANCELED", "orphan_of": "twin"},
+            {"status_source": "espn_scoreboard", "espn_status": "STATUS_POSTPONED"},
+        ],
+    )
+    def test_a_cancel_recorded_on_purpose_is_never_reopened(self, stats, teams, metadata):
+        cur = StatusCursor([_row("cancelled", metadata=metadata)])
+        fu._record_result(cur, SOCCER, "league", _postponed())
+        assert cur.updates == [] and cur.rows[0]["status"] == "cancelled"
 
 
 # ── (4) calendar-year season labels ─────────────────────────────────────
@@ -496,6 +566,70 @@ class TestSoccerSeasonLabels:
         event = {"id": "e", "competitions": [{"id": "c"}]}
         fu.process_event(None, SOCCER, "lg", event, handler=lambda *a: seen.append(a[4]) or True, league_slug="bra.1")
         assert seen[0]["league_slug"] == "bra.1"
+
+    @staticmethod
+    def _sweep_event(state: str) -> dict:
+        status = {"state": state, "name": "STATUS_SCHEDULED" if state == "pre" else "STATUS_FULL_TIME"}
+        if state == "post":
+            status.update(completed=True, detail="FT")
+        return {
+            "id": "e-mls",
+            "competitions": [
+                {
+                    "id": "c-mls",
+                    "date": "2026-03-21T02:30Z",  # March: '2026' calendar-year, '2025-2026' cross-year
+                    "status": {"type": status},
+                    "competitors": [
+                        {"homeAway": "home", "id": "1", "score": "2", "team": {"id": "1", "displayName": "LA Galaxy"}},
+                        {"homeAway": "away", "id": "2", "score": "1", "team": {"id": "2", "displayName": "Seattle"}},
+                    ],
+                }
+            ],
+        }
+
+    @pytest.fixture
+    def sweep(self, monkeypatch, stats):
+        """fetch_all / fetch_results_all with ESPN and the database stubbed:
+        what season each insert helper is handed."""
+        seen: list[tuple[str, str]] = []
+
+        class Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def cursor(self, cursor_factory=None):
+                return self
+
+            def commit(self):
+                pass
+
+        monkeypatch.setattr(fu.psycopg2, "connect", lambda url: Conn())
+        monkeypatch.setattr(fu, "ensure_league", lambda *a: "league-mls")
+        monkeypatch.setattr(fu, "ensure_team", lambda cur, cfg, name, league_id: f"team-{name}")
+        monkeypatch.setattr(fu, "_reconcile_match_row", lambda *a, **k: True)
+        monkeypatch.setattr(fu, "_stamp_identity", lambda *a, **k: True)
+        monkeypatch.setattr(
+            fu, "insert_scheduled_match", lambda *a, season=None, **k: seen.append(("scheduled", season)) or 1
+        )
+        monkeypatch.setattr(
+            fu, "insert_finished_match", lambda *a, season=None, **k: seen.append(("finished", season)) or 1
+        )
+        return seen
+
+    def test_the_fixtures_sweep_threads_the_slug_to_the_insert(self, sweep, monkeypatch):
+        days = iter([[self._sweep_event("pre")]])
+        monkeypatch.setattr(fu, "fetch_day", lambda cfg, slug, day: next(days, []))
+        assert fu.fetch_all("postgresql://unused", SOCCER, ["usa.1"], 2) == {"usa.1": 1}
+        assert sweep == [("scheduled", "2026")]
+
+    def test_the_results_sweep_threads_the_slug_to_the_insert(self, sweep, monkeypatch):
+        days = iter([[self._sweep_event("post")]])
+        monkeypatch.setattr(fu, "fetch_day", lambda cfg, slug, day: next(days, []))
+        assert fu.fetch_results_all("postgresql://unused", SOCCER, ["usa.1"], 1) == {"usa.1": 1}
+        assert sweep == [("finished", "2026")]
 
     def test_the_results_path_labels_an_inserted_row(self, stats, recorded):
         comp = fixture("ldu_palmeiras_ft_pens_3_2")

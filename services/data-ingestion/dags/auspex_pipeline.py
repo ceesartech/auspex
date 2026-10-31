@@ -51,9 +51,14 @@ with DAG(
     DOCKER_EXEC = "docker compose -f /opt/auspex/docker-compose.yml exec -T api"
 
     # ── Sport branches ─────────────────────────────────────────────
-    # fetch_upcoming_* exit 3 when they REFUSE to write a fixture whose
-    # identity drifted (fetch_upcoming.ForkRefused / same-team rows) — after
-    # committing everything else in the sweep. So every compute_features*
+    # fetch_upcoming_* exit 3 when they REFUSE a write that would corrupt a
+    # fixture (fetch_upcoming.IDENTITY_STATS) — an ESPN id whose team pair
+    # drifted (ForkRefused), both sides resolving to one team, a soccer
+    # header score its own scoring plays contradict (score_mismatch), or a
+    # postponement / cancellation whose ESPN id names a row that drifted
+    # (status_refused) — after committing everything else in the sweep. A
+    # placeholder slot, a filled knockout slot or a re-drawn tennis/MMA slot
+    # is skipped or resolved by teams, never refused. So every compute_features*
     # runs ALL_DONE: one bad fixture pages (the fetch task fails) but never
     # stops a whole sport's features, predictions and recommendations — the
     # FC Juárez fork lasted 11 days. retries=0 on the fetch tasks: a refusal
@@ -334,8 +339,9 @@ with DAG(
     # Every sport runs even when an earlier one fails, and the task exits
     # non-zero at the end if any did (2026-10-29: the sports used to be
     # chained with &&, so one bad ESPN NBA response skipped NFL/tennis/MMA
-    # results too). fetch_upcoming itself now retries a bad response and
-    # only exits non-zero when EVERY request for a sport failed (an outage).
+    # results too). fetch_upcoming itself now retries a bad response; it
+    # exits 1 when EVERY request for a sport failed (an outage) and 3 when it
+    # refused a result or status write (see the sport-branch comment above).
     fetch_results = BashOperator(
         task_id="fetch_results",
         bash_command="rc=0; "

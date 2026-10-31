@@ -16,6 +16,7 @@ Locks the behaviors the graders depend on:
 from __future__ import annotations
 
 import importlib.util
+import json
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -315,11 +316,11 @@ class TestInsertFinishedMatchLeavesCancelledRows:
             {"result_detail": "FT", "result_source": "espn_scoreboard"},
         )
 
-    def _existing(self, db, status):
+    def _existing(self, db, status, metadata=None):
         db.execute(
-            "INSERT INTO matches (league_id, home_team_id, away_team_id, match_date, status, season) "
-            "VALUES ('lg', 'bastia', 'red-star', ?, ?, '2025-2026')",
-            (RESULT_KICKOFF.isoformat(), status),
+            "INSERT INTO matches (league_id, home_team_id, away_team_id, match_date, status, season, metadata) "
+            "VALUES ('lg', 'bastia', 'red-star', ?, ?, '2025-2026', ?)",
+            (RESULT_KICKOFF.isoformat(), status, json.dumps(metadata) if metadata is not None else None),
         )
 
     def _row(self, db):
@@ -344,11 +345,35 @@ class TestInsertFinishedMatchLeavesCancelledRows:
         assert self._record(results_db, 3, 1) == 1
         assert self._row(results_db) == ("finished", 3, 1)
 
-    def test_the_guard_mirrors_promote_raw(self):
+    def test_the_guard_mirrors_promote_raw_except_for_espns_own_cancels(self):
         cur = MagicMock()
         _REAL_INSERT_FINISHED_MATCH(cur, fu.SPORT_CONFIGS["soccer"], "lg", "h", "a", RESULT_KICKOFF, None, 1, 0, {})
         sql = " ".join(cur.execute.call_args.args[0].split())
-        assert "WHERE matches.status <> 'cancelled' RETURNING id" in sql
+        assert "WHERE matches.status <> 'cancelled' OR (matches.metadata->>'status_source' = 'espn_scoreboard'" in sql
+        assert sql.endswith("AND matches.metadata->>'redrawn_espn_id' IS NULL) RETURNING id")
+
+    ESPN_ABANDONED = {"status_source": "espn_scoreboard", "espn_status": "STATUS_ABANDONED"}
+
+    @pytest.mark.parametrize("espn_status", ["STATUS_ABANDONED", "STATUS_CANCELED"])
+    def test_a_cancel_espn_reported_takes_the_result_espn_now_reports(self, results_db, espn_status):
+        # Abandoned, then resumed or awarded: ESPN's own status is not final.
+        self._existing(results_db, "cancelled", {**self.ESPN_ABANDONED, "espn_status": espn_status})
+        assert self._record(results_db, 2, 1) == 1
+        assert self._row(results_db) == ("finished", 2, 1)
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            {**ESPN_ABANDONED, "orphan_of": "twin-uuid"},  # repair_fixture_orphans' cancelled duplicate
+            {**ESPN_ABANDONED, "redrawn_espn_id": "185138"},  # a released tennis/MMA slot
+            {"status_source": "espn_scoreboard", "espn_status": "STATUS_POSTPONED"},  # then cancelled by hand
+            {"unplayed_fix": True},  # fix_unplayed_soccer_rows
+        ],
+    )
+    def test_a_cancel_recorded_on_purpose_stays_final(self, results_db, metadata):
+        self._existing(results_db, "cancelled", metadata)
+        assert self._record(results_db, 2, 1) == 0
+        assert self._row(results_db) == ("cancelled", None, None)
 
 
 class TestFindTeamNeverWrites:

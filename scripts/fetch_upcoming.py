@@ -503,6 +503,64 @@ def insert_scheduled_match(
     return cur.rowcount
 
 
+# A 'cancelled' row ESPN's own status put there (_record_status_change stamps
+# status_source='espn_scoreboard' and espn_status) stays open to correction:
+# ESPN cancels and abandons matches it later resumes, awards or replays under
+# the same id. A cancel recorded on purpose stays final — an operator's
+# (fix_unplayed_soccer_rows: no status_source), a duplicate's
+# (repair_fixture_orphans: metadata.orphan_of), a re-drawn tennis/MMA slot's
+# (_release_redrawn_slot: metadata.redrawn_espn_id) — and so does a row ESPN
+# only postponed before someone else cancelled it (espn_status
+# STATUS_POSTPONED).
+ESPN_CANCEL_STATUSES = ("STATUS_CANCELED", "STATUS_CANCELLED", "STATUS_ABANDONED")
+ESPN_CANCELLED_SQL = (
+    "({t}.metadata->>'status_source' = 'espn_scoreboard'"
+    " AND {t}.metadata->>'espn_status' IN ('STATUS_CANCELED', 'STATUS_CANCELLED', 'STATUS_ABANDONED')"
+    " AND {t}.metadata->>'orphan_of' IS NULL"
+    " AND {t}.metadata->>'redrawn_espn_id' IS NULL)"
+)
+
+
+def espn_cancelled(status: str | None, metadata: dict | None) -> bool:
+    """True for a 'cancelled' row whose cancel came from ESPN's scoreboard
+    and nothing else has claimed since (ESPN_CANCELLED_SQL, in Python)."""
+    meta = metadata or {}
+    return (
+        status == "cancelled"
+        and meta.get("status_source") == "espn_scoreboard"
+        and meta.get("espn_status") in ESPN_CANCEL_STATUSES
+        and not meta.get("orphan_of")
+        and not meta.get("redrawn_espn_id")
+    )
+
+
+# The DO UPDATE's WHERE leaves a final 'cancelled' row alone (see
+# insert_finished_match).
+INSERT_FINISHED_MATCH_SQL = (
+    """
+        INSERT INTO matches (league_id, home_team_id, away_team_id, match_date,
+                             status, venue, season, home_score, away_score, metadata,
+                             half_time_home, half_time_away)
+        VALUES (%s, %s, %s, %s, 'finished', %s, %s, %s, %s, %s::jsonb, %s, %s)
+        ON CONFLICT (home_team_id, away_team_id, match_date) DO UPDATE
+            SET status = 'finished',
+                home_score = EXCLUDED.home_score,
+                away_score = EXCLUDED.away_score,
+                metadata = COALESCE(matches.metadata, '{}'::jsonb) || EXCLUDED.metadata,
+                half_time_home = CASE WHEN matches.half_time_home IS NULL
+                                      THEN EXCLUDED.half_time_home ELSE matches.half_time_home END,
+                half_time_away = CASE WHEN matches.half_time_home IS NULL
+                                      THEN EXCLUDED.half_time_away ELSE matches.half_time_away END,
+                venue = COALESCE(matches.venue, EXCLUDED.venue),
+                updated_at = NOW()
+            WHERE matches.status <> 'cancelled' OR """
+    + ESPN_CANCELLED_SQL.format(t="matches")
+    + """
+        RETURNING id
+    """
+)
+
+
 def insert_finished_match(
     cur,
     cfg: SportConfig,
@@ -530,32 +588,16 @@ def insert_finished_match(
     inserted row, as in insert_scheduled_match.
 
     A 'cancelled' row is never touched (the same rule as promote_raw's
-    upsert). That status is set on purpose, by an operator or by
-    _release_redrawn_slot, and a deep results backfill must not flip it to
-    'finished'. Returns 1 when a row was written and 0 when the existing
-    row is 'cancelled' (the DO UPDATE's WHERE is false, so no row comes
-    back)."""
+    upsert) when that status was set on purpose, by an operator, by
+    repair_fixture_orphans or by _release_redrawn_slot: a deep results
+    backfill must not flip it to 'finished'. A cancel taken from ESPN's own
+    scoreboard (ESPN_CANCELLED_SQL) is not final: an abandoned match ESPN
+    later reports as final (resumed, awarded) gets its result. Returns 1 when
+    a row was written and 0 when the existing row is a final 'cancelled' (the
+    DO UPDATE's WHERE is false, so no row comes back)."""
     ht_home, ht_away = halftime if halftime is not None else (None, None)
     cur.execute(
-        """
-        INSERT INTO matches (league_id, home_team_id, away_team_id, match_date,
-                             status, venue, season, home_score, away_score, metadata,
-                             half_time_home, half_time_away)
-        VALUES (%s, %s, %s, %s, 'finished', %s, %s, %s, %s, %s::jsonb, %s, %s)
-        ON CONFLICT (home_team_id, away_team_id, match_date) DO UPDATE
-            SET status = 'finished',
-                home_score = EXCLUDED.home_score,
-                away_score = EXCLUDED.away_score,
-                metadata = COALESCE(matches.metadata, '{}'::jsonb) || EXCLUDED.metadata,
-                half_time_home = CASE WHEN matches.half_time_home IS NULL
-                                      THEN EXCLUDED.half_time_home ELSE matches.half_time_home END,
-                half_time_away = CASE WHEN matches.half_time_home IS NULL
-                                      THEN EXCLUDED.half_time_away ELSE matches.half_time_away END,
-                venue = COALESCE(matches.venue, EXCLUDED.venue),
-                updated_at = NOW()
-            WHERE matches.status <> 'cancelled'
-        RETURNING id
-        """,
+        INSERT_FINISHED_MATCH_SQL,
         (
             league_id,
             home_id,
@@ -821,9 +863,10 @@ def _resolve_match_id(
     played (prod 2026-10-28: comp 185138 stayed on "Fritz v Tsitsipas" after
     Hijikata replaced Tsitsipas; every later time change of the real match
     then forked a new unidentified row, ~25-50 a week). When the id's row is
-    still 'scheduled' and shares not even the same two players, the slot was
-    re-drawn: the stale row is released (id removed, status 'cancelled',
-    the re-draw recorded in metadata) and resolution continues by pair. A
+    still 'scheduled' (or cancelled by ESPN's own status, espn_cancelled)
+    and shares not even the same two players, the slot was re-drawn: the
+    stale row is released (id removed, status 'cancelled', the re-draw
+    recorded in metadata) and resolution continues by pair. A
     swapped pair (same two players) is NOT a re-draw and keeps the old
     refuse-and-log behaviour in _realign_match_date.
 
@@ -849,7 +892,7 @@ def _resolve_match_id(
         # instead of self-healing. LIMIT 2 so the duplicate is detectable.
         cur.execute(
             """
-            SELECT m.id, m.home_team_id, m.away_team_id, m.status
+            SELECT m.id, m.home_team_id, m.away_team_id, m.status, m.metadata
               FROM matches m
               JOIN leagues l ON l.id = m.league_id
              WHERE m.external_ids->>'espn' = %s
@@ -934,9 +977,11 @@ def _is_redrawn_slot(row: dict, home_id, away_id) -> bool:
 def _release_redrawn_slot(cur, cfg: SportConfig, espn_id, row: dict) -> bool:
     """Detach an ESPN id from a scheduled row whose draw slot ESPN re-filled
     with another player, and cancel that pairing (it will never be played).
-    Finished/live rows are never touched. Returns True when released, so the
-    caller resolves the new pairing by pair instead of by the stale row."""
-    if row.get("status") != "scheduled":
+    A row ESPN's own status cancelled (espn_cancelled) is released the same
+    way. Finished/live rows, and rows cancelled on purpose, are never
+    touched. Returns True when released, so the caller resolves the new
+    pairing by pair instead of by the stale row."""
+    if row.get("status") != "scheduled" and not espn_cancelled(row.get("status"), row.get("metadata")):
         logger.error(
             "ESPN %s id %s resolves to %s row %s for a different pairing — not releasing a non-scheduled row; "
             "this competition stays unidentified",
@@ -954,7 +999,9 @@ def _release_redrawn_slot(cur, cfg: SportConfig, espn_id, row: dict) -> bool:
                metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb,
                updated_at = NOW()
          WHERE id = %s
-           AND status = 'scheduled'
+           AND (status = 'scheduled' OR (status = 'cancelled' AND """
+        + ESPN_CANCELLED_SQL.format(t="matches")
+        + """))
         """,
         (json.dumps({"redrawn_espn_id": str(espn_id)}), row["id"]),
     )
@@ -1517,8 +1564,10 @@ _ESPN_STATUS_RECORDED_AS = {
 }
 
 # The statuses each may replace. 'finished' is never touched (a result
-# stands), and neither is 'cancelled': it is set on purpose, by an operator
-# (an awarded match), by _release_redrawn_slot or by an earlier sweep.
+# stands). A 'cancelled' row is replaced only when ESPN's own status put it
+# there (espn_cancelled: a cancel ESPN turns into a postponement); one set on
+# purpose — by an operator (an awarded match), by repair_fixture_orphans or by
+# _release_redrawn_slot — stays final.
 _STATUS_REPLACES = {"postponed": ("scheduled", "live"), "cancelled": ("scheduled", "live", "postponed")}
 
 # Stamped on the first postponement only (never overwritten): the kickoff
@@ -1544,11 +1593,15 @@ STATUS_ROW_BY_TRIPLE_SQL = """
      WHERE home_team_id = %s AND away_team_id = %s AND match_date = %s
 """
 
-# Guarded on the status the row was read with.
+# Guarded on the status the row was read with. The CASE drops the ESPN id
+# when it is the one given (a cancelled tennis/MMA competition, see
+# _record_status_change); NULL keeps every id.
 STATUS_UPDATE_SQL = """
     UPDATE matches
        SET status = %s,
            metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb,
+           external_ids = CASE WHEN external_ids->>'espn' = %s
+                               THEN external_ids - 'espn' ELSE external_ids END,
            updated_at = NOW()
      WHERE id = %s
        AND status = %s
@@ -1565,45 +1618,77 @@ def espn_terminal_status(comp: dict) -> tuple[str, str] | None:
 
 
 def _status_target_row(cur, cfg: SportConfig, espn_id, home_id, away_id, match_dt, home_name, away_name):
-    """The existing row a status change applies to, or None. By ESPN id
-    (scoped to the sport), else the exact (home, away, kickoff) triple — no
-    healing: a status change never moves a row or guesses one. An ESPN id on
-    two rows, or on a row for another team pair, is refused, and counted for
-    team sports; in a 1v1 sport another pair under the id is a re-drawn slot
-    (see _resolve_match_id), so it is only logged."""
+    """The existing row a status change applies to, or None.
+
+    By ESPN id (scoped to the sport) when the id names exactly one row and
+    that row is this fixture: the same pair, or in a 1v1 sport the same two
+    players in either order (ESPN orders MMA competitors freely, see
+    _realign_match_date). Otherwise the exact (home, away, kickoff) triple —
+    no healing: a status change never moves a row or guesses one.
+
+    The id naming a row whose pair DRIFTED from this parse — one team shared,
+    or the pair swapped (team sports) — is refused and counted
+    (status_refused, exit 3), the same rule the fixture path refuses a fork
+    by (_is_identity_drift): our team resolution moved under a fixed fixture.
+    Both sides different (a knockout placeholder filled, a re-used id, a
+    re-drawn tennis/MMA slot) or the id on two rows is only logged, and the
+    triple decides, as the fixture path lets the real fixture have its row."""
     if espn_id:
         cur.execute(STATUS_ROW_BY_ESPN_SQL, (str(espn_id), cfg.sport))
         rows = cur.fetchall() or []
-        if len(rows) > 1 or (rows and (rows[0]["home_team_id"], rows[0]["away_team_id"]) != (home_id, away_id)):
-            if cfg.is_individual and len(rows) == 1:
-                logger.warning(
-                    "Not recording ESPN's status for %s %s vs %s at %s: ESPN %s names row %s for another pairing "
-                    "(a re-drawn slot)",
+        if len(rows) == 1:
+            row = rows[0]
+            stored = (row["home_team_id"], row["away_team_id"])
+            if stored == (home_id, away_id):
+                return row
+            if cfg.is_individual and {str(t) for t in stored} == {str(home_id), str(away_id)}:
+                return row  # the same two players, listed the other way round
+            if not cfg.is_individual and _is_identity_drift(row, home_id, away_id):
+                IDENTITY_STATS["status_refused"] += 1
+                logger.error(
+                    "Refusing to record ESPN's status for %s %s vs %s at %s (ESPN %s): the id names row %s "
+                    "(%s v %s), which shares a team with this parse (%s v %s) — team resolution drifted under "
+                    "the fixture. Nothing written; repair the team mapping or the row. This run exits %d.",
                     cfg.sport,
                     home_name,
                     away_name,
                     match_dt,
                     espn_id,
-                    rows[0]["id"],
+                    row["id"],
+                    row["home_team_id"],
+                    row["away_team_id"],
+                    home_id,
+                    away_id,
+                    IDENTITY_EXIT_CODE,
                 )
                 return None
-            IDENTITY_STATS["status_refused"] += 1
-            logger.error(
-                "Refusing to record ESPN's status for %s %s vs %s at %s (ESPN %s): the id names %s — not this "
-                "team pair (%s v %s) alone. Nothing written; repair the fixture identity. This run exits %d.",
+            logger.warning(
+                "ESPN %s id %s names row %s (%s v %s), another fixture than %s vs %s (%s v %s: %s) — looking it "
+                "up by its teams and kickoff %s",
                 cfg.sport,
+                espn_id,
+                row["id"],
+                row["home_team_id"],
+                row["away_team_id"],
+                home_name,
+                away_name,
+                home_id,
+                away_id,
+                "a re-drawn slot" if cfg.is_individual else "both teams differ: a filled slot or a re-used id",
+                match_dt,
+            )
+        elif len(rows) > 1:
+            logger.error(
+                "ESPN %s id %s is on %d matches rows (%s) — the fixture is fragmented; repair the duplicates. "
+                "Looking %s vs %s up by its teams and kickoff %s",
+                cfg.sport,
+                espn_id,
+                len(rows),
+                ", ".join(str(r["id"]) for r in rows),
                 home_name,
                 away_name,
                 match_dt,
-                espn_id,
-                ", ".join(f"row {r['id']} ({r['home_team_id']} v {r['away_team_id']})" for r in rows),
-                home_id,
-                away_id,
-                IDENTITY_EXIT_CODE,
             )
-            return None
-        if rows:
-            return rows[0]
     cur.execute(STATUS_ROW_BY_TRIPLE_SQL, (home_id, away_id, match_dt))
     return cur.fetchone()
 
@@ -1611,9 +1696,16 @@ def _status_target_row(cur, cfg: SportConfig, espn_id, home_id, away_id, match_d
 def _record_status_change(cur, cfg: SportConfig, league_id: str, parts: tuple, target: str, espn_status: str) -> bool:
     """Record ESPN's postponement / cancellation on the EXISTING row for
     this competition. Never inserts a row or a team (teams resolve through
-    find_team), never touches a 'finished' or 'cancelled' row, and writes
+    find_team), never touches a 'finished' row or one cancelled on purpose
+    (a cancel ESPN recorded may still become a postponement), and writes
     only when the status changes, guarded on the status read. Returns True
-    when a row was written."""
+    when a row was written.
+
+    A cancel stamps status_source / espn_status (what keeps it correctable,
+    espn_cancelled). In a 1v1 sport it also drops the ESPN id, as
+    _release_redrawn_slot does, recording it as cancelled_espn_id: ESPN
+    re-fills a cancelled draw slot under the same id, and that pairing must
+    resolve to its own row."""
     _home, _away, home_name, away_name, match_dt, _state, _venue, espn_id = parts
     home_id = find_team(cur, cfg, home_name, league_id)
     away_id = find_team(cur, cfg, away_name, league_id)
@@ -1623,7 +1715,8 @@ def _record_status_change(cur, cfg: SportConfig, league_id: str, parts: tuple, t
     if row is None or row["status"] == target:
         return False
     old = row["status"]
-    if old not in _STATUS_REPLACES[target]:
+    reopened = target == "postponed" and espn_cancelled(old, row.get("metadata"))
+    if old not in _STATUS_REPLACES[target] and not reopened:
         if old == "finished":
             logger.warning(
                 "ESPN reports %s for %s %s vs %s at %s (ESPN %s) but row %s is 'finished' — the result stands; "
@@ -1642,7 +1735,10 @@ def _record_status_change(cur, cfg: SportConfig, league_id: str, parts: tuple, t
     if target == "postponed" and POSTPONED_KICKOFF_KEY not in meta:
         patch[POSTPONED_KICKOFF_KEY] = row["match_date"].isoformat()
         patch[POSTPONED_AT_KEY] = datetime.now(timezone.utc).isoformat()
-    cur.execute(STATUS_UPDATE_SQL, (target, json.dumps(patch), row["id"], old))
+    drop_espn_id = str(espn_id) if (target == "cancelled" and cfg.is_individual and espn_id) else None
+    if drop_espn_id:
+        patch["cancelled_espn_id"] = drop_espn_id
+    cur.execute(STATUS_UPDATE_SQL, (target, json.dumps(patch), drop_espn_id, row["id"], old))
     if cur.fetchone() is None:
         logger.error(
             "Row %s (%s %s vs %s at %s) changed while recording ESPN's %s — left as it is",
@@ -1793,11 +1889,12 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
         )
     )
     if not written:
-        # insert_finished_match leaves a 'cancelled' row alone. That status
-        # is recorded on purpose (an abandoned or awarded match), and ESPN can
-        # still report a "full time" score for it: fra.2 747597, Bastia v Red
-        # Star, shows 0-0 STATUS_FULL_TIME although the match was abandoned at
-        # 58' and awarded.
+        # insert_finished_match leaves a 'cancelled' row alone when that
+        # status was recorded on purpose (an abandoned or awarded match an
+        # operator cancelled; a cancel ESPN itself reported is finished
+        # instead), and ESPN can still report a "full time" score for it:
+        # fra.2 747597, Bastia v Red Star, shows 0-0 STATUS_FULL_TIME although
+        # the match was abandoned at 58' and awarded.
         logger.warning(
             "Left %s %s vs %s at %s (ESPN %s) as it is: the existing row is 'cancelled' but ESPN reports a final "
             "%d-%d (%s) — check which is right",

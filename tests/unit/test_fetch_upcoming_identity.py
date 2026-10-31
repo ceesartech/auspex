@@ -52,11 +52,12 @@ HOME = "home-uuid"
 AWAY = "away-uuid"
 
 
-def _row(rid, match_date, *, status="scheduled", espn=None, home=HOME, away=AWAY):
+def _row(rid, match_date, *, status="scheduled", espn=None, home=HOME, away=AWAY, metadata=None):
     return {
         "id": rid,
         "match_date": match_date,
         "status": status,
+        "metadata": metadata,
         "espn": espn,
         "home_team_id": home,
         "away_team_id": away,
@@ -91,6 +92,8 @@ class FakeCursor:
                     "home_team_id": r["home_team_id"],
                     "away_team_id": r["away_team_id"],
                     "status": r["status"],
+                    # only when selected, so dropping it fails the ESPN-cancel release test
+                    **({"metadata": r.get("metadata")} if "m.metadata" in sql else {}),
                 }
                 for r in self.rows
                 if r["espn"] == espn_id and self.sport == sport
@@ -132,9 +135,19 @@ class FakeCursor:
             ]
         elif sql.startswith("UPDATE matches"):
             self.updates.append((sql, params))
-            if "- 'espn'" in sql:  # re-drawn slot release — only a still-scheduled row
+            if "- 'espn'" in sql:  # re-drawn slot release — a still-scheduled row, or one ESPN cancelled
                 rid = params[1]
-                hit = [r for r in self.rows if r["id"] == rid and r["status"] == "scheduled"]
+                guard_reopens = (
+                    "status = 'cancelled' AND (matches.metadata->>'status_source' = 'espn_scoreboard'" in sql
+                )
+                hit = [
+                    r
+                    for r in self.rows
+                    if r["id"] == rid
+                    and (
+                        r["status"] == "scheduled" or (guard_reopens and fu.espn_cancelled(r["status"], r["metadata"]))
+                    )
+                ]
                 for r in hit:
                     r["espn"], r["status"] = None, "cancelled"
                 self.rowcount = len(hit)
@@ -334,6 +347,30 @@ class TestRedrawnSlot:
         cur = FakeCursor([_row("same-fight", KICKOFF, espn="185138", home=AWAY, away=HOME)], sport="tennis")
         assert fu.resolve_match_id(cur, TENNIS, "185138", HOME, AWAY, KICKOFF) == "same-fight"
         assert cur.updates == [] and cur.rows[0]["status"] == "scheduled"
+
+    def test_a_slot_espn_cancelled_is_released_too(self):
+        espn_cancel = {"status_source": "espn_scoreboard", "espn_status": "STATUS_CANCELED"}
+        cur = FakeCursor(
+            [
+                _row("stale", KICKOFF, status="cancelled", espn="185138", away="withdrawn", metadata=espn_cancel),
+                _row("real", KICKOFF + timedelta(hours=1)),
+            ],
+            sport="tennis",
+        )
+        assert fu.resolve_match_id(cur, TENNIS, "185138", HOME, AWAY, KICKOFF + timedelta(hours=1)) == "real"
+        assert cur.rows[0]["espn"] is None and cur.rows[0]["status"] == "cancelled"
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [None, {"status_source": "espn_scoreboard", "espn_status": "STATUS_CANCELED", "orphan_of": "twin"}],
+    )
+    def test_a_slot_cancelled_on_purpose_is_never_released(self, metadata):
+        cur = FakeCursor(
+            [_row("stale", KICKOFF, status="cancelled", espn="185138", away="withdrawn", metadata=metadata)],
+            sport="tennis",
+        )
+        assert fu.resolve_match_id(cur, TENNIS, "185138", HOME, AWAY, KICKOFF) == "stale"
+        assert cur.updates == [] and cur.rows[0]["espn"] == "185138"
 
     def test_team_sports_never_release(self):
         cur = FakeCursor([_row("fixture", KICKOFF, espn="401", away="someone-else")])
