@@ -11,11 +11,13 @@ exactly one served market, ht_ft_double_result: precompute_predictions builds
 the HT scoreline matrix, builds this artifact's 2H matrix (loaded through
 _load_dixon_coles_artifact into DixonColesPredictor(DIXON_COLES_CONFIG),
 build_dc_matrix(..., MAX_GOALS_DERIVE)) and convolves the two
-(derive_soccer_htft_markets). The trainer as written fits the OLDEST 80% of
-the frame with the pinned legacy config — which never converges on the 2H
-frame (15/15 walk-forward cutoffs) yet still emits finite matrices, so the
-invalid-probability rule that caught the HT pinned config cannot catch it
-here: non-convergence is a disqualification of its own.
+(derive_soccer_htft_markets). The trainer as written when this gate was
+designed fitted the OLDEST 80% of the frame with the pinned legacy config —
+which never converges on the 2H frame (15/15 walk-forward cutoffs) yet still
+emits finite matrices, so the invalid-probability rule that caught the HT
+pinned config cannot catch it here: non-convergence is a disqualification of
+its own. (Since 2026-10-31 the trainer fits every row with the refit arm's
+DIXON_COLES_CONFIG, refuses unsound fits and stages only; nothing promotes it.)
 
 PRE-REGISTERED DESIGN (fixed before the first run)
   Frame    SECOND_HALF_TRAINING_QUERY rows (2H goals = FT - HT, FT >= HT)
@@ -40,9 +42,12 @@ PRE-REGISTERED DESIGN (fixed before the first run)
     served        the production H2 file (or --served-artifact): the incumbent.
     pinned        walk-forward refit with the trainer's pinned legacy config
                   (dixon_coles_config_pinned_to_legacy_fit) — "the trainer,
-                  fitted on all data before the fold".
+                  fitted on all data before the fold", as the trainer stood
+                  when this design was fixed (until 2026-10-31).
     refit         walk-forward refit with DIXON_COLES_CONFIG (per-league
-                  baselines, 20-match prior, 730-day decay, max_goals 10).
+                  baselines, 20-match prior, 730-day decay, max_goals 10) —
+                  since 2026-10-31 the config train_second_half_dixon_coles.py
+                  itself fits (h2_config).
     refit_frozen  refit's config fitted ONCE at the first fold cutoff and scored
                   on every fold: the H2 artifact is fitted by hand, not by the
                   weekly DAG, so this staleness is what would ship.
@@ -389,15 +394,18 @@ def matched_conditional(arm: str) -> str:
 
 
 def arm_configs() -> Dict[str, Any]:
-    """The ModelConfig each fitted arm uses — exactly the trainers' own."""
+    """The ModelConfig each fitted arm uses. ht_side and refit are exactly what
+    train_halftime_dixon_coles.py and (since 2026-10-31)
+    train_second_half_dixon_coles.h2_config() fit; pinned is the legacy config
+    the second-half trainer fitted until 2026-10-31."""
     from dataclasses import replace
 
     from predictors.model_config import DIXON_COLES_CONFIG, dixon_coles_config_pinned_to_legacy_fit  # type: ignore
 
     return {
         "ht_side": replace(DIXON_COLES_CONFIG, name="dixon_coles_ht_soccer"),  # train_halftime_dixon_coles.py
-        "pinned": dixon_coles_config_pinned_to_legacy_fit("dixon_coles_h2_soccer"),  # train_second_half_dixon_coles
-        "refit": replace(DIXON_COLES_CONFIG, name="dixon_coles_h2_soccer"),
+        "pinned": dixon_coles_config_pinned_to_legacy_fit("dixon_coles_h2_soccer"),  # the pre-2026-10-31 trainer
+        "refit": replace(DIXON_COLES_CONFIG, name="dixon_coles_h2_soccer"),  # train_second_half_dixon_coles.py now
     }
 
 

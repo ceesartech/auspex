@@ -118,8 +118,12 @@ REGISTRY: Dict[str, DCModelSpec] = {
         smoke_market="match_result_ht",
     ),
     # "h2" (dixon_coles_h2_soccer, served config name "dixon_coles") and "nhl"
-    # (dixon_coles_nhl) belong here once their trainers write a manifest into
-    # their own staging-* dir — both are still ungated (audit §4 registry).
+    # (dixon_coles_nhl) may be added ONLY after that artifact's gate passes —
+    # scripts/ab_second_half_dixon_coles.py and scripts/ab_nhl_dixon_coles.py
+    # respectively. Both trainers already write a manifest into their own
+    # staging-* dir; that is necessary, not sufficient. Neither has passed
+    # (audit §4 registry), and tests/unit/test_train_side_dixon_coles.py fails
+    # if either entry appears.
 }
 
 

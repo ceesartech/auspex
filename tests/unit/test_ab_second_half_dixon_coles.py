@@ -229,6 +229,14 @@ class TestArms:
             **LEGACY_DIXON_COLES_HYPERPARAMETERS,
         }
 
+    def test_refit_is_what_the_trainer_now_fits_and_pinned_is_not(self):
+        """arm_configs' tags: since 2026-10-31 train_second_half_dixon_coles fits
+        the refit arm's config; pinned is the legacy one it used to fit."""
+        trainer = _load("train_second_half_dixon_coles", "train_second_half_dixon_coles.py")
+        c = ab.arm_configs()
+        assert c["refit"] == trainer.h2_config()
+        assert c["pinned"] != trainer.h2_config()
+
     def test_decayed_arms_meet_the_decayed_constants(self):
         assert ab.matched_constant("refit") == "base_league_dw" and ab.matched_conditional("refit") == "base_cond_dw"
         assert ab.matched_constant("refit_frozen") == "base_league_dw"

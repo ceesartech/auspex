@@ -200,8 +200,11 @@ def store_prediction(
 def _load_hockey_dixon_coles():
     """Load the NHL Dixon-Coles artifact if present. Returns None when
     the model hasn't been trained yet (so the trained ensemble path
-    keeps working unchanged). Path matches train_hockey_dixon_coles.py's
-    default --output-dir."""
+    keeps working unchanged). This is the PRODUCTION path, and nothing
+    writes it automatically: train_hockey_dixon_coles.py stages into
+    /app/models/staging-nhl/dixon_coles_nhl/1.0.0 and refuses this tree.
+    A staged fit may reach this path only through scripts/promote_dc_model.py,
+    which has no "nhl" entry until scripts/ab_nhl_dixon_coles.py passes."""
     from pathlib import Path
 
     path = Path("/app/models/production/dixon_coles_nhl/1.0.0/model.bin")
