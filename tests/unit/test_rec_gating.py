@@ -119,6 +119,7 @@ def test_every_gate_carries_evidence():
         ("mma", "moneyline"),
         ("tennis", "moneyline"),
         ("soccer", "over_under"),
+        ("soccer", "odd_even"),
         ("nfl", "total"),
         ("nfl", "spread"),
         ("nba", "moneyline"),
@@ -141,7 +142,7 @@ def test_disabled_streams_reject_naming_the_stream(sport, bet_type):
 
 def test_enabled_streams_are_exactly_the_expected_set():
     disabled = {k for k, g in rg.GATES.items() if not g.enabled}
-    assert disabled == {("mma", "moneyline"), ("tennis", "moneyline"), ("soccer", "over_under")}
+    assert disabled == {("mma", "moneyline"), ("tennis", "moneyline"), ("soccer", "over_under"), ("soccer", "odd_even")}
     assert [s for s, g in rg.SPORT_DEFAULTS.items() if not g.enabled] == ["nfl", "nba", "nhl"]
 
 

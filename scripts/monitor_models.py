@@ -136,6 +136,7 @@ _MAX_PAGE_LINES = 12
 _N_CLASSES_BY_TYPE = {
     "match_result": 3,
     "match_result_ht": 3,
+    "regulation_1x2": 3,
     "double_chance": 3,
     "correct_score": 13,
     "winning_margin": 7,
@@ -146,7 +147,7 @@ _N_CLASSES_BY_TYPE = {
     "clean_sheet": 4,
     "win_to_nil": 4,
 }
-_TWO_WAY_MULTI_LINE = frozenset({"asian_handicap", "over_under", "team_total", "over_under_ht"})
+_TWO_WAY_MULTI_LINE = frozenset({"asian_handicap", "over_under", "team_total", "over_under_ht", "puck_line"})
 
 # A persisting condition should page once a day, not once an hour. The
 # monitor DAG runs hourly; without this the 2026-09-21 findings would have

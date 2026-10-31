@@ -220,6 +220,18 @@ GATES: dict[tuple[str, str], MarketGate] = {
             "base rate), in both the covered and uncovered segments."
         ),
     ),
+    ("soccer", "odd_even"): MarketGate(
+        enabled=False,
+        max_odds=None,
+        max_ev=None,
+        max_gap=None,
+        note=(
+            "First grading of the derived odd/even market (2026-10-30, 160-day backlog): picks hit "
+            "48.4% (n=7,584 rows) on a ~50/50 market — no skill, below the 52.4% break-even the "
+            "monitor pages on. No odds feed exists for it (prod odds carry 1x2 / AH / O-U only), so "
+            "no rec was ever emitted; gated so the monitor measures it without paging."
+        ),
+    ),
     ("soccer", "1x2"): MarketGate(
         enabled=True,
         max_odds=5.0,
