@@ -590,15 +590,25 @@ class TestSharedConfigScoping:
         assert a.per_league_baselines is False and a.league_baselines == {}
         assert fitted_mean_total(a, df) == pytest.approx(fitted_mean_total(b, df), rel=1e-9)
 
-    def test_the_three_off_gate_trainers_do_not_use_the_soccer_config(self):
-        """A grep-level guard. The whole defect is that these three read the
-        SAME object the soccer refit mutates."""
+    def test_the_off_gate_trainers_do_not_use_the_soccer_config(self):
+        """A grep-level guard. The whole defect is that these read the SAME
+        object the soccer refit mutates."""
         repo = Path(__file__).resolve().parents[4]
         for script in (
             "train_hockey_dixon_coles.py",
-            "train_halftime_dixon_coles.py",
             "train_second_half_dixon_coles.py",
         ):
             source = (repo / "scripts" / script).read_text()
             assert "DixonColesPredictor(DIXON_COLES_CONFIG)" not in source, script
             assert "dixon_coles_config_pinned_to_legacy_fit" in source, script
+
+    def test_the_halftime_trainer_uses_its_gated_config_and_never_writes_production(self):
+        """The half-time artifact was gated on DIXON_COLES_CONFIG by
+        scripts/ab_halftime_dixon_coles.py (2026-10-31): it may use that
+        config, under its own name, and it writes to staging — promotion is
+        a separate, backed-up step."""
+        repo = Path(__file__).resolve().parents[4]
+        source = (repo / "scripts" / "train_halftime_dixon_coles.py").read_text()
+        assert 'replace(DIXON_COLES_CONFIG, name="dixon_coles_ht_soccer")' in source
+        assert "ab_halftime_dixon_coles.py" in source
+        assert 'default=Path("/app/models/staging-ht/dixon_coles_ht_soccer/1.0.0")' in source

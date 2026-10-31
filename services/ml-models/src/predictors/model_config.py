@@ -269,16 +269,20 @@ DIXON_COLES_CONFIG = ModelConfig(
 #     scripts/train_second_half_dixon_coles.py  -> dixon_coles_h2_soccer
 # None of the three goes through training/train_all_models.py, so neither the
 # 1x2 promote gate nor the derived-market guard ever sees them — whatever they
-# fit is what serves.
+# fit is what serves. The HALF-TIME one now has its own gate:
+# scripts/ab_halftime_dixon_coles.py measured DIXON_COLES_CONFIG on HT goals
+# (2026-10-31, HT 1x2 Brier -0.0160 vs the legacy artifact), so that trainer
+# uses it, writes to staging, and is promoted by scripts/ops/promote_ht_model.sh.
+# The hockey and second-half trainers stay pinned until each is measured.
 #
 # The four refit knobs above (max_goals 10, a LIVE time_decay, regularization as
 # a 20-effective-match prior, per_league_baselines) were measured on exactly one
 # object: the soccer FULL-TIME over-2.5 walk-forward. Nothing about hockey goals
 # or halftime goals was measured anywhere, and the tuned values do not obviously
 # transfer — a 20-effective-match prior is a materially stronger shrink against
-# halftime's ~0.6 goals/match than against full-time's ~2.65. So those three
+# halftime's ~0.6 goals/match than against full-time's ~2.65. So those
 # trainers are pinned back to the pre-refit values until each is separately
-# measured and gated.
+# measured and gated (the half-time one was, above).
 #
 # What this deliberately does NOT do: fix the deferred NHL defect. That artifact
 # carries max_goals=6 and home_advantage=0.25 against league_avg_goals ~3.10,

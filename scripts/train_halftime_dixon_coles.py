@@ -12,13 +12,23 @@ Architecture:
   * Pull a soccer training frame with half_time_home/away renamed
     to home_score/away_score so the existing DixonColesPredictor
     code path works unchanged.
-  * Train + save the model to
-    /app/models/production/dixon_coles_ht_soccer/1.0.0/model.bin.
-  * `scripts/precompute_predictions.py` loads this artifact (if
-    present) and writes one row per HT market_type per match.
+  * Fit on ALL of it with DIXON_COLES_CONFIG — the configuration
+    scripts/ab_halftime_dixon_coles.py gated on 2026-10-31 (see the
+    comment at the fit) — and write the artifact to STAGING.
+  * scripts/ops/promote_ht_model.sh backs up the production artifact and
+    promotes the staged one; `scripts/precompute_predictions.py` loads
+    /app/models/production/dixon_coles_ht_soccer/1.0.0/model.bin on its
+    next run and writes one row per HT market_type per match.
+
+Until 2026-10-31 this script fitted the OLDEST 80% only (the newest 20% was
+a validation slice, so no recent match ever reached the fit), used the
+legacy pinned config (a configured 0.25 home bump on a ~0.6-goal base: the
+served artifact picked home on 89% of matches and under-weighted the HT
+draw), and wrote straight over the production file with no gate.
 
 Run on prod via:
     docker compose exec api python /app/scripts/train_halftime_dixon_coles.py
+    bash /opt/auspex/scripts/ops/promote_ht_model.sh      # after reading the log
 """
 
 import argparse
@@ -74,8 +84,15 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("/app/models/production/dixon_coles_ht_soccer/1.0.0"),
-        help="Where to write the model artifact (model.bin).",
+        default=Path("/app/models/staging-ht/dixon_coles_ht_soccer/1.0.0"),
+        help="Where to write model.bin (default: staging; promote with scripts/ops/promote_ht_model.sh).",
+    )
+    parser.add_argument(
+        "--holdout-fraction",
+        type=float,
+        default=0.0,
+        help="Diagnostic only: hold out the newest fraction and report its metrics. 0 (default) fits everything — "
+        "the gated configuration was measured as a fit on all matches before each eval month.",
     )
     parser.add_argument(
         "--log-level",
@@ -92,7 +109,11 @@ def main():
         return 1
 
     sys.path.insert(0, "/app/services/ml-models/src")
-    from predictors.model_config import dixon_coles_config_pinned_to_legacy_fit
+    from dataclasses import replace
+
+    import numpy as np
+    from predictors.market_derivation import MAX_GOALS_DERIVE, build_dc_matrix
+    from predictors.model_config import DIXON_COLES_CONFIG
     from predictors.poisson_models import DixonColesPredictor
     from utils.training_data import load_training_frame
 
@@ -105,24 +126,42 @@ def main():
         frame["match_date"].max(),
     )
 
-    # 80/20 train/val by date. Match-date sort is preserved by the
-    # query's ORDER BY, so the last 20% are the temporally latest
-    # matches — clean walk-forward eval.
+    # Fit everything by default. The query's ORDER BY keeps match-date order,
+    # so a holdout (diagnostic only) is the temporally latest slice.
     n = len(frame)
-    cutoff = int(n * 0.8)
+    if not 0.0 <= args.holdout_fraction < 1.0:
+        LOGGER.error("--holdout-fraction must be in [0, 1)")
+        return 1
+    cutoff = n - int(n * args.holdout_fraction)
     train_df = frame.iloc[:cutoff].copy()
-    val_df = frame.iloc[cutoff:].copy()
-    LOGGER.info("Train=%d Val=%d", len(train_df), len(val_df))
+    val_df = frame.iloc[cutoff:].copy() if cutoff < n else None
+    LOGGER.info("Train=%d Holdout=%d", len(train_df), 0 if val_df is None else len(val_df))
 
-    # NOT DIXON_COLES_CONFIG: see model_config.dixon_coles_config_pinned_to_legacy_fit.
-    # The refit knobs were measured on the FULL-TIME over-2.5 walk-forward only.
-    # Halftime goals average ~0.6/match against full-time's ~2.65, so a
-    # 20-effective-match shrinkage prior is a materially stronger shrink here
-    # than the value that was measured — and this artifact never passes the
-    # promote gate. Pinned until a halftime A/B exists.
-    model = DixonColesPredictor(dixon_coles_config_pinned_to_legacy_fit("dixon_coles_ht_soccer"))
+    # DIXON_COLES_CONFIG (per-league home/away baselines, a 20-match shrinkage
+    # prior, 730-day decay, max_goals 10), gated for THIS artifact by
+    # scripts/ab_halftime_dixon_coles.py (2026-10-31, 15 monthly walk-forward
+    # folds 2025-08..2026-10, n=8,145): HT 1x2 Brier -0.0160 vs the served
+    # artifact (fold-clustered SE 0.0026) and -0.0130 vs a recency-matched
+    # per-league constant; fitted once and frozen for 15 months, -0.0138. The
+    # legacy pinned config it replaces DIVERGED on the full frame (13/13 folds
+    # unconverged, non-finite probabilities in 2026-08) — never fit it again.
+    model = DixonColesPredictor(replace(DIXON_COLES_CONFIG, name="dixon_coles_ht_soccer"))
     result = model.train(train_df, val_df=val_df)
     LOGGER.info("Train result: %s", {k: v for k, v in result.items() if k not in ("team_attack", "team_defense")})
+    if result.get("iterations") is None:
+        LOGGER.error("The fit did not converge — refusing to write an artifact")
+        return 1
+    # Every training fixture must produce a valid served matrix.
+    pairs = train_df[["home_team", "away_team", "league_id"]].drop_duplicates()
+    for home, away, league in pairs.itertuples(index=False):
+        h_lam, a_lam = model.lambdas_for_match(home, away, league=league)
+        P = build_dc_matrix(float(h_lam), float(a_lam), float(model.rho), max_goals=MAX_GOALS_DERIVE)
+        if not (np.isfinite(P).all() and abs(float(P.sum()) - 1.0) < 1e-6):
+            LOGGER.error(
+                "Invalid scoreline matrix for %s v %s (%s) — refusing to write an artifact", home, away, league
+            )
+            return 1
+    LOGGER.info("Checked %d distinct fixtures: every served matrix is finite and normalised", len(pairs))
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     model_path = args.output_dir / "model.bin"
