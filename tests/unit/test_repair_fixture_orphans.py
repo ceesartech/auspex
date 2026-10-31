@@ -370,9 +370,10 @@ class TestSqlInvariants:
             "m.home_team_id = %(home)s::uuid",
             "m.away_team_id = %(away)s::uuid",
             "NOT (COALESCE(m.metadata, '{}'::jsonb) ? 'orphan_of')",
-            "r.status = 'pending'",
+            "r.status IN ('pending', 'placed')",  # the open-rec set the grader lists
         ):
             assert guard in sql
+        assert "r.status IN ('pending', 'placed')" in rfo._PENDING_RECS  # the plan blocks on the same set
         assert "betting_recommendations" not in sql.split("WHERE", 1)[0]  # never writes a rec
 
     def test_soccer_candidates_are_scheduled_rows_only(self):

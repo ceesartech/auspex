@@ -707,20 +707,35 @@ def list_recs_on_cancelled_matches(cur) -> list[dict]:
 def void_recs_on_cancelled_matches(cur) -> tuple[int, int]:
     """Void (profit 0) the open recs on cancelled matches. Returns (voided,
     refused): a rec on a cancelled DUPLICATE of a played fixture is refused
-    and logged at ERROR, never voided — the match was played, on the twin."""
+    and logged at ERROR, never voided — the match was played, on the twin.
+    The ERROR names the remedy: repair_stranded_recs settles (or voids, when
+    written after kickoff) a 'pending' rec on such a row from its twin and
+    re-points it there; it does not touch 'placed', so a 'placed' one is set
+    back to 'pending' first. repair_fixture_orphans never retires a row that
+    holds an open rec (CANCEL_PINNED_SQL), so this needs a rec written or
+    re-opened on the row afterwards."""
     voided = refused = 0
     for rec in list_recs_on_cancelled_matches(cur):
         if rec.get("orphan_of"):
             refused += 1
+            reopen = (
+                ""
+                if rec.get("status") == "pending"
+                else f"UPDATE betting_recommendations SET status = 'pending' WHERE id = '{rec['rec_id']}' "
+                f"AND status = '{rec.get('status')}' (it only reads 'pending' recs), then "
+            )
             logger.error(
                 "Not voiding rec %s (match %s, %s %s, status %s): the cancelled row is a duplicate of match %s, "
-                "which was played — settle it from the twin (scripts/repair_stranded_recs.py)",
+                "which was played — settle it from the twin: %sdocker compose exec -T api python "
+                "/app/scripts/repair_stranded_recs.py --sport <sport> (dry run, then --apply; it reads pending recs "
+                "on cancelled rows carrying orphan_of and re-points them onto the twin)",
                 rec["rec_id"],
                 rec["match_id"],
                 rec.get("bet_type"),
                 rec.get("selection"),
                 rec.get("status"),
                 rec["orphan_of"],
+                reopen,
             )
             continue
         logger.warning(
@@ -1075,7 +1090,8 @@ def run(database_url: str, days: int, match_id: Optional[str]) -> dict:
     if stats["cancelled_orphan_recs"]:
         logger.error(
             "Left %d open recommendation(s) on cancelled duplicates of played fixtures (metadata.%s): settle them "
-            "from the twin with scripts/repair_stranded_recs.py",
+            "from the twin with scripts/repair_stranded_recs.py --sport <sport> (it reads pending recs on those "
+            "rows; set a 'placed' one back to 'pending' first — the per-rec ERROR lines above give the commands)",
             stats["cancelled_orphan_recs"],
             ORPHAN_OF_KEY,
         )

@@ -1297,7 +1297,20 @@ class TestCancelledRecs:
         with caplog.at_level("ERROR", logger="grade_completed_matches"):
             assert gcm.void_recs_on_cancelled_matches(cur) == (0, 1)
         assert cur.voids == [] and cur.recs["r1"]["status"] == "pending"
-        assert any("duplicate of match twin-1" in r.getMessage() for r in caplog.records)
+        (msg,) = [r.getMessage() for r in caplog.records if "duplicate of match twin-1" in r.getMessage()]
+        assert "repair_stranded_recs.py --sport <sport>" in msg and "UPDATE betting_recommendations" not in msg
+
+    def test_a_placed_rec_on_a_cancelled_duplicate_is_told_to_reopen_it_first(self, caplog):
+        cur = RegulationCursor(
+            [],
+            [_rec("r1", "m9", "p1", stake=10, odds=2.0, status="placed")],
+            cancelled_recs=[_open_on("r1", "m9", "placed", orphan_of="twin-1")],
+        )
+        with caplog.at_level("ERROR", logger="grade_completed_matches"):
+            assert gcm.void_recs_on_cancelled_matches(cur) == (0, 1)
+        (msg,) = [r.getMessage() for r in caplog.records if "duplicate of match twin-1" in r.getMessage()]
+        assert "SET status = 'pending' WHERE id = 'r1' AND status = 'placed'" in msg
+        assert "repair_stranded_recs.py --sport <sport>" in msg
 
     def test_a_match_rescheduled_meanwhile_keeps_its_rec(self, caplog):
         cur = RegulationCursor(

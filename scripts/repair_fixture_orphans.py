@@ -251,7 +251,11 @@ _HAS_RECS = """
       OR EXISTS (SELECT 1 FROM betting_recommendations r
                    JOIN predictions p ON p.id = r.prediction_id
                   WHERE p.match_id = m.id)"""
-_PENDING_RECS = "(SELECT count(*) FROM betting_recommendations r WHERE r.match_id = m.id AND r.status = 'pending')"
+# Open recs, the set grade_completed_matches lists ('pending' and 'placed'): CANCEL_PINNED_SQL never retires a row
+# holding one, and the plan blocks on the same set, so the two never disagree.
+_PENDING_RECS = (
+    "(SELECT count(*) FROM betting_recommendations r WHERE r.match_id = m.id AND r.status IN ('pending', 'placed'))"
+)
 
 LIST_CANDIDATES_SQL = f"""
     SELECT m.id::text AS id, m.league_id::text AS league_id,
@@ -436,8 +440,10 @@ DELETE_ORPHANS_SQL = """
 """
 
 # Soccer: a merged orphan that recs still reference is retired, not deleted.
-# Guarded on the observed values; never twice (orphan_of), never under a
-# pending rec (repair_stranded_recs only reads 'scheduled' rows).
+# Guarded on the observed values; never twice (orphan_of), never under an
+# open ('pending' or 'placed') rec: grade_completed_matches refuses to void
+# an open rec on a cancelled orphan_of row (the match was played, on the
+# twin), so such a rec would only be settled by hand.
 CANCEL_PINNED_SQL = """
     UPDATE matches m
        SET status = 'cancelled',
@@ -450,7 +456,8 @@ CANCEL_PINNED_SQL = """
        AND m.home_team_id = %(home)s::uuid
        AND m.away_team_id = %(away)s::uuid
        AND NOT (COALESCE(m.metadata, '{}'::jsonb) ? 'orphan_of')
-       AND NOT EXISTS (SELECT 1 FROM betting_recommendations r WHERE r.match_id = m.id AND r.status = 'pending')
+       AND NOT EXISTS (SELECT 1 FROM betting_recommendations r
+                        WHERE r.match_id = m.id AND r.status IN ('pending', 'placed'))
 """
 
 # Soccer: a listed, ESPN-verified postponed stale row. Guarded on the

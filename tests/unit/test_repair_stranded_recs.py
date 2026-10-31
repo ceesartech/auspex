@@ -769,6 +769,23 @@ def test_missing_created_at_is_loud_and_writes_nothing(tmp_path):
     assert conn.cur.updates == [] and not out.exists()
 
 
+def test_candidates_include_pending_recs_on_cancelled_orphan_of_rows():
+    """grade_completed_matches refuses to void an open rec on a cancelled
+    duplicate (metadata.orphan_of) and points here: this tool must read it."""
+    seen = []
+
+    class Cur:
+        def execute(self, sql, params=None):
+            seen.append(" ".join(sql.split()))
+
+        def fetchall(self):
+            return []
+
+    rs.list_candidates(Cur(), "soccer", 24)
+    assert "(m.status = 'scheduled' OR (m.status = 'cancelled' AND m.metadata ? 'orphan_of'))" in seen[0]
+    assert "br.status = 'pending'" in seen[0]
+
+
 def test_candidate_query_selects_created_at():
     seen = []
 
@@ -789,3 +806,64 @@ def test_written_after_kickoff_boundaries():
     assert rs.written_after_kickoff(KICKOFF - timedelta(seconds=1), KICKOFF) is False
     with pytest.raises(ValueError):
         rs.written_after_kickoff(KICKOFF, None)
+
+
+# ── the PLAN line and --expect-plan (scripts/ops/repair_stranded_recs_soccer.sh) ──
+
+
+def test_the_plan_line_sums_every_action(tmp_path, caplog):
+    rec, twin = _moved_earlier(19.75)
+    before = make_rec(rec_id="rec-2", selection="away", created_at=twin["match_date"] - timedelta(hours=1))
+    conn = FakeConn([rec, before], [twin])
+    with caplog.at_level("INFO", logger="repair_stranded_recs"):
+        result = _run(conn, tmp_path, apply_changes=False)
+    assert result["plan"] == {
+        "candidates": 2,
+        "settle": 1,
+        "void_post_kickoff": 1,
+        "void_no_twin": 0,
+        "no_twin": 0,
+        "ambiguous": 0,
+        "ungradable": 0,
+    }
+    assert (
+        "PLAN candidates=2 settle=1 void_post_kickoff=1 void_no_twin=0 no_twin=0 ambiguous=0 ungradable=0"
+        in caplog.text
+    )
+
+
+def test_a_plan_that_is_not_the_pinned_one_writes_nothing(tmp_path):
+    rec, twin = _moved_earlier(19.75)
+    conn = FakeConn([rec], [twin])
+    pin = dict.fromkeys(rs.PLAN_KEYS, 0) | {"candidates": 1, "void_post_kickoff": 2}
+    result = _run(conn, tmp_path, expect_plan=pin)
+    assert result["plan_mismatch"] and result["applied"] == 0 and conn.cur.updates == []
+    assert Path(result["csv_path"]).exists()  # the audit CSV still lands, before any write
+
+
+def test_the_pinned_plan_applies(tmp_path):
+    rec, twin = _moved_earlier(19.75)
+    conn = FakeConn([rec], [twin])
+    pin = dict.fromkeys(rs.PLAN_KEYS, 0) | {"candidates": 1, "void_post_kickoff": 1}
+    result = _run(conn, tmp_path, expect_plan=pin)
+    assert not result["plan_mismatch"] and result["applied"] == 1
+
+
+def test_an_apply_pin_must_name_every_key():
+    with pytest.raises(SystemExit):
+        rs.parse_args(["--apply", "--expect-plan", "settle=0,void_post_kickoff=7"])
+    with pytest.raises(SystemExit):
+        rs.parse_args(["--expect-plan", "settled=0"])
+    full = ",".join(f"{k}=0" for k in rs.PLAN_KEYS)
+    assert rs.parse_args(["--apply", "--expect-plan", full]).expect_plan == dict.fromkeys(rs.PLAN_KEYS, 0)
+    assert rs.parse_args(["--expect-plan", "settle=0"]).expect_plan == {"settle": 0}  # a dry run takes a subset
+
+
+def test_main_exits_1_on_a_plan_mismatch(monkeypatch):
+    class _Closing:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(rs.psycopg2, "connect", lambda url: _Closing())
+    monkeypatch.setattr(rs, "run", lambda conn, **kw: {"plan_mismatch": True, "total_candidates": 3})
+    assert rs.main(["--database-url", "postgresql://x", "--expect-plan", "settle=1"]) == 1

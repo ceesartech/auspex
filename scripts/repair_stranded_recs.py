@@ -14,7 +14,9 @@ abandoned row stay status='pending' forever.
 WHAT THIS DOES
 --------------
 For every stale pending rec (rec.status='pending', match.status='scheduled',
-match_date older than --stale-after-hours) it looks for the fixture's
+or a 'cancelled' row carrying metadata.orphan_of — a duplicate
+repair_fixture_orphans retired, which grade_completed_matches refuses to void
+and points here — match_date older than --stale-after-hours) it looks for the fixture's
 finished TWIN: a `matches` row with the SAME home_team_id AND the SAME
 away_team_id (identical orientation — a swapped pair is a different
 fixture and is never matched), status='finished', both scores present,
@@ -190,6 +192,40 @@ CSV_COLUMNS = [
 ]
 
 
+# The fixed-format 'PLAN ...' line (plan_line) and the --expect-plan keys:
+# what scripts/ops/repair_stranded_recs_soccer.sh pins.
+PLAN_KEYS = ("candidates", "settle", "void_post_kickoff", "void_no_twin", "no_twin", "ambiguous", "ungradable")
+
+
+def plan_totals(per_sport: dict[str, dict]) -> dict[str, int]:
+    """{PLAN key: count} over every sport of a run's plan. Pure."""
+    out = dict.fromkeys(PLAN_KEYS, 0)
+    for c in per_sport.values():
+        out["candidates"] += c["candidates"]
+        out["settle"] += c["settled_won"] + c["settled_lost"] + c["settled_push_void"]
+        out["void_post_kickoff"] += c["post_kickoff_voided"]
+        out["void_no_twin"] += c["no_twin_voided"]
+        out["no_twin"] += c["no_twin"]
+        out["ambiguous"] += c["ambiguous_skipped"]
+        out["ungradable"] += c["ungradable_skipped"]
+    return out
+
+
+def plan_line(totals: dict[str, int]) -> str:
+    return "PLAN " + " ".join(f"{k}={totals[k]}" for k in PLAN_KEYS)
+
+
+def parse_expect_plan(text: str) -> dict[str, int]:
+    """'settle=0,void_post_kickoff=7,...' -> {key: n}; ValueError on anything else."""
+    out: dict[str, int] = {}
+    for part in (p.strip() for p in text.split(",")):
+        key, sep, value = part.partition("=")
+        if not sep or key not in PLAN_KEYS or not value.isdigit() or key in out:
+            raise ValueError(f"--expect-plan {text!r}: want KEY=N pairs with KEY one of {', '.join(PLAN_KEYS)}")
+        out[key] = int(value)
+    return out
+
+
 class MaxRowsExceeded(RuntimeError):
     """Candidate set is larger than --max-rows and --yes was not passed."""
 
@@ -222,7 +258,7 @@ def list_candidates(cur, sport: str, stale_after_hours: int) -> list[dict]:
         JOIN matches m ON m.id = br.match_id
         JOIN leagues l ON l.id = m.league_id
         WHERE br.status = 'pending'
-          AND m.status = 'scheduled'
+          AND (m.status = 'scheduled' OR (m.status = 'cancelled' AND m.metadata ? 'orphan_of'))
           AND m.match_date < NOW() - (%s || ' hours')::interval
           AND l.sport = %s
         ORDER BY m.match_date ASC, br.id ASC
@@ -869,9 +905,12 @@ def run(
     yes: bool = False,
     apply_changes: bool = False,
     out_csv: Optional[str] = None,
+    expect_plan: Optional[dict[str, int]] = None,
 ) -> dict:
     """Plan every sport read-only, write the CSV, then (only with
-    apply_changes) execute one transaction per sport."""
+    apply_changes) execute one transaction per sport. `expect_plan` pins the
+    plan's counts (plan_totals): a plan that differs writes nothing and the
+    result carries plan_mismatch."""
     sports = list(sports)
     validate_request(sports, twin_window_hours, stale_after_hours, void_no_twin)
     out_csv = out_csv or default_out_csv(sports)
@@ -899,10 +938,17 @@ def run(
 
     # CSV goes out BEFORE any UPDATE, dry-run included.
     csv_path = write_csv(out_csv, all_entries)
+    totals = plan_totals(per_sport)
+    logger.info("%s", plan_line(totals))
+    mismatch = "; ".join(
+        f"{totals[k]} {k}, expected {n}" for k, n in sorted((expect_plan or {}).items()) if totals[k] != n
+    )
+    if mismatch:
+        logger.error("The plan is not the one pinned (%s): nothing written; review %s", mismatch, csv_path)
 
     applied = 0
     skipped_entries: list[dict] = []
-    if apply_changes:
+    if apply_changes and not mismatch:
         for sport in sports:
             entries = entries_by_sport[sport]
             if not entries:
@@ -932,6 +978,8 @@ def run(
 
     return {
         "per_sport": per_sport,
+        "plan": totals,
+        "plan_mismatch": bool(mismatch),
         "total_candidates": total_candidates,
         "affected": len(all_entries),
         "applied": applied,
@@ -1030,10 +1078,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="CSV of affected rows (default /app/backups/repaired_rec_ids_<sports>_<utc timestamp>.csv). "
         "Write-once: an existing path is an error, never an overwrite.",
     )
+    p.add_argument(
+        "--expect-plan",
+        default=None,
+        help=f"Write nothing unless the plan has exactly these counts (KEY=N,... with KEY one of "
+        f"{', '.join(PLAN_KEYS)}); --apply with it needs every key. The PLAN line of a dry run shows them.",
+    )
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Plan only (DEFAULT).")
     mode.add_argument("--apply", action="store_true", help="Execute the UPDATEs.")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.expect_plan is not None:
+        try:
+            args.expect_plan = parse_expect_plan(args.expect_plan)
+        except ValueError as e:
+            p.error(str(e))
+        missing = [k for k in PLAN_KEYS if k not in args.expect_plan]
+        if args.apply and missing:
+            p.error(f"--apply with --expect-plan needs every key; missing: {', '.join(missing)}")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1064,6 +1127,7 @@ def main(argv: list[str] | None = None) -> int:
             yes=args.yes,
             apply_changes=args.apply,
             out_csv=args.out_csv,
+            expect_plan=args.expect_plan,
         )
     except (MaxRowsExceeded, UnsafeRequest) as exc:
         logger.error("%s", exc)
@@ -1071,6 +1135,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         conn.close()
 
+    if result["plan_mismatch"]:
+        return 1
     if result["total_candidates"] == 0:
         logger.info("No stranded pending recs found for %s", ", ".join(sports))
         return 1
