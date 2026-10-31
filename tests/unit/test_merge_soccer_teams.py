@@ -165,7 +165,8 @@ class TestCommittedMap:
         wrapper = (SCRIPTS_DIR / "ops" / "merge_soccer_teams.sh").read_text()
         lib = (SCRIPTS_DIR / "ops" / "_airflow_lib.sh").read_text()
         assert 'DAGS="auspex_pipeline fetch_live_odds"' in wrapper
-        assert "trap af_resume EXIT" in wrapper and "trap 'exit 130' INT TERM HUP" in wrapper
+        assert "trap af_resume_on_exit EXIT" in wrapper and "trap 'exit 130' INT TERM HUP" in wrapper
+        assert "trap '' PIPE" in lib  # a dead tee cannot kill the exit path (run for real in the wrapper tests)
         assert "airflow dags pause -y" in lib and "airflow dags unpause -y" in lib
         assert 'AF_PAUSED_BY_US="$AF_PAUSED_BY_US $d"' in lib  # only what it paused; an already paused DAG stays paused
         backup, pause = wrapper.index('log "backup landed'), wrapper.index("af_drain_and_pause 5 40 $DAGS")
