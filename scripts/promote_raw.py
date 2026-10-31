@@ -54,6 +54,9 @@ from zoneinfo import ZoneInfo
 import psycopg2
 from psycopg2.extras import Json, RealDictCursor, execute_values
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import team_identity  # noqa: E402
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("promote_raw")
 
@@ -381,33 +384,60 @@ def upsert_leagues(cur, codes: set[str]) -> dict[str, str]:
 
 
 def upsert_teams(cur, team_names: set[str], league_id_by_team: dict[str, str]) -> dict[str, str]:
-    """Insert all teams referenced; return {normalized_name: team_id}."""
+    """Insert the teams referenced; return {normalized_name: team_id} for
+    every soccer team, plus each raw name resolved onto another row.
+
+    A raw name that is no team's normalized_name may still be a known club:
+    an alias (teams.metadata.aliases, the resolver fetch_upcoming uses too)
+    or the same name with accents ("Alaves" / "Alavés"). Such a name maps
+    onto that row instead of minting a twin with no history. Only a name
+    that matches nothing is inserted, and each one is logged as a canary
+    (team_identity.log_new_soccer_team)."""
     if not team_names:
         return {}
+    cur.execute("SELECT id, normalized_name FROM teams WHERE sport = 'soccer'")
+    existing = {r["normalized_name"] for r in cur.fetchall()}
+    aliases = team_identity.load_alias_index(cur, "soccer")
     # Dedupe on the conflict key (normalized_name, sport): two RAW names
     # can normalize identically ("Alaves"/"Alavés"), and ON CONFLICT DO
     # UPDATE cannot touch the same row twice within one command
     # (CardinalityViolation) — keep the first raw spelling.
     seen: set[str] = set()
     rows = []
+    resolved: dict[str, str] = {}
+    minted: list[str] = []
     for name in sorted(team_names):
         norm = normalize_team_name(name)
         if norm in seen:
             continue
         seen.add(norm)
+        if norm not in existing:
+            team_id = team_identity.resolve_alias(aliases, "soccer", norm) or (
+                team_identity.find_team_accent_insensitive(cur, "soccer", norm)
+            )
+            if team_id:
+                resolved[norm] = team_id
+                logger.info("Raw team %r resolves to existing soccer team %s (alias or accent fold)", name, team_id)
+                continue
+            minted.append(name)
         rows.append((name, norm, league_id_by_team.get(name), "soccer"))
-    execute_values(
-        cur,
-        """
-        INSERT INTO teams (name, normalized_name, league_id, sport)
-        VALUES %s
-        ON CONFLICT (normalized_name, sport) DO UPDATE
-            SET league_id = COALESCE(EXCLUDED.league_id, teams.league_id)
-        """,
-        rows,
-    )
+    if rows:
+        execute_values(
+            cur,
+            """
+            INSERT INTO teams (name, normalized_name, league_id, sport)
+            VALUES %s
+            ON CONFLICT (normalized_name, sport) DO UPDATE
+                SET league_id = COALESCE(EXCLUDED.league_id, teams.league_id)
+            """,
+            rows,
+        )
+    for name in minted:
+        team_identity.log_new_soccer_team(cur, name, league_id_by_team.get(name), "football-data promote_raw")
     cur.execute("SELECT id, normalized_name FROM teams WHERE sport = 'soccer'")
-    return {r["normalized_name"]: r["id"] for r in cur.fetchall()}
+    team_ids = {r["normalized_name"]: r["id"] for r in cur.fetchall()}
+    team_ids.update(resolved)
+    return team_ids
 
 
 # promote() inserts only where find_existing_matches found no row, so this

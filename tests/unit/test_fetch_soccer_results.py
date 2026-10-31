@@ -67,7 +67,7 @@ def stats(monkeypatch):
 @pytest.fixture
 def recorded(monkeypatch):
     """Stub the team + match writes; capture what insert_finished_match got."""
-    monkeypatch.setattr(fu, "ensure_team", lambda cur, cfg, name, league_id: f"team-{name}")
+    monkeypatch.setattr(fu, "ensure_team", lambda cur, cfg, name, league_id, espn_id=None: f"team-{name}")
     monkeypatch.setattr(fu, "_reconcile_match_row", lambda *a, **k: True)
     monkeypatch.setattr(fu, "_stamp_identity", lambda *a, **k: True)
     calls: list[dict] = []
@@ -608,7 +608,7 @@ class TestSoccerSeasonLabels:
 
         monkeypatch.setattr(fu.psycopg2, "connect", lambda url: Conn())
         monkeypatch.setattr(fu, "ensure_league", lambda *a: "league-mls")
-        monkeypatch.setattr(fu, "ensure_team", lambda cur, cfg, name, league_id: f"team-{name}")
+        monkeypatch.setattr(fu, "ensure_team", lambda cur, cfg, name, league_id, espn_id=None: f"team-{name}")
         monkeypatch.setattr(fu, "_reconcile_match_row", lambda *a, **k: True)
         monkeypatch.setattr(fu, "_stamp_identity", lambda *a, **k: True)
         monkeypatch.setattr(

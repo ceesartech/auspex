@@ -2,7 +2,8 @@
 
 Populates the `matches` table with future (status='scheduled') fixtures
 for the configured leagues of the chosen sport. Matched to existing
-teams by normalized name; new teams are inserted on the fly.
+teams by ESPN team id, then name (see find_team); new teams are inserted
+on the fly.
 
 ESPN's scoreboard endpoint returns the current scoring window (a few
 days) plus you can pass ?dates=YYYYMMDD to walk forward up to ~2 weeks.
@@ -38,7 +39,6 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from difflib import SequenceMatcher
 from typing import Callable
 
 import psycopg2
@@ -134,8 +134,9 @@ class SportConfig:
     espn_path: str  # ESPN scoreboard segment after /apis/.../sports/
     leagues: dict[str, tuple[str, str, str]]  # slug -> (code, name, country)
     season_func: Callable[[datetime], str]
-    # Club name tokens stripped only for fuzzy matching. Soccer has many
-    # ("FC", "AFC", "BK"); NHL teams are unambiguous and need none.
+    # Club name tokens ("FC", "AFC", "BK"). Soccer has many; NHL teams are
+    # unambiguous and need none. find_team runs its fuzzy step only for a
+    # sport that has them.
     club_suffixes: frozenset[str] = frozenset()
     club_prefixes: frozenset[str] = frozenset()
     # True for 1v1 sports (tennis, MMA, boxing) where ESPN's competitors
@@ -323,9 +324,11 @@ def normalize_team(name: str) -> str:
 
 def _strip_club_tokens(norm: str, cfg: SportConfig) -> str:
     """Aggressive normalisation: drop common club abbreviation tokens so
-    'rosenborg bk' and 'rosenborg' compare equal. Used only for fuzzy
-    matching, not as the persisted normalized_name. No-op for sports
-    without club-token conventions (NHL)."""
+    'rosenborg bk' and 'rosenborg' compare equal. Not the persisted
+    normalized_name, and no longer on the team-resolution path (soccer's
+    fuzzy step is team_identity.match_club_name; club_suffixes/club_prefixes
+    still mark the sports that run it). No-op for sports without club-token
+    conventions (NHL)."""
     if not cfg.club_suffixes and not cfg.club_prefixes:
         return norm
     tokens = norm.split()
@@ -394,84 +397,115 @@ def ensure_league(cur, cfg: SportConfig, code: str, name: str, country: str) -> 
     return row["id"] if row else None
 
 
-def ensure_team(cur, cfg: SportConfig, name: str, league_id: str) -> str | None:
-    """Resolve `name` to a team_id via find_team, inserting a new team row
-    only when no existing one matches."""
-    team_id = find_team(cur, cfg, name, league_id)
-    if team_id:
-        return team_id
+def ensure_team(cur, cfg: SportConfig, name: str, league_id: str, espn_id: str | None = None) -> str | None:
+    """Resolve `name` (and, for a team sport, ESPN team id `espn_id`) to a
+    team_id via find_team, inserting a new team row only when nothing matches.
 
-    # 3. Insert new team. ON CONFLICT guard for race conditions on the
+    The ESPN id is stamped onto a row found by name and onto an inserted row,
+    so the name decision is made once and every later sweep resolves by id
+    (team_identity). None when the name resolves to a row of another ESPN
+    team (find_team refuses it, and a twin cannot be inserted under a taken
+    name). A new soccer team is logged as a canary: in a league with
+    established teams it is usually a split of one of them."""
+    espn_id = str(espn_id) if espn_id else None
+    team_id, how = _find_team(cur, cfg, name, league_id, espn_id)
+    if team_id:
+        if espn_id and how != "espn":
+            team_identity.stamp_espn_id(cur, team_id, espn_id, f"{cfg.sport} {name!r}")
+        return team_id
+    if how == "refused":
+        return None
+
+    # Insert new team. ON CONFLICT guard for race conditions on the
     # unique (normalized_name, sport) constraint.
     cur.execute(
         """
-        INSERT INTO teams (name, normalized_name, league_id, sport)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO teams (name, normalized_name, league_id, sport, external_ids)
+        VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT (normalized_name, sport) DO UPDATE
             SET league_id = COALESCE(teams.league_id, EXCLUDED.league_id)
-        RETURNING id
+        RETURNING id, (xmax = 0) AS inserted, external_ids->>'espn' AS espn
         """,
-        (name, normalize_team(name), league_id, cfg.sport),
+        (name, normalize_team(name), league_id, cfg.sport, Json({"espn": espn_id} if espn_id else {})),
     )
     row = cur.fetchone()
-    return row["id"] if row else None
+    if not row:
+        return None
+    if espn_id and row.get("espn") != espn_id:  # the race branch: another sweep inserted the name first
+        if not team_identity.stamp_espn_id(cur, row["id"], espn_id, f"{cfg.sport} {name!r}"):
+            return None
+    if cfg.sport == "soccer" and row.get("inserted", True):
+        source = f"ESPN sweep, ESPN team id {espn_id}" if espn_id else "ESPN sweep"
+        team_identity.log_new_soccer_team(cur, name, league_id, source)
+    return row["id"]
 
 
-def find_team(cur, cfg: SportConfig, name: str, league_id: str | None) -> str | None:
+def find_team(cur, cfg: SportConfig, name: str, league_id: str | None, espn_id: str | None = None) -> str | None:
     """Resolve `name` to an EXISTING team_id, or None. Never writes —
     backfills that must not mint teams use this instead of ensure_team.
 
-    The match strategy is three-tier so vendor team names (e.g. ESPN's
-    "Rosenborg BK") reuse the same row as football-data's "Rosenborg"
-    instead of creating an orphan that has no historical matches:
+    Vendor names differ from the history's (ESPN "Tottenham Hotspur",
+    football-data "Tottenham"), and a miss mints a twin with no history, so
+    the lookup runs in tiers (the shared rules live in team_identity):
 
-      1. Exact normalised match on (normalized_name, sport), then the same
-         match with accents folded (team_identity: ESPN "Montreal" must reuse
-         the NHL API's "Montréal" row, not mint a history-less twin).
-      2. Fuzzy match against teams in the same league: drop common club
-         abbreviation tokens (BK, FC, etc.) from both sides and compare
-         via SequenceMatcher. Reuse if ratio >= 0.85. Soccer-only — NHL
-         team names are unambiguous so we skip the fuzzy step.
-      3. (ensure_team only) INSERT a new row if neither lookup matched.
+      1. The ESPN team id, when the caller has one (teams.external_ids.espn).
+      2. Exact normalised name on (normalized_name, sport).
+      3. An alias (teams.metadata.aliases).
+      4. The same name with accents folded (ESPN "Montreal" must reuse the
+         NHL API's "Montréal" row).
+      5. Soccer only: a club-name match among the teams of the swept league's
+         country (team_identity.match_club_name) — never in an international
+         competition, where clubs of every country meet.
+      6. (ensure_team only) INSERT a new row.
+
+    A row from tiers 2-4 that already carries a DIFFERENT ESPN id is another
+    ESPN team, so it is refused (logged at ERROR) rather than merged.
     """
+    return _find_team(cur, cfg, name, league_id, str(espn_id) if espn_id else None)[0]
+
+
+def _find_team(cur, cfg: SportConfig, name: str, league_id: str | None, espn_id: str | None) -> tuple[str | None, str]:
+    """find_team's (team_id, tier): tier is 'espn' | 'exact' | 'alias' |
+    'accent' | 'fuzzy' for a hit, 'refused' when a name hit belongs to another
+    ESPN team, '' when nothing matched."""
     norm = normalize_team(name)
 
-    # 1. Exact normalised match
+    if espn_id:
+        by_espn = team_identity.find_team_by_espn_id(cur, cfg.sport, espn_id)
+        if by_espn:
+            return by_espn, "espn"
+
     cur.execute(
         "SELECT id FROM teams WHERE normalized_name = %s AND sport = %s",
         (norm, cfg.sport),
     )
     row = cur.fetchone()
-    if row:
-        return row["id"]
+    team_id, how = (row["id"], "exact") if row else (None, "")
+    if not team_id:
+        team_id, how = team_identity.find_team_by_alias(cur, cfg.sport, norm), "alias"
+    if not team_id:
+        team_id, how = team_identity.find_team_accent_insensitive(cur, cfg.sport, norm), "accent"
+    if team_id:
+        held = team_identity.espn_id_of(cur, team_id) if espn_id else None
+        if held and held != espn_id:
+            logger.error(
+                "Refusing %s team %r (ESPN team id %s): its %s match, team %s, is ESPN team %s — a different club "
+                "under the same name. The competition is skipped; fix the row or its aliases.",
+                cfg.sport,
+                name,
+                espn_id,
+                how,
+                team_id,
+                held,
+            )
+            return None, "refused"
+        return team_id, how
 
-    # 1b. Same club, other accent spelling ("Montreal" vs "Montréal").
-    folded_id = team_identity.find_team_accent_insensitive(cur, cfg.sport, norm)
-    if folded_id:
-        return folded_id
-
-    # 2. Fuzzy match within the same league, after stripping club tokens.
     if league_id and (cfg.club_suffixes or cfg.club_prefixes):
-        cur.execute(
-            "SELECT id, normalized_name FROM teams WHERE league_id = %s AND sport = %s",
-            (league_id, cfg.sport),
-        )
-        candidates = cur.fetchall()
-        if candidates:
-            target = _strip_club_tokens(norm, cfg)
-            best_id = None
-            best_score = 0.0
-            for c in candidates:
-                c_stripped = _strip_club_tokens(c["normalized_name"], cfg)
-                if not target or not c_stripped:
-                    continue
-                score = SequenceMatcher(None, c_stripped, target).ratio()
-                if score > best_score:
-                    best_score = score
-                    best_id = c["id"]
-            if best_id and best_score >= 0.85:
-                return best_id
-    return None
+        fuzzy_id = team_identity.find_team_fuzzy(cur, cfg.sport, name, league_id, espn_id)
+        if fuzzy_id:
+            return fuzzy_id, "fuzzy"
+    return None, ""
 
 
 def season_label(cfg: SportConfig, match_dt: datetime, event_context: dict | None = None) -> str:
@@ -627,6 +661,16 @@ def _competitor_name(competitor: dict, is_individual: bool) -> str | None:
         return athlete.get("displayName") or athlete.get("shortName") or athlete.get("name")
     team = competitor.get("team") or {}
     return team.get("displayName") or team.get("name")
+
+
+def _competitor_espn_id(competitor: dict, is_individual: bool) -> str | None:
+    """ESPN's id for a team-sport competitor's team (.team.id, else the
+    competitor's own .id, which ESPN sets to the same value), as a string.
+    None for an individual sport: athlete rows are not keyed by ESPN id."""
+    if is_individual:
+        return None
+    raw = (competitor.get("team") or {}).get("id") or competitor.get("id")
+    return str(raw) if raw not in (None, "") else None
 
 
 # ESPN's event.season.type enum. 1 = preseason, 2 = regular season,
@@ -1238,14 +1282,25 @@ def _log_refused_fork(
     )
 
 
-def _resolve_teams(cur, cfg: SportConfig, league_id: str, home_name: str, away_name: str, espn_id, match_dt):
+def _resolve_teams(
+    cur,
+    cfg: SportConfig,
+    league_id: str,
+    home_name: str,
+    away_name: str,
+    espn_id,
+    match_dt,
+    home_espn: str | None = None,
+    away_espn: str | None = None,
+):
     """(home_id, away_id) for a competition, or None when a side cannot be
     resolved or both sides resolve to ONE team. A team playing itself is a
     team-matching error (a fuzzy match, or a placeholder slot the filter
     missed: the 2026 World Cup left 20 such rows), never a fixture, so it is
-    refused and counted."""
-    home_id = ensure_team(cur, cfg, home_name, league_id)
-    away_id = ensure_team(cur, cfg, away_name, league_id)
+    refused and counted. home_espn / away_espn are the sides' ESPN team ids
+    (_competitor_espn_id); espn_id is the competition's."""
+    home_id = ensure_team(cur, cfg, home_name, league_id, espn_id=home_espn)
+    away_id = ensure_team(cur, cfg, away_name, league_id, espn_id=away_espn)
     if not (home_id and away_id):
         return None
     if home_id == away_id:
@@ -1371,7 +1426,17 @@ def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict, even
     if state != "pre":
         return False  # results path (--results) handles post events
 
-    teams = _resolve_teams(cur, cfg, league_id, home_name, away_name, espn_id, match_dt)
+    teams = _resolve_teams(
+        cur,
+        cfg,
+        league_id,
+        home_name,
+        away_name,
+        espn_id,
+        match_dt,
+        home_espn=_competitor_espn_id(home, cfg.is_individual),
+        away_espn=_competitor_espn_id(away, cfg.is_individual),
+    )
     if teams is None:
         return False
     home_id, away_id = teams
@@ -1851,7 +1916,17 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
     # the plays don't reproduce the final score.
     ht = halftime_scores(comp, home, away, scores) if cfg.sport == "soccer" else None
 
-    teams = _resolve_teams(cur, cfg, league_id, home_name, away_name, espn_id, match_dt)
+    teams = _resolve_teams(
+        cur,
+        cfg,
+        league_id,
+        home_name,
+        away_name,
+        espn_id,
+        match_dt,
+        home_espn=_competitor_espn_id(home, cfg.is_individual),
+        away_espn=_competitor_espn_id(away, cfg.is_individual),
+    )
     if teams is None:
         return False
     home_id, away_id = teams

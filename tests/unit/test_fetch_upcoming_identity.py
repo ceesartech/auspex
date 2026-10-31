@@ -544,7 +544,9 @@ class _RecordingPath:
 
     def __enter__(self):
         self._team, self._sched, self._fin = fu.ensure_team, fu.insert_scheduled_match, fu.insert_finished_match
-        fu.ensure_team = lambda cur, cfg, name, league_id: HOME if name == "Home FC" or self._same_team else AWAY
+        fu.ensure_team = lambda cur, cfg, name, league_id, espn_id=None: (
+            HOME if name == "Home FC" or self._same_team else AWAY
+        )
         fu.insert_scheduled_match = lambda *a, **k: self.inserts.append("scheduled") or 1
         fu.insert_finished_match = lambda *a, **k: self.inserts.append("finished") or self._finished_returns
         return self

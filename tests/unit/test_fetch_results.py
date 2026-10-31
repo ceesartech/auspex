@@ -41,7 +41,7 @@ fu = _load("fetch_upcoming_results", "fetch_upcoming.py")
 _REAL_INSERT_FINISHED_MATCH = fu.insert_finished_match
 
 
-def _team_per_name(cur, cfg, name, league_id):
+def _team_per_name(cur, cfg, name, league_id, espn_id=None):
     """ensure_team stub: one id per name (a single id for both sides is now
     refused as a team playing itself)."""
     return f"team-{name}"
