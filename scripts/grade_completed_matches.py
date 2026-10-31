@@ -572,6 +572,51 @@ def run(database_url: str, days: int, match_id: Optional[str]) -> dict:
     return summary
 
 
+def warn_stuck_post_kickoff_recs(database_url: str, days: int) -> int:
+    """Canary, run after every grading run. Migration 027 leaves a rec
+    written at or after kickoff 'pending' for grade_match to void, but
+    grade_match only visits matches whose kickoff is inside the --days
+    window: a match marked finished after it aged out of that window (a
+    results backlog, a repaired fixture) would hold such a rec open forever,
+    counted in the dashboard's active_recs, and void_post_kickoff_recs.py
+    only selects settled recs. Logs ERROR with the count, the first 10 rec
+    ids and the command that voids them; returns the count (0: logs nothing).
+    Joins on the rec's own match_id with the `>=` comparison, as
+    list_open_recs_for_match does."""
+    with psycopg2.connect(database_url) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT br.id::text AS rec_id,
+                       COUNT(*) OVER () AS n,
+                       CEIL(EXTRACT(EPOCH FROM NOW() - MIN(m.match_date) OVER ()) / 86400)::int + 1 AS days_needed
+                FROM betting_recommendations br
+                JOIN matches m ON m.id = br.match_id
+                WHERE br.status IN ('pending', 'placed')
+                  AND m.status = 'finished'
+                  AND br.created_at >= m.match_date
+                  AND m.match_date < NOW() - (%s || ' days')::interval
+                ORDER BY m.match_date, br.id
+                LIMIT 10
+                """,
+                (str(days),),
+            )
+            rows = cur.fetchall()
+    if not rows:
+        return 0
+    logger.error(
+        "%d pending/placed rec(s) written at or after kickoff sit on finished matches older than the --days %d "
+        "window, so no scheduled run will void them (first %d: %s). Void them with: "
+        "python /app/scripts/grade_completed_matches.py --days %d",
+        rows[0]["n"],
+        days,
+        len(rows),
+        ", ".join(r["rec_id"] for r in rows),
+        rows[0]["days_needed"],
+    )
+    return int(rows[0]["n"])
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
@@ -595,6 +640,7 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("DATABASE_URL not set")
         return 2
     run(args.database_url, args.days, args.match_id)
+    warn_stuck_post_kickoff_recs(args.database_url, args.days)
     return 0
 
 

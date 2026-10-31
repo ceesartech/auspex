@@ -33,6 +33,19 @@
 -- Rows the old trigger already settled are untouched here:
 -- scripts/ops/void_post_kickoff_recs.sh re-settles those recs.
 --
+-- KNOWN GAP (accepted -- pending beats wrongly settled): the grader voids a
+-- post-kickoff rec only when it visits the match, i.e. when the match's
+-- kickoff is inside its --days window. A match that flips to 'finished'
+-- after aging out of that window (a results backlog after an outage, a
+-- repair flipping old rows) leaves its post-kickoff recs 'pending' with no
+-- scheduled run to void them; they stay in the dashboard's active_recs, and
+-- void_post_kickoff_recs.py selects only settled recs. Under 011 the same
+-- recs were marked won/lost instead. grade_completed_matches.py checks for
+-- them after every run (warn_stuck_post_kickoff_recs) and logs ERROR with
+-- the count, the first ids and the command that voids them: an operator run
+--   python /app/scripts/grade_completed_matches.py --days N
+-- with N reaching the oldest such kickoff (the ERROR line gives N).
+--
 -- REVERSIBLE: re-apply 011_extend_match_outcome_trigger.sql (idempotent:
 -- CREATE OR REPLACE of the helpers and this function, then re-declares the
 -- trigger).

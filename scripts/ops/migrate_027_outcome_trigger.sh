@@ -7,12 +7,14 @@
 #   1. pre-check (read-only): the live function must be 011's (or already
 #      027's). Anything else is an unknown edit 027 would overwrite;
 #   2. verified backup (B2) — abort if it does not land;
-#   3. dry run: 027 plus the proof from step 6 in ONE transaction, rolled
-#      back, so the new body is proven on prod before it is committed;
+#   3. dry run: 027, step 5's after-state check and step 6's proof in ONE
+#      transaction, rolled back. A migration file that has drifted from the
+#      md5 pinned below, or a body that fails the proof, is refused here,
+#      before anything is committed;
 #   4. apply 027 (one transaction; CREATE OR REPLACE FUNCTION locks no table);
-#   5. after-state: the live body is 027's byte for byte (md5), carries each
-#      guard exactly once, and trg_match_outcome still fires it, enabled.
-#      EXPECTED "<md5 027>|1|1|1";
+#   5. after-state (re-confirms step 3 on the committed body): the live body
+#      is 027's byte for byte (md5), carries each guard exactly once, and
+#      trg_match_outcome still fires it, enabled. EXPECTED "<md5 027>|1|1|1";
 #   6. prove it (rolled back): flip a scratch match to finished holding a
 #      pre-kickoff rec, a rec written AT kickoff (the >= boundary, on the same
 #      graded prediction), and a pre- and a post-kickoff prediction. EXPECTED
@@ -21,8 +23,9 @@
 # Re-runnable: re-applying 027 is a no-op.
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/migrate_027_outcome_trigger.sh 2>&1 | tee -a ~/migrate_027.log
+# (AUSPEX_DIR and TMPDIR exist for tests/unit/test_migrate_027_wrapper.py.)
 set -uo pipefail
-cd /opt/auspex
+cd "${AUSPEX_DIR:-/opt/auspex}" || { echo "ABORT: cannot cd to ${AUSPEX_DIR:-/opt/auspex} — nothing changed"; exit 1; }
 DC="docker compose"
 MIG=services/data-ingestion/db/migrations/027_outcome_trigger_skips_post_kickoff.sql
 MD5_011=24b0d94b2d5b9ad6e6f8b04550e9d9f7 # md5(pg_get_functiondef) after 011 — prod's, 2026-10-31
@@ -30,6 +33,10 @@ MD5_027=97384c8327efa61669af1012c06c6232 # after 027 (scratch Postgres, every mi
 EXPECT_STATE="$MD5_027|1|1|1"
 EXPECT_PROOF="m027 pre_pred=true post_pred=null pre_rec=won post_rec=pending"
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
+# Host-side SQL and logs live in a private directory: no clash with an earlier
+# run's files. The SQL is removed on exit; the logs stay for inspection.
+W=$(mktemp -d "${TMPDIR:-/tmp}/m027.XXXXXX") || { log "ABORT: mktemp failed — nothing changed"; exit 1; }
+log "logs in $W"
 # run_sql <host file> <log file> [psql opts]: output to the log; exit status
 # is psql's (ON_ERROR_STOP, so any SQL error is non-zero) — never a pipe's.
 run_sql() {
@@ -40,15 +47,28 @@ latest_dump() {
   $DC exec -T api python -c "import sys; sys.path.insert(0,'/app/scripts'); import b2_io; s=b2_io.s3_client(); o=max(b2_io._list(s,'postgres/'), key=lambda o:o['LastModified']); print(int(o['LastModified'].timestamp()), o['Key'])" 2>/dev/null | tail -1
 }
 cleanup() {
-  rm -f /tmp/m027_*.sql
+  rm -f "$W"/m027_*.sql
   $DC exec -T postgres sh -c "rm -f /tmp/m027_*.sql /tmp/$(basename "$MIG")" >/dev/null 2>&1
 }
 trap cleanup EXIT
 
+# The after-state: step 3 runs it inside 027's transaction (on the body about
+# to be committed), step 5 on the committed one.
+cat > "$W/m027_verify.sql" <<'SQLEOF'
+WITH f AS (SELECT pg_get_functiondef('calculate_match_outcome()'::regprocedure) AS d)
+SELECT md5(d)
+    || '|' || (cardinality(string_to_array(d, 'AND (p.created_at > NEW.match_date) IS NOT TRUE')) - 1)
+    || '|' || (cardinality(string_to_array(d, 'AND (br.created_at >= NEW.match_date) IS NOT TRUE')) - 1)
+    || '|' || (SELECT count(*) FROM pg_trigger
+                WHERE tgname = 'trg_match_outcome' AND tgrelid = 'matches'::regclass
+                  AND tgfoid = 'calculate_match_outcome()'::regprocedure AND tgenabled <> 'D')
+  FROM f;
+SQLEOF
+
 # The proof, without BEGIN/ROLLBACK: step 3 runs it inside 027's transaction,
 # step 6 inside its own. A scratch match (no league or teams; kickoff 3h ago)
 # and its rows exist only inside that transaction; stakes are 0.
-cat > /tmp/m027_prove_body.sql <<'SQLEOF'
+cat > "$W/m027_prove_body.sql" <<'SQLEOF'
 SET LOCAL lock_timeout = '10s';
 INSERT INTO matches (match_date, status, season)
 VALUES (date_trunc('second', NOW()) - interval '3 hours', 'scheduled', 'm027')
@@ -78,13 +98,13 @@ SELECT 'm027 pre_pred=' || COALESCE((SELECT is_correct::text FROM predictions WH
 SQLEOF
 
 log "1/6 pre-check (read-only)"
-cat > /tmp/m027_fn.sql <<'SQLEOF'
+cat > "$W/m027_fn.sql" <<'SQLEOF'
 SELECT md5(pg_get_functiondef('calculate_match_outcome()'::regprocedure));
 SQLEOF
-run_sql /tmp/m027_fn.sql /tmp/m027_fn.log -tA
+run_sql "$W/m027_fn.sql" "$W/m027_fn.log" -tA
 rc=$?
-live=$(tr -d '[:space:]' < /tmp/m027_fn.log)
-if [ $rc -ne 0 ]; then cat /tmp/m027_fn.log; log "ABORT at step 1: could not read calculate_match_outcome — nothing changed"; exit 1; fi
+live=$(tr -d '[:space:]' < "$W/m027_fn.log")
+if [ $rc -ne 0 ]; then cat "$W/m027_fn.log"; log "ABORT at step 1: could not read calculate_match_outcome — nothing changed"; exit 1; fi
 case "$live" in
   "$MD5_011") log "live function is 011's, as expected" ;;
   "$MD5_027") log "live function is already 027's — re-applying is a no-op" ;;
@@ -103,52 +123,45 @@ done
 if [ -z "$landed" ]; then log "ABORT: backup did not land in B2 within 20 min — nothing changed"; exit 1; fi
 log "backup landed: $landed"
 
-log "3/6 dry run: 027 + proof in one transaction, rolled back"
-sed '/^COMMIT;$/d' "$MIG" > /tmp/m027_dry.sql
-cat /tmp/m027_prove_body.sql >> /tmp/m027_dry.sql
-echo 'ROLLBACK;' >> /tmp/m027_dry.sql
-if grep -qiE '^[[:space:]]*COMMIT' /tmp/m027_dry.sql; then log "ABORT at step 3: the dry-run file still commits — nothing changed"; exit 1; fi
-run_sql /tmp/m027_dry.sql /tmp/m027_dry.log -tA
+log "3/6 dry run: 027 + after-state + proof in one transaction, rolled back"
+sed '/^COMMIT;$/d' "$MIG" > "$W/m027_dry.sql"
+cat "$W/m027_verify.sql" "$W/m027_prove_body.sql" >> "$W/m027_dry.sql"
+echo 'ROLLBACK;' >> "$W/m027_dry.sql"
+if grep -qiE '^[[:space:]]*COMMIT' "$W/m027_dry.sql"; then log "ABORT at step 3: the dry-run file still commits — nothing changed"; exit 1; fi
+run_sql "$W/m027_dry.sql" "$W/m027_dry.log" -tA
 rc=$?
-cat /tmp/m027_dry.log
+cat "$W/m027_dry.log"
 if [ $rc -ne 0 ]; then log "ABORT at step 3: the dry run failed (rolled back) — nothing changed"; exit 1; fi
-if ! grep -qFx "$EXPECT_PROOF" /tmp/m027_dry.log; then
+if ! grep -qFx "$EXPECT_STATE" "$W/m027_dry.log"; then
+  log "ABORT at step 3: under 027 md5|prediction guard|rec guard|trigger did not read '$EXPECT_STATE' — $MIG has drifted from the md5 pinned here, or a guard or the trigger is missing (rolled back) — nothing changed"; exit 1
+fi
+if ! grep -qFx "$EXPECT_PROOF" "$W/m027_dry.log"; then
   log "ABORT at step 3: under 027 the proof did not read '$EXPECT_PROOF' (rolled back) — nothing changed"; exit 1
 fi
 
 log "4/6 apply 027"
-run_sql "$MIG" /tmp/m027_apply.log
+run_sql "$MIG" "$W/m027_apply.log"
 rc=$?
-cat /tmp/m027_apply.log
+cat "$W/m027_apply.log"
 if [ $rc -ne 0 ]; then log "ABORT at step 4: migration failed (one transaction — nothing changed); re-run"; exit 1; fi
 
 log "5/6 after-state"
-cat > /tmp/m027_verify.sql <<'SQLEOF'
-WITH f AS (SELECT pg_get_functiondef('calculate_match_outcome()'::regprocedure) AS d)
-SELECT md5(d)
-    || '|' || (cardinality(string_to_array(d, 'AND (p.created_at > NEW.match_date) IS NOT TRUE')) - 1)
-    || '|' || (cardinality(string_to_array(d, 'AND (br.created_at >= NEW.match_date) IS NOT TRUE')) - 1)
-    || '|' || (SELECT count(*) FROM pg_trigger
-                WHERE tgname = 'trg_match_outcome' AND tgrelid = 'matches'::regclass
-                  AND tgfoid = 'calculate_match_outcome()'::regprocedure AND tgenabled <> 'D')
-  FROM f;
-SQLEOF
-run_sql /tmp/m027_verify.sql /tmp/m027_verify.log -tA
+run_sql "$W/m027_verify.sql" "$W/m027_verify.log" -tA
 rc=$?
-state=$(tr -d '[:space:]' < /tmp/m027_verify.log)
+state=$(tr -d '[:space:]' < "$W/m027_verify.log")
 echo "md5|prediction guard|rec guard|trigger: $state"
 if [ $rc -ne 0 ] || [ "$state" != "$EXPECT_STATE" ]; then
   log "FAILED at step 5: expected $EXPECT_STATE — inspect now (revert: re-apply 011)"; exit 1
 fi
 
 log "6/6 prove: a post-kickoff rec stays pending (rolled back)"
-echo 'BEGIN;' > /tmp/m027_prove.sql
-cat /tmp/m027_prove_body.sql >> /tmp/m027_prove.sql
-echo 'ROLLBACK;' >> /tmp/m027_prove.sql
-run_sql /tmp/m027_prove.sql /tmp/m027_prove.log -tA
+echo 'BEGIN;' > "$W/m027_prove.sql"
+cat "$W/m027_prove_body.sql" >> "$W/m027_prove.sql"
+echo 'ROLLBACK;' >> "$W/m027_prove.sql"
+run_sql "$W/m027_prove.sql" "$W/m027_prove.log" -tA
 rc=$?
-cat /tmp/m027_prove.log
-if [ $rc -eq 0 ] && grep -qFx "$EXPECT_PROOF" /tmp/m027_prove.log; then
+cat "$W/m027_prove.log"
+if [ $rc -eq 0 ] && grep -qFx "$EXPECT_PROOF" "$W/m027_prove.log"; then
   log "DONE: post-kickoff rec left pending, post-kickoff prediction ungraded, pre-kickoff rec settled"
 else
   log "FAILED at step 6: expected '$EXPECT_PROOF' — inspect now (revert: re-apply 011)"; exit 1

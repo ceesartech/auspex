@@ -19,7 +19,9 @@ total 5.5) are tested without any features_cache row.
 
 Migration 027 makes the trigger skip predictions written after kickoff
 and recs written at or after it (TestPostKickoffRows), so seeded
-predictions default to an hour before kickoff.
+predictions default to an hour before kickoff. One test there also runs
+scripts/grade_completed_matches.py against this database: the grader voids
+the recs 027 leaves pending, and its canary names the ones it cannot reach.
 
 These are integration tests — they need a real Postgres with all
 migrations applied. They're auto-marked `integration` by
@@ -30,9 +32,14 @@ conftest.pytest_collection_modifyitems and run via:
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
+import re
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
@@ -215,6 +222,22 @@ def _finish_match(conn, *, match_id: str, home_score: int, away_score: int):
         ),
         {"hs": home_score, "as": away_score, "mid": match_id},
     )
+
+
+def _load_grader():
+    """scripts/grade_completed_matches.py as a module (it is not a package).
+    It puts scripts/ on sys.path for its own grading_outcomes import; that
+    entry is taken off again once it has loaded."""
+    scripts = Path(__file__).resolve().parents[4] / "scripts"
+    saved = list(sys.path)
+    try:
+        spec = importlib.util.spec_from_file_location("grade_completed_matches", scripts / "grade_completed_matches.py")
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    finally:
+        sys.path[:] = saved
+    return mod
 
 
 def _read_prediction(conn, pred_id: str) -> dict:
@@ -789,3 +812,52 @@ class TestPostKickoffRows:
             _finish_match(conn, match_id=ids["match_id"], home_score=0, away_score=1)
             row = _read_rec(conn, rec)
         assert row["status"] == "lost"
+
+    def test_pending_rec_the_grading_window_misses_is_reported_until_voided(self, trigger_tables, engine, caplog):
+        # 027 leaves a post-kickoff rec pending for the grader, which visits
+        # only matches inside --days. On a match marked finished after it aged
+        # out of that window, grade_completed_matches.py's canary must name the
+        # rec, and the command it prints must void it.
+        grader = _load_grader()
+        url = os.environ["DATABASE_URL"]
+        with engine.begin() as conn:
+            ids = _seed_match(conn, sport="soccer")
+            kickoff = conn.execute(
+                text(
+                    "UPDATE matches SET match_date = match_date - INTERVAL '30 days' "
+                    "WHERE id = :id RETURNING match_date"
+                ),
+                {"id": ids["match_id"]},
+            ).scalar_one()
+            pred = _seed_prediction(
+                conn,
+                match_id=ids["match_id"],
+                model_name="ensemble_soccer_match_result",
+                prediction_type="match_result",
+                predicted_outcome="home",
+            )
+            late = _seed_rec(
+                conn,
+                match_id=ids["match_id"],
+                prediction_id=pred,
+                selection="home",
+                created_at=kickoff + timedelta(minutes=5),
+            )
+            _finish_match(conn, match_id=ids["match_id"], home_score=2, away_score=1)
+        with engine.begin() as conn:
+            assert _read_rec(conn, late)["status"] == "pending"
+
+        with caplog.at_level("INFO", logger="grade_completed_matches"):
+            grader.run(url, 14, None)  # the scheduled run: the match is outside its window
+            assert grader.warn_stuck_post_kickoff_recs(url, 14) == 1
+        errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1 and late in errors[0], errors
+        command = re.search(r"Void them with: python /app/scripts/grade_completed_matches.py --days (\d+)$", errors[0])
+        assert command, errors[0]
+        assert int(command.group(1)) == 32  # kickoff 30 days + 4 hours ago
+
+        grader.run(url, int(command.group(1)), None)
+        with engine.begin() as conn:
+            row = _read_rec(conn, late)
+        assert row["status"] == "void" and row["actual_result"] == grader.POST_KICKOFF_VOID_RESULT
+        assert grader.warn_stuck_post_kickoff_recs(url, 14) == 0
