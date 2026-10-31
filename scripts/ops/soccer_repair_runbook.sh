@@ -362,8 +362,10 @@ run_step 8 "backfill_soccer_regulation_scores + re-grade" step8
 run_step 9 "backfill_season_labels" bash "$OPS/backfill_season_labels.sh"
 run_step 10 "compute_features --backfill-finished soccer" step10
 run_step 11 "merge odds after-check" step11
+scope="from step $FROM"
+[ -z "$ONLY" ] || scope="step $ONLY only"
 if corpus_consistent; then
-  log "ALL STEPS DONE (${ONLY:+step $ONLY}${ONLY:-from step $FROM})"
+  log "ALL STEPS DONE ($scope)"
 else
-  log "ALL STEPS DONE (${ONLY:+step $ONLY}${ONLY:-from step $FROM}) — but no feature recompute (step 10) since the last corpus change: the repair is not complete"
+  log "ALL STEPS DONE ($scope) — but no feature recompute (step 10) since the last corpus change: the repair is not complete"
 fi

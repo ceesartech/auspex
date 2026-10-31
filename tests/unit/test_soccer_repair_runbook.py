@@ -199,8 +199,10 @@ def test_from_and_only(tmp_path):
     rc, out, steps, calls, _ = _run(tmp_path, "--from", "6")
     assert rc == 0, out
     assert steps == EXPECTED_ORDER[5:]
+    assert "ALL STEPS DONE (from step 6)" in out
     rc, out, steps, calls, _ = _run(tmp_path / "o", "--only", "9", repo=_repo(tmp_path / "o"))
     assert rc == 0 and steps == ["backfill_season_labels"], out
+    assert "ALL STEPS DONE (step 9 only)" in out
     assert not [c for c in calls if "compute_features" in c]
 
 
