@@ -122,6 +122,8 @@ class FakeCursor:
                 for r in self.rows
                 if r["id"] == params[0]
             ]
+        elif sql == " ".join(fu.TEAM_NAMES_SQL.split()):  # a refusal names the parse's team rows
+            self._result = [{"id": t, "name": f"team-{t}"} for t in params[0]]
         elif "JOIN teams th" in sql:  # _match_teams — the owner's pair, with names
             self._result = [
                 {
@@ -744,6 +746,7 @@ class TestForkRefusal:
         assert len(refusal) == 1
         for both_pairs_and_the_id in ("401671789", "owner", "name-old-home-uuid", "Home FC", "Away FC", HOME):
             assert both_pairs_and_the_id in refusal[0].message
+        assert f"Home FC -> team 'team-{HOME}' [{HOME}]" in refusal[0].message  # the resolved row, by name
 
     def test_results_path_writes_nothing_and_counts_it(self, identity_stats):
         cur = self._owned_by_old_home()

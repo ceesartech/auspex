@@ -271,6 +271,8 @@ class StatusCursor:
                 if drop_espn_id is not None and r.get("espn") == drop_espn_id and "- 'espn'" in sql:
                     r["espn"] = None
             self._result = [{"id": rid}] if hit else []
+        elif sql == " ".join(fu.TEAM_NAMES_SQL.split()):  # a refusal names the team rows next to their ids
+            self._result = [{"id": t, "name": f"name-{t}"} for t in params[0]]
         else:
             raise AssertionError(f"unexpected SQL: {sql[:80]}")
 
@@ -432,7 +434,10 @@ class TestRecordStatusChange:
             fu._record_result(cur, SOCCER, "league", _postponed())
         assert cur.updates == [] and stats["status_refused"] == 1
         assert fu.identity_exit_code(SOCCER) == 3
-        assert any("Refusing to record ESPN's status" in r.getMessage() for r in caplog.records)
+        (msg,) = [r.getMessage() for r in caplog.records if "Refusing to record ESPN's status" in r.getMessage()]
+        # the stored pair and the parse, each team row by name next to its id
+        for named in ("'name-someone-else' [someone-else]", f"'name-{AWAY}' [{AWAY}]", f"'name-{HOME}' [{HOME}]"):
+            assert named in msg
 
     def test_an_espn_id_on_two_rows_falls_back_to_the_exact_fixture(self, stats, teams, caplog):
         twin = _row(rid="row-2", match_date=KICKOFF - timedelta(hours=2))

@@ -11,7 +11,8 @@ so the jsonb predicates and guards are Postgres's, not a stub's:
     a cancelled duplicate of a played fixture;
   * a money-settled rec is re-settled on a 90-minute score that arrives later;
   * ESPN's own cancel stays correctable (insert_finished_match,
-    _release_redrawn_slot), a cancel recorded on purpose stays final, and a
+    insert_scheduled_match, _release_redrawn_slot), a cancel recorded on
+    purpose stays final on both upserts, and a
     cancelled tennis competition gives up its ESPN id;
   * regrade_predictions --match-id reads only those matches.
 
@@ -278,6 +279,32 @@ class TestEspnCancels:
         assert self._finish(cur, m, kickoff) == written
         expected = ("finished", 2, 1) if written else ("cancelled", None, None)
         assert _status(cur, "matches", m["id"], "status", "home_score", "away_score") == expected
+
+    @pytest.mark.parametrize(
+        "metadata, status_after",
+        [
+            ({"status_source": "espn_scoreboard", "espn_status": "STATUS_ABANDONED"}, "scheduled"),
+            ({"status_source": "espn_scoreboard", "espn_status": "STATUS_ABANDONED", "orphan_of": "t"}, "cancelled"),
+            (
+                {"status_source": "espn_scoreboard", "espn_status": "STATUS_CANCELED", "redrawn_espn_id": "9"},
+                "cancelled",
+            ),
+            ({"result_note": "operator"}, "cancelled"),  # fix_unplayed_soccer_rows: no status_source
+            ({}, "cancelled"),
+        ],
+    )
+    def test_the_fixtures_upsert_keeps_a_cancel_recorded_on_purpose(self, cur, metadata, status_after):
+        kickoff = NOW + timedelta(days=1)
+        m = _match(cur, status="cancelled", kickoff=kickoff, scores=(None, None), metadata=metadata)
+        assert fu.insert_scheduled_match(cur, self.SOCCER, m["league"], m["home"], m["away"], kickoff, None) == 1
+        assert _status(cur, "matches", m["id"], "status") == (status_after,)
+
+    def test_the_fixtures_upsert_still_reschedules_a_postponed_row_and_keeps_a_finished_one(self, cur):
+        for status, after in (("postponed", "scheduled"), ("finished", "finished")):
+            kickoff = NOW + timedelta(days=2)
+            m = _match(cur, status=status, kickoff=kickoff)
+            fu.insert_scheduled_match(cur, self.SOCCER, m["league"], m["home"], m["away"], kickoff, None)
+            assert _status(cur, "matches", m["id"], "status") == (after,)
 
     def test_an_espn_cancelled_slot_is_released_and_an_operators_is_not(self, cur):
         for metadata, released in ((self.ESPN, True), ({}, False)):

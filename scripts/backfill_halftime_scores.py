@@ -132,8 +132,20 @@ def scoreboard_days(days: set[date]) -> list[date]:
     return sorted({d for day in days for d in (day, day - timedelta(days=1))})
 
 
-def find_row(cur, league_id: Optional[str], espn_id: Optional[str], home_name, away_name, match_dt):
-    """(row, how) for the existing finished row, or (None, reason)."""
+def find_row(
+    cur,
+    league_id: Optional[str],
+    espn_id: Optional[str],
+    home_name,
+    away_name,
+    match_dt,
+    home_espn: Optional[str] = None,
+    away_espn: Optional[str] = None,
+):
+    """(row, how) for the existing finished row, or (None, reason). Sides
+    resolve by the competitors' ESPN team ids first (fetch_upcoming.find_team,
+    as backfill_soccer_regulation_scores.match_candidate does): ESPN's
+    'Santos' is Santos Laguna (225) in Liga MX, not Santos FC by name."""
     if espn_id:
         cur.execute(ROW_BY_ESPN_SQL, (str(espn_id),))
         rows = cur.fetchall()
@@ -141,8 +153,8 @@ def find_row(cur, league_id: Optional[str], espn_id: Optional[str], home_name, a
             return None, "ambiguous"
         if rows:
             return rows[0], "espn"
-    home_id = fu.find_team(cur, SOCCER, home_name, league_id)
-    away_id = fu.find_team(cur, SOCCER, away_name, league_id)
+    home_id = fu.find_team(cur, SOCCER, home_name, league_id, espn_id=home_espn)
+    away_id = fu.find_team(cur, SOCCER, away_name, league_id, espn_id=away_espn)
     if not (home_id and away_id):
         return None, "unmatched"
     cur.execute(ROW_BY_TRIPLE_SQL, (home_id, away_id, match_dt))
@@ -170,7 +182,16 @@ def plan_competition(cur, league_id: Optional[str], comp: dict, counts: Counter)
     if ht is None:
         counts["plays_do_not_add_up"] += 1
         return None
-    row, how = find_row(cur, league_id, espn_id, home_name, away_name, match_dt)
+    row, how = find_row(
+        cur,
+        league_id,
+        espn_id,
+        home_name,
+        away_name,
+        match_dt,
+        home_espn=fu._competitor_espn_id(home, False),
+        away_espn=fu._competitor_espn_id(away, False),
+    )
     if row is None:
         counts[how] += 1
         return None

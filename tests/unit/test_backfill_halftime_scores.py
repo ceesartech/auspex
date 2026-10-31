@@ -55,7 +55,7 @@ def _row(home_score=2, away_score=1, half_time_home=None):
 def found(monkeypatch):
     """Make find_row return a chosen row without touching a DB."""
     state = {"row": _row(), "how": "espn"}
-    monkeypatch.setattr(bh, "find_row", lambda *a: (state["row"], state["how"]))
+    monkeypatch.setattr(bh, "find_row", lambda *a, **k: (state["row"], state["how"]))
     return state
 
 
@@ -119,14 +119,33 @@ class TestFindRow:
         assert row is None and how == "ambiguous"
 
     def test_falls_back_to_the_exact_triple_via_find_team(self, monkeypatch):
-        monkeypatch.setattr(bh.fu, "find_team", lambda cur, cfg, name, lg: f"id-{name}")
+        monkeypatch.setattr(bh.fu, "find_team", lambda cur, cfg, name, lg, espn_id=None: f"id-{name}")
         cur = _Cur(triple_rows=[_row()])
         row, how = bh.find_row(cur, "lg", "7001", "Home FC", "Away FC", "2026-08-01")
         assert how == "triple" and row["id"] == "m-1"
         assert not any("INSERT" in s for s in cur.sql)
 
+    def test_sides_resolve_by_the_competitors_espn_team_ids(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            bh.fu, "find_team", lambda cur, cfg, name, lg, espn_id=None: seen.append((name, espn_id)) or f"id-{name}"
+        )
+        bh.find_row(_Cur(triple_rows=[_row()]), "lg", None, "Santos", "Tijuana", "2026-08-01", "225", "10125")
+        assert seen == [("Santos", "225"), ("Tijuana", "10125")]
+
+    def test_plan_competition_hands_find_row_the_competitor_ids(self, monkeypatch):
+        got = {}
+
+        def fake_find_row(cur, lg, espn_id, home_name, away_name, match_dt, home_espn=None, away_espn=None):
+            got.update(home=home_espn, away=away_espn)
+            return None, "unmatched"
+
+        monkeypatch.setattr(bh, "find_row", fake_find_row)
+        bh.plan_competition(None, "lg", _comp(), Counter())
+        assert got == {"home": "10", "away": "20"}  # the competitors' ids in _comp
+
     def test_unknown_team_is_unmatched(self, monkeypatch):
-        monkeypatch.setattr(bh.fu, "find_team", lambda *a: None)
+        monkeypatch.setattr(bh.fu, "find_team", lambda *a, **k: None)
         row, how = bh.find_row(_Cur(), "lg", None, "Home FC", "Away FC", "2026-08-01")
         assert row is None and how == "unmatched"
 

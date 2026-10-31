@@ -732,20 +732,14 @@ def insert_scheduled_match(
     cur, cfg: SportConfig, league_id, home_id, away_id, match_dt, venue, season: str | None = None
 ) -> int:
     """`season` labels an INSERTED row (an existing row keeps its label);
-    None falls back to cfg.season_func."""
+    None falls back to cfg.season_func. On the existing row of the triple a
+    'finished' status stays, and so does a 'cancelled' one recorded on purpose
+    (an operator's, repair_fixture_orphans' orphan_of, a re-drawn slot's): the
+    results path's rule (INSERT_FINISHED_MATCH_SQL), so the two paths never
+    disagree about a cancel. Only ESPN's own cancel (ESPN_CANCELLED_SQL) and
+    any other status go back to 'scheduled'."""
     cur.execute(
-        """
-        INSERT INTO matches (league_id, home_team_id, away_team_id, match_date,
-                             status, venue, season)
-        VALUES (%s, %s, %s, %s, 'scheduled', %s, %s)
-        ON CONFLICT (home_team_id, away_team_id, match_date) DO UPDATE
-            SET status = CASE
-                  WHEN matches.status = 'finished' THEN matches.status
-                  ELSE EXCLUDED.status
-                END,
-                venue = COALESCE(matches.venue, EXCLUDED.venue),
-                updated_at = NOW()
-        """,
+        INSERT_SCHEDULED_MATCH_SQL,
         (league_id, home_id, away_id, match_dt, venue, season if season is not None else cfg.season_func(match_dt)),
     )
     return cur.rowcount
@@ -766,6 +760,28 @@ ESPN_CANCELLED_SQL = (
     " AND {t}.metadata->>'espn_status' IN ('STATUS_CANCELED', 'STATUS_CANCELLED', 'STATUS_ABANDONED')"
     " AND {t}.metadata->>'orphan_of' IS NULL"
     " AND {t}.metadata->>'redrawn_espn_id' IS NULL)"
+)
+
+
+# The fixtures path's upsert (insert_scheduled_match). COALESCE: on a row
+# without those metadata keys ESPN_CANCELLED_SQL is NULL, which must read
+# "not ESPN's cancel" (keep it), never fall through to 'scheduled'.
+INSERT_SCHEDULED_MATCH_SQL = (
+    """
+        INSERT INTO matches (league_id, home_team_id, away_team_id, match_date,
+                             status, venue, season)
+        VALUES (%s, %s, %s, %s, 'scheduled', %s, %s)
+        ON CONFLICT (home_team_id, away_team_id, match_date) DO UPDATE
+            SET status = CASE
+                  WHEN matches.status = 'finished' THEN matches.status
+                  WHEN matches.status = 'cancelled' AND NOT COALESCE("""
+    + ESPN_CANCELLED_SQL.format(t="matches")
+    + """, false) THEN matches.status
+                  ELSE EXCLUDED.status
+                END,
+                venue = COALESCE(matches.venue, EXCLUDED.venue),
+                updated_at = NOW()
+    """
 )
 
 
@@ -1436,6 +1452,21 @@ def _stamp_identity(cur, home_id, away_id, match_dt, espn_id, season_type) -> bo
     return cur.rowcount > 0
 
 
+# id::text: never a cast error inside the sweep's transaction, whatever the ids.
+TEAM_NAMES_SQL = "SELECT id::text AS id, name FROM teams WHERE id::text = ANY(%s)"
+
+
+def _team_names(cur, *team_ids) -> dict[str, str]:
+    """{team id: name} of the team rows a refusal names, so the log line shows
+    which club each id is (ESPN calls Santos FC and Santos Laguna both
+    'Santos'). A row that is not found is left out (the line prints '?')."""
+    ids = sorted({str(t) for t in team_ids if t})
+    if not ids:
+        return {}
+    cur.execute(TEAM_NAMES_SQL, (ids,))
+    return {str(r["id"]): r["name"] for r in (cur.fetchall() or [])}
+
+
 def _match_teams(cur, match_id) -> dict | None:
     """A row's team pair, with names for the log line."""
     cur.execute(
@@ -1501,16 +1532,19 @@ def _is_identity_drift(owner: dict, home_id, away_id) -> bool:
 
 
 def _log_refused_fork(
-    cfg: SportConfig, espn_id, refusal: ForkRefused, home_name, home_id, away_name, away_id, match_dt
+    cur, cfg: SportConfig, espn_id, refusal: ForkRefused, home_name, home_id, away_name, away_id, match_dt
 ) -> None:
-    """Count a ForkRefused and log both team pairs, so the repair is obvious."""
+    """Count a ForkRefused and log both team pairs, so the repair is obvious:
+    the parse's sides as ESPN names them AND as the team rows they resolved
+    to (ESPN's 'Santos' is two clubs; only the row names tell them apart)."""
     IDENTITY_STATS["forks_refused"] += 1
     owner = refusal.owner
+    names = _team_names(cur, home_id, away_id)
     logger.error(
         "Refusing %s ESPN competition %s at %s: it already owns match %s, %s [%s] vs %s [%s], but now parses as "
-        "%s [%s] vs %s [%s]. Writing it would insert a second row for the same fixture, splitting predictions/recs "
-        "from the result. Nothing written. Repair the team mapping (a duplicate team row?) or the fixture row; "
-        "this run exits %d.",
+        "%s -> team %r [%s] vs %s -> team %r [%s]. Writing it would insert a second row for the same fixture, "
+        "splitting predictions/recs from the result. Nothing written. Repair the team mapping (a duplicate team "
+        "row?) or the fixture row; this run exits %d.",
         cfg.sport,
         espn_id,
         match_dt,
@@ -1520,8 +1554,10 @@ def _log_refused_fork(
         owner.get("away_name"),
         owner["away_team_id"],
         home_name,
+        names.get(str(home_id), "?"),
         home_id,
         away_name,
+        names.get(str(away_id), "?"),
         away_id,
         IDENTITY_EXIT_CODE,
     )
@@ -1704,7 +1740,7 @@ def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict, even
             allow_heal=healing_allowed((event_context or {}).get("pair_index"), home_name, away_name, match_dt),
         )
     except ForkRefused as refusal:
-        _log_refused_fork(cfg, espn_id, refusal, home_name, home_id, away_name, away_id, match_dt)
+        _log_refused_fork(cur, cfg, espn_id, refusal, home_name, home_id, away_name, away_id, match_dt)
         return False
     written = bool(
         insert_scheduled_match(
@@ -1963,19 +1999,25 @@ def _status_target_row(cur, cfg: SportConfig, espn_id, home_id, away_id, match_d
                 return row  # the same two players, listed the other way round
             if not cfg.is_individual and _is_identity_drift(row, home_id, away_id):
                 IDENTITY_STATS["status_refused"] += 1
+                names = _team_names(cur, row["home_team_id"], row["away_team_id"], home_id, away_id)
                 logger.error(
                     "Refusing to record ESPN's status for %s %s vs %s at %s (ESPN %s): the id names row %s "
-                    "(%s v %s), which shares a team with this parse (%s v %s) — team resolution drifted under "
-                    "the fixture. Nothing written; repair the team mapping or the row. This run exits %d.",
+                    "(team %r [%s] v team %r [%s]), which shares a team with this parse (team %r [%s] v team %r "
+                    "[%s]) — team resolution drifted under the fixture. Nothing written; repair the team mapping or "
+                    "the row. This run exits %d.",
                     cfg.sport,
                     home_name,
                     away_name,
                     match_dt,
                     espn_id,
                     row["id"],
+                    names.get(str(row["home_team_id"]), "?"),
                     row["home_team_id"],
+                    names.get(str(row["away_team_id"]), "?"),
                     row["away_team_id"],
+                    names.get(str(home_id), "?"),
                     home_id,
+                    names.get(str(away_id), "?"),
                     away_id,
                     IDENTITY_EXIT_CODE,
                 )
@@ -2215,7 +2257,7 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
             allow_heal=healing_allowed((event_context or {}).get("pair_index"), home_name, away_name, match_dt),
         )
     except ForkRefused as refusal:
-        _log_refused_fork(cfg, espn_id, refusal, home_name, home_id, away_name, away_id, match_dt)
+        _log_refused_fork(cur, cfg, espn_id, refusal, home_name, home_id, away_name, away_id, match_dt)
         return False
     written = bool(
         insert_finished_match(
