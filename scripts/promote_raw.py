@@ -55,6 +55,7 @@ import psycopg2
 from psycopg2.extras import Json, RealDictCursor, execute_values
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import soccer_seasons  # noqa: E402
 import team_identity  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
@@ -139,9 +140,6 @@ LEAGUE_MAP: dict[str, tuple[str, str]] = {
 # league code in load_football_data_extra.COUNTRY_MAP (pinned by
 # tests/unit/test_promote_raw.py). Until 2026-10-31 this set was named
 # CALENDAR_SEASON_LEAGUES, although Liga MX and Austria are cross-year.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import soccer_seasons  # noqa: E402
-
 YEAR_CODED_LEAGUES: frozenset[str] = soccer_seasons.FOOTBALL_DATA_YEAR_CODED
 _CROSS_YEAR_SEASON = re.compile(r"(\d{4})/(\d{4})")
 
