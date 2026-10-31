@@ -206,11 +206,23 @@ CORPUS_STEPS=" 1 3 4 5 7 "
 # lock, so step 3 does not wait.
 af_lock soccer_repair_runbook || exit 1
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/soccer_runbook.XXXXXX") || { log "ABORT: mktemp failed"; af_unlock; exit 1; }
-# The state file's last record among step 10's completions and the corpus steps' 'changed' and 'failed' ones
-# (records are appended in order): 10, a corpus step, or nothing.
+# The state file's last corpus record (records are appended in order): 10, a corpus step, or nothing. Step 10's
+# completions count, and a corpus step's 'changed' and 'failed'. So does its 'started', written before it runs, until
+# the same step records a read-only result (ALREADY DONE / checked) right after it: a run killed outright during a
+# corpus step (kill -9, a host crash: finish never runs) leaves 'started' behind, unclosed, and that counts as a
+# change for good — a later re-run that reads the step ALREADY DONE still finds the corpus changed since step 10.
 last_corpus_record() {
   [ -r "$STATE_FILE" ] || return 0
-  sed -nE 's/^step=(10) result=[a-z_]+ .*/\1/p; s/^step=(1|3|4|5|7) result=(changed|failed) .*/\1/p' "$STATE_FILE" | tail -1
+  awk '
+    $1 !~ /^step=/ || $2 !~ /^result=/ { next }
+    { n = substr($1, 6); r = substr($2, 8) }
+    n == "10" { last = n; open = ""; next }
+    n != "1" && n != "3" && n != "4" && n != "5" && n != "7" { next }
+    r == "changed" || r == "failed" { last = n; open = ""; next }
+    r == "started" { before = (open != "" ? open : last); open = n; last = n; next }
+    open == n { last = before; open = "" }
+    END { print last }
+  ' "$STATE_FILE"
 }
 # 0 when step 10 recomputed the features after the last corpus change.
 step10_done_already() { [ "$(last_corpus_record)" = "10" ]; }
@@ -328,7 +340,7 @@ if ! af_drain_and_pause 1 4 $RETRAIN_DAGS; then
 fi
 
 # ---- steps -----------------------------------------------------------------
-record() {  # record <step> <changed|already_done|checked>
+record() {  # record <step> <started|changed|already_done|checked>
   echo "step=$1 result=$2 at=$(date -u +%s) head=$head" >> "$STATE_FILE" 2>/dev/null \
     || { STATE_WRITE_FAILED=1; log "WARNING: could not write $STATE_FILE (step 10's skip then re-runs it; the retrain DAGs stay paused at the end)"; }
 }
@@ -337,6 +349,7 @@ run_step() {  # run_step <n> <label> <command...>
   shift 2
   should_run "$n" || return 0
   CURRENT_STEP="$n"
+  case "$CORPUS_STEPS" in *" $n "*) record "$n" started ;; esac
   log "STEP $n/11 START: $label"
   "$@" 2>&1 | tee "$RUN_DIR/step$n.log"
   rc=${PIPESTATUS[0]}
@@ -396,14 +409,16 @@ step10() {
 }
 
 step11() {
-  local st plan merged_at runs starts s found="" i rc
+  local st plan merged_at runs starts s found="" i rc d
   st=$($DC exec -T api sh -c "cat /app/backups/merge_soccer_teams_last_apply.env 2>/dev/null")
   plan=$(echo "$st" | sed -n 's/^PLAN=//p'); merged_at=$(echo "$st" | sed -n 's/^MERGED_AT=//p')
   if [ -z "$plan" ] || [ -z "$merged_at" ]; then
     log "no merge apply recorded in /app/backups/merge_soccer_teams_last_apply.env (got '$st') — step 3 has not applied"; return 1
   fi
   log "merge plan $plan, merged at $merged_at; waiting for a fetch_live_odds run that started after it to finish"
-  if [ "$(af_dag_paused fetch_live_odds)" = "True" ]; then log "fetch_live_odds is paused — unpause it, then re-run with --from 11"; return 1; fi
+  for d in auspex_pipeline fetch_live_odds; do
+    if [ "$(af_dag_paused "$d")" = "True" ]; then log "$d is paused — unpause it: $(af_unpause_cmd "$d") — then re-run with --from 11"; return 1; fi
+  done
   for i in $(seq 1 "$ODDS_WAIT_POLLS"); do
     runs=$($DC exec -T airflow-scheduler sh -c "airflow dags list-runs fetch_live_odds --state success -o json 2>/dev/null | grep '^\\[' | tail -1")
     starts=$(echo "$runs" | grep -o '"start_date": "[^"]*"' | cut -d'"' -f4 | cut -c1-19)

@@ -646,3 +646,32 @@ def test_the_real_merge_wrapper_runs_as_step_3_under_the_runbooks_lock_with_its_
     af = fd.airflow_state(tmp_path)["dags"]
     assert not af["auspex_pipeline"]["paused"] and not af["fetch_live_odds"]["paused"]
     assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": True, "retrain_halftime_dc": True}  # step 10 to do
+
+
+def test_a_run_killed_outright_during_a_corpus_step_is_not_forgotten(tmp_path):
+    """kill -9 (or OOM, a host crash) during step 1, after its apply committed: finish never runs, so no 'failed'
+    record — but the 'started' record written before the step stays unclosed. --only 1 then reads ALREADY DONE and
+    must still keep the retrain DAGs paused until step 10 has run."""
+    repo = _repo(tmp_path)
+    env = {**_env(tmp_path, install=True), "AUSPEX_DIR": str(repo)}
+    first = subprocess.Popen(
+        ["bash", str(RUNBOOK_IN(tmp_path))],
+        env={**os.environ, **env, "HANG_REPOINT_TEAM_MATCHES": "1"},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    steps_log = tmp_path / "fake" / "steps.log"
+    assert _wait_for(lambda: steps_log.exists() and "repoint_team_matches" in steps_log.read_text())
+    os.killpg(first.pid, signal.SIGKILL)
+    first.wait()
+    assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": True, "retrain_halftime_dc": True}
+    assert "step=1 result=started" in (tmp_path / "state").read_text()
+
+    rc, out = fd.run(RUNBOOK_IN(tmp_path), {**env, "ALREADY_REPOINT_TEAM_MATCHES": "1"}, "--only", "1")
+    assert rc == 0 and "STEP 1/11 DONE (already_done)" in out and "the repair is not complete" in out, out
+    assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": True, "retrain_halftime_dc": True}
+
+    rc, out = fd.run(RUNBOOK_IN(tmp_path), _env(tmp_path), "--only", "10")
+    assert rc == 0 and "not complete" not in out, out
+    assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": False, "retrain_halftime_dc": False}
