@@ -70,7 +70,9 @@ def make_rec(
     }
 
 
-def make_match(match_id, home_team_id=HOME, away_team_id=AWAY, home_score=2, away_score=1, offset_hours=1.0):
+def make_match(
+    match_id, home_team_id=HOME, away_team_id=AWAY, home_score=2, away_score=1, offset_hours=1.0, metadata=None
+):
     return {
         "id": match_id,
         "home_team_id": home_team_id,
@@ -79,6 +81,7 @@ def make_match(match_id, home_team_id=HOME, away_team_id=AWAY, home_score=2, awa
         "home_score": home_score,
         "away_score": away_score,
         "match_date": KICKOFF + timedelta(hours=offset_hours),
+        "metadata": metadata,
     }
 
 
@@ -120,6 +123,8 @@ class FakeCursor:
                     "home_score": m["home_score"],
                     "away_score": m["away_score"],
                     "match_date": m["match_date"],
+                    # only when the query selects it, so dropping it fails the 90-minute test
+                    **({"metadata": m.get("metadata")} if "t.metadata" in flat else {}),
                 }
                 for m in self.matches
                 if m["home_team_id"] == home
@@ -662,15 +667,54 @@ def test_rec_written_a_second_before_the_twin_kickoff_still_settles(tmp_path):
     assert conn.cur.updates[0][1][0] == "won"
 
 
-def test_twin_kickoff_not_the_orphan_kickoff_is_the_reference(tmp_path):
-    """Written after the orphan's stale kickoff but before the real (later)
-    one: a pre-kickoff bet, settled as usual."""
+def test_the_earlier_of_the_two_kickoffs_is_the_reference(tmp_path):
+    """Written after the orphan's kickoff but before the twin's later one:
+    either row can carry the wrong time (football-data's summer kickoffs sat
+    1 h late), so only the earlier kickoff proves a bet predates the match —
+    the cutoff repair_fixture_orphans moves prices by. Voided."""
     twin = make_match(TWIN, home_score=2, away_score=1, offset_hours=3.0)
     rec = make_rec(created_at=KICKOFF + timedelta(hours=1))
     conn = FakeConn([rec], [twin])
     result = _run(conn, tmp_path)
+    assert result["per_sport"]["tennis"]["settled_won"] == 0
+    assert result["per_sport"]["tennis"]["post_kickoff_voided"] == 1
+    (row,) = _csv_rows(Path(result["csv_path"]))
+    assert row["kickoff_cutoff"] == str(KICKOFF)  # the orphan's, the earlier one
+
+
+def test_a_rec_before_both_kickoffs_still_settles(tmp_path):
+    twin = make_match(TWIN, home_score=2, away_score=1, offset_hours=3.0)
+    rec = make_rec(created_at=KICKOFF - timedelta(seconds=1))
+    result = _run(FakeConn([rec], [twin]), tmp_path)
     assert result["per_sport"]["tennis"]["settled_won"] == 1
-    assert result["per_sport"]["tennis"]["post_kickoff_voided"] == 0
+
+
+def test_kickoff_cutoff_is_the_earlier_kickoff():
+    assert rs.kickoff_cutoff(KICKOFF, KICKOFF + timedelta(hours=3)) == KICKOFF
+    assert rs.kickoff_cutoff(KICKOFF, KICKOFF - timedelta(hours=20)) == KICKOFF - timedelta(hours=20)
+    assert rs.kickoff_cutoff(None, KICKOFF) is None and rs.kickoff_cutoff(KICKOFF, None) is None
+
+
+def test_a_soccer_twin_decided_after_90_minutes_settles_on_its_90_minute_score(tmp_path, caplog):
+    # Belgium v Senegal: 3-2 after extra time, 2-2 after 90. 'home' lost on 90 minutes.
+    meta = {"result_detail": "AET", "regulation_home_score": 2, "regulation_away_score": 2, "went_extra": True}
+    twin = make_match(TWIN, home_score=3, away_score=2, metadata=meta)
+    rec = make_rec(sport="soccer")
+    conn = FakeConn([rec], [twin])
+    with caplog.at_level("WARNING", logger="grading_outcomes"):
+        result = _run(conn, tmp_path, sports=["soccer"])
+    assert result["per_sport"]["soccer"]["settled_lost"] == 1
+    assert conn.cur.updates[0][1][0] == "lost"
+    assert not any("without its metadata" in r.getMessage() for r in caplog.records)
+
+
+def test_a_twin_without_metadata_settles_on_its_final_score_quietly(tmp_path, caplog):
+    twin = make_match(TWIN, home_score=3, away_score=2, metadata=None)  # matches.metadata NULL
+    conn = FakeConn([make_rec(sport="soccer")], [twin])
+    with caplog.at_level("WARNING", logger="grading_outcomes"):
+        result = _run(conn, tmp_path, sports=["soccer"])
+    assert result["per_sport"]["soccer"]["settled_won"] == 1
+    assert not any("without its metadata" in r.getMessage() for r in caplog.records)
 
 
 def test_post_kickoff_void_and_settle_in_one_run(tmp_path):

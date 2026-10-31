@@ -38,8 +38,8 @@ filters `m.status = 'finished'`. Settling without repointing produces a
 summary table that no product surface agrees with. The orphan id stays in
 the CSV's `match_id` column, so the move is reversible.
 
-A REC WRITTEN AT OR AFTER THE TWIN'S KICKOFF IS VOIDED, NEVER SETTLED
---------------------------------------------------------------------
+A REC WRITTEN AT OR AFTER KICKOFF IS VOIDED, NEVER SETTLED
+----------------------------------------------------------
 The orphan row carries a STALE kickoff: ESPN moved the fixture, the
 fetcher forked a new row at the new time, and the orphan kept the old one.
 When ESPN moved the kickoff EARLIER, rec generation still saw the orphan
@@ -47,13 +47,21 @@ as upcoming and wrote recs on it after the real match had started — or
 finished. Settling those is settling hindsight: the 2026-09-04 run settled
 35 soccer recs, 21 of them written 46 minutes to 24 hours after the twin's
 kickoff (8W/12L/1V, net -228.25), plus 2 MMA recs written after their bout.
-Such a rec (created_at >= the twin's match_date — the twin carries the
-kickoff ESPN reported with the result) is now planned as action
-`void_post_kickoff`: status 'void', profit 0, actual_result 'void: written
-after kickoff' (shared with grade_completed_matches), and REPOINTED onto
-the twin like a settlement, so its orphan can be cleaned up and the row
-sits on the real fixture. scripts/void_post_kickoff_recs.py corrects the
-ones the earlier runs settled.
+Either row can carry the wrong time, though (the twin can be a
+football-data row, whose summer kickoffs sat 1 h late), so neither alone
+proves a rec was written before the match started. The cutoff is the
+EARLIER of the two kickoffs, LEAST(orphan, twin) — the same cutoff
+repair_fixture_orphans moves prices and predictions by. A rec with
+created_at >= that cutoff is planned as action `void_post_kickoff`: status
+'void', profit 0, actual_result 'void: written after kickoff' (shared with
+grade_completed_matches), and REPOINTED onto the twin like a settlement, so
+its orphan can be cleaned up and the row sits on the real fixture. The CSV
+records the cutoff (kickoff_cutoff). scripts/void_post_kickoff_recs.py
+corrects the ones the earlier runs settled.
+
+A soccer rec settles on the twin's 90-minute score when the twin carries
+one (a tie decided in extra time or on penalties): the twin's metadata goes
+to grade_rec_selection, as in grade_completed_matches.
 
 Because N orphan rows of one real fixture each carry their own duplicate
 rec, the summary also prints the COLLAPSE FACTOR (distinct twins, and how
@@ -149,7 +157,7 @@ VOID_ACTUAL_RESULT = "void: match never resulted (fixture-identity duplicate)"
 
 ACTION_SETTLE = "settle"
 ACTION_VOID = "void"
-# Written at or after the twin's kickoff: hindsight, voided (see docstring).
+# Written at or after the earlier of the orphan's and the twin's kickoff: hindsight, voided (see docstring).
 ACTION_VOID_POST_KICKOFF = "void_post_kickoff"
 
 REASON_OK = "ok"
@@ -177,7 +185,8 @@ CSV_COLUMNS = [
     "twin_match_date",
     "twin_count",  # finished twins seen in the window for this orphan
     "duplicate_of_group",  # 1 = another rec already covers (twin, bet, selection)
-    "rec_created_at",  # vs twin_match_date: the post-kickoff evidence
+    "rec_created_at",  # vs kickoff_cutoff: the post-kickoff evidence
+    "kickoff_cutoff",  # LEAST(orphan kickoff, twin kickoff)
 ]
 
 
@@ -242,7 +251,8 @@ def find_twins(
                t.away_team_id::text AS away_team_id,
                t.home_score,
                t.away_score,
-               t.match_date
+               t.match_date,
+               t.metadata
         FROM matches t
         WHERE t.home_team_id = %s
           AND t.away_team_id = %s
@@ -329,7 +339,7 @@ def void_rec(cur, rec_id: str) -> int:
 
 
 def void_post_kickoff_rec(cur, rec_id: str, new_match_id: str) -> int:
-    """Void a rec written at or after its twin's kickoff, and REPOINT it
+    """Void a rec written at or after kickoff (kickoff_cutoff), and REPOINT it
     onto the twin like a settlement (the twin is the real fixture, and an
     orphan that still holds a rec can never be cleaned up). Same mandatory
     status guard as settle_rec; returns the rowcount for the same reason."""
@@ -407,11 +417,20 @@ def select_twin(twins: list[dict], match_date: datetime) -> tuple[Optional[dict]
     return ranked[0], REASON_OK
 
 
+def kickoff_cutoff(orphan_kickoff: Optional[datetime], twin_kickoff: Optional[datetime]) -> Optional[datetime]:
+    """The earlier of the orphan's and the twin's kickoff (None when either
+    is missing): either row can carry the wrong time, so only the earlier
+    one proves a rec predates the match (repair_fixture_orphans' cutoff)."""
+    if orphan_kickoff is None or twin_kickoff is None:
+        return None
+    return min(orphan_kickoff, twin_kickoff)
+
+
 def written_after_kickoff(created_at: Optional[datetime], kickoff: Optional[datetime]) -> bool:
-    """True when a rec was written at or after the real kickoff — the
-    twin's match_date, not the orphan's stale one. A missing timestamp is
-    an error, not a pass: without it nobody can tell a bet from hindsight
-    (created_at defaults to NOW() and prod has no NULLs, 2026-10-30)."""
+    """True when a rec was written at or after `kickoff` — the cutoff from
+    kickoff_cutoff. A missing timestamp is an error, not a pass: without it
+    nobody can tell a bet from hindsight (created_at defaults to NOW() and
+    prod has no NULLs, 2026-10-30)."""
     if created_at is None or kickoff is None:
         raise ValueError(f"cannot tell whether a rec is post-kickoff: created_at={created_at!r} kickoff={kickoff!r}")
     return created_at >= kickoff
@@ -430,7 +449,7 @@ def _new_counts() -> dict[str, Any]:
         "ungradable_skipped": 0,
         "no_twin": 0,
         "no_twin_voided": 0,
-        # Written at or after the twin's kickoff: voided, never settled.
+        # Written at or after kickoff_cutoff: voided, never settled.
         "post_kickoff_voided": 0,
         # Rows planned but NOT written because the rec was no longer
         # pending at apply time (concurrent settlement).
@@ -521,16 +540,18 @@ def plan_sport(
         delta_hours = round(_delta_seconds(twin, rec["match_date"]) / 3600.0, 3)
 
         # Hindsight check BEFORE grading: a rec written at or after the
-        # real kickoff is voided whatever the score says.
-        if written_after_kickoff(rec["created_at"], twin["match_date"]):
+        # earlier of the two kickoffs is voided whatever the score says.
+        cutoff = kickoff_cutoff(rec["match_date"], twin["match_date"])
+        if written_after_kickoff(rec["created_at"], cutoff):
             counts["post_kickoff_voided"] += 1
             logger.warning(
-                "POST-KICKOFF: rec %s on match %s (%s) was written %s, at or after its twin %s kicked off at %s "
-                "— voiding, never settling",
+                "POST-KICKOFF: rec %s on match %s (%s) was written %s, at or after the earlier of its kickoff %s "
+                "and its twin %s's %s — voiding, never settling",
                 rec["rec_id"],
                 match_id,
                 sport,
                 rec["created_at"],
+                rec["match_date"],
                 twin["twin_id"],
                 twin["match_date"],
             )
@@ -556,6 +577,7 @@ def plan_sport(
                     "twin_count": len(twin_cache[match_id]),
                     "duplicate_of_group": 0,
                     "rec_created_at": rec["created_at"],
+                    "kickoff_cutoff": cutoff,
                 }
             )
             continue
@@ -566,6 +588,7 @@ def plan_sport(
             twin["home_score"],
             twin["away_score"],
             sport=sport,  # NHL double_chance is the regulation 3-way: never settle it on the final score
+            metadata=twin["metadata"] or {},  # a soccer tie decided after 90 minutes settles on 90 minutes
         )
         if outcome is None:
             counts["ungradable_skipped"] += 1
@@ -636,6 +659,7 @@ def plan_sport(
                 "twin_count": len(twin_cache[match_id]),
                 "duplicate_of_group": int(duplicate),
                 "rec_created_at": rec["created_at"],
+                "kickoff_cutoff": cutoff,
             }
         )
 
@@ -821,7 +845,8 @@ def print_summary(per_sport: dict[str, dict], applied: bool) -> None:
         )
     if totals["post_kickoff_voided"]:
         logger.warning(
-            "%d rec(s) were written at or after their twin's kickoff — %s, not settled (pk_void column). "
+            "%d rec(s) were written at or after the earlier of their orphan's and twin's kickoff — %s, not settled "
+            "(pk_void column). "
             "They are hindsight and must never count as won/lost.",
             totals["post_kickoff_voided"],
             "voided" if applied else "would be voided",

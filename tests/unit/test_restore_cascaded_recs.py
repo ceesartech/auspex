@@ -61,7 +61,7 @@ PRED = {
     "model_version": "v",
     "prediction_type": "moneyline",
 }
-TWIN = {"id": "twin", "status": "finished", "home_score": 0, "away_score": 1}
+TWIN = {"id": "twin", "status": "finished", "home_score": 0, "away_score": 1, "metadata": None, "sport": "tennis"}
 
 
 class TestCopyBlock:
@@ -113,6 +113,20 @@ class TestCheckRow:
     )
     def test_refusals(self, rec, pred, twin, reason):
         assert rcr.check_row(_audit(), rec, pred, twin) == reason
+
+    def test_a_soccer_twin_decided_after_90_minutes_regrades_on_its_90_minute_score(self):
+        # 3-2 after extra time, 2-2 after 90: 'home' won on the final score,
+        # lost on 90 minutes — the CSV's 'won' no longer reproduces.
+        meta = {"regulation_home_score": 2, "regulation_away_score": 2, "went_extra": True}
+        twin = {**TWIN, "home_score": 3, "away_score": 2, "metadata": meta, "sport": "soccer"}
+        audit = _audit(twin_home_score="3", twin_away_score="2", profit_loss="50.284800")
+        rec = _rec(bet_type="1x2", selection="home")
+        assert rcr.check_row(audit, rec, PRED, twin) == "regrade_disagrees"
+        assert rcr.check_row(audit, rec, PRED, {**twin, "metadata": {}}) is None
+
+    def test_the_twin_query_reads_what_the_grader_needs(self):
+        sql = " ".join(rcr.TWIN_SQL.split())
+        assert "m.metadata" in sql and "l.sport" in sql and "LEFT JOIN leagues l ON l.id = m.league_id" in sql
 
     def test_a_settlement_grading_no_longer_reproduces_is_refused(self):
         assert rcr.check_row(_audit(), _rec(selection="home"), PRED, TWIN) == "regrade_disagrees"

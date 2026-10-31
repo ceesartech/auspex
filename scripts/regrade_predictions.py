@@ -15,8 +15,14 @@ double_chance rows True -> False (regulation ties, 100% -> 76.6%) and 146
 correct_score 'other' rows False -> True (0% -> 51.0%); nothing else moves.
 
 Guarantees:
-  * Dry run unless --apply; refuses to run without --model-name and/or
-    --prediction-type.
+  * Dry run unless --apply; refuses to run without --model-name,
+    --prediction-type or --match-id / --match-ids-file.
+  * --match-id (repeatable) / --match-ids-file (one id per line) limit the
+    run to those matches, and --days is then ignored; every id must be a
+    finished match, or nothing runs. A fix that touches known matches (the
+    90-minute scores stamped by backfill_soccer_regulation_scores.py) is
+    re-graded on exactly those, so the dry run's change count is the fix's
+    and nothing else the current grader disagrees with.
   * Every planned change goes to a write-once CSV (old + new values)
     BEFORE any UPDATE, dry run included. That CSV is the rollback.
   * Never touches betting_recommendations: recs settle from their own
@@ -45,6 +51,8 @@ Usage (inside the api container):
         --prediction-type double_chance,correct_score --days 365          # dry run
     python /app/scripts/regrade_predictions.py --model-name dixon_coles_nhl \\
         --prediction-type double_chance,correct_score --days 365 --apply
+    python /app/scripts/regrade_predictions.py --match-ids-file /app/backups/ids.txt \\
+        --prediction-type match_result,btts                               # those matches only
 """
 
 from __future__ import annotations
@@ -54,6 +62,7 @@ import csv
 import logging
 import os
 import sys
+import uuid
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,7 +90,8 @@ GRADED_PREDICTIONS_SQL = """
     FROM predictions p
     JOIN matches m ON m.id = p.match_id
     WHERE m.status = 'finished'
-      AND m.match_date >= NOW() - (%(days)s || ' days')::interval
+      AND (%(match_ids)s::uuid[] IS NOT NULL OR m.match_date >= NOW() - (%(days)s || ' days')::interval)
+      AND (%(match_ids)s::uuid[] IS NULL OR p.match_id = ANY(%(match_ids)s::uuid[]))
       AND (p.actual_outcome IS NOT NULL OR p.is_correct IS NOT NULL)
       AND (%(model_name)s::text IS NULL OR p.model_name = %(model_name)s::text)
       AND (%(types)s::text[] IS NULL OR p.prediction_type = ANY(%(types)s::text[]))
@@ -113,6 +123,36 @@ CSV_FIELDS = (
 )
 
 MATCH_FIELDS = ("match_id", "home_score", "away_score", "metadata", "half_time_home", "half_time_away")
+
+# Which of the requested match ids are finished matches.
+FINISHED_MATCHES_SQL = "SELECT id::text AS id FROM matches WHERE id = ANY(%s::uuid[]) AND status = 'finished'"
+
+
+class MatchIdsRefused(ValueError):
+    """--match-id / --match-ids-file named a match that is not a finished match."""
+
+
+def parse_match_ids(values: Optional[list[str]], path: Optional[str]) -> Optional[list[str]]:
+    """The --match-id values plus the --match-ids-file lines (blank lines and
+    '#' comments skipped), as sorted unique UUID strings; None when neither
+    was given. A malformed id raises ValueError."""
+    raw = [v for v in values or []]
+    if path is not None:
+        with open(path) as fh:
+            raw += [line.split("#", 1)[0].strip() for line in fh]
+    ids = set()
+    for value in (v.strip() for v in raw):
+        if not value:
+            continue
+        try:
+            ids.add(str(uuid.UUID(value)))
+        except ValueError:
+            raise ValueError(f"not a match id: {value!r}") from None
+    if values is None and path is None:
+        return None
+    if not ids:
+        raise ValueError("--match-id / --match-ids-file named no match")
+    return sorted(ids)
 
 
 def parse_types(values: Optional[list[str]]) -> Optional[list[str]]:
@@ -274,13 +314,27 @@ def run(
     types: Optional[list[str]],
     apply_changes: bool,
     out_csv: Optional[str] = None,
+    match_ids: Optional[list[str]] = None,
 ) -> Counter:
     if model_name is None and types is None:
-        logger.warning("No --model-name or --prediction-type: re-grading EVERY graded prediction in %d days", days)
+        scope = f"{len(match_ids)} match(es)" if match_ids is not None else f"{days} days"
+        logger.warning("No --model-name or --prediction-type: re-grading EVERY graded prediction of %s", scope)
     if not apply_changes:
         conn.set_session(readonly=True)
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(GRADED_PREDICTIONS_SQL, {"days": str(days), "model_name": model_name, "types": types})
+        if match_ids is not None:
+            cur.execute(FINISHED_MATCHES_SQL, (match_ids,))
+            missing = sorted(set(match_ids) - {r["id"] for r in cur.fetchall()})
+            if missing:
+                raise MatchIdsRefused(
+                    f"{len(missing)} of {len(match_ids)} requested match id(s) are not finished matches: "
+                    + ", ".join(missing)
+                )
+            logger.info("Limited to %d match(es); --days ignored", len(match_ids))
+        cur.execute(
+            GRADED_PREDICTIONS_SQL,
+            {"days": str(days), "model_name": model_name, "types": types, "match_ids": match_ids},
+        )
         rows = [dict(r) for r in cur.fetchall()]
         contexts = {mid: gcm.fetch_match_grading_context(cur, mid) for mid in sorted(matches_needing_context(rows))}
     conn.rollback()  # close the read snapshot before writing
@@ -347,6 +401,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Only these prediction types; repeatable and/or comma-separated (default: all).",
     )
     p.add_argument("--days", type=int, default=365, help="Finished matches this recent (default 365).")
+    p.add_argument(
+        "--match-id",
+        action="append",
+        default=None,
+        help="Only this match (repeatable); --days is then ignored. Every id must be a finished match.",
+    )
+    p.add_argument(
+        "--match-ids-file",
+        default=None,
+        help="Only the matches listed in this file, one id per line ('#' comments allowed); as --match-id.",
+    )
     p.add_argument("--apply", action="store_true", help="Write (default: dry run).")
     p.add_argument(
         "--out-csv",
@@ -366,13 +431,22 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("--days must be positive (got %d)", args.days)
         return 2
     types = parse_types(args.prediction_type)
-    if args.model_name is None and types is None:
+    try:
+        match_ids = parse_match_ids(args.match_id, args.match_ids_file)
+    except (OSError, ValueError) as exc:
+        logger.error("%s", exc)
+        return 2
+    if args.model_name is None and types is None and match_ids is None:
         # A grading fix is market-specific; an unscoped pass re-reads every
         # graded row in the window (58k for 30 days on 2026-10-31).
-        logger.error("Refusing an unscoped re-grade: pass --model-name and/or --prediction-type")
+        logger.error("Refusing an unscoped re-grade: pass --model-name, --prediction-type and/or --match-id")
         return 2
     with psycopg2.connect(args.database_url) as conn:
-        counts = run(conn, args.days, args.model_name, types, args.apply, args.out_csv)
+        try:
+            counts = run(conn, args.days, args.model_name, types, args.apply, args.out_csv, match_ids)
+        except MatchIdsRefused as exc:
+            logger.error("%s — nothing re-graded", exc)
+            return 2
     logger.info("Done: %s", dict(sorted(counts.items())))
     return 1 if counts["changed_since_plan"] else 0
 

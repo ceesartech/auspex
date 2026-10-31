@@ -818,7 +818,9 @@ def grade_rec_selection(
     `metadata` (the match's matches.metadata): a soccer rec settles on the
     90-minute score it carries when the match was decided after 90 minutes
     (settlement_scores), and an unusable 90-minute pair leaves the rec open.
-    Without it (callers that omit it) the rec settles on the final score.
+    Pass {} for a match whose metadata is NULL. Without it (None) a soccer
+    rec settles on the final score and a WARNING says so: a caller that
+    forgets it would settle an extra-time tie on the post-extra-time score.
 
     `sport` (leagues.sport of the rec's match) and `model_name` (the model
     of the rec's prediction) say whether the rec is on an NHL match; either
@@ -832,6 +834,15 @@ def grade_rec_selection(
         this function only sees the final score.
       * correct_score 'other': it covers whatever that prediction did not
         list, and the rec does not carry the prediction's key set."""
+    if metadata is None and (sport or "soccer").strip().lower() == "soccer" and not is_nhl_model(model_name):
+        logger.warning(
+            "grade_rec_selection(%r, %r) on a soccer match without its metadata: a tie decided after 90 minutes "
+            "would settle on the post-extra-time %s-%s — pass metadata=<matches.metadata>",
+            bet_type,
+            selection,
+            home_score,
+            away_score,
+        )
     scores = settlement_scores(home_score, away_score, metadata, sport=sport, model_name=model_name)
     if scores is None:
         return None

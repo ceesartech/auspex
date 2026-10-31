@@ -238,6 +238,11 @@ class FakeCursor:
             self.conn.read_params = params
             self._rows = self.conn.rows
             return
+        if sql_norm.startswith("SELECT id::text AS id FROM matches WHERE id = ANY(%s::uuid[])"):
+            assert "status = 'finished'" in sql_norm
+            (ids,) = params
+            self._rows = [{"id": i} for i in ids if i in self.conn.finished]
+            return
         if sql_norm.startswith("UPDATE predictions"):
             assert not self.conn.readonly
             for guard in UPDATE_GUARDS:
@@ -264,6 +269,7 @@ class FakeConn:
         self.commits = 0
         self.read_params = None
         self.stale_file_at_commit = None
+        self.finished: set = set()
 
     def set_session(self, readonly=False):
         self.readonly = readonly
@@ -292,6 +298,7 @@ class TestRun:
             "days": "365",
             "model_name": "dixon_coles_nhl",
             "types": ["correct_score", "double_chance"],
+            "match_ids": None,
         }
         assert len(list(csv.DictReader(out.open()))) == 2
         assert counts["changed"] == 2 and counts["scanned"] == 5
@@ -391,3 +398,70 @@ class TestRun:
         monkeypatch.setattr(rp.psycopg2, "connect", no_connect)
         assert rp.main(["--database-url", "postgresql://x"]) == 2
         assert rp.main(["--database-url", "postgresql://x", "--prediction-type", " , "]) == 2
+
+
+M1 = "11111111-1111-1111-1111-111111111111"
+M2 = "22222222-2222-2222-2222-222222222222"
+
+
+class TestMatchIds:
+    def test_values_and_file_merge_sorted_and_unique(self, tmp_path):
+        f = tmp_path / "ids.txt"
+        f.write_text(f"# stamped 2026-10-31\n{M2}\n\n{M1}  # Belgium v Senegal\n{M2.upper()}\n")
+        assert rp.parse_match_ids([M1], str(f)) == [M1, M2]
+        assert rp.parse_match_ids(None, str(f)) == [M1, M2]
+        assert rp.parse_match_ids([M2], None) == [M2]
+
+    def test_absent_means_no_limit(self):
+        assert rp.parse_match_ids(None, None) is None
+
+    @pytest.mark.parametrize("values", [["not-a-uuid"], [" "], []])
+    def test_a_bad_or_empty_list_is_refused(self, values):
+        with pytest.raises(ValueError):
+            rp.parse_match_ids(values, None)
+
+    def test_the_read_limits_to_the_ids_and_drops_the_window(self):
+        sql = " ".join(rp.GRADED_PREDICTIONS_SQL.split())
+        assert "(%(match_ids)s::uuid[] IS NOT NULL OR m.match_date >= NOW() - (%(days)s || ' days')::interval)" in sql
+        assert "(%(match_ids)s::uuid[] IS NULL OR p.match_id = ANY(%(match_ids)s::uuid[]))" in sql
+
+    def test_run_reads_only_those_matches(self, tmp_path):
+        out = tmp_path / "ids.csv"
+        conn = FakeConn(_nhl_rows(), str(out))
+        conn.finished = {M1, M2}
+        rp.run(conn, 365, None, ["double_chance"], False, str(out), [M1, M2])
+        assert conn.read_params["match_ids"] == [M1, M2]
+        assert conn.read_params["model_name"] is None
+
+    def test_an_unfinished_match_refuses_before_reading_or_writing(self, tmp_path):
+        out = tmp_path / "ids.csv"
+        conn = FakeConn(_nhl_rows(), str(out))
+        conn.finished = {M1}
+        with pytest.raises(rp.MatchIdsRefused, match=M2):
+            rp.run(conn, 365, None, ["double_chance"], False, str(out), [M1, M2])
+        assert conn.read_params is None and not out.exists()
+
+    def test_main_takes_a_match_id_as_the_scope(self, tmp_path, monkeypatch):
+        conn = FakeConn(_nhl_rows(), str(tmp_path / "m.csv"))
+        conn.finished = {M1}
+
+        class Ctx:
+            def __enter__(self):
+                return conn
+
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr(rp.psycopg2, "connect", lambda url: Ctx())
+        assert rp.main(["--database-url", "x", "--match-id", M1, "--out-csv", str(tmp_path / "m.csv")]) == 0
+        assert conn.read_params["match_ids"] == [M1] and conn.read_params["types"] is None
+        conn.finished = set()
+        assert rp.main(["--database-url", "x", "--match-id", M1, "--out-csv", str(tmp_path / "n.csv")]) == 2
+
+    def test_main_refuses_a_bad_id_or_file_before_connecting(self, tmp_path, monkeypatch):
+        def no_connect(*_a, **_k):
+            raise AssertionError("must refuse before connecting")
+
+        monkeypatch.setattr(rp.psycopg2, "connect", no_connect)
+        assert rp.main(["--database-url", "x", "--match-id", "nope"]) == 2
+        assert rp.main(["--database-url", "x", "--match-ids-file", str(tmp_path / "missing.txt")]) == 2

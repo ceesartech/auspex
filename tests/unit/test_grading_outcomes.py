@@ -1198,3 +1198,31 @@ class TestNinetyMinuteScore:
     )
     def test_soccer_went_past_90(self, meta, expected):
         assert go.soccer_went_past_90(meta) is expected
+
+
+class TestRecSettlementWithoutMetadataIsLoud:
+    """grade_rec_selection(metadata=None) settles a soccer rec on the final
+    score; a caller that forgets the match metadata would settle an
+    extra-time tie on its post-extra-time score, so it says so."""
+
+    def test_a_soccer_rec_without_metadata_warns(self, caplog):
+        with caplog.at_level("WARNING", logger="grading_outcomes"):
+            assert go.grade_rec_selection("1x2", "home", 3, 2) == go.REC_WON
+            assert go.grade_rec_selection("1x2", "home", 3, 2, sport="soccer") == go.REC_WON
+        warned = [r for r in caplog.records if "without its metadata" in r.getMessage()]
+        assert len(warned) == 2 and "3-2" in warned[0].getMessage()
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"sport": "soccer", "metadata": {}},
+            {"metadata": {"result_detail": "FT"}},
+            {"sport": "nhl"},
+            {"sport": "tennis"},
+            {"model_name": "ensemble_nhl_ml"},
+        ],
+    )
+    def test_no_warning_with_metadata_or_off_soccer(self, kwargs, caplog):
+        with caplog.at_level("WARNING", logger="grading_outcomes"):
+            go.grade_rec_selection("moneyline", "home", 3, 2, **kwargs)
+        assert not any("without its metadata" in r.getMessage() for r in caplog.records)

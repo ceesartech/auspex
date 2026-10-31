@@ -24,11 +24,20 @@ script also re-grades the already-graded full-time predictions whose
 verdict changes (guarded on the old values, never un-grading); the trigger's
 rec settlements carry no P&L and are re-settled here anyway.
 
+A 90-minute score can arrive after the match was graded (a later results
+sweep in the 3-day window, or scripts/backfill_soccer_regulation_scores.py):
+recs already settled with P&L on the final score are then re-settled when
+their verdict changes, guarded, each logged at ERROR.
+
 Postponements (fetch_upcoming records ESPN's STATUS_POSTPONED): a rec on a
 match still 'postponed' POSTPONED_VOID_HOURS after its kickoff, or on one
 played more than that after its original kickoff when the rec predates the
 postponement, is VOIDED (profit 0, actual_result 'void: match postponed
->72h'), as books void them.
+>72h'), as books void them. Cancellations likewise: a rec on a match
+'cancelled' with a kickoff CANCELLED_VOID_HOURS old is VOIDED ('void: match
+cancelled'), except on a cancelled duplicate of a played fixture
+(metadata.orphan_of), which is logged at ERROR for repair_stranded_recs.
+Both voids are guarded on the rec's and the match's status.
 
 Phantom-line guard: NBA/NFL spread + total grade against the closing
 line stored in features_cache, but compute_features_{nba,nfl}.py write
@@ -66,7 +75,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 
 import psycopg2
@@ -76,6 +85,11 @@ from psycopg2.extras import RealDictCursor
 sys.path.insert(0, os.path.dirname(__file__))
 
 from grading_outcomes import (  # noqa: E402
+    REC_HALF_LOST,
+    REC_HALF_WON,
+    REC_LOST,
+    REC_PUSH,
+    REC_WON,
     REGULATION_HOME_KEY,
     SOCCER_FT_TYPES,
     actual_outcome,
@@ -109,6 +123,21 @@ POSTPONED_VOID_RESULT = "void: match postponed >72h"
 POSTPONED_KICKOFF_KEY = "postponed_kickoff"
 POSTPONED_AT_KEY = "postponed_at"
 
+# A cancelled match (an ESPN cancel or abandonment, an operator's cancel, a
+# re-drawn tennis/MMA slot) voids its open recs once its kickoff is this old,
+# the same shape as the postponement rule. A cancelled row that is a
+# DUPLICATE of a played fixture (repair_fixture_orphans' metadata.orphan_of)
+# is not voided: its recs settle from the twin (repair_stranded_recs).
+CANCELLED_VOID_HOURS = 72
+CANCELLED_VOID_RESULT = "void: match cancelled"
+ORPHAN_OF_KEY = "orphan_of"
+
+# Every void above (post-kickoff, postponed, cancelled, never-resulted, the
+# constant-prior incident) writes an actual_result with this prefix: no
+# score decides such a rec, so a later 90-minute score never re-settles it.
+SCORE_INDEPENDENT_VOID_PREFIX = "void:"
+REC_OUTCOMES = frozenset({REC_WON, REC_LOST, REC_PUSH, REC_HALF_WON, REC_HALF_LOST})
+
 
 # ── DB I/O ────────────────────────────────────────────────────────────
 
@@ -118,9 +147,11 @@ def list_finished_matches(cur, days: int, match_id: Optional[str]) -> list[dict]
     short-circuit to that one row (operator escape hatch for ad-hoc
     re-grading). Otherwise: matches that finished in the last `days`
     days AND have at least one ungraded prediction OR unsettled rec, or
-    that carry a 90-minute score (their trigger-graded full-time markets
-    need re-grading; a no-op once done, and such ties are a handful a
-    month). The EXISTS subqueries keep this from churning over
+    soccer matches that carry a 90-minute score (their trigger-graded
+    full-time markets and recs settled on the final score need re-grading;
+    a no-op once done, and such ties are a handful a month — NHL games carry
+    a key of the same name, so the clause is soccer-only, as grade_match
+    treats a league-less match). The EXISTS subqueries keep this from churning over
     already-graded matches on every run. `sport` and `match_date` feed the
     90-minute and postponement rules in grade_match."""
     if match_id is not None:
@@ -161,9 +192,12 @@ def list_finished_matches(cur, days: int, match_id: Optional[str]) -> list[dict]
                            AND br.profit_loss IS NULL)
                     )
               )
-              -- decided after 90 minutes: the trigger graded its full-time
-              -- markets on the post-extra-time score
-              OR m.metadata ? %s
+              -- a soccer match decided after 90 minutes: the trigger graded
+              -- its full-time markets on the post-extra-time score. Soccer
+              -- only: load_nhl_historical --attach-only writes the same key
+              -- on every finished NHL game (96 in a 14-day window on
+              -- 2026-10-31), which would be walked every tick for nothing.
+              OR (COALESCE(l.sport, 'soccer') = 'soccer' AND m.metadata ? %s)
           )
         ORDER BY m.match_date ASC
         """,
@@ -406,6 +440,137 @@ def regrade_on_regulation(cur, match: dict, ctx: dict) -> int:
     return written
 
 
+def list_settled_recs_for_match(cur, match_id: str) -> list[dict]:
+    """The match's recs settled WITH money (profit_loss set), with what
+    grade_rec_selection needs. Only read for a soccer match carrying a
+    90-minute score: a rec settled on the final score before the score
+    arrived (a later results sweep stamped it, or the backfill did) holds
+    the wrong verdict and P&L, and list_open_recs_for_match never reads it
+    again."""
+    cur.execute(
+        """
+        SELECT br.id::text AS rec_id,
+               br.bet_type, br.selection,
+               br.recommended_stake, br.odds_at_recommendation,
+               br.status, br.actual_result, br.profit_loss,
+               p.model_name AS p_model_name,
+               l.sport AS sport
+        FROM betting_recommendations br
+        LEFT JOIN predictions p ON p.id = br.prediction_id
+        LEFT JOIN matches m ON m.id = br.match_id
+        LEFT JOIN leagues l ON l.id = m.league_id
+        WHERE br.match_id = %s
+          AND br.status IN ('won', 'lost', 'void')
+          AND br.profit_loss IS NOT NULL
+        """,
+        (match_id,),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def resettle_recommendation(cur, rec: dict, new_status: str, actual_result: str, profit_loss: Decimal) -> bool:
+    """Rewrite one settled rec, guarded on the status, actual_result and
+    profit_loss it was read with. True when the row was written."""
+    cur.execute(
+        """
+        UPDATE betting_recommendations
+        SET status = %s,
+            actual_result = %s,
+            profit_loss = %s,
+            settled_at = NOW(),
+            updated_at = NOW()
+        WHERE id = %s
+          AND status = %s
+          AND actual_result IS NOT DISTINCT FROM %s
+          AND profit_loss IS NOT DISTINCT FROM %s
+        """,
+        (
+            new_status,
+            actual_result,
+            profit_loss,
+            rec["rec_id"],
+            rec["status"],
+            rec["actual_result"],
+            rec["profit_loss"],
+        ),
+    )
+    return cur.rowcount == 1
+
+
+def _cents(value) -> Decimal:
+    """A P&L as profit_loss stores it (DECIMAL(10,2), ties away from zero)."""
+    return Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def resettle_recs_on_regulation(cur, match: dict) -> int:
+    """Re-settle a 90-minute-scored soccer match's recs that were settled,
+    with money, on the final score: only those whose verdict changes, each
+    guarded on what it was read with, each logged at ERROR (a settled bet's
+    P&L moves). A rec voided for a reason no score decides ('void: ...') is
+    never touched, and one the 90-minute score cannot grade keeps its
+    settlement (logged). Returns the recs rewritten; a no-op for every other
+    match."""
+    meta = match.get("metadata") or {}
+    if (match.get("sport") or "soccer") != "soccer" or regulation_scores(meta) is None:
+        return 0
+    written = 0
+    for rec in list_settled_recs_for_match(cur, match["match_id"]):
+        if str(rec.get("actual_result") or "").startswith(SCORE_INDEPENDENT_VOID_PREFIX):
+            continue
+        outcome = grade_rec_selection(
+            rec["bet_type"],
+            rec["selection"],
+            match["home_score"],
+            match["away_score"],
+            sport=rec["sport"],
+            model_name=rec["p_model_name"],
+            metadata=meta,
+        )
+        if outcome is None:
+            logger.warning(
+                "Rec %s (match %s, %s %s) is settled %s (%s) but the 90-minute score cannot grade it — left as it is",
+                rec["rec_id"],
+                match["match_id"],
+                rec["bet_type"],
+                rec["selection"],
+                rec["status"],
+                rec["actual_result"],
+            )
+            continue
+        new_status, pl = rec_status_and_pl(outcome, rec["recommended_stake"], rec["odds_at_recommendation"])
+        same_verdict = rec["actual_result"] not in REC_OUTCOMES or rec["actual_result"] == outcome
+        if new_status == rec["status"] and same_verdict and _cents(pl) == _cents(rec["profit_loss"]):
+            continue
+        if resettle_recommendation(cur, rec, new_status, outcome, pl):
+            written += 1
+            logger.error(
+                "Re-settled rec %s (match %s, %s %s @ %s, stake %s) on the 90-minute score %s: (%s, %s, %s) -> "
+                "(%s, %s, %s). It had settled on the final, post-extra-time %s-%s.",
+                rec["rec_id"],
+                match["match_id"],
+                rec["bet_type"],
+                rec["selection"],
+                rec["odds_at_recommendation"],
+                rec["recommended_stake"],
+                regulation_scores(meta),
+                rec["status"],
+                rec["actual_result"],
+                rec["profit_loss"],
+                new_status,
+                outcome,
+                _cents(pl),
+                match.get("home_score"),
+                match.get("away_score"),
+            )
+        else:
+            logger.error(
+                "Rec %s (match %s) changed while it was being re-settled on the 90-minute score — left as it is",
+                rec["rec_id"],
+                match["match_id"],
+            )
+    return written
+
+
 def _as_utc(value) -> Optional[datetime]:
     """A timestamp from metadata (ISO string) or the DB (datetime), tz-aware
     (naive read as UTC), or None when it cannot be read."""
@@ -466,11 +631,44 @@ def list_recs_on_long_postponed_matches(cur) -> list[dict]:
     return [dict(r) for r in cur.fetchall()]
 
 
+# Guarded on the rec's status and on its match's status as read: a rec
+# settled meanwhile, or a match rescheduled meanwhile, is left alone.
+VOID_OPEN_REC_SQL = """
+    UPDATE betting_recommendations br
+    SET status = 'void',
+        actual_result = %s,
+        profit_loss = 0,
+        settled_at = NOW(),
+        updated_at = NOW()
+    FROM matches m
+    WHERE br.id = %s
+      AND br.status = %s
+      AND m.id = br.match_id
+      AND m.status = %s
+    RETURNING br.id
+"""
+
+
+def void_open_rec(cur, rec: dict, match_status: str, actual_result: str) -> bool:
+    """Void (profit 0) one open rec whose match is `match_status`, guarded
+    (VOID_OPEN_REC_SQL). True when written; a guard that fires is logged."""
+    cur.execute(VOID_OPEN_REC_SQL, (actual_result, rec["rec_id"], rec["status"], match_status))
+    if cur.fetchone() is not None:
+        return True
+    logger.error(
+        "Rec %s (match %s) or its match changed while voiding it (%r) — left as it is",
+        rec["rec_id"],
+        rec["match_id"],
+        actual_result,
+    )
+    return False
+
+
 def void_recs_on_long_postponed_matches(cur) -> int:
     """Void (profit 0) every open rec list_recs_on_long_postponed_matches
-    finds. Returns how many."""
-    recs = list_recs_on_long_postponed_matches(cur)
-    for rec in recs:
+    finds. Returns how many were written."""
+    voided = 0
+    for rec in list_recs_on_long_postponed_matches(cur):
         logger.warning(
             "Voiding rec %s (match %s, %s %s, status %s): the match is still postponed %dh after its kickoff %s",
             rec["rec_id"],
@@ -481,8 +679,61 @@ def void_recs_on_long_postponed_matches(cur) -> int:
             POSTPONED_VOID_HOURS,
             rec.get("kickoff"),
         )
-        settle_recommendation(cur, rec["rec_id"], "void", POSTPONED_VOID_RESULT, Decimal("0"))
-    return len(recs)
+        voided += void_open_rec(cur, rec, "postponed", POSTPONED_VOID_RESULT)
+    return voided
+
+
+def list_recs_on_cancelled_matches(cur) -> list[dict]:
+    """Open recs on matches 'cancelled' with a kickoff CANCELLED_VOID_HOURS
+    old. `orphan_of` names the played twin of a cancelled duplicate row."""
+    cur.execute(
+        """
+        SELECT br.id::text AS rec_id, br.match_id::text AS match_id,
+               br.bet_type, br.selection, br.status, br.created_at,
+               m.match_date AS kickoff,
+               m.metadata->>'orphan_of' AS orphan_of
+        FROM betting_recommendations br
+        JOIN matches m ON m.id = br.match_id
+        WHERE br.status IN ('pending', 'placed')
+          AND m.status = 'cancelled'
+          AND m.match_date < NOW() - (%s || ' hours')::interval
+        ORDER BY m.match_date, br.id
+        """,
+        (str(CANCELLED_VOID_HOURS),),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def void_recs_on_cancelled_matches(cur) -> tuple[int, int]:
+    """Void (profit 0) the open recs on cancelled matches. Returns (voided,
+    refused): a rec on a cancelled DUPLICATE of a played fixture is refused
+    and logged at ERROR, never voided — the match was played, on the twin."""
+    voided = refused = 0
+    for rec in list_recs_on_cancelled_matches(cur):
+        if rec.get("orphan_of"):
+            refused += 1
+            logger.error(
+                "Not voiding rec %s (match %s, %s %s, status %s): the cancelled row is a duplicate of match %s, "
+                "which was played — settle it from the twin (scripts/repair_stranded_recs.py)",
+                rec["rec_id"],
+                rec["match_id"],
+                rec.get("bet_type"),
+                rec.get("selection"),
+                rec.get("status"),
+                rec["orphan_of"],
+            )
+            continue
+        logger.warning(
+            "Voiding rec %s (match %s, %s %s, status %s): the match was cancelled (kickoff %s)",
+            rec["rec_id"],
+            rec["match_id"],
+            rec.get("bet_type"),
+            rec.get("selection"),
+            rec.get("status"),
+            rec.get("kickoff"),
+        )
+        voided += void_open_rec(cur, rec, "cancelled", CANCELLED_VOID_RESULT)
+    return voided, refused
 
 
 def list_open_recs_for_match(cur, match_id: str) -> list[dict]:
@@ -646,9 +897,10 @@ def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
     'after_kickoff_skips', 'post_kickoff_rec_voids' (recs voided
     because they were written at or after kickoff; not counted in
     recs_settled), 'postponed_rec_voids' (recs priced before a postponement
-    longer than POSTPONED_VOID_HOURS; not counted either) and
+    longer than POSTPONED_VOID_HOURS; not counted either),
     'regulation_regrades' (graded predictions rewritten on the 90-minute
-    score). run() passes one so it can log a single summary line;
+    score) and 'regulation_resettles' (money-settled recs re-settled on it).
+    run() passes one so it can log a single summary line;
     callers that don't care omit it.
     """
     counts = {"predictions_graded": 0, "predictions_skipped": 0, "recs_settled": 0}
@@ -670,6 +922,11 @@ def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
     regraded = regrade_on_regulation(cur, match, ctx)
     if regraded:
         stats["regulation_regrades"] = stats.get("regulation_regrades", 0) + regraded
+    # The money-settled recs on it, before the open ones below are settled
+    # (those are settled with the 90-minute score already).
+    resettled = resettle_recs_on_regulation(cur, match)
+    if resettled:
+        stats["regulation_resettles"] = stats.get("regulation_resettles", 0) + resettled
 
     for pred in list_ungraded_predictions(cur, match["match_id"]):
         skip, actual, correct = compute_prediction_grade(pred, match, ctx)
@@ -764,7 +1021,10 @@ STAT_KEYS = (
     "after_kickoff_skips",
     "post_kickoff_rec_voids",
     "postponed_rec_voids",
+    "cancelled_rec_voids",
+    "cancelled_orphan_recs",
     "regulation_regrades",
+    "regulation_resettles",
 )
 
 
@@ -782,6 +1042,9 @@ def run(database_url: str, days: int, match_id: Optional[str]) -> dict:
             if match_id is None:
                 # Not tied to a finished match, so not in grade_match.
                 stats["postponed_rec_voids"] += void_recs_on_long_postponed_matches(cur)
+                voided, refused = void_recs_on_cancelled_matches(cur)
+                stats["cancelled_rec_voids"] += voided
+                stats["cancelled_orphan_recs"] += refused
             matches = list_finished_matches(cur, days, match_id)
             if not matches:
                 logger.info("No finished matches needing grading in the last %d days", days)
@@ -802,10 +1065,29 @@ def run(database_url: str, days: int, match_id: Optional[str]) -> dict:
             POSTPONED_VOID_HOURS,
             POSTPONED_VOID_RESULT,
         )
+    if stats["cancelled_rec_voids"]:
+        logger.warning(
+            "Voided %d recommendation(s) on matches cancelled more than %dh ago (%r)",
+            stats["cancelled_rec_voids"],
+            CANCELLED_VOID_HOURS,
+            CANCELLED_VOID_RESULT,
+        )
+    if stats["cancelled_orphan_recs"]:
+        logger.error(
+            "Left %d open recommendation(s) on cancelled duplicates of played fixtures (metadata.%s): settle them "
+            "from the twin with scripts/repair_stranded_recs.py",
+            stats["cancelled_orphan_recs"],
+            ORPHAN_OF_KEY,
+        )
     if stats["regulation_regrades"]:
         logger.warning(
             "Re-graded %d full-time prediction(s) on the 90-minute score of matches decided after 90 minutes",
             stats["regulation_regrades"],
+        )
+    if stats["regulation_resettles"]:
+        logger.error(
+            "Re-settled %d recommendation(s) that had settled on the post-extra-time score (ids above)",
+            stats["regulation_resettles"],
         )
     if stats["post_kickoff_rec_voids"]:
         # ERROR, not WARNING: rec generation must never write a rec for a

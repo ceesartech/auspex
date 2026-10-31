@@ -35,20 +35,20 @@ score, result_detail, no regulation keys); a row that changed rolls the
 whole run back. Merging metadata on a finished row fires no trigger, so
 nothing re-grades here. Afterwards re-grade the full-time markets
 (grading_outcomes.SOCCER_FT_TYPES; the half-time-only markets do not
-change), dry run first, then the same with --apply; --days must reach back
-to the oldest stamped match (2026-06-29):
+change) of exactly the stamped matches, dry run first, then the same with
+--apply (scripts/ops/backfill_soccer_regulation_scores.sh writes the ids from
+its apply CSV and runs the dry run):
 
-    python /app/scripts/regrade_predictions.py --model-name ensemble --days 150 \\
-        --prediction-type match_result,btts,over_under,double_chance,draw_no_bet,correct_score \\
-        --prediction-type asian_handicap,clean_sheet,win_to_nil,team_total,odd_even,total_goals \\
-        --prediction-type winning_margin,result_btts,result_over_under,ht_ft_double_result
+    python /app/scripts/regrade_predictions.py --match-ids-file <stamped ids> \\
+        --prediction-type <grading_outcomes.SOCCER_FT_TYPES, comma-separated>
 
-That run also rewrites the DB trigger's 'over' / 'under' over_under
-actual_outcome into the grader's 'over_0.5' form on every graded row in the
-window (7,357 rows in the 130 days to 2026-10-31) without changing a
-verdict; its summary's "changed (→T/→F)" column shows the real moves. All 28
-recs on these matches were already void (constant-prior incident), so no rec
-re-settles.
+That re-grade also rewrites the DB trigger's 'over' / 'under' over_under
+actual_outcome on those matches into the grader's 'over_0.5' form without
+changing a verdict; its summary's "changed (→T/→F)" column shows the real
+moves. A rec settled with money on such a match is re-settled by
+grade_completed_matches when the match is in its window; all 28 recs on the
+15 matches of 2026-10-31 were already void (constant-prior incident), and a
+'void: ...' rec is never re-settled.
 
 Usage (inside the api container):
     python /app/scripts/backfill_soccer_regulation_scores.py            # dry run

@@ -33,9 +33,10 @@ prediction id goes to the audit CSV; its row stays in the archive.
 A row is refused (counted, never inserted) unless: the dump row is
 'pending' on the CSV's orphan; the archived prediction is that rec's, on
 that orphan; the twin is finished with the CSV's score; grading the rec's
-own selection on that score (grading_outcomes, never re-implemented)
-reproduces the CSV's status and P&L; and the twin holds exactly one
-prediction of the same key. The insert is all-or-nothing and ON CONFLICT
+own selection on that score (grading_outcomes, never re-implemented, with
+the twin's sport and metadata, so a soccer tie decided after 90 minutes
+grades on its 90-minute score) reproduces the CSV's status and P&L; and the
+twin holds exactly one prediction of the same key. The insert is all-or-nothing and ON CONFLICT
 (id) DO NOTHING; any row that does not insert rolls everything back. Every
 planned row goes to a write-once CSV first, dry run included.
 
@@ -89,7 +90,14 @@ CSV_FIELDS = (
     "profit_loss",
 )
 
-TWIN_SQL = "SELECT id::text AS id, status, home_score, away_score FROM matches WHERE id = %s"
+# metadata + sport: grade_rec_selection settles a soccer tie decided after 90
+# minutes on its 90-minute score, and never settles NHL double_chance.
+TWIN_SQL = """
+    SELECT m.id::text AS id, m.status, m.home_score, m.away_score, m.metadata, l.sport
+      FROM matches m
+      LEFT JOIN leagues l ON l.id = m.league_id
+     WHERE m.id = %s
+"""
 
 TWIN_PREDICTION_SQL = """
     SELECT id::text AS id FROM predictions
@@ -165,7 +173,15 @@ def check_row(audit: dict, rec: Optional[dict], pred: Optional[dict], twin: Opti
         return "twin_not_finished"
     if (str(twin["home_score"]), str(twin["away_score"])) != (audit["twin_home_score"], audit["twin_away_score"]):
         return "twin_score_changed"
-    outcome = grade_rec_selection(rec["bet_type"], rec["selection"], twin["home_score"], twin["away_score"])
+    outcome = grade_rec_selection(
+        rec["bet_type"],
+        rec["selection"],
+        twin["home_score"],
+        twin["away_score"],
+        sport=twin["sport"],
+        model_name=pred.get("model_name"),
+        metadata=twin["metadata"] or {},
+    )
     if outcome is None or outcome != audit["outcome"]:
         return "regrade_disagrees"
     status, pl = rec_status_and_pl(outcome, rec["recommended_stake"], rec["odds_at_recommendation"])

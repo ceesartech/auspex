@@ -599,7 +599,7 @@ class _RunCursor(FakeCursor):
         if sql_norm.startswith("SELECT m.id::text AS match_id"):
             self._last = ("matches", [dict(m) for m in self.matches])
             return
-        if "AND m.status = 'postponed'" in sql_norm:
+        if "AND m.status = 'postponed'" in sql_norm or "AND m.status = 'cancelled'" in sql_norm:
             self._last = ("recs", [])
             return
         super().execute(sql, params)
@@ -823,18 +823,85 @@ _ = pytest
 
 class RegulationCursor(FakeCursor):
     """FakeCursor plus the graded full-time read, the guarded re-grade, the
-    long-postponement rec read, and rec created_at."""
+    money-settled rec read and its guarded re-settle, the long-postponement
+    and cancelled rec reads, the guarded void, and rec created_at.
+    `match_status` maps a match id to its status for the void's guard (an
+    unlisted match is taken to hold the status the guard asks for)."""
 
-    def __init__(self, predictions, recs, postponed_recs=(), features=None):
+    def __init__(self, predictions, recs, postponed_recs=(), features=None, cancelled_recs=(), match_status=None):
         super().__init__(predictions, recs, features)
         self.postponed_recs = [dict(r) for r in postponed_recs]
+        self.cancelled_recs = [dict(r) for r in cancelled_recs]
+        self.match_status = dict(match_status or {})
         self.guarded_updates: list[tuple] = []
+        self.resettles: list[tuple] = []
+        self.voids: list[tuple] = []
         self.rowcount = 0
         self.sql: list[str] = []
+
+    def fetchone(self):
+        if self._last and self._last[0] == "void":
+            return self._last[1]
+        return super().fetchone()
 
     def execute(self, sql, params=None):
         sql_norm = " ".join(sql.split())
         self.sql.append(sql_norm)
+        if "br.profit_loss IS NOT NULL" in sql_norm and "FROM betting_recommendations br" in sql_norm:
+            (match_id,) = params
+            rows = []
+            for r in self.recs.values():
+                if r["match_id"] != match_id or r["status"] not in ("won", "lost", "void") or r["profit_loss"] is None:
+                    continue
+                p = self.predictions.get(r["prediction_id"], {})
+                rows.append(
+                    {
+                        "rec_id": r["id"],
+                        "bet_type": r["bet_type"],
+                        "selection": r["selection"],
+                        "recommended_stake": r["recommended_stake"],
+                        "odds_at_recommendation": r["odds_at_recommendation"],
+                        "status": r["status"],
+                        "actual_result": r.get("actual_result"),
+                        "profit_loss": r["profit_loss"],
+                        "p_model_name": p.get("model_name"),
+                        "sport": r.get("sport") if "l.sport AS sport" in sql_norm else None,
+                    }
+                )
+            self._last = ("recs", rows)
+            return
+        if sql_norm.startswith("UPDATE betting_recommendations br") and "FROM matches m" in sql_norm:
+            actual_result, rec_id, old_status, match_status = params
+            for guard in ("WHERE br.id = %s", "AND br.status = %s", "AND m.id = br.match_id", "AND m.status = %s"):
+                assert guard in sql_norm, f"the void lacks its guard {guard!r}"
+            self.voids.append(params)
+            r = self.recs[rec_id]
+            hit = r["status"] == old_status and self.match_status.get(r["match_id"], match_status) == match_status
+            hit = hit and "SET status = 'void'" in sql_norm and "profit_loss = 0" in sql_norm
+            if hit:
+                r["status"], r["actual_result"], r["profit_loss"] = "void", actual_result, Decimal("0")
+            self._last = ("void", {"id": rec_id} if hit else None)
+            return
+        if sql_norm.startswith("UPDATE betting_recommendations") and params is not None and len(params) == 7:
+            new_status, actual_result, pl, rec_id, old_status, old_actual, old_pl = params
+            for guard in (
+                "WHERE id = %s",
+                "AND status = %s",
+                "AND actual_result IS NOT DISTINCT FROM %s",
+                "AND profit_loss IS NOT DISTINCT FROM %s",
+            ):
+                assert guard in sql_norm, f"the re-settle lacks its guard {guard!r}"
+            self.resettles.append(params)
+            r = self.recs[rec_id]
+            hit = (r["status"], r.get("actual_result"), r["profit_loss"]) == (old_status, old_actual, old_pl)
+            if hit:
+                r["status"], r["actual_result"], r["profit_loss"] = new_status, actual_result, pl
+            self.rowcount = 1 if hit else 0
+            self._last = ("settle", None)
+            return
+        if "AND m.status = 'cancelled'" in sql_norm:
+            self._last = ("recs", [dict(r) for r in self.cancelled_recs])
+            return
         if "FROM predictions" in sql_norm and "p.is_correct IS NOT NULL" in sql_norm:
             match_id, types = params
             self._last = (
@@ -971,7 +1038,7 @@ class TestNinetyMinuteGrading:
         gcm.grade_match(cur, match)
         assert not any("p.is_correct IS NOT NULL" in s for s in cur.sql)
 
-    def test_finished_matches_with_the_keys_are_listed(self):
+    def test_finished_soccer_matches_with_the_keys_are_listed(self):
         seen = []
 
         class Cur:
@@ -983,7 +1050,10 @@ class TestNinetyMinuteGrading:
 
         gcm.list_finished_matches(Cur(), 14, None)
         sql, params = seen[0]
-        assert "OR m.metadata ? %s" in sql and params == ("14", "regulation_home_score")
+        # Soccer only: load_nhl_historical writes the same key on every
+        # finished NHL game (tests/unit/test_grading_sql_pg.py runs it).
+        assert "OR (COALESCE(l.sport, 'soccer') = 'soccer' AND m.metadata ? %s)" in sql
+        assert params == ("14", "regulation_home_score")
         assert "m.match_date, l.sport" in sql and "LEFT JOIN leagues l ON l.id = m.league_id" in sql
 
     def test_decided_after_90_without_the_keys_warns_once(self, caplog):
@@ -1111,3 +1181,181 @@ class _PostponedRunCursor(RegulationCursor):
 
     def __exit__(self, *a):
         return False
+
+
+# ── Money-settled recs when the 90-minute score arrives later ────────
+
+
+def _settled(rid, selection, status, actual_result, pl, bet_type="1x2", stake=10, odds=2.0, match_id="m1"):
+    rec = _rec(rid, match_id, "p1", stake=stake, odds=odds, bet_type=bet_type, selection=selection, status=status)
+    rec["actual_result"] = actual_result
+    rec["profit_loss"] = Decimal(str(pl))
+    return rec
+
+
+class TestRegulationResettles:
+    PRED = [_pred("p1", "m1", "match_result", "ensemble", "home", is_correct=False, actual_outcome="draw")]
+
+    def test_a_rec_settled_on_the_post_extra_time_score_is_resettled_loudly(self, caplog):
+        # Settled 'won' on Belgium 3-2 AET before the 90-minute 2-2 arrived.
+        cur = RegulationCursor(self.PRED, [_settled("r1", "home", "won", "won", "10.00")])
+        stats: dict = {}
+        with caplog.at_level("ERROR", logger="grade_completed_matches"):
+            gcm.grade_match(cur, dict(AET_MATCH), stats)
+        r = cur.recs["r1"]
+        assert (r["status"], r["actual_result"], r["profit_loss"]) == ("lost", "lost", Decimal("-10"))
+        assert stats["regulation_resettles"] == 1
+        assert cur.resettles[0][3:] == ("r1", "won", "won", Decimal("10.00"))  # guarded on what it read
+        msg = next(rec.getMessage() for rec in caplog.records if "Re-settled rec r1" in rec.getMessage())
+        assert "(2, 2)" in msg and "(won, won, 10.00) -> (lost, lost, -10.00)" in msg and "3-2" in msg
+
+    def test_an_unchanged_verdict_is_left_alone(self):
+        # BTTS yes wins on 3-2 and on 2-2 alike.
+        cur = RegulationCursor(self.PRED, [_settled("r1", "yes", "won", "won", "10.00", bet_type="btts")])
+        gcm.grade_match(cur, dict(AET_MATCH))
+        assert cur.resettles == [] and cur.recs["r1"]["status"] == "won"
+
+    def test_cents_rounding_is_not_a_change(self):
+        # 7.50 at 1.833 pays 6.2475, stored as 6.25.
+        rec = _settled("r1", "yes", "won", "won", "6.25", bet_type="btts", stake=7.5, odds=1.833)
+        cur = RegulationCursor(self.PRED, [rec])
+        gcm.grade_match(cur, dict(AET_MATCH))
+        assert cur.resettles == []
+
+    def test_a_score_independent_void_is_never_touched(self):
+        rec = _settled("r1", "home", "void", "void: constant-prior incident (2026-06-15..07-13)", "0.00")
+        cur = RegulationCursor(self.PRED, [rec])
+        gcm.grade_match(cur, dict(AET_MATCH))
+        assert cur.resettles == [] and cur.recs["r1"]["status"] == "void"
+
+    def test_a_legacy_result_text_with_the_same_money_is_left_alone(self):
+        rec = _settled("r1", "draw", "won", "draw", "10.00")  # an older settler wrote the outcome, not the verdict
+        cur = RegulationCursor(self.PRED, [rec])
+        gcm.grade_match(cur, dict(AET_MATCH))
+        assert cur.resettles == []
+
+    def test_a_rec_rewritten_meanwhile_is_left_alone(self, caplog):
+        cur = RegulationCursor(self.PRED, [_settled("r1", "home", "won", "won", "10.00")])
+        real = cur.execute
+
+        def racing(sql, params=None):
+            if params is not None and len(params) == 7:
+                cur.recs["r1"]["profit_loss"] = Decimal("9.99")
+            return real(sql, params)
+
+        cur.execute = racing
+        stats: dict = {}
+        with caplog.at_level("ERROR", logger="grade_completed_matches"):
+            gcm.grade_match(cur, dict(AET_MATCH), stats)
+        assert cur.recs["r1"]["status"] == "won" and stats.get("regulation_resettles", 0) == 0
+        assert any("changed while it was being re-settled" in r.getMessage() for r in caplog.records)
+
+    def test_nhl_and_unscored_matches_never_read_their_settled_recs(self):
+        for match in ({**AET_MATCH, "sport": "nhl"}, {**AET_MATCH, "metadata": {"result_detail": "AET"}}):
+            cur = RegulationCursor(self.PRED, [_settled("r1", "home", "won", "won", "10.00")])
+            gcm.grade_match(cur, match)
+            assert not any("br.profit_loss IS NOT NULL" in s for s in cur.sql)
+
+    def test_run_reports_them_at_error(self, monkeypatch, caplog):
+        class Cur(_PostponedRunCursor):
+            pass
+
+        cur = Cur([dict(AET_MATCH)], self.PRED, [_settled("r1", "home", "won", "won", "10.00")], [])
+        monkeypatch.setattr(gcm.psycopg2, "connect", lambda url: _RunConn(cur))
+        with caplog.at_level("ERROR", logger="grade_completed_matches"):
+            summary = gcm.run("postgresql://unused/db", 14, None)
+        assert summary["regulation_resettles"] == 1
+        assert any("Re-settled 1 recommendation(s)" in r.getMessage() for r in caplog.records)
+
+
+# ── Cancelled matches ────────────────────────────────────────────────
+
+
+def _open_on(rid, match_id, status="pending", **extra):
+    return {"rec_id": rid, "match_id": match_id, "bet_type": "1x2", "selection": "home", "status": status, **extra}
+
+
+class TestCancelledRecs:
+    def test_open_recs_on_a_cancelled_match_are_voided_guarded(self):
+        recs = [_rec("r1", "m9", "p1", stake=10, odds=2.0), _rec("r2", "m9", "p1", stake=5, odds=3.0, status="placed")]
+        cur = RegulationCursor([], recs, cancelled_recs=[_open_on("r1", "m9"), _open_on("r2", "m9", "placed")])
+        assert gcm.void_recs_on_cancelled_matches(cur) == (2, 0)
+        for rid in ("r1", "r2"):
+            r = cur.recs[rid]
+            assert (r["status"], r["profit_loss"], r["actual_result"]) == (
+                "void",
+                Decimal("0"),
+                "void: match cancelled",
+            )
+        assert cur.voids[0] == (gcm.CANCELLED_VOID_RESULT, "r1", "pending", "cancelled")
+        assert cur.voids[1][2] == "placed"
+
+    def test_a_cancelled_duplicate_of_a_played_fixture_is_refused(self, caplog):
+        cur = RegulationCursor(
+            [], [_rec("r1", "m9", "p1", stake=10, odds=2.0)], cancelled_recs=[_open_on("r1", "m9", orphan_of="twin-1")]
+        )
+        with caplog.at_level("ERROR", logger="grade_completed_matches"):
+            assert gcm.void_recs_on_cancelled_matches(cur) == (0, 1)
+        assert cur.voids == [] and cur.recs["r1"]["status"] == "pending"
+        assert any("duplicate of match twin-1" in r.getMessage() for r in caplog.records)
+
+    def test_a_match_rescheduled_meanwhile_keeps_its_rec(self, caplog):
+        cur = RegulationCursor(
+            [],
+            [_rec("r1", "m9", "p1", stake=10, odds=2.0)],
+            cancelled_recs=[_open_on("r1", "m9")],
+            match_status={"m9": "scheduled"},
+        )
+        with caplog.at_level("ERROR", logger="grade_completed_matches"):
+            assert gcm.void_recs_on_cancelled_matches(cur) == (0, 0)
+        assert cur.recs["r1"]["status"] == "pending"
+        assert any("changed while voiding it" in r.getMessage() for r in caplog.records)
+
+    def test_the_cancelled_query(self):
+        seen = []
+
+        class Cur:
+            def execute(self, sql, params=None):
+                seen.append((" ".join(sql.split()), params))
+
+            def fetchall(self):
+                return []
+
+        gcm.list_recs_on_cancelled_matches(Cur())
+        sql, params = seen[0]
+        assert "br.status IN ('pending', 'placed')" in sql and "m.status = 'cancelled'" in sql
+        assert "m.metadata->>'orphan_of' AS orphan_of" in sql
+        assert "m.match_date < NOW() - (%s || ' hours')::interval" in sql and params == ("72",)
+
+    def test_the_postponement_void_is_guarded_the_same_way(self):
+        pending = _open_on("r1", "m9")
+        cur = RegulationCursor([], [_rec("r1", "m9", "p1", stake=10, odds=2.0)], postponed_recs=[pending])
+        cur.match_status["m9"] = "scheduled"  # rescheduled meanwhile
+        assert gcm.void_recs_on_long_postponed_matches(cur) == 0
+        assert cur.voids == [(gcm.POSTPONED_VOID_RESULT, "r1", "pending", "postponed")]
+        assert cur.recs["r1"]["status"] == "pending"
+
+    def test_run_voids_them_and_reports_it(self, monkeypatch, caplog):
+        cur = _PostponedRunCursor([], [], [_rec("r1", "m9", "p1", stake=10, odds=2.0)], [])
+        cur.cancelled_recs = [_open_on("r1", "m9")]
+        monkeypatch.setattr(gcm.psycopg2, "connect", lambda url: _RunConn(cur))
+        with caplog.at_level("WARNING", logger="grade_completed_matches"):
+            summary = gcm.run("postgresql://unused/db", 14, None)
+        assert summary["cancelled_rec_voids"] == 1 and cur.recs["r1"]["status"] == "void"
+        assert any("cancelled more than 72h ago" in r.getMessage() for r in caplog.records)
+
+    def test_run_reports_refused_orphans_at_error(self, monkeypatch, caplog):
+        cur = _PostponedRunCursor([], [], [_rec("r1", "m9", "p1", stake=10, odds=2.0)], [])
+        cur.cancelled_recs = [_open_on("r1", "m9", orphan_of="twin-1")]
+        monkeypatch.setattr(gcm.psycopg2, "connect", lambda url: _RunConn(cur))
+        with caplog.at_level("ERROR", logger="grade_completed_matches"):
+            summary = gcm.run("postgresql://unused/db", 14, None)
+        assert summary["cancelled_orphan_recs"] == 1 and cur.recs["r1"]["status"] == "pending"
+        assert any("cancelled duplicates of played fixtures" in r.getMessage() for r in caplog.records)
+
+    def test_an_ad_hoc_match_run_leaves_them_alone(self, monkeypatch):
+        cur = _PostponedRunCursor([], [], [_rec("r1", "m9", "p1", stake=10, odds=2.0)], [])
+        cur.cancelled_recs = [_open_on("r1", "m9")]
+        monkeypatch.setattr(gcm.psycopg2, "connect", lambda url: _RunConn(cur))
+        assert gcm.run("postgresql://unused/db", 14, "m1")["cancelled_rec_voids"] == 0
+        assert cur.recs["r1"]["status"] == "pending"
