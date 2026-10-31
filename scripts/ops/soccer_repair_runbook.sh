@@ -202,6 +202,7 @@ run_step() {  # run_step <n> <label> <command...>
   fi
   result=changed
   grep -q "ALREADY DONE" "$RUN_DIR/step$n.log" && result=already_done
+  grep -q "CHECKED (read-only)" "$RUN_DIR/step$n.log" && result=checked
   record "$n" "$result"
   log "STEP $n/11 DONE ($result)"
 }
@@ -273,6 +274,9 @@ step11() {
   if [ -z "$found" ]; then log "no fetch_live_odds run has finished since $merged_at after $ODDS_WAIT_POLLS polls — re-run with --from 11 later"; return 1; fi
   log "fetch_live_odds run started $found finished; checking odds and resolution since $merged_at"
   $DC exec -T api sh -c "python /app/scripts/merge_soccer_teams.py --check-after $plan --odds-since $merged_at --after-later-steps > /tmp/runbook_odds_after.log 2>&1; rc=\$?; grep -E 'AFTER|REFUSED|ERROR|stopped|repoints_missing|Traceback' /tmp/runbook_odds_after.log | tail -15; exit \$rc"
+  rc=$?
+  [ "$rc" -eq 0 ] && log "CHECKED (read-only): no merged team re-minted, every merged spelling resolves, the odds feed still reaches the merged clubs' fixtures"
+  return "$rc"
 }
 
 run_step 1 "repoint_team_matches --pass 1" bash "$OPS/repoint_team_matches.sh" --pass 1
