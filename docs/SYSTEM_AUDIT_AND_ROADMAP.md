@@ -1437,9 +1437,17 @@ with the growth-rate driver (WAL) eliminated.
 > repair now match its plan (status, P&L to the cent — `profit_loss` is
 > numeric(10,2) — and match_id), each has its prediction, and the recs P&L
 > widget's query sees all 50 settled at net +61.96; a re-run finds nothing to
-> restore. Open: the CASCADE
-> itself — any prediction delete silently deletes recs; `ON DELETE RESTRICT`
-> (a migration, needs approval) would make this class fail loudly.
+> restore. **The CASCADE itself is gone (migration 025, operator-approved,
+> applied 01:32Z after backup `betting_system-2026-10-31T012945Z.dump`):**
+> `betting_recommendations.prediction_id` is now `ON DELETE NO ACTION`, so a
+> delete that would strand a rec fails loudly — the ops script proved it by
+> attempting one (refused, rolled back). NO ACTION rather than RESTRICT
+> because it is checked at end of statement: deleting a match that takes its
+> rec and its prediction together still works (verified on a scratch
+> Postgres). Only `scripts/cleanup_soccer_pollution.py` and the orphan tool
+> delete predictions/matches in code; both are compatible.
+> `betting_recommendations.match_id` remains `ON DELETE CASCADE` (deleting a
+> match deletes its recs) — guarded in the orphan tool, not in the schema.
 
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
