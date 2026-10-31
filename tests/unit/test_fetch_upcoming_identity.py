@@ -544,7 +544,7 @@ class _RecordingPath:
 
     def __enter__(self):
         self._team, self._sched, self._fin = fu.ensure_team, fu.insert_scheduled_match, fu.insert_finished_match
-        fu.ensure_team = lambda cur, cfg, name, league_id, espn_id=None: (
+        fu.ensure_team = lambda cur, cfg, name, league_id, espn_id=None, alt_names=(): (
             HOME if name == "Home FC" or self._same_team else AWAY
         )
         fu.insert_scheduled_match = lambda *a, **k: self.inserts.append("scheduled") or 1
@@ -707,12 +707,19 @@ class TestKnockoutPlaceholders:
 
 @pytest.fixture
 def identity_stats(monkeypatch):
-    for key in fu.IDENTITY_STATS:
+    for key in list(fu.IDENTITY_STATS):
         monkeypatch.setitem(fu.IDENTITY_STATS, key, 0)
     return fu.IDENTITY_STATS
 
 
-NO_REFUSALS = {"forks_refused": 0, "same_team": 0, "score_mismatch": 0, "status_refused": 0}
+NO_REFUSALS = {
+    "forks_refused": 0,
+    "same_team": 0,
+    "score_mismatch": 0,
+    "status_refused": 0,
+    "team_namesakes": 0,
+    "team_conflicts": 0,
+}
 
 
 class TestForkRefusal:
@@ -845,6 +852,15 @@ class TestExitCode:
 
     def test_a_same_team_refusal_exits_3(self, monkeypatch, identity_stats):
         assert self._main(monkeypatch, refuse="same_team") == 3
+
+    def test_a_namesake_insert_exits_3(self, monkeypatch, identity_stats, caplog):
+        # Santos Laguna inserted as its own row because Santos FC holds 'Santos'.
+        assert self._main(monkeypatch, refuse="team_namesakes") == 3
+        assert self._main(monkeypatch, refuse="team_namesakes", results=True) == 3
+        assert any("inserted as their own row" in r.message for r in caplog.records)
+
+    def test_an_espn_team_id_conflict_exits_3(self, monkeypatch, identity_stats):
+        assert self._main(monkeypatch, refuse="team_conflicts") == 3
 
 
 class TestSampleTimes:

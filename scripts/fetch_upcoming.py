@@ -16,9 +16,10 @@ Usage:
 
 Exit status: 0 ok; 1 every ESPN request failed (results mode, an outage);
 2 no database URL; 3 the sweep refused at least one competition because
-writing it would corrupt a fixture: its identity, its score, or its status
-(see IDENTITY_STATS). Everything else in the sweep is committed before the
-script exits 3.
+writing it would corrupt a fixture (its identity, its score, or its
+status), inserted a club as its own row because another ESPN team holds its
+name, or met an ESPN team id conflict (see IDENTITY_STATS). Everything else
+in the sweep is committed before the script exits 3.
 
 ESPN's STATUS_POSTPONED / STATUS_CANCELED / STATUS_ABANDONED are recorded on
 the EXISTING row ('postponed' / 'cancelled'), never inserted, from either
@@ -39,7 +40,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import psycopg2
 import requests
@@ -397,47 +398,131 @@ def ensure_league(cur, cfg: SportConfig, code: str, name: str, country: str) -> 
     return row["id"] if row else None
 
 
-def ensure_team(cur, cfg: SportConfig, name: str, league_id: str, espn_id: str | None = None) -> str | None:
-    """Resolve `name` (and, for a team sport, ESPN team id `espn_id`) to a
-    team_id via find_team, inserting a new team row only when nothing matches.
+# Inserted with an empty external_ids: the ESPN id goes on afterwards through
+# team_identity.stamp_espn_id, whose guard never puts one id on two rows. The
+# conflict branch is the race where another sweep inserted the same name
+# between our lookup and this insert.
+INSERT_TEAM_SQL = """
+    INSERT INTO teams (name, normalized_name, league_id, sport)
+    VALUES (%s, %s, %s, %s)
+    ON CONFLICT (normalized_name, sport) DO UPDATE
+        SET league_id = COALESCE(teams.league_id, EXCLUDED.league_id)
+    RETURNING id, (xmax = 0) AS inserted
+"""
 
-    The ESPN id is stamped onto a row found by name and onto an inserted row,
-    so the name decision is made once and every later sweep resolves by id
-    (team_identity). None when the name resolves to a row of another ESPN
-    team (find_team refuses it, and a twin cannot be inserted under a taken
-    name). A new soccer team is logged as a canary: in a league with
-    established teams it is usually a split of one of them."""
+
+def ensure_team(
+    cur,
+    cfg: SportConfig,
+    name: str,
+    league_id: str,
+    espn_id: str | None = None,
+    alt_names: tuple[str, ...] = (),
+) -> str | None:
+    """Resolve `name` (and, for a team sport, ESPN team id `espn_id`) to a
+    team_id via find_team's tiers, inserting a new team row only when nothing
+    matches.
+
+    The ESPN id is stamped onto a row found by name and onto an inserted row
+    (guarded: team_identity.stamp_espn_id), so the name decision is made once
+    and every later sweep resolves by id. A new soccer team is logged as a
+    canary: in a league with established teams it is usually a split of one.
+
+    A club whose name belongs to ANOTHER ESPN team (Santos Laguna arriving as
+    'Santos' after Santos FC stamped the 'Santos' row) is never merged and
+    never dropped: when no other tier resolves it, it gets its own row under
+    a distinct name (namesake_name), stamped with its id, and the run counts
+    IDENTITY_STATS['team_namesakes'] so it exits 3 once; later sweeps resolve
+    it by id. None only on an ESPN-id conflict (the id on two rows, the
+    seeded row holding another id, a stamp refused on a new row), counted in
+    IDENTITY_STATS['team_conflicts'] — the competition is then skipped."""
     espn_id = str(espn_id) if espn_id else None
-    team_id, how = _find_team(cur, cfg, name, league_id, espn_id)
-    if team_id:
-        if espn_id and how != "espn":
-            team_identity.stamp_espn_id(cur, team_id, espn_id, f"{cfg.sport} {name!r}")
-        return team_id
-    if how == "refused":
+    label = f"{cfg.sport} {name!r}"
+    found = _find_team(cur, cfg, name, league_id, espn_id)
+    if found.team_id:
+        if espn_id and found.how != "espn" and not team_identity.stamp_espn_id(cur, found.team_id, espn_id, label):
+            # Only a race reaches this (each tier skips rows of other ESPN
+            # teams, and a holder of this id resolves first): the name
+            # decision stands, the conflict is logged above and counted.
+            IDENTITY_STATS["team_conflicts"] += 1
+        return found.team_id
+    if found.how == "refused":
+        IDENTITY_STATS["team_conflicts"] += 1
         return None
 
-    # Insert new team. ON CONFLICT guard for race conditions on the
-    # unique (normalized_name, sport) constraint.
-    cur.execute(
-        """
-        INSERT INTO teams (name, normalized_name, league_id, sport, external_ids)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (normalized_name, sport) DO UPDATE
-            SET league_id = COALESCE(teams.league_id, EXCLUDED.league_id)
-        RETURNING id, (xmax = 0) AS inserted, external_ids->>'espn' AS espn
-        """,
-        (name, normalize_team(name), league_id, cfg.sport, Json({"espn": espn_id} if espn_id else {})),
-    )
+    insert_name = name
+    if found.how == "seed-new" and found.insert_name:
+        insert_name = found.insert_name
+    elif found.how == "namesake":
+        insert_name = namesake_name(cur, cfg, name, espn_id, alt_names)
+    cur.execute(INSERT_TEAM_SQL, (insert_name, normalize_team(insert_name), league_id, cfg.sport))
     row = cur.fetchone()
     if not row:
+        IDENTITY_STATS["team_conflicts"] += 1
+        logger.error("Inserting %s team %r returned no row — the competition is skipped", cfg.sport, insert_name)
         return None
-    if espn_id and row.get("espn") != espn_id:  # the race branch: another sweep inserted the name first
-        if not team_identity.stamp_espn_id(cur, row["id"], espn_id, f"{cfg.sport} {name!r}"):
-            return None
+    if espn_id and not team_identity.stamp_espn_id(cur, row["id"], espn_id, label):
+        IDENTITY_STATS["team_conflicts"] += 1
+        logger.error(
+            "Not using %s team %s (%r) for ESPN team %s: the guarded stamp refused it (see above), so this side is "
+            "unresolved and the competition is skipped; this run exits %d",
+            cfg.sport,
+            row["id"],
+            insert_name,
+            espn_id,
+            IDENTITY_EXIT_CODE,
+        )
+        return None
+    if found.how == "namesake":
+        IDENTITY_STATS["team_namesakes"] += 1
+        logger.error(
+            "%s ESPN team %s %r: that name belongs to %s — a different club under the same name. Inserted it as "
+            "its own team %s (%r) stamped with ESPN id %s; later sweeps resolve it by that id. This run exits %d. "
+            "If the two ARE one club, one of the stamped ESPN ids is wrong: pin the right row in "
+            "scripts/data/soccer_team_espn_seed.csv and move this team's matches (scripts/repoint_team_matches.py).",
+            cfg.sport,
+            espn_id,
+            name,
+            "; ".join(f"team {tid} ({tier} match, ESPN team {held})" for tier, tid, held in found.blocked),
+            row["id"],
+            insert_name,
+            espn_id,
+            IDENTITY_EXIT_CODE,
+        )
     if cfg.sport == "soccer" and row.get("inserted", True):
         source = f"ESPN sweep, ESPN team id {espn_id}" if espn_id else "ESPN sweep"
-        team_identity.log_new_soccer_team(cur, name, league_id, source)
+        if found.how == "seed-new":
+            source += ", pinned by scripts/data/soccer_team_espn_seed.csv"
+        team_identity.log_new_soccer_team(cur, insert_name, league_id, source, seeded=found.how == "seed-new")
     return row["id"]
+
+
+def namesake_name(cur, cfg: SportConfig, name: str, espn_id: str | None, alt_names: tuple[str, ...] = ()) -> str:
+    """A name for the row of a club whose display name another ESPN team
+    holds, free under UNIQUE(normalized_name, sport) and in every name tier.
+
+    ESPN's own full names come first (competitor team.name / team.location,
+    e.g. 'Athletico Paranaense' for 'Athletico-PR'). Its abbreviation and
+    shortDisplayName are never used: the collisions this exists for share
+    them ('SAN' for both Santos clubs, 'LIV' for both Liverpools), and short
+    forms like 'Estudiantes' name several clubs. Otherwise the deterministic
+    '<name> (ESPN <id>)'."""
+    for alt in alt_names:
+        alt = " ".join((alt or "").split())
+        if alt and normalize_team(alt) != normalize_team(name) and _name_is_free(cur, cfg, alt):
+            return alt
+    return f"{name} (ESPN {espn_id})"
+
+
+def _name_is_free(cur, cfg: SportConfig, name: str) -> bool:
+    """True when no exact, alias or accent-folded name tier resolves `name`."""
+    norm = normalize_team(name)
+    cur.execute("SELECT id FROM teams WHERE normalized_name = %s AND sport = %s", (norm, cfg.sport))
+    if cur.fetchone():
+        return False
+    if team_identity.find_team_by_alias(cur, cfg.sport, norm):
+        return False
+    return not team_identity.find_team_accent_insensitive(cur, cfg.sport, norm)
 
 
 def find_team(cur, cfg: SportConfig, name: str, league_id: str | None, espn_id: str | None = None) -> str | None:
@@ -449,6 +534,9 @@ def find_team(cur, cfg: SportConfig, name: str, league_id: str | None, espn_id: 
     the lookup runs in tiers (the shared rules live in team_identity):
 
       1. The ESPN team id, when the caller has one (teams.external_ids.espn).
+         The id on two rows is corruption: refused, never resolved by name.
+      1b. Soccer: the seed (team_identity.seed_entry) — ESPN ids whose names
+         collide, pinned to their rows ('Santos' FC vs Santos Laguna).
       2. Exact normalised name on (normalized_name, sport).
       3. An alias (teams.metadata.aliases).
       4. The same name with accents folded (ESPN "Montreal" must reuse the
@@ -456,56 +544,180 @@ def find_team(cur, cfg: SportConfig, name: str, league_id: str | None, espn_id: 
       5. Soccer only: a club-name match among the teams of the swept league's
          country (team_identity.match_club_name) — never in an international
          competition, where clubs of every country meet.
-      6. (ensure_team only) INSERT a new row.
+      6. Soccer only: the in-league spelling ratio, the pre-2026-10 step kept
+         last (team_identity.match_league_ratio): 'Espanyol' -> 'Espanol'.
+      7. (ensure_team only) INSERT a new row.
 
-    A row from tiers 2-4 that already carries a DIFFERENT ESPN id is another
-    ESPN team, so it is refused (logged at ERROR) rather than merged.
+    With an ESPN id, tiers 2-6 skip every row that carries a DIFFERENT ESPN
+    id: that row is another club under the same (or a similar) name. If one
+    was skipped and nothing else resolves, ensure_team inserts the club under
+    a distinct name (see ensure_team); find_team returns None.
     """
-    return _find_team(cur, cfg, name, league_id, str(espn_id) if espn_id else None)[0]
+    return _find_team(cur, cfg, name, league_id, str(espn_id) if espn_id else None).team_id
 
 
-def _find_team(cur, cfg: SportConfig, name: str, league_id: str | None, espn_id: str | None) -> tuple[str | None, str]:
-    """find_team's (team_id, tier): tier is 'espn' | 'exact' | 'alias' |
-    'accent' | 'fuzzy' for a hit, 'refused' when a name hit belongs to another
-    ESPN team, '' when nothing matched."""
+class TeamLookup(NamedTuple):
+    """_find_team's verdict. how: 'espn' | 'seed' | 'exact' | 'alias' |
+    'accent' | 'fuzzy' | 'ratio' for a hit (team_id set); for a miss,
+    '' (insert `name`), 'seed-new' (insert insert_name, the seeded name),
+    'namesake' (a name tier hit rows of other ESPN teams, listed in blocked
+    as (tier, team_id, their ESPN id): insert under a distinct name) or
+    'refused' (an ESPN id conflict: write nothing)."""
+
+    team_id: str | None
+    how: str
+    insert_name: str | None = None
+    blocked: tuple[tuple[str, str, str], ...] = ()
+
+
+def _find_team(cur, cfg: SportConfig, name: str, league_id: str | None, espn_id: str | None) -> TeamLookup:
+    """find_team's tiers (see find_team), with the verdict ensure_team acts on."""
     norm = normalize_team(name)
 
     if espn_id:
-        by_espn = team_identity.find_team_by_espn_id(cur, cfg.sport, espn_id)
-        if by_espn:
-            return by_espn, "espn"
+        holders = team_identity.espn_id_holders(cur, cfg.sport, espn_id)
+        seed = team_identity.seed_entry(cfg.sport, espn_id)
+        if len(holders) > 1:
+            logger.error(
+                "Refusing %s team %r: ESPN team id %s is on %d teams (%s) — one ESPN team must be one row. The "
+                "competition is skipped until the rows are repaired.",
+                cfg.sport,
+                name,
+                espn_id,
+                len(holders),
+                ", ".join(holders),
+            )
+            return TeamLookup(None, "refused")
+        if holders:
+            if seed and _team_normalized_name(cur, holders[0]) != seed.normalized_name:
+                logger.error(
+                    "Refusing %s team %r: ESPN team id %s is stamped on team %s, but the seed pins it to %r (%s). "
+                    "One of the two is wrong; the competition is skipped until they agree.",
+                    cfg.sport,
+                    name,
+                    espn_id,
+                    holders[0],
+                    seed.team_name,
+                    seed.evidence,
+                )
+                return TeamLookup(None, "refused")
+            return TeamLookup(holders[0], "espn")
+        if seed:
+            return _seeded_team(cur, cfg, name, espn_id, seed)
+
+    blocked: list[tuple[str, str, str]] = []
+
+    def usable(team_id: str | None, tier: str) -> bool:
+        """A name-tier hit counts unless it belongs to another ESPN team."""
+        if not team_id:
+            return False
+        held = team_identity.espn_id_of(cur, team_id) if espn_id else None
+        if held and held != espn_id:
+            if all(str(team_id) != tid for _, tid, _ in blocked):
+                blocked.append((tier, str(team_id), held))
+            return False
+        return True
 
     cur.execute(
         "SELECT id FROM teams WHERE normalized_name = %s AND sport = %s",
         (norm, cfg.sport),
     )
     row = cur.fetchone()
-    team_id, how = (row["id"], "exact") if row else (None, "")
-    if not team_id:
-        team_id, how = team_identity.find_team_by_alias(cur, cfg.sport, norm), "alias"
-    if not team_id:
-        team_id, how = team_identity.find_team_accent_insensitive(cur, cfg.sport, norm), "accent"
-    if team_id:
-        held = team_identity.espn_id_of(cur, team_id) if espn_id else None
-        if held and held != espn_id:
-            logger.error(
-                "Refusing %s team %r (ESPN team id %s): its %s match, team %s, is ESPN team %s — a different club "
-                "under the same name. The competition is skipped; fix the row or its aliases.",
-                cfg.sport,
-                name,
-                espn_id,
-                how,
-                team_id,
-                held,
-            )
-            return None, "refused"
-        return team_id, how
+    if row and usable(row["id"], "exact"):
+        return TeamLookup(row["id"], "exact")
+    alias_id = team_identity.find_team_by_alias(cur, cfg.sport, norm)
+    if usable(alias_id, "alias"):
+        return TeamLookup(alias_id, "alias")
+    accent_id = team_identity.find_team_accent_insensitive(cur, cfg.sport, norm)
+    if usable(accent_id, "accent"):
+        return TeamLookup(accent_id, "accent")
 
     if league_id and (cfg.club_suffixes or cfg.club_prefixes):
+        # Both fuzzy tiers leave out rows stamped with another ESPN id.
         fuzzy_id = team_identity.find_team_fuzzy(cur, cfg.sport, name, league_id, espn_id)
         if fuzzy_id:
-            return fuzzy_id, "fuzzy"
-    return None, ""
+            return TeamLookup(fuzzy_id, "fuzzy")
+        ratio_id = _find_team_by_league_ratio(cur, cfg, name, league_id, espn_id)
+        if ratio_id:
+            return TeamLookup(ratio_id, "ratio")
+    if blocked:
+        return TeamLookup(None, "namesake", blocked=tuple(blocked))
+    return TeamLookup(None, "")
+
+
+def _team_normalized_name(cur, team_id) -> str | None:
+    cur.execute("SELECT normalized_name FROM teams WHERE id = %s", (team_id,))
+    row = cur.fetchone()
+    return row["normalized_name"] if row else None
+
+
+def _seeded_team(cur, cfg: SportConfig, name: str, espn_id: str, seed) -> TeamLookup:
+    """The seed's row for this ESPN id: found by its exact name, 'seed-new'
+    when no such row exists yet (ensure_team creates it under the seeded
+    name), refused when that row already carries another ESPN id."""
+    cur.execute(
+        "SELECT id FROM teams WHERE normalized_name = %s AND sport = %s",
+        (seed.normalized_name, cfg.sport),
+    )
+    row = cur.fetchone()
+    if not row:
+        logger.info("%s ESPN team %s %r is seeded as new team %r", cfg.sport, espn_id, name, seed.team_name)
+        return TeamLookup(None, "seed-new", insert_name=seed.team_name)
+    held = team_identity.espn_id_of(cur, row["id"])
+    if held and held != espn_id:
+        logger.error(
+            "Refusing %s team %r (ESPN team id %s): the seed pins it to team %s (%r), which carries ESPN id %s. "
+            "One of the two is wrong; the competition is skipped until they agree.",
+            cfg.sport,
+            name,
+            espn_id,
+            row["id"],
+            seed.team_name,
+            held,
+        )
+        return TeamLookup(None, "refused")
+    logger.info("%s ESPN team %s %r resolves to %r by the seed", cfg.sport, espn_id, name, seed.team_name)
+    return TeamLookup(row["id"], "seed")
+
+
+def _find_team_by_league_ratio(cur, cfg: SportConfig, name: str, league_id, espn_id: str | None) -> str | None:
+    """The last tier: team_identity.match_league_ratio among the teams whose
+    first league is `league_id` (the pre-2026-10 fuzzy step), skipping rows
+    stamped with another ESPN id when the caller has one. A match is logged at
+    WARNING, like the club-name tier: it is the decision to review if two
+    clubs were merged."""
+    cur.execute(
+        "SELECT id, name, normalized_name, external_ids->>'espn' AS espn FROM teams "
+        "WHERE league_id = %s AND sport = %s",
+        (league_id, cfg.sport),
+    )
+    candidates = [
+        (c, _strip_club_tokens(c["normalized_name"], cfg)) for c in cur.fetchall() if not (espn_id and c.get("espn"))
+    ]
+    verdict = team_identity.match_league_ratio(name, _strip_club_tokens(normalize_team(name), cfg), candidates)
+    if verdict.outcome == "matched":
+        logger.warning(
+            "Resolved %s team %r onto existing %r by the in-league spelling ratio %.2f (runner-up %r %.2f) — if "
+            "they are different clubs, split them and pin both in scripts/data/soccer_team_espn_seed.csv",
+            cfg.sport,
+            name,
+            verdict.name,
+            verdict.score,
+            verdict.runner_up,
+            verdict.runner_up_score,
+        )
+        return verdict.team_id
+    if verdict.outcome == "ambiguous":
+        logger.warning(
+            "In-league spelling ratio for %s team %r is ambiguous: %r %.2f vs %r %.2f — not merging",
+            cfg.sport,
+            name,
+            verdict.name,
+            verdict.score,
+            verdict.runner_up,
+            verdict.runner_up_score,
+        )
+    return None
 
 
 def season_label(cfg: SportConfig, match_dt: datetime, event_context: dict | None = None) -> str:
@@ -673,6 +885,21 @@ def _competitor_espn_id(competitor: dict, is_individual: bool) -> str | None:
     return str(raw) if raw not in (None, "") else None
 
 
+def _competitor_alt_names(competitor: dict, is_individual: bool) -> tuple[str, ...]:
+    """ESPN's other full names for a team-sport competitor (team.name, then
+    team.location), for naming a namesake row (see namesake_name). Empty for
+    an individual sport."""
+    if is_individual:
+        return ()
+    team = competitor.get("team") or {}
+    names: list[str] = []
+    for key in ("name", "location"):
+        value = " ".join(str(team.get(key) or "").split())
+        if value and value not in names:
+            names.append(value)
+    return tuple(names)
+
+
 # ESPN's event.season.type enum. 1 = preseason, 2 = regular season,
 # 3 = post-season. Verified live 2026-09-04 against the NFL, NBA and NHL
 # scoreboards (NFL 2026-08-15 -> 7 type-1 events; NFL 2026-09-13 -> 13
@@ -730,17 +957,35 @@ IDENTITY_WINDOW_HOURS = 72
 # is worth an ERROR line even though the payload guard has cleared it.
 LARGE_SHIFT_HOURS = 24
 
-# Competitions a sweep REFUSED to write because the write would corrupt a
-# fixture: its identity — forks_refused (see ForkRefused) and same_team (see
-# _resolve_teams) — its score — score_mismatch (see _record_result: ESPN's
-# header score contradicted by its own scoring plays) — or its status —
-# status_refused (see _record_status_change: the ESPN id names a row for
-# another team pair). The rest of the sweep is still written and committed;
-# main() then exits IDENTITY_EXIT_CODE so the run fails, and the DAG's
-# failure callback alerts someone. An ERROR line alone was not enough: from
-# 2026-09-29 to 2026-10-10 the soccer fixtures path logged the same refusal on
-# about 1,075 runs while it forked FC Juarez v Tijuana into two rows.
-IDENTITY_STATS = {"forks_refused": 0, "same_team": 0, "score_mismatch": 0, "status_refused": 0}
+# What a sweep did that needs a person, counted so main() exits
+# IDENTITY_EXIT_CODE and the DAG's failure callback alerts someone:
+#   forks_refused   competitions not written: the write would fork an
+#                   ESPN-identified fixture (see ForkRefused);
+#   same_team       competitions not written: both sides resolved to one team
+#                   (see _resolve_teams);
+#   score_mismatch  results not written: ESPN's header score is contradicted
+#                   by its own scoring plays (see _record_result);
+#   status_refused  postponements / cancels not written: the ESPN id names a
+#                   row for another team pair (see _record_status_change);
+#   team_namesakes  a club whose name another ESPN team holds was inserted as
+#                   its own row (see ensure_team) — written, but a person must
+#                   confirm it is not a mis-stamped id; once only, since later
+#                   sweeps resolve it by its id;
+#   team_conflicts  ESPN team id conflicts (the id on two rows, the seed and a
+#                   stamp disagreeing, a guarded stamp refused); a side left
+#                   unresolved skips its competition.
+# The rest of the sweep is still written and committed. An ERROR line alone
+# was not enough: from 2026-09-29 to 2026-10-10 the soccer fixtures path
+# logged the same refusal on about 1,075 runs while it forked FC Juarez v
+# Tijuana into two rows.
+IDENTITY_STATS = {
+    "forks_refused": 0,
+    "same_team": 0,
+    "score_mismatch": 0,
+    "status_refused": 0,
+    "team_namesakes": 0,
+    "team_conflicts": 0,
+}
 IDENTITY_EXIT_CODE = 3
 
 
@@ -1292,15 +1537,19 @@ def _resolve_teams(
     match_dt,
     home_espn: str | None = None,
     away_espn: str | None = None,
+    home_alt: tuple[str, ...] = (),
+    away_alt: tuple[str, ...] = (),
 ):
     """(home_id, away_id) for a competition, or None when a side cannot be
-    resolved or both sides resolve to ONE team. A team playing itself is a
-    team-matching error (a fuzzy match, or a placeholder slot the filter
-    missed: the 2026 World Cup left 20 such rows), never a fixture, so it is
-    refused and counted. home_espn / away_espn are the sides' ESPN team ids
-    (_competitor_espn_id); espn_id is the competition's."""
-    home_id = ensure_team(cur, cfg, home_name, league_id, espn_id=home_espn)
-    away_id = ensure_team(cur, cfg, away_name, league_id, espn_id=away_espn)
+    resolved (ensure_team counted why) or both sides resolve to ONE team. A
+    team playing itself is a team-matching error (a fuzzy match, or a
+    placeholder slot the filter missed: the 2026 World Cup left 20 such
+    rows), never a fixture, so it is refused and counted. home_espn /
+    away_espn are the sides' ESPN team ids (_competitor_espn_id) and
+    home_alt / away_alt their other ESPN names (_competitor_alt_names);
+    espn_id is the competition's."""
+    home_id = ensure_team(cur, cfg, home_name, league_id, espn_id=home_espn, alt_names=home_alt)
+    away_id = ensure_team(cur, cfg, away_name, league_id, espn_id=away_espn, alt_names=away_alt)
     if not (home_id and away_id):
         return None
     if home_id == away_id:
@@ -1436,6 +1685,8 @@ def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict, even
         match_dt,
         home_espn=_competitor_espn_id(home, cfg.is_individual),
         away_espn=_competitor_espn_id(away, cfg.is_individual),
+        home_alt=_competitor_alt_names(home, cfg.is_individual),
+        away_alt=_competitor_alt_names(away, cfg.is_individual),
     )
     if teams is None:
         return False
@@ -1926,6 +2177,8 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
         match_dt,
         home_espn=_competitor_espn_id(home, cfg.is_individual),
         away_espn=_competitor_espn_id(away, cfg.is_individual),
+        home_alt=_competitor_alt_names(home, cfg.is_individual),
+        away_alt=_competitor_alt_names(away, cfg.is_individual),
     )
     if teams is None:
         return False
@@ -2156,24 +2409,30 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def identity_exit_code(cfg: SportConfig) -> int:
-    """0, or IDENTITY_EXIT_CODE when the sweep refused any competition (see
-    IDENTITY_STATS). The rest of the sweep has already been committed."""
+    """0, or IDENTITY_EXIT_CODE when the sweep refused a competition or did
+    something to a team that needs a person (see IDENTITY_STATS). The rest
+    of the sweep has already been committed."""
     forks, same_team = IDENTITY_STATS["forks_refused"], IDENTITY_STATS["same_team"]
     scores, statuses = IDENTITY_STATS["score_mismatch"], IDENTITY_STATS["status_refused"]
+    namesakes, conflicts = IDENTITY_STATS["team_namesakes"], IDENTITY_STATS["team_conflicts"]
     refused = forks + same_team + scores + statuses
-    if not refused:
+    if not (refused or namesakes or conflicts):
         return 0
     logger.error(
         "%s sweep REFUSED %d write(s): %d would have forked an ESPN-identified fixture, %d resolved both sides to "
         "one team, %d carried a header score its own scoring plays contradict, %d status change(s) named a row "
-        "for another team pair. Everything else was written and committed; exiting %d so this run fails until "
-        "they are repaired or ESPN corrects them (details in the ERROR lines above).",
+        "for another team pair. %d club(s) were inserted as their own row because another ESPN team holds their "
+        "name; %d ESPN team id conflict(s). Everything else was written and committed; exiting %d so this run "
+        "fails until they are repaired, ESPN corrects them, or the team mapping is checked (details in the ERROR "
+        "lines above).",
         cfg.sport,
         refused,
         forks,
         same_team,
         scores,
         statuses,
+        namesakes,
+        conflicts,
         IDENTITY_EXIT_CODE,
     )
     return IDENTITY_EXIT_CODE

@@ -19,12 +19,17 @@ twin, and every later sweep matched the twin exactly: 320 soccer teams
 created from 2026-05-27 split from their history ('Man City' 722 finished
 matches, 'Manchester City' 11). Lowering the threshold is no fix — it would
 merge Kalamata with Kalamaria (0.82) and Man City with Man United (0.81).
-Three tools here close it, consulted by fetch_upcoming in this order:
+The tools here close it, consulted by fetch_upcoming in this order:
 
   1. The ESPN team id (teams.external_ids.espn), looked up first and stamped
      onto whatever row a name resolves to, so a name is decided once and every
      later sweep follows the id. A row that already carries a different ESPN
-     id is a different ESPN team: it is never reused or overwritten.
+     id is a different ESPN team: no name tier ever picks it, and it is never
+     overwritten.
+  1b. The seed (scripts/data/soccer_team_espn_seed.csv): ESPN ids whose names
+     collide pinned to their rows ('Santos' is both Santos FC, bra.1, and
+     Santos Laguna, mex.1). Consulted when the id lookup misses, so the order
+     of the first sweeps after a deploy cannot hand a row to the wrong club.
   2. Aliases (teams.metadata.aliases, a jsonb array of names), consulted after
      the exact name: the curated answer for names no rule can pair ('Wolves' /
      'Wolverhampton Wanderers'). promote_raw.upsert_teams uses the same
@@ -34,17 +39,26 @@ Three tools here close it, consulted by fetch_upcoming in this order:
      meet): equal club words, the existing name's words inside the incoming
      one's (for a club that played in the last three years), or abbreviations
      ('Man' for 'Manchester', 'Utd', 'QPR'). It accepts only a unique best
-     with a clear margin over the runner-up; anything else is a new team,
-     which the caller logs at ERROR as a canary.
+     with a clear margin over the runner-up.
+  4. match_league_ratio, the pre-2026-10 step kept as the last tier: a
+     whole-string ratio >= 0.85 within the swept league's own teams (first
+     league), now with a unique best and the same margin. Names resolve
+     through it today ('Espanyol' / 'Espanol' 0.93, 'Levadiakos' /
+     'Levadeiakos' 0.95) that no structural rule pairs, and dropping it would
+     mint history-less twins for them.
+Anything else is a new team, which the caller logs at ERROR as a canary.
 """
 
 from __future__ import annotations
 
+import csv
 import logging
 import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -93,22 +107,28 @@ STAMP_ESPN_SQL = """
 """
 
 
-def find_team_by_espn_id(cur, sport: str, espn_id: str | None) -> str | None:
-    """id of the team of `sport` stamped with this ESPN team id, else None.
-
-    Two rows holding one id is corruption: logged at ERROR and neither is
-    returned, so the caller falls back to the name (and stamp_espn_id will
-    not add a third holder)."""
+def espn_id_holders(cur, sport: str, espn_id: str | None) -> list[str]:
+    """Sorted ids of every team of `sport` stamped with this ESPN team id.
+    More than one is corruption (one ESPN team is one row)."""
     if not espn_id:
-        return None
+        return []
     cur.execute(
         "SELECT id FROM teams WHERE sport = %s AND external_ids @> jsonb_build_object('espn', %s::text)",
         (sport, str(espn_id)),
     )
-    ids = sorted({str(r["id"]) for r in cur.fetchall()})
+    return sorted({str(r["id"]) for r in cur.fetchall()})
+
+
+def find_team_by_espn_id(cur, sport: str, espn_id: str | None) -> str | None:
+    """id of the team of `sport` stamped with this ESPN team id, else None.
+
+    Two rows holding one id is corruption: logged at ERROR and neither is
+    returned. fetch_upcoming then refuses the side rather than resolve it by
+    name (see espn_id_holders), so a third row never gets the id."""
+    ids = espn_id_holders(cur, sport, espn_id)
     if len(ids) > 1:
         logger.error(
-            "ESPN team id %s is on %d %s teams (%s): one ESPN team must be one row — resolving by name instead",
+            "ESPN team id %s is on %d %s teams (%s): one ESPN team must be one row — repair the rows",
             espn_id,
             len(ids),
             sport,
@@ -153,6 +173,85 @@ def stamp_espn_id(cur, team_id, espn_id: str, label: str = "") -> bool:
         row.get("holder"),
     )
     return False
+
+
+# ── 1b. The seed: ESPN ids whose names collide ───────────────────────
+
+# 'Santos' is Santos FC (bra.1, ESPN 2674) and Santos Laguna (mex.1, ESPN
+# 225); 'Liverpool' is the Premier League's (364) and Liverpool Montevideo
+# (Libertadores, 5492). Both arrive under one display name, so by name alone
+# the first sweep after a deploy to reach either club would stamp its id on
+# the shared row, and which club that is depends on the week's fixture list.
+# The seed decides it instead: espn_id -> the team row (by name) that club
+# owns, or the name of the row to create when it has none. Reviewed rows
+# only, each with its evidence (scripts/compare_team_resolution.py lists the
+# collisions).
+SEED_PATH = Path(__file__).resolve().parent / "data" / "soccer_team_espn_seed.csv"
+SEED_FIELDS = ("espn_id", "team_name", "league_slug", "evidence")
+
+
+@dataclass(frozen=True)
+class SeedEntry:
+    """One reviewed row of the seed: ESPN team `espn_id` is our team named
+    `team_name` (teams.normalized_name == normalize(team_name))."""
+
+    espn_id: str
+    team_name: str
+    league_slug: str
+    evidence: str
+
+    @property
+    def normalized_name(self) -> str:
+        return " ".join(self.team_name.strip().lower().split())
+
+
+_SEED_CACHE: dict[str, dict[str, SeedEntry]] = {}
+
+
+def load_espn_seed(path: Path | str | None = None) -> dict[str, SeedEntry]:
+    """{espn_id: SeedEntry} from the seed CSV. A malformed seed raises
+    ValueError (and a missing one FileNotFoundError): it pins clubs to rows,
+    so a half-read seed would silently hand a collision back to sweep order.
+    Rejected: a missing column, an empty or non-numeric espn_id, an empty
+    team_name, one id twice, one team named by two ids."""
+    path = Path(path or SEED_PATH)
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        missing = [f for f in SEED_FIELDS if f not in (reader.fieldnames or [])]
+        if missing:
+            raise ValueError(f"{path}: missing column(s) {', '.join(missing)}")
+        seed: dict[str, SeedEntry] = {}
+        owner: dict[str, str] = {}
+        for line, row in enumerate(reader, start=2):
+            entry = SeedEntry(*(str(row.get(f) or "").strip() for f in SEED_FIELDS))
+            if not entry.espn_id.isdigit() or not entry.team_name:
+                raise ValueError(f"{path}:{line}: espn_id must be digits and team_name non-empty: {row}")
+            if entry.espn_id in seed:
+                raise ValueError(f"{path}:{line}: ESPN id {entry.espn_id} is seeded twice")
+            if entry.normalized_name in owner:
+                raise ValueError(
+                    f"{path}:{line}: team {entry.team_name!r} is seeded for ESPN ids {owner[entry.normalized_name]} "
+                    f"and {entry.espn_id}; one team row is one ESPN team"
+                )
+            seed[entry.espn_id] = entry
+            owner[entry.normalized_name] = entry.espn_id
+    return seed
+
+
+def espn_seed(path: Path | str | None = None) -> dict[str, SeedEntry]:
+    """load_espn_seed, read once per process and path."""
+    key = str(Path(path or SEED_PATH))
+    if key not in _SEED_CACHE:
+        _SEED_CACHE[key] = load_espn_seed(key)
+    return _SEED_CACHE[key]
+
+
+def seed_entry(sport: str, espn_id: str | None) -> SeedEntry | None:
+    """The seed row for a soccer ESPN team id, else None (other sports have
+    no seed)."""
+    if sport != "soccer" or not espn_id:
+        return None
+    return espn_seed().get(str(espn_id))
 
 
 # ── 2. Aliases ────────────────────────────────────────────────────────
@@ -361,6 +460,12 @@ def club_match_tier(incoming: tuple[str, ...], existing: tuple[str, ...]) -> flo
     return max(_inside(b, a), reverse)
 
 
+def _same_side(a: tuple[str, ...], b: tuple[str, ...]) -> bool:
+    """True when two club keys carry the same side markers (both first
+    teams, both B sides, ...)."""
+    return (set(a) & SIDE_MARKERS) == (set(b) & SIDE_MARKERS)
+
+
 @dataclass(frozen=True)
 class ClubMatch:
     """The fuzzy step's verdict: team_id is set only when outcome == 'matched'."""
@@ -391,7 +496,11 @@ def match_club_name(name: str, candidates: list[dict], as_of: datetime | None = 
     for cand, ckey in keyed:
         score = club_match_tier(key, ckey)
         if 0 < score < SCORE_EQUAL and score == _inside(ckey, key):
-            if any(other is not cand and _inside(ckey, okey) for other, okey in keyed):
+            # Only a candidate of the same side counts as 'another club'
+            # here: 'Sociedad B' holds 'Sociedad' but can never be the
+            # incoming first team (club_match_tier refuses across side
+            # markers), so it must not block Real Sociedad's match.
+            if any(other is not cand and _same_side(ckey, okey) and _inside(ckey, okey) for other, okey in keyed):
                 score = 0.0
         if score in (SCORE_CONTAINED, SCORE_PARTIAL):
             latest = cand.get("latest_date")
@@ -405,6 +514,52 @@ def match_club_name(name: str, candidates: list[dict], as_of: datetime | None = 
     if best_score < MIN_SCORE:
         return ClubMatch("no-match")
     outcome = "matched" if best_score - runner[0] >= MIN_MARGIN - 1e-9 else "ambiguous"
+    return ClubMatch(
+        outcome,
+        team_id=str(best["id"]) if outcome == "matched" else None,
+        name=best.get("name"),
+        score=best_score,
+        runner_up=runner[1].get("name") if runner[0] else None,
+        runner_up_score=runner[0],
+    )
+
+
+# ── 4. The in-league spelling ratio (last tier) ──────────────────────
+
+# The pre-2026-10 fuzzy step, kept behind the structural one: a whole-string
+# SequenceMatcher ratio between the club-token-stripped names, among the teams
+# whose FIRST league is the swept league. Names resolve through it today that
+# no structural rule pairs ('Espanyol' / 'Espanol' 0.93, 'Levadiakos' /
+# 'Levadeiakos' 0.95, runner-up 0.47 / 0.60), and without it each would get a
+# history-less twin stamped with its ESPN id. It was tightened only where the
+# old step could merge two clubs and never resolve one: a unique best by
+# LEAGUE_RATIO_MARGIN, never across side markers, and (in the caller) never a
+# row of another ESPN team.
+LEAGUE_RATIO_MIN = 0.85
+LEAGUE_RATIO_MARGIN = MIN_MARGIN
+
+
+def match_league_ratio(name: str, target: str, candidates: list[tuple[dict, str]]) -> ClubMatch:
+    """Pick the team `name` denotes by the in-league ratio. `target` is the
+    incoming name stripped of club tokens and `candidates` (team dict,
+    stripped name) pairs, both stripped by the caller's sport rules
+    (fetch_upcoming._strip_club_tokens). The best must reach
+    LEAGUE_RATIO_MIN and beat the runner-up by LEAGUE_RATIO_MARGIN."""
+    side = set(club_key(name)) & SIDE_MARKERS
+    scored: list[tuple[float, dict]] = []
+    for cand, stripped in candidates:
+        if not target or not stripped:
+            continue
+        if (set(club_key(cand.get("normalized_name") or cand.get("name") or "")) & SIDE_MARKERS) != side:
+            continue
+        scored.append((SequenceMatcher(None, stripped, target).ratio(), cand))
+    if not scored:
+        return ClubMatch("no-match")
+    scored.sort(key=lambda sc: -sc[0])
+    (best_score, best), runner = scored[0], (scored[1] if len(scored) > 1 else (0.0, {}))
+    if best_score < LEAGUE_RATIO_MIN:
+        return ClubMatch("no-match")
+    outcome = "matched" if best_score - runner[0] >= LEAGUE_RATIO_MARGIN - 1e-9 else "ambiguous"
     return ClubMatch(
         outcome,
         team_id=str(best["id"]) if outcome == "matched" else None,
@@ -507,15 +662,16 @@ def established_team_count(cur, league_id) -> int:
     return int(row["n"]) if row else 0
 
 
-def log_new_soccer_team(cur, name: str, league_id, source: str) -> None:
+def log_new_soccer_team(cur, name: str, league_id, source: str, seeded: bool = False) -> None:
     """The canary for a soccer team row about to be minted. In a league that
     already has established teams a new name is usually a split of one of
     them, so it is logged at ERROR with the established count; in a league
-    with none it is expected and logged at WARNING."""
+    with none it is expected and logged at WARNING, as is a row the seed
+    names (`seeded`: a reviewed decision, not a split)."""
     league = league_label(cur, league_id)
     label = f"{league[0]} ({league[1]})" if league else f"league {league_id}"
     established = established_team_count(cur, league_id) if league_id else 0
-    level = logging.ERROR if established else logging.WARNING
+    level = logging.ERROR if established and not seeded else logging.WARNING
     logger.log(
         level,
         "new soccer team %s in %s that already has %d established teams (%s) — if it is one of them, add its name "
