@@ -1446,8 +1446,19 @@ with the growth-rate driver (WAL) eliminated.
 > rec and its prediction together still works (verified on a scratch
 > Postgres). Only `scripts/cleanup_soccer_pollution.py` and the orphan tool
 > delete predictions/matches in code; both are compatible.
-> `betting_recommendations.match_id` remains `ON DELETE CASCADE` (deleting a
-> match deletes its recs) — guarded in the orphan tool, not in the schema.
+> **Migration 026 (operator-approved, applied 02:08Z after backup
+> `betting_system-2026-10-31T020639Z.dump`):** `betting_recommendations.match_id`
+> is now `ON DELETE NO ACTION` too, so deleting a match that holds a rec
+> fails; a tool that means to remove such a fixture must re-point or delete
+> its recs first, explicitly (this supersedes 025's "a match delete that
+> takes its rec and prediction together still works"). The ops script proved
+> it with the rec's prediction link cleared first, so the refusal came from
+> the match FK itself (rolled back; the match and all 1,818 rec→prediction
+> links intact). The only code that deletes matches (the orphan tool)
+> already skips rows holding recs; the generators' per-cycle `DELETE ...
+> status='pending'` deletes recs, not matches, and is unaffected. Every other
+> match_id FK (odds, snapshots, predictions, features, stats, weather) still
+> cascades — derived or re-fetchable; `betting_history` is SET NULL (0 rows).
 
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
