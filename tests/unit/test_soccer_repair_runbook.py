@@ -235,6 +235,23 @@ def test_a_failing_corpus_step_stops_keeps_the_retrains_paused_and_from_n_restor
     assert _paused(af) == {"retrain_models": False, "retrain_halftime_dc": False} and _markers(tmp_path) == []
 
 
+def test_a_corpus_step_that_fails_after_a_complete_repair_keeps_the_retrains_paused(tmp_path):
+    """The state file's last corpus record is step 10's, but this run's step 3
+    failed: it may have committed part of its work, so the corpus is suspect."""
+    (tmp_path / "state").write_text("step=3 result=changed at=1 head=x\nstep=10 result=changed at=2 head=x\n")
+    rc, out, _, _, af = _run(tmp_path, "--only", "3", FAIL_MERGE_SOCCER_TEAMS="1")
+    assert rc == 1 and "ALERT: retrain_models stays PAUSED" in out and "in step 3" in out, out
+    assert _paused(af) == {"retrain_models": True, "retrain_halftime_dc": True}
+
+
+def test_a_state_file_that_cannot_be_written_keeps_the_retrains_paused(tmp_path):
+    (tmp_path / "state").mkdir()  # a directory: every record fails
+    rc, out, steps, _, af = _run(tmp_path)
+    assert rc == 0 and steps == EXPECTED_ORDER and "WARNING: could not write" in out, out
+    assert "the repair is not complete" in out
+    assert _paused(af) == {"retrain_models": True, "retrain_halftime_dc": True}
+
+
 def test_a_failure_outside_the_corpus_steps_restores_the_retrains_when_step_10_is_recorded(tmp_path):
     rc, out, steps, _, af = _run(tmp_path, "--only", "11", rules=_rules(check_rc=1))
     assert rc == 1 and "STEP 11 FAILED" in out, out
