@@ -207,14 +207,17 @@ def assess(cand: dict, comp: dict, parts: tuple) -> tuple[str, str, Optional[tup
 
 def match_candidate(cur, league_id, parts: tuple, by_espn: dict, by_triple: dict) -> Optional[dict]:
     """The candidate this competition is, or None. Only candidates can
-    match, so no other row is ever touched."""
-    _home, _away, home_name, away_name, match_dt, _state, _venue, espn_id = parts
+    match, so no other row is ever touched. A row without an ESPN id is
+    matched by its teams, each resolved as the sweeps resolve it: its ESPN
+    team id first (fetch_upcoming.find_team), since ESPN's 'Santos' is both
+    Santos FC and Santos Laguna by name."""
+    home, away, home_name, away_name, match_dt, _state, _venue, espn_id = parts
     if espn_id and espn_id in by_espn:
         return by_espn[espn_id]
     if not by_triple:
         return None
-    home_id = fu.find_team(cur, SOCCER, home_name, league_id)
-    away_id = fu.find_team(cur, SOCCER, away_name, league_id)
+    home_id = fu.find_team(cur, SOCCER, home_name, league_id, espn_id=fu._competitor_espn_id(home, False))
+    away_id = fu.find_team(cur, SOCCER, away_name, league_id, espn_id=fu._competitor_espn_id(away, False))
     if not (home_id and away_id):
         return None
     return by_triple.get((str(home_id), str(away_id), _utc(match_dt)))

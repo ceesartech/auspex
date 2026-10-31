@@ -296,7 +296,11 @@ def _row(status="scheduled", *, espn="401896749", home=HOME, away=AWAY, metadata
 @pytest.fixture
 def teams(monkeypatch):
     found = {"Atromitos": HOME, "AEK Athens": AWAY}
-    monkeypatch.setattr(fu, "find_team", lambda cur, cfg, name, league_id: found.get(name))
+
+    def lookup(cur, cfg, name, league_id, espn_id):
+        return fu.TeamLookup(found.get(name), "exact" if name in found else "")
+
+    monkeypatch.setattr(fu, "_find_team", lookup)
     monkeypatch.setattr(fu, "ensure_team", MagicMock(side_effect=AssertionError("the status path never inserts teams")))
     return found
 
@@ -412,7 +416,7 @@ class TestRecordStatusChange:
         assert not any(s.startswith("INSERT") for s in cur.statements)
 
     def test_unknown_teams_mean_no_row_of_ours(self, stats, monkeypatch):
-        monkeypatch.setattr(fu, "find_team", lambda *a: None)
+        monkeypatch.setattr(fu, "_find_team", lambda *a: fu.TeamLookup(None, ""))
         cur = StatusCursor([_row()])
         fu._record_result(cur, SOCCER, "league", _postponed())
         assert cur.statements == []

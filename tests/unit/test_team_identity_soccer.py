@@ -901,3 +901,97 @@ class TestCompetitorAltNames:
 
     def test_individual_sports_carry_none(self):
         assert fu._competitor_alt_names({"athlete": {"displayName": "Jannik Sinner"}}, True) == ()
+
+
+# ── the status path resolves sides as ensure_team does ───────────────
+
+
+class StatusFakeDB(FakeDB):
+    """FakeDB plus the matches rows fetch_upcoming's status path reads
+    (STATUS_ROW_BY_ESPN_SQL, STATUS_ROW_BY_TRIPLE_SQL) and writes
+    (STATUS_UPDATE_SQL, guarded on the status read)."""
+
+    def __init__(self, teams=(), matches=(), **kwargs):
+        super().__init__(teams, **kwargs)
+        self.matches = [dict(m) for m in matches]
+
+    def _answer(self, q, p):
+        if q.startswith("SELECT m.id, m.status, m.home_team_id, m.away_team_id, m.match_date, m.metadata FROM matches"):
+            espn, _sport = p
+            return [m for m in self.matches if m.get("espn") == espn][:2]
+        if q.startswith("SELECT id, status, home_team_id, away_team_id, match_date, metadata FROM matches"):
+            home, away, when = p
+            return [
+                m for m in self.matches if (m["home_team_id"], m["away_team_id"], m["match_date"]) == (home, away, when)
+            ]
+        if q.startswith("UPDATE matches SET status"):
+            status, _patch, _drop, rid, old = p
+            row = next((m for m in self.matches if m["id"] == rid and m["status"] == old), None)
+            if row is None:
+                return []
+            row["status"] = status
+            return [{"id": rid}]
+        return super()._answer(q, p)
+
+
+def _postponed_liga_mx():
+    """ESPN's Liga MX competition 401: Santos Laguna, whose ESPN display name
+    is 'Santos' (mex.1 id 225), v Tijuana, postponed."""
+    comp = _comp(
+        {"id": "225", "team": {"id": "225", "displayName": "Santos"}},
+        {"id": "10125", "team": {"id": "10125", "displayName": "Tijuana"}},
+    )
+    comp["status"] = {"type": {"name": "STATUS_POSTPONED", "state": "post", "completed": False}}
+    return comp
+
+
+def _liga_mx_db(*, laguna_espn=None, extra=()):
+    comp = _postponed_liga_mx()
+    kickoff = fu._competition_parts(comp, SOCCER)[4]
+    teams = [
+        team("santos", "Santos", country="Brazil", espn="2674", league_id=BR),
+        team("laguna", "Santos Laguna", country="Mexico", espn=laguna_espn, league_id=MX),
+        team("tijuana", "Tijuana", country="Mexico", league_id=MX),
+        *extra,
+    ]
+    row = {
+        "id": "fixture",
+        "status": "scheduled",
+        "espn": "401",
+        "home_team_id": "laguna",
+        "away_team_id": "tijuana",
+        "match_date": kickoff,
+        "metadata": {},
+    }
+    return StatusFakeDB(teams, [row]), comp
+
+
+class TestStatusPathResolvesByEspnId:
+    """ESPN's 'Santos' is two clubs. The fixture and results paths resolve a
+    side by its ESPN team id (and the seed) first; the status path must too,
+    or a Santos Laguna postponement resolves 'Santos' by name to Santos FC,
+    finds its own fixture row 'drifted' and is refused every sweep (exit 3)."""
+
+    @pytest.mark.parametrize("laguna_espn", [None, "225"], ids=["seeded", "stamped"])
+    @pytest.mark.parametrize("path", ["results", "fixtures"])
+    def test_a_santos_laguna_postponement_lands_on_its_row(self, identity_stats, laguna_espn, path):
+        db, comp = _liga_mx_db(laguna_espn=laguna_espn)
+        if path == "results":
+            assert fu._record_result(db, SOCCER, MX, comp) is False  # not a result
+        else:
+            assert fu._process_competition(db, SOCCER, MX, comp) is False
+        assert db.matches[0]["status"] == "postponed"
+        assert identity_stats["status_refused"] == identity_stats["team_conflicts"] == 0
+        assert fu.identity_exit_code(SOCCER) == 0
+        assert [q for q in db.writes() if "teams" in q] == []  # never inserts or stamps a team
+
+    def test_an_espn_team_id_conflict_writes_nothing_and_is_counted(self, identity_stats, caplog):
+        # 225 on two rows: corruption, never resolved by name.
+        dup = team("laguna-twin", "Club Santos Laguna", country="Mexico", espn="225", league_id=MX)
+        db, comp = _liga_mx_db(laguna_espn="225", extra=(dup,))
+        with caplog.at_level(logging.ERROR):
+            assert fu._record_result(db, SOCCER, MX, comp) is False
+        assert db.matches[0]["status"] == "scheduled" and db.writes() == []
+        assert identity_stats["team_conflicts"] == 1 and identity_stats["status_refused"] == 0
+        assert fu.identity_exit_code(SOCCER) == fu.IDENTITY_EXIT_CODE
+        assert "ESPN team id 225 is on 2 teams" in caplog.text

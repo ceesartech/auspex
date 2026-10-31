@@ -174,7 +174,7 @@ def espn(monkeypatch):
 
     teams: dict[str, str] = {}
     monkeypatch.setattr(bf.fu, "fetch_day", fetch_day)
-    monkeypatch.setattr(bf.fu, "find_team", lambda cur, cfg, name, league_id: teams.get(name))
+    monkeypatch.setattr(bf.fu, "find_team", lambda cur, cfg, name, league_id, espn_id=None: teams.get(name))
     monkeypatch.setitem(bf.fu.FETCH_STATS, "ok", 1)
     monkeypatch.setitem(bf.fu.FETCH_STATS, "failed", 0)
     return boards, teams, fetched
@@ -206,6 +206,23 @@ class TestPlan:
         assert counts == Counter({bf.STAMP: 2})
         # each candidate day plus the day before
         assert ("fifa.world", date(2026, 6, 30)) in fetched and ("conmebol.libertadores", date(2026, 9, 15)) in fetched
+
+    def test_the_triple_resolves_each_side_by_its_espn_team_id(self, espn, monkeypatch):
+        # ESPN's 'Santos' is two clubs by name; the sweeps resolve a side by its ESPN team id first.
+        boards, teams, _ = espn
+        ldu = cand("m-ldu", ("Copa Libertadores", "International"), None, detail="FT-PENS")
+        teams.update({"Liga de Quito": "m-ldu-home", "Palmeiras": "m-ldu-away"})
+        boards[("conmebol.libertadores", date(2026, 9, 16))] = [_event(comp_of("ldu_palmeiras_ft_pens_3_2"))]
+        lookups: list[tuple] = []
+
+        def find_team(cur, cfg, name, league_id, espn_id=None):
+            lookups.append((name, espn_id))
+            return teams.get(name)
+
+        monkeypatch.setattr(bf.fu, "find_team", find_team)
+        entries = bf.plan(FakeCursor(), [ldu], Counter())
+        assert entries[0]["action"] == bf.STAMP
+        assert lookups == [("Liga de Quito", "4816"), ("Palmeiras", "2029")]
 
     def test_a_candidate_missing_from_espn_is_refused(self, espn):
         counts: Counter = Counter()

@@ -2011,22 +2011,37 @@ def _status_target_row(cur, cfg: SportConfig, espn_id, home_id, away_id, match_d
     return cur.fetchone()
 
 
+def _existing_side(cur, cfg: SportConfig, name: str, league_id: str, competitor: dict) -> str | None:
+    """One side of a competition the status path records, resolved as
+    ensure_team resolves it (find_team's tiers, the side's ESPN team id
+    first) but never inserted. By name alone ESPN's 'Santos' (Santos Laguna,
+    ESPN 225) is Santos FC's row, so a Liga MX postponement found its own
+    fixture row 'drifted' and was refused every sweep. An ESPN-id conflict
+    (the id on two rows, the seed and a stamp disagreeing) leaves the side
+    unresolved and is counted in IDENTITY_STATS['team_conflicts'], as
+    ensure_team counts it: a postponed competition never reaches ensure_team."""
+    found = _find_team(cur, cfg, name, league_id, _competitor_espn_id(competitor, cfg.is_individual))
+    if found.how == "refused":
+        IDENTITY_STATS["team_conflicts"] += 1
+    return found.team_id
+
+
 def _record_status_change(cur, cfg: SportConfig, league_id: str, parts: tuple, target: str, espn_status: str) -> bool:
     """Record ESPN's postponement / cancellation on the EXISTING row for
     this competition. Never inserts a row or a team (teams resolve through
-    find_team), never touches a 'finished' row or one cancelled on purpose
-    (a cancel ESPN recorded may still become a postponement), and writes
-    only when the status changes, guarded on the status read. Returns True
-    when a row was written.
+    find_team's tiers, ESPN team id first: _existing_side), never touches a
+    'finished' row or one cancelled on purpose (a cancel ESPN recorded may
+    still become a postponement), and writes only when the status changes,
+    guarded on the status read. Returns True when a row was written.
 
     A cancel stamps status_source / espn_status (what keeps it correctable,
     espn_cancelled). In a 1v1 sport it also drops the ESPN id, as
     _release_redrawn_slot does, recording it as cancelled_espn_id: ESPN
     re-fills a cancelled draw slot under the same id, and that pairing must
     resolve to its own row."""
-    _home, _away, home_name, away_name, match_dt, _state, _venue, espn_id = parts
-    home_id = find_team(cur, cfg, home_name, league_id)
-    away_id = find_team(cur, cfg, away_name, league_id)
+    home, away, home_name, away_name, match_dt, _state, _venue, espn_id = parts
+    home_id = _existing_side(cur, cfg, home_name, league_id, home)
+    away_id = _existing_side(cur, cfg, away_name, league_id, away)
     if not (home_id and away_id) or home_id == away_id:
         return False  # no row of ours can be this fixture
     row = _status_target_row(cur, cfg, espn_id, home_id, away_id, match_dt, home_name, away_name)
