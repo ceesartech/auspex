@@ -1093,3 +1093,108 @@ class TestCorrectScoreOther:
         assert self._grade("1-0", 2, 2, keys, model_name="ensemble") == ("2-2", False)
         assert self._grade("other", 2, 2, keys, model_name="ensemble") == ("2-2", True)
         assert self._grade("other", 0, 0, keys, model_name="ensemble") == ("0-0", False)
+
+
+# ── Soccer full-time markets settle on 90 minutes ────────────────────
+
+# Belgium v Senegal, 2026 World Cup: 2-2 after 90 minutes, 3-2 after extra
+# time, 0-1 at half-time.
+AET = {"regulation_home_score": 2, "regulation_away_score": 2, "went_extra": True, "result_detail": "AET"}
+
+
+class TestNinetyMinuteScore:
+    def test_regulation_scores_reads_the_pair(self):
+        assert go.regulation_scores(AET) == (2, 2)
+        assert go.regulation_scores({"regulation_home_score": "1", "regulation_away_score": "0"}) == (1, 0)
+        assert go.regulation_scores({}) is None and go.regulation_scores(None) is None
+        assert go.regulation_scores({"regulation_home_score": 1}) is None
+        assert go.regulation_scores({"regulation_home_score": -1, "regulation_away_score": 0}) is None
+
+    def test_settlement_scores(self):
+        assert go.settlement_scores(3, 2, AET) == (2, 2)
+        assert go.settlement_scores(3, 2, AET, sport="soccer") == (2, 2)
+        assert go.settlement_scores(3, 2, {"result_detail": "FT"}) == (3, 2)
+        assert go.settlement_scores(3, 2, None) == (3, 2)
+
+    def test_nhl_never_reads_the_keys(self):
+        assert go.settlement_scores(3, 2, AET, model_name="dixon_coles_nhl") == (3, 2)
+        assert go.settlement_scores(3, 2, AET, sport="nhl") == (3, 2)
+        assert go.settlement_scores(3, 2, AET, sport="nba") == (3, 2)
+
+    @pytest.mark.parametrize(
+        "meta",
+        [
+            {"regulation_home_score": 2},  # half-written
+            {"regulation_home_score": "x", "regulation_away_score": 2},  # malformed
+            {"regulation_home_score": 4, "regulation_away_score": 2},  # above the final 3-2
+        ],
+    )
+    def test_an_unusable_pair_grades_nothing(self, meta):
+        assert go.settlement_scores(3, 2, meta) is None
+        assert _actual("match_result", "home", 3, 2, metadata=meta) is None
+        assert go.grade_rec_selection("1x2", "home", 3, 2, metadata=meta) is None
+
+    def test_every_full_time_market_grades_on_90_minutes(self):
+        cases = {
+            "match_result": ("home", "draw"),
+            "btts": ("yes", "yes"),
+            "over_under": ("over_4.5", "under_4.5"),
+            "double_chance": ("12", "draw"),
+            "draw_no_bet": ("home", "push"),
+            "correct_score": ("3-2", "2-2"),
+            "asian_handicap": ("-0.5_home", "away_covers_-0.5"),
+            "clean_sheet": ("home_no", "home_no"),
+            "win_to_nil": ("home_no", "home_no"),
+            "team_total": ("home_over_2.5", "home_under_2.5"),
+            "odd_even": ("odd", "even"),
+            "total_goals": ("5", "4"),
+            "winning_margin": ("home_1", "draw"),
+            "result_btts": ("home_yes", "draw_yes"),
+            "result_over_under": ("home_over", "draw_over"),
+        }
+        assert set(cases) | {"ht_ft_double_result"} == go.SOCCER_FT_TYPES
+        for ptype, (pick, expected) in cases.items():
+            assert _actual(ptype, pick, 3, 2, metadata=AET) == expected, ptype
+
+    def test_ht_ft_double_result_takes_its_full_time_half_from_90_minutes(self):
+        assert _actual("ht_ft_double_result", "away_home", 3, 2, metadata=AET, halftime=(0, 1)) == "away_draw"
+
+    def test_half_time_markets_are_unchanged(self):
+        assert _actual("match_result_ht", "away", 3, 2, metadata=AET, halftime=(0, 1)) == "away"
+        assert _actual("over_under_ht", "over_0.5", 3, 2, metadata=AET, halftime=(0, 1)) == "over_0.5"
+
+    def test_without_the_keys_the_final_score_grades(self):
+        meta = {"result_detail": "AET"}  # decided after 90, 90-minute score unknown
+        assert _actual("match_result", "home", 3, 2, metadata=meta) == "home"
+
+    def test_nhl_dixon_coles_markets_keep_the_final_score(self):
+        assert _actual("correct_score", "3-2", 3, 2, model_name="dixon_coles_nhl", metadata=AET) == "3-2"
+        assert _actual("total_goals", "5", 3, 2, model_name="dixon_coles_nhl", metadata=AET) == "5"
+
+    def test_rec_settlement_reads_the_metadata(self):
+        assert go.grade_rec_selection("1x2", "home", 3, 2) == go.REC_WON  # final score: as before
+        assert go.grade_rec_selection("1x2", "home", 3, 2, metadata=AET) == go.REC_LOST
+        assert go.grade_rec_selection("1x2", "draw", 3, 2, sport="soccer", metadata=AET) == go.REC_WON
+        assert go.grade_rec_selection("over_under", "over_4.5", 3, 2, metadata=AET) == go.REC_LOST
+        assert go.grade_rec_selection("asian_handicap", "home_-0.5", 3, 2, metadata=AET) == go.REC_LOST
+        assert go.grade_rec_selection("draw_no_bet", "home", 3, 2, metadata=AET) == go.REC_PUSH
+        assert go.grade_rec_selection("correct_score", "2-2", 3, 2, metadata=AET) == go.REC_WON
+        assert go.grade_rec_selection("double_chance", "1X", 3, 2, metadata=AET) == go.REC_WON
+
+    def test_an_nhl_rec_keeps_the_final_score(self):
+        assert go.grade_rec_selection("moneyline", "home", 3, 2, sport="nhl", metadata=AET) == go.REC_WON
+
+    @pytest.mark.parametrize(
+        "meta, expected",
+        [
+            ({"result_detail": "AET"}, True),
+            ({"result_detail": "FT-PENS"}, True),
+            ({"went_extra": True}, True),
+            ({"result_detail": "FT"}, False),
+            ({"result_detail": "SUSPENDED"}, False),
+            ({"result_detail": "FINAL/SO"}, False),
+            (None, False),
+        ],
+    )
+    def test_soccer_went_past_90(self, meta, expected):
+        assert go.soccer_went_past_90(meta) is expected

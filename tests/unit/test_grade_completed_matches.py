@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -594,8 +595,12 @@ class _RunCursor(FakeCursor):
         self.matches = matches
 
     def execute(self, sql, params=None):
-        if " ".join(sql.split()).startswith("SELECT m.id::text AS match_id"):
+        sql_norm = " ".join(sql.split())
+        if sql_norm.startswith("SELECT m.id::text AS match_id"):
             self._last = ("matches", [dict(m) for m in self.matches])
+            return
+        if "AND m.status = 'postponed'" in sql_norm:
+            self._last = ("recs", [])
             return
         super().execute(sql, params)
 
@@ -811,3 +816,298 @@ class TestGradeMatchNba:
 
 # Quiet a flake8 import-unused warning on pytest in test discovery.
 _ = pytest
+
+
+# ── Soccer full-time markets on the 90-minute score ──────────────────
+
+
+class RegulationCursor(FakeCursor):
+    """FakeCursor plus the graded full-time read, the guarded re-grade, the
+    long-postponement rec read, and rec created_at."""
+
+    def __init__(self, predictions, recs, postponed_recs=(), features=None):
+        super().__init__(predictions, recs, features)
+        self.postponed_recs = [dict(r) for r in postponed_recs]
+        self.guarded_updates: list[tuple] = []
+        self.rowcount = 0
+        self.sql: list[str] = []
+
+    def execute(self, sql, params=None):
+        sql_norm = " ".join(sql.split())
+        self.sql.append(sql_norm)
+        if "FROM predictions" in sql_norm and "p.is_correct IS NOT NULL" in sql_norm:
+            match_id, types = params
+            self._last = (
+                "preds",
+                [
+                    {
+                        "prediction_id": p["id"],
+                        "prediction_type": p["prediction_type"],
+                        "model_name": p["model_name"],
+                        "predicted_outcome": p["predicted_outcome"],
+                        "probabilities": p.get("probabilities"),
+                        "actual_outcome": p.get("actual_outcome"),
+                        "is_correct": p.get("is_correct"),
+                        "after_kickoff": p.get("after_kickoff", False),
+                    }
+                    for p in self.predictions.values()
+                    if p["match_id"] == match_id and p.get("is_correct") is not None and p["prediction_type"] in types
+                ],
+            )
+            return
+        if sql_norm.startswith("UPDATE predictions") and len(params) == 5:
+            actual, correct, pid, old_actual, old_correct = params
+            self.guarded_updates.append(params)
+            p = self.predictions[pid]
+            hit = (p.get("actual_outcome"), p.get("is_correct")) == (old_actual, old_correct)
+            if hit:
+                p["actual_outcome"], p["is_correct"] = actual, correct
+            self.rowcount = 1 if hit else 0
+            self._last = ("update_pred", None)
+            return
+        if "AND m.status = 'postponed'" in sql_norm:
+            self._last = ("recs", [dict(r) for r in self.postponed_recs])
+            return
+        super().execute(sql, params)
+        if self._last and self._last[0] == "recs":
+            for row in self._last[1]:
+                row["created_at"] = self.recs[row["rec_id"]].get("created_at")
+
+
+# Belgium v Senegal, 2026 World Cup: 3-2 after extra time, 2-2 after 90.
+AET_MATCH = {
+    "match_id": "m1",
+    "sport": "soccer",
+    "home_score": 3,
+    "away_score": 2,
+    "half_time_home": 0,
+    "half_time_away": 1,
+    "metadata": {"result_detail": "AET", "regulation_home_score": 2, "regulation_away_score": 2, "went_extra": True},
+}
+
+
+class TestNinetyMinuteGrading:
+    def test_ungraded_markets_and_recs_settle_on_90_minutes(self):
+        preds = [
+            _pred("p1", "m1", "match_result", "ensemble", "home"),
+            _pred("p2", "m1", "correct_score", "ensemble", "2-2"),
+            _pred("p3", "m1", "match_result_ht", "ensemble", "away"),
+        ]
+        recs = [
+            _rec("r1", "m1", "p1", stake=10, odds=2.0, selection="home"),
+            _rec("r2", "m1", "p1", stake=10, odds=3.5, selection="draw"),
+        ]
+        cur = RegulationCursor(preds, recs)
+
+        gcm.grade_match(cur, dict(AET_MATCH))
+
+        assert (cur.predictions["p1"]["actual_outcome"], cur.predictions["p1"]["is_correct"]) == ("draw", False)
+        assert cur.predictions["p2"]["is_correct"] is True
+        assert (cur.predictions["p3"]["actual_outcome"], cur.predictions["p3"]["is_correct"]) == ("away", True)
+        assert (cur.recs["r1"]["status"], cur.recs["r1"]["profit_loss"]) == ("lost", Decimal("-10"))
+        assert (cur.recs["r2"]["status"], cur.recs["r2"]["profit_loss"]) == ("won", Decimal("25.0"))
+
+    def test_the_triggers_post_extra_time_verdicts_are_regraded(self, caplog):
+        # The DB trigger graded these on 3-2 when the match flipped to finished.
+        preds = [
+            _pred("p1", "m1", "match_result", "ensemble", "home", is_correct=True, actual_outcome="home"),
+            _pred("p2", "m1", "over_under", "ensemble", "over_4.5", is_correct=True, actual_outcome="over"),
+            _pred("p3", "m1", "btts", "ensemble", "yes", is_correct=True, actual_outcome="yes"),
+            _pred("p4", "m1", "draw_no_bet", "ensemble", "home", is_correct=True, actual_outcome="home"),
+            _pred("p5", "m1", "match_result_ht", "ensemble", "home", is_correct=False, actual_outcome="away"),
+        ]
+        cur = RegulationCursor(preds, [])
+        stats: dict = {}
+
+        with caplog.at_level("WARNING", logger="grade_completed_matches"):
+            gcm.grade_match(cur, dict(AET_MATCH), stats)
+
+        assert (cur.predictions["p1"]["actual_outcome"], cur.predictions["p1"]["is_correct"]) == ("draw", False)
+        assert (cur.predictions["p2"]["actual_outcome"], cur.predictions["p2"]["is_correct"]) == ("under_4.5", False)
+        assert (cur.predictions["p3"]["actual_outcome"], cur.predictions["p3"]["is_correct"]) == ("yes", True)
+        # a draw voids draw-no-bet: graded -> push is the one NULL verdict written
+        assert (cur.predictions["p4"]["actual_outcome"], cur.predictions["p4"]["is_correct"]) == ("push", None)
+        # half-time markets are not full-time markets: never read back
+        assert cur.predictions["p5"]["actual_outcome"] == "away"
+        assert stats["regulation_regrades"] == 3
+        assert all(len(p) == 5 for p in cur.guarded_updates)  # guarded on the old verdict
+        assert sum("on the 90-minute score" in r.getMessage() for r in caplog.records) == 3
+
+    def test_a_verdict_is_never_ungraded(self):
+        # correct_score 'other' without its key set grades NULL (not a push).
+        preds = [_pred("p1", "m1", "correct_score", "ensemble", "other", is_correct=False, actual_outcome="3-2")]
+        cur = RegulationCursor(preds, [])
+        gcm.grade_match(cur, dict(AET_MATCH))
+        assert cur.guarded_updates == [] and cur.predictions["p1"]["is_correct"] is False
+
+    def test_a_row_rewritten_meanwhile_is_left_alone(self, caplog):
+        preds = [_pred("p1", "m1", "match_result", "ensemble", "home", is_correct=True, actual_outcome="home")]
+        cur = RegulationCursor(preds, [])
+        real = cur.execute
+
+        def racing(sql, params=None):
+            if " ".join(sql.split()).startswith("UPDATE predictions"):
+                cur.predictions["p1"]["actual_outcome"] = "someone-else"
+            return real(sql, params)
+
+        cur.execute = racing
+        stats: dict = {}
+        with caplog.at_level("ERROR", logger="grade_completed_matches"):
+            gcm.grade_match(cur, dict(AET_MATCH), stats)
+        assert cur.predictions["p1"]["actual_outcome"] == "someone-else"
+        assert stats.get("regulation_regrades", 0) == 0
+        assert any("changed while it was being re-graded" in r.getMessage() for r in caplog.records)
+
+    def test_a_match_without_the_keys_reads_nothing_back(self):
+        # The base FakeCursor raises on any SQL it does not know.
+        match = {"match_id": "m1", "home_score": 3, "away_score": 2, "metadata": {"result_detail": "FT"}}
+        preds = [_pred("p1", "m1", "match_result", "ensemble", "home", is_correct=True, actual_outcome="home")]
+        gcm.grade_match(FakeCursor(preds, []), match)
+
+    def test_an_nhl_match_is_never_regraded(self):
+        match = {**AET_MATCH, "sport": "nhl"}
+        preds = [_pred("p1", "m1", "moneyline", "ensemble_nhl_ml", "home", is_correct=True, actual_outcome="home")]
+        cur = RegulationCursor(preds, [])
+        gcm.grade_match(cur, match)
+        assert not any("p.is_correct IS NOT NULL" in s for s in cur.sql)
+
+    def test_finished_matches_with_the_keys_are_listed(self):
+        seen = []
+
+        class Cur:
+            def execute(self, sql, params=None):
+                seen.append((" ".join(sql.split()), params))
+
+            def fetchall(self):
+                return []
+
+        gcm.list_finished_matches(Cur(), 14, None)
+        sql, params = seen[0]
+        assert "OR m.metadata ? %s" in sql and params == ("14", "regulation_home_score")
+        assert "m.match_date, l.sport" in sql and "LEFT JOIN leagues l ON l.id = m.league_id" in sql
+
+    def test_decided_after_90_without_the_keys_warns_once(self, caplog):
+        match = {"match_id": "m1", "home_score": 3, "away_score": 2, "metadata": {"result_detail": "AET"}}
+        cur = FakeCursor([_pred("p1", "m1", "match_result", "ensemble", "home")], [])
+        with caplog.at_level("WARNING", logger="grade_completed_matches"):
+            gcm.grade_match(cur, match)
+            gcm.grade_match(cur, match)  # the next tick: nothing new graded
+        warned = [r for r in caplog.records if "carries no 90-minute score" in r.getMessage()]
+        assert len(warned) == 1
+        assert cur.predictions["p1"]["actual_outcome"] == "home"  # the final score, as before
+
+
+# ── Postponed matches ────────────────────────────────────────────────
+
+ORIGINAL = datetime(2026, 10, 17, 16, 30, tzinfo=timezone.utc)
+RECORDED = ORIGINAL - timedelta(hours=20)
+
+
+def _postponed_match(played_hours_later: float, **meta) -> dict:
+    return {
+        "match_id": "m1",
+        "sport": "soccer",
+        "match_date": ORIGINAL + timedelta(hours=played_hours_later),
+        "home_score": 2,
+        "away_score": 1,
+        "metadata": {"postponed_kickoff": ORIGINAL.isoformat(), "postponed_at": RECORDED.isoformat(), **meta},
+    }
+
+
+class TestPostponedRecs:
+    def _settle(self, match, created_at):
+        rec = _rec("r1", "m1", "p1", stake=10, odds=2.0)
+        rec["created_at"] = created_at
+        cur = RegulationCursor([], [rec])
+        stats: dict = {}
+        counts = gcm.grade_match(cur, match, stats)
+        return cur.recs["r1"], counts, stats
+
+    def test_a_rec_priced_before_a_long_postponement_is_void(self):
+        rec, counts, stats = self._settle(_postponed_match(96), ORIGINAL - timedelta(days=2))
+        assert (rec["status"], rec["profit_loss"]) == ("void", Decimal("0"))
+        assert rec["actual_result"] == gcm.POSTPONED_VOID_RESULT == "void: match postponed >72h"
+        assert counts["recs_settled"] == 0 and stats["postponed_rec_voids"] == 1
+
+    def test_a_short_postponement_settles_as_usual(self):
+        rec, counts, _ = self._settle(_postponed_match(48), ORIGINAL - timedelta(days=2))
+        assert rec["status"] == "won" and counts["recs_settled"] == 1
+
+    def test_a_rec_priced_for_the_rescheduled_match_settles(self):
+        rec, _, _ = self._settle(_postponed_match(240), RECORDED + timedelta(days=3))
+        assert rec["status"] == "won"
+
+    def test_without_the_keys_nothing_changes(self):
+        match = {**_postponed_match(240), "metadata": {}}
+        rec, _, _ = self._settle(match, ORIGINAL - timedelta(days=2))
+        assert rec["status"] == "won"
+
+    def test_unreadable_keys_settle_as_usual_and_warn(self, caplog):
+        match = _postponed_match(240, postponed_at="not-a-time")
+        with caplog.at_level("WARNING", logger="grade_completed_matches"):
+            rec, _, _ = self._settle(match, ORIGINAL - timedelta(days=2))
+        assert rec["status"] == "won"
+        assert any("cannot apply the postponement rule" in r.getMessage() for r in caplog.records)
+
+    def test_still_postponed_after_72h_is_void(self):
+        pending = {"rec_id": "r1", "match_id": "m9", "bet_type": "1x2", "selection": "home", "status": "pending"}
+        recs = [_rec("r1", "m9", "p1", stake=10, odds=2.0), _rec("r2", "m9", "p1", stake=5, odds=3.0, status="placed")]
+        cur = RegulationCursor([], recs, postponed_recs=[pending, {**pending, "rec_id": "r2", "status": "placed"}])
+        assert gcm.void_recs_on_long_postponed_matches(cur) == 2
+        for rid in ("r1", "r2"):
+            assert cur.recs[rid]["status"] == "void" and cur.recs[rid]["profit_loss"] == Decimal("0")
+            assert cur.recs[rid]["actual_result"] == gcm.POSTPONED_VOID_RESULT
+
+    def test_the_long_postponement_query(self):
+        seen = []
+
+        class Cur:
+            def execute(self, sql, params=None):
+                seen.append((" ".join(sql.split()), params))
+
+            def fetchall(self):
+                return []
+
+        gcm.list_recs_on_long_postponed_matches(Cur())
+        sql, params = seen[0]
+        assert "br.status IN ('pending', 'placed')" in sql and "m.status = 'postponed'" in sql
+        assert "m.match_date < NOW() - (%s || ' hours')::interval" in sql and params == ("72",)
+
+    def test_run_voids_them_and_reports_it(self, monkeypatch, caplog):
+        pending = {"rec_id": "r1", "match_id": "m9", "bet_type": "1x2", "selection": "home", "status": "pending"}
+        cur = _PostponedRunCursor([], [], [_rec("r1", "m9", "p1", stake=10, odds=2.0)], [pending])
+        monkeypatch.setattr(gcm.psycopg2, "connect", lambda url: _RunConn(cur))
+        with caplog.at_level("WARNING", logger="grade_completed_matches"):
+            summary = gcm.run("postgresql://unused/db", 14, None)
+        assert summary["postponed_rec_voids"] == 1 and cur.recs["r1"]["status"] == "void"
+        assert any("postponed more than 72h" in r.getMessage() for r in caplog.records)
+
+    def test_an_ad_hoc_match_run_leaves_them_alone(self, monkeypatch):
+        pending = {"rec_id": "r1", "match_id": "m9", "bet_type": "1x2", "selection": "home", "status": "pending"}
+        cur = _PostponedRunCursor([], [], [_rec("r1", "m9", "p1", stake=10, odds=2.0)], [pending])
+        monkeypatch.setattr(gcm.psycopg2, "connect", lambda url: _RunConn(cur))
+        assert gcm.run("postgresql://unused/db", 14, "m1")["postponed_rec_voids"] == 0
+        assert cur.recs["r1"]["status"] == "pending"
+
+
+class _PostponedRunCursor(RegulationCursor):
+    def __init__(self, matches, predictions, recs, postponed_recs):
+        super().__init__(predictions, recs, postponed_recs)
+        self.matches = matches
+
+    def execute(self, sql, params=None):
+        if " ".join(sql.split()).startswith("SELECT m.id::text AS match_id"):
+            self._last = ("matches", [dict(m) for m in self.matches])
+            return
+        super().execute(sql, params)
+
+    def fetchall(self):
+        if self._last and self._last[0] == "matches":
+            return self._last[1]
+        return super().fetchall()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False

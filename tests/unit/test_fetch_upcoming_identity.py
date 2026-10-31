@@ -668,9 +668,12 @@ class TestKnockoutPlaceholders:
 
 @pytest.fixture
 def identity_stats(monkeypatch):
-    monkeypatch.setitem(fu.IDENTITY_STATS, "forks_refused", 0)
-    monkeypatch.setitem(fu.IDENTITY_STATS, "same_team", 0)
+    for key in fu.IDENTITY_STATS:
+        monkeypatch.setitem(fu.IDENTITY_STATS, key, 0)
     return fu.IDENTITY_STATS
+
+
+NO_REFUSALS = {"forks_refused": 0, "same_team": 0, "score_mismatch": 0, "status_refused": 0}
 
 
 class TestForkRefusal:
@@ -690,7 +693,7 @@ class TestForkRefusal:
             assert fu._process_competition(cur, SOCCER, "league", _comp(), {"season_type": "regular"}) is False
         assert rec.inserts == []
         assert not any("external_ids" in s for s, _ in cur.updates)
-        assert identity_stats == {"forks_refused": 1, "same_team": 0}
+        assert identity_stats == {**NO_REFUSALS, "forks_refused": 1}
         refusal = [r for r in caplog.records if r.levelname == "ERROR" and "Refusing soccer ESPN" in r.message]
         assert len(refusal) == 1
         for both_pairs_and_the_id in ("401671789", "owner", "name-old-home-uuid", "Home FC", "Away FC", HOME):
@@ -757,7 +760,7 @@ class TestSameTeamRefusal:
             assert fu._process_competition(cur, SOCCER, "league", _comp()) is False
             assert fu._record_result(cur, SOCCER, "league", _comp(state="post")) is False
         assert rec.inserts == [] and cur.statements == []
-        assert identity_stats == {"forks_refused": 0, "same_team": 2}
+        assert identity_stats == {**NO_REFUSALS, "same_team": 2}
         assert any(r.levelname == "ERROR" and "cannot play itself" in r.message for r in caplog.records)
 
 

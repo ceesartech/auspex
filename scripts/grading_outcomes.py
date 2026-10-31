@@ -44,6 +44,19 @@ graded — they pass through with actual_outcome=None. The derived
 markets were added 2026-10-30: until then ~92k soccer + 1.4k NHL
 derived predictions sat is_correct NULL on every grading run.
 
+Soccer full-time markets settle on 90 minutes plus stoppage time, as
+books settle them, never on extra time or a shootout. A cup tie decided
+after 90 minutes carries metadata.regulation_home_score /
+regulation_away_score (fetch_upcoming stamps them from ESPN's scoring
+plays; scripts/backfill_soccer_regulation_scores.py stamped the older
+rows), and every market in SOCCER_FT_TYPES grades on that pair, as does
+soccer rec settlement (settlement_scores). home_score / away_score stay the
+final, post-extra-time score. Until 2026-10-31 such a tie graded on the
+post-extra-time score: Belgium v Senegal (2026 World Cup) was 2-2 after 90
+minutes and 3-2 after extra time, so a 'home' 1X2 pick graded as a win. The
+three half-time-only markets are unaffected, and no NHL model reads the
+keys.
+
 NHL Dixon-Coles markets are graded on the FINAL score (incl. OT/SO),
 which is what the model is fitted on — except the two that price the
 REGULATION 3-way (regulation_1x2, double_chance), graded from
@@ -320,6 +333,39 @@ def grade_correct_score_other(actual: str, probabilities: Optional[dict]) -> Opt
 HANDICAP_PREDICTION_TYPES = frozenset({"asian_handicap", "puck_line"})
 HALFTIME_TYPES = frozenset({"match_result_ht", "btts_ht", "over_under_ht", "ht_ft_double_result"})
 
+# Soccer markets settled on 90 minutes plus stoppage time: everything priced
+# on the full-time score, ht_ft_double_result's full-time half included. The
+# other three half-time markets read only the half-time columns.
+SOCCER_FT_TYPES = frozenset(
+    {
+        "match_result",
+        "btts",
+        "over_under",
+        "double_chance",
+        "draw_no_bet",
+        "correct_score",
+        "asian_handicap",
+        "clean_sheet",
+        "win_to_nil",
+        "team_total",
+        "odd_even",
+        "total_goals",
+        "winning_margin",
+        "result_btts",
+        "result_over_under",
+        "ht_ft_double_result",
+    }
+)
+
+# matches.metadata keys holding the 90-minute score of a soccer match decided
+# in extra time or on penalties (written only together with went_extra=true).
+REGULATION_HOME_KEY = "regulation_home_score"
+REGULATION_AWAY_KEY = "regulation_away_score"
+
+# ESPN's status detail for a soccer match decided after 90 minutes: 'AET' and
+# 'FT-Pens' (stored upper-cased in metadata.result_detail).
+SOCCER_PAST_90_DETAIL = re.compile(r"\b(?:AET|PENS?)\b", re.IGNORECASE)
+
 # Top band of the exact-total market (derive_soccer_markets emits '6+',
 # derive_hockey_markets '8+').
 TOTAL_GOALS_CAP_SOCCER = 6
@@ -449,6 +495,73 @@ def halftime_outcome(
     return None
 
 
+# ── The 90-minute score (soccer ties decided after 90 minutes) ──────
+
+
+def _score_pair(home, away) -> Optional[tuple[int, int]]:
+    """(home, away) as non-negative ints, or None when either is missing,
+    malformed or negative."""
+    try:
+        pair = int(home), int(away)
+    except (TypeError, ValueError):
+        return None
+    return pair if min(pair) >= 0 else None
+
+
+def regulation_scores(metadata: Optional[dict]) -> Optional[tuple[int, int]]:
+    """The stored 90-minute (home, away) of a soccer match decided in extra
+    time or on penalties, or None when the row carries no usable pair (the
+    normal case: the final score IS the 90-minute score)."""
+    meta = metadata or {}
+    return _score_pair(meta.get(REGULATION_HOME_KEY), meta.get(REGULATION_AWAY_KEY))
+
+
+def settlement_scores(
+    home_score: Optional[int],
+    away_score: Optional[int],
+    metadata: Optional[dict],
+    *,
+    sport: Optional[str] = None,
+    model_name: Optional[str] = None,
+) -> Optional[tuple[Optional[int], Optional[int]]]:
+    """The (home, away) a full-time market settles on.
+
+    Soccer (sport 'soccer', or None, which settles as soccer everywhere in
+    this module): the 90-minute pair when metadata carries one, else the
+    final score. Any other sport, or an NHL model: the final score, whatever
+    the metadata holds. None, so nothing grades, when the 90-minute pair is
+    half-written, malformed or above the final score: the keys say the match
+    went past 90 minutes, so the final score is the wrong basis and the right
+    one is unknown."""
+    final = (home_score, away_score)
+    if is_nhl_model(model_name) or (sport or "soccer").strip().lower() != "soccer":
+        return final
+    meta = metadata or {}
+    raw = (meta.get(REGULATION_HOME_KEY), meta.get(REGULATION_AWAY_KEY))
+    if raw == (None, None):
+        return final
+    reg = _score_pair(*raw)
+    if reg is None or (
+        home_score is not None and away_score is not None and (reg[0] > home_score or reg[1] > away_score)
+    ):
+        logger.warning(
+            "unusable 90-minute score %r-%r (final %r-%r); full-time markets left ungraded",
+            raw[0],
+            raw[1],
+            home_score,
+            away_score,
+        )
+        return None
+    return reg
+
+
+def soccer_went_past_90(metadata: Optional[dict]) -> bool:
+    """True when a soccer result says it was decided after 90 minutes:
+    metadata.went_extra, or ESPN's status detail ('AET', 'FT-PENS')."""
+    meta = metadata or {}
+    return bool(meta.get("went_extra")) or bool(SOCCER_PAST_90_DETAIL.search(str(meta.get("result_detail") or "")))
+
+
 # ── Top-level dispatch ──────────────────────────────────────────────
 
 
@@ -491,6 +604,15 @@ def actual_outcome(
     # The remaining markets all need both score columns populated.
     if home_score is None or away_score is None:
         return None
+
+    if prediction_type in SOCCER_FT_TYPES:
+        # A soccer full-time market settles on 90 minutes (stoppage time
+        # included): a tie decided in extra time or on penalties grades on
+        # its stored 90-minute score. NHL models keep the final score.
+        scores = settlement_scores(home_score, away_score, metadata, model_name=model_name)
+        if scores is None:
+            return None
+        home_score, away_score = scores
 
     if prediction_type == "match_result":
         return soccer_match_result(home_score, away_score)
@@ -687,10 +809,16 @@ def grade_rec_selection(
     *,
     sport: Optional[str] = None,
     model_name: Optional[str] = None,
+    metadata: Optional[dict] = None,
 ):
     """Settlement verdict for one recommendation from ITS OWN selection and
     the final score. Returns REC_* or None (ungradable: unknown format, or
     a market needing data we don't grade yet — *_ht, team_total).
+
+    `metadata` (the match's matches.metadata): a soccer rec settles on the
+    90-minute score it carries when the match was decided after 90 minutes
+    (settlement_scores), and an unusable 90-minute pair leaves the rec open.
+    Without it (callers that omit it) the rec settles on the final score.
 
     `sport` (leagues.sport of the rec's match) and `model_name` (the model
     of the rec's prediction) say whether the rec is on an NHL match; either
@@ -704,6 +832,10 @@ def grade_rec_selection(
         this function only sees the final score.
       * correct_score 'other': it covers whatever that prediction did not
         list, and the rec does not carry the prediction's key set."""
+    scores = settlement_scores(home_score, away_score, metadata, sport=sport, model_name=model_name)
+    if scores is None:
+        return None
+    home_score, away_score = scores
     bt = (bet_type or "").strip().lower()
     side, line = _split_sel_line(selection)
     margin = home_score - away_score

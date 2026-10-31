@@ -96,8 +96,10 @@ class TestRecordResult:
         fu.ensure_team = MagicMock(side_effect=_team_per_name)
         captured = {}
 
-        def fake_insert(cur, cfg, league_id, home_id, away_id, match_dt, venue, hs, as_, meta, halftime=None):
-            captured.update(home_score=hs, away_score=as_, meta=meta)
+        def fake_insert(
+            cur, cfg, league_id, home_id, away_id, match_dt, venue, hs, as_, meta, halftime=None, season=None
+        ):
+            captured.update(home_score=hs, away_score=as_, meta=meta, season=season)
             return 1
 
         fu.insert_finished_match = fake_insert
@@ -201,8 +203,10 @@ class TestRecordResultHalftime:
         monkeypatch.setattr(fu, "ensure_team", MagicMock(side_effect=_team_per_name))
         captured = {}
 
-        def fake_insert(cur, cfg, league_id, home_id, away_id, match_dt, venue, hs, as_, meta, halftime=None):
-            captured.update(meta=meta, halftime=halftime)
+        def fake_insert(
+            cur, cfg, league_id, home_id, away_id, match_dt, venue, hs, as_, meta, halftime=None, season=None
+        ):
+            captured.update(meta=meta, halftime=halftime, home_score=hs, away_score=as_)
             return 1
 
         monkeypatch.setattr(fu, "insert_finished_match", fake_insert)
@@ -216,8 +220,11 @@ class TestRecordResultHalftime:
         assert "halftime_home_score" not in got["meta"]  # the retired metadata keys
 
     def test_soccer_result_without_usable_plays_has_no_halftime(self, monkeypatch):
-        got = self._record(monkeypatch, fu.SPORT_CONFIGS["soccer"], _soccer_comp(2, 1, [_goal("10", "17'")]))
-        assert got["halftime"] is None
+        # The plays agree with the 2-1 header, but one goal has no clock: no
+        # half-time pair can be read, the result itself is recorded.
+        comp = _soccer_comp(2, 1, [_goal("10", "17'"), _goal("20", ""), _goal("10", "80'")])
+        got = self._record(monkeypatch, fu.SPORT_CONFIGS["soccer"], comp)
+        assert got["halftime"] is None and (got["home_score"], got["away_score"]) == (2, 1)
 
     def test_nhl_result_has_no_halftime(self, monkeypatch):
         got = self._record(monkeypatch, fu.SPORT_CONFIGS["nhl"], _soccer_comp(4, 3, [_goal("10", "17'")]))

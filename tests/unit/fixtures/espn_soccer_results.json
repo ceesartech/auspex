@@ -1,0 +1,689 @@
+{
+ "_source": "ESPN site API soccer scoreboards, fetched 2026-10-31; trimmed to the fields fetch_upcoming reads",
+ "aalesund_hamkam_header_0_0_plays_2_2": {
+  "id": "401843358",
+  "date": "2026-05-29T17:00Z",
+  "status": {
+   "type": {
+    "name": "STATUS_FULL_TIME",
+    "state": "post",
+    "completed": true,
+    "detail": "FT",
+    "shortDetail": "FT"
+   }
+  },
+  "competitors": [
+   {
+    "id": "3278",
+    "homeAway": "home",
+    "winner": false,
+    "score": "0",
+    "team": {
+     "id": "3278",
+     "displayName": "Aalesund"
+    }
+   },
+   {
+    "id": "21380",
+    "homeAway": "away",
+    "winner": false,
+    "score": "0",
+    "team": {
+     "id": "21380",
+     "displayName": "Hamarkameratene"
+    }
+   }
+  ],
+  "details": [
+   {
+    "type": {
+     "text": "Own Goal"
+    },
+    "clock": {
+     "displayValue": "24'"
+    },
+    "team": {
+     "id": "3278"
+    },
+    "scoringPlay": true,
+    "ownGoal": true,
+    "penaltyKick": false,
+    "shootout": false
+   },
+   {
+    "type": {
+     "text": "Goal"
+    },
+    "clock": {
+     "displayValue": "44'"
+    },
+    "team": {
+     "id": "21380"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": false,
+    "shootout": false
+   },
+   {
+    "type": {
+     "text": "Goal"
+    },
+    "clock": {
+     "displayValue": "54'"
+    },
+    "team": {
+     "id": "21380"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": false,
+    "shootout": false
+   },
+   {
+    "type": {
+     "text": "Goal"
+    },
+    "clock": {
+     "displayValue": "57'"
+    },
+    "team": {
+     "id": "3278"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": false,
+    "shootout": false
+   }
+  ]
+ },
+ "belgium_senegal_aet_3_2": {
+  "id": "760493",
+  "date": "2026-07-01T20:00Z",
+  "status": {
+   "type": {
+    "name": "STATUS_FINAL_AET",
+    "state": "post",
+    "completed": true,
+    "detail": "AET",
+    "shortDetail": "AET"
+   }
+  },
+  "competitors": [
+   {
+    "id": "459",
+    "homeAway": "home",
+    "winner": true,
+    "score": "3",
+    "team": {
+     "id": "459",
+     "displayName": "Belgium"
+    }
+   },
+   {
+    "id": "654",
+    "homeAway": "away",
+    "winner": false,
+    "score": "2",
+    "team": {
+     "id": "654",
+     "displayName": "Senegal"
+    }
+   }
+  ],
+  "details": [
+   {
+    "type": {
+     "text": "Goal"
+    },
+    "clock": {
+     "displayValue": "24'"
+    },
+    "team": {
+     "id": "654"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": false,
+    "shootout": false
+   },
+   {
+    "type": {
+     "text": "Goal"
+    },
+    "clock": {
+     "displayValue": "51'"
+    },
+    "team": {
+     "id": "654"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": false,
+    "shootout": false
+   },
+   {
+    "type": {
+     "text": "Goal"
+    },
+    "clock": {
+     "displayValue": "86'"
+    },
+    "team": {
+     "id": "459"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": false,
+    "shootout": false
+   },
+   {
+    "type": {
+     "text": "Goal - Header"
+    },
+    "clock": {
+     "displayValue": "89'"
+    },
+    "team": {
+     "id": "459"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": false,
+    "shootout": false
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "120'+5'"
+    },
+    "team": {
+     "id": "459"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": false
+   }
+  ]
+ },
+ "spain_argentina_aet_1_0": {
+  "id": "760517",
+  "date": "2026-07-19T19:00Z",
+  "status": {
+   "type": {
+    "name": "STATUS_FINAL_AET",
+    "state": "post",
+    "completed": true,
+    "detail": "AET",
+    "shortDetail": "AET"
+   }
+  },
+  "competitors": [
+   {
+    "id": "164",
+    "homeAway": "home",
+    "winner": true,
+    "score": "1",
+    "team": {
+     "id": "164",
+     "displayName": "Spain"
+    }
+   },
+   {
+    "id": "202",
+    "homeAway": "away",
+    "winner": false,
+    "score": "0",
+    "team": {
+     "id": "202",
+     "displayName": "Argentina"
+    }
+   }
+  ],
+  "details": [
+   {
+    "type": {
+     "text": "Goal"
+    },
+    "clock": {
+     "displayValue": "106'"
+    },
+    "team": {
+     "id": "164"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": false,
+    "shootout": false
+   }
+  ]
+ },
+ "germany_paraguay_ft_pens_1_1": {
+  "id": "760489",
+  "date": "2026-06-29T20:30Z",
+  "status": {
+   "type": {
+    "name": "STATUS_FINAL_PEN",
+    "state": "post",
+    "completed": true,
+    "detail": "FT-Pens",
+    "shortDetail": "FT-Pens"
+   }
+  },
+  "competitors": [
+   {
+    "id": "481",
+    "homeAway": "home",
+    "winner": false,
+    "score": "1",
+    "team": {
+     "id": "481",
+     "displayName": "Germany"
+    }
+   },
+   {
+    "id": "210",
+    "homeAway": "away",
+    "winner": true,
+    "score": "1",
+    "team": {
+     "id": "210",
+     "displayName": "Paraguay"
+    }
+   }
+  ],
+  "details": [
+   {
+    "type": {
+     "text": "Goal - Header"
+    },
+    "clock": {
+     "displayValue": "42'"
+    },
+    "team": {
+     "id": "210"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": false,
+    "shootout": false
+   },
+   {
+    "type": {
+     "text": "Goal - Header"
+    },
+    "clock": {
+     "displayValue": "54'"
+    },
+    "team": {
+     "id": "481"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": false,
+    "shootout": false
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "120'"
+    },
+    "team": {
+     "id": "210"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": true
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "120'"
+    },
+    "team": {
+     "id": "481"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": true
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "120'"
+    },
+    "team": {
+     "id": "210"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": true
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "120'"
+    },
+    "team": {
+     "id": "481"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": true
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "120'"
+    },
+    "team": {
+     "id": "210"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": true
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "120'"
+    },
+    "team": {
+     "id": "481"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": true
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "120'"
+    },
+    "team": {
+     "id": "210"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": true
+   }
+  ]
+ },
+ "ldu_palmeiras_ft_pens_3_2": {
+  "id": "401912525",
+  "date": "2026-09-16T22:00Z",
+  "status": {
+   "type": {
+    "name": "STATUS_FINAL_PEN",
+    "state": "post",
+    "completed": true,
+    "detail": "FT-Pens",
+    "shortDetail": "FT-Pens"
+   }
+  },
+  "competitors": [
+   {
+    "id": "4816",
+    "homeAway": "home",
+    "winner": false,
+    "score": "3",
+    "team": {
+     "id": "4816",
+     "displayName": "Liga de Quito"
+    }
+   },
+   {
+    "id": "2029",
+    "homeAway": "away",
+    "winner": true,
+    "score": "2",
+    "team": {
+     "id": "2029",
+     "displayName": "Palmeiras"
+    }
+   }
+  ],
+  "details": [
+   {
+    "type": {
+     "text": "Goal"
+    },
+    "clock": {
+     "displayValue": "10'"
+    },
+    "team": {
+     "id": "2029"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": false,
+    "shootout": false
+   },
+   {
+    "type": {
+     "text": "Goal - Header"
+    },
+    "clock": {
+     "displayValue": "15'"
+    },
+    "team": {
+     "id": "4816"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": false,
+    "shootout": false
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "73'"
+    },
+    "team": {
+     "id": "2029"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": false
+   },
+   {
+    "type": {
+     "text": "Goal"
+    },
+    "clock": {
+     "displayValue": "90'"
+    },
+    "team": {
+     "id": "4816"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": false,
+    "shootout": false
+   },
+   {
+    "type": {
+     "text": "Goal - Header"
+    },
+    "clock": {
+     "displayValue": "90'+3'"
+    },
+    "team": {
+     "id": "4816"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": false,
+    "shootout": false
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "91'"
+    },
+    "team": {
+     "id": "2029"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": true
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "92'"
+    },
+    "team": {
+     "id": "4816"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": true
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "93'"
+    },
+    "team": {
+     "id": "2029"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": true
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "94'"
+    },
+    "team": {
+     "id": "2029"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": true
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "95'"
+    },
+    "team": {
+     "id": "4816"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": true
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "97'"
+    },
+    "team": {
+     "id": "4816"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": true
+   },
+   {
+    "type": {
+     "text": "Penalty - Scored"
+    },
+    "clock": {
+     "displayValue": "98'"
+    },
+    "team": {
+     "id": "2029"
+    },
+    "scoringPlay": true,
+    "ownGoal": false,
+    "penaltyKick": true,
+    "shootout": true
+   }
+  ]
+ },
+ "atromitos_aek_postponed": {
+  "id": "401896749",
+  "date": "2026-10-17T16:30Z",
+  "status": {
+   "type": {
+    "name": "STATUS_POSTPONED",
+    "state": "post",
+    "completed": false,
+    "detail": "Postponed",
+    "shortDetail": "Postponed"
+   }
+  },
+  "competitors": [
+   {
+    "id": "6790",
+    "homeAway": "home",
+    "winner": false,
+    "score": "0",
+    "team": {
+     "id": "6790",
+     "displayName": "Atromitos"
+    }
+   },
+   {
+    "id": "887",
+    "homeAway": "away",
+    "winner": false,
+    "score": "0",
+    "team": {
+     "id": "887",
+     "displayName": "AEK Athens"
+    }
+   }
+  ],
+  "details": []
+ }
+}

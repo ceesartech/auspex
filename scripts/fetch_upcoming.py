@@ -15,8 +15,14 @@ Usage:
 
 Exit status: 0 ok; 1 every ESPN request failed (results mode, an outage);
 2 no database URL; 3 the sweep refused at least one competition because
-writing it would corrupt fixture identity (see IDENTITY_STATS). Everything
-else in the sweep is committed before the script exits 3.
+writing it would corrupt a fixture: its identity, its score, or its status
+(see IDENTITY_STATS). Everything else in the sweep is committed before the
+script exits 3.
+
+ESPN's STATUS_POSTPONED / STATUS_CANCELED / STATUS_ABANDONED are recorded on
+the EXISTING row ('postponed' / 'cancelled'), never inserted, from either
+mode (see _record_status_change); grade_completed_matches voids the recs of a
+match postponed more than 72 h.
 """
 
 from __future__ import annotations
@@ -29,7 +35,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Callable
 
@@ -46,8 +52,13 @@ logger = logging.getLogger("fetch_upcoming")
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 
 
-def _season_soccer(dt: datetime) -> str:
-    """Soccer season runs Aug→May. Aug-Dec → YYYY-YYYY+1; Jan-Jul → YYYY-1-YYYY."""
+def _season_soccer(dt: datetime, league_slug: str | None = None) -> str:
+    """A calendar-year league (SOCCER_CALENDAR_SEASON_SLUGS) labels its
+    season by the year: '2026'. Every other league runs Aug→May:
+    Jul-Dec → YYYY-YYYY+1; Jan-Jun → YYYY-1-YYYY. Without a slug (a caller
+    that does not know the league) the Aug→May rule applies."""
+    if league_slug in SOCCER_CALENDAR_SEASON_SLUGS:
+        return str(dt.year)
     if dt.month >= 7:
         return f"{dt.year}-{dt.year + 1}"
     return f"{dt.year - 1}-{dt.year}"
@@ -169,6 +180,34 @@ SOCCER_LEAGUES: dict[str, tuple[str, str, str]] = {
     "uefa.europa": ("UEL", "UEFA Europa League", "International"),
     "conmebol.libertadores": ("LIB", "Copa Libertadores", "International"),
 }
+
+
+# ESPN slugs of the leagues whose season is one calendar year, labelled
+# '2026' the way promote_raw.season_label labels football-data's calendar-year
+# files. Until 2026-10-31 these took the Aug→May label, which split one
+# Brasileirão / MLS / Eliteserien season across '2025-2026' and '2026-2027'
+# at July. Every code here is in promote_raw.CALENDAR_SEASON_LEAGUES (pinned
+# by tests/unit/test_fetch_soccer_results.py), so the season-label checks
+# (scripts/ops/backfill_season_labels.sh) agree.
+# Two codes in that set stay on Aug→May here: Liga MX (MX1) plays Apertura
+# Jul-Dec + Clausura Jan-May and football-data labels it 'YYYY/YYYY'; J1
+# (JP1) moved to an Aug-May season from 2026-27. promote_raw lists both only
+# because it reads a 4-digit football-data code as a year. Chile and
+# Colombia also play calendar years, but promote_raw does not list CL1/CO1
+# yet, so they stay on Aug→May until it does.
+SOCCER_CALENDAR_SEASON_SLUGS: frozenset[str] = frozenset(
+    {
+        "usa.1",  # MLS
+        "bra.1",  # BR1
+        "arg.1",  # AR1
+        "chn.1",  # CN1
+        "nor.1",  # NO1
+        "swe.1",  # SE1
+        "fifa.world",  # WC
+        "concacaf.gold",  # GOLD
+        "conmebol.libertadores",  # LIB
+    }
+)
 
 
 SOCCER_CLUB_SUFFIXES = frozenset(
@@ -450,7 +489,19 @@ def find_team(cur, cfg: SportConfig, name: str, league_id: str | None) -> str | 
     return None
 
 
-def insert_scheduled_match(cur, cfg: SportConfig, league_id, home_id, away_id, match_dt, venue) -> int:
+def season_label(cfg: SportConfig, match_dt: datetime, event_context: dict | None = None) -> str:
+    """matches.season for a fixture: the sport's convention, and for soccer
+    the league's (event_context['league_slug'], set by the sweeps)."""
+    if cfg.sport == "soccer":
+        return _season_soccer(match_dt, (event_context or {}).get("league_slug"))
+    return cfg.season_func(match_dt)
+
+
+def insert_scheduled_match(
+    cur, cfg: SportConfig, league_id, home_id, away_id, match_dt, venue, season: str | None = None
+) -> int:
+    """`season` labels an INSERTED row (an existing row keeps its label);
+    None falls back to cfg.season_func."""
     cur.execute(
         """
         INSERT INTO matches (league_id, home_team_id, away_team_id, match_date,
@@ -464,7 +515,7 @@ def insert_scheduled_match(cur, cfg: SportConfig, league_id, home_id, away_id, m
                 venue = COALESCE(matches.venue, EXCLUDED.venue),
                 updated_at = NOW()
         """,
-        (league_id, home_id, away_id, match_dt, venue, cfg.season_func(match_dt)),
+        (league_id, home_id, away_id, match_dt, venue, season if season is not None else cfg.season_func(match_dt)),
     )
     return cur.rowcount
 
@@ -481,6 +532,7 @@ def insert_finished_match(
     away_score: int,
     result_meta: dict,
     halftime: tuple[int, int] | None = None,
+    season: str | None = None,
 ) -> int:
     """Record a final result (audit doc §2.1 — the missing half of the
     feedback loop). Updates the row fetch_upcoming created — callers run
@@ -491,7 +543,8 @@ def insert_finished_match(
     Score columns follow the corpus conventions: real scores for team
     sports, winner-flag 1/0 for tennis/MMA. `halftime` (soccer) fills
     half_time_home/away only while that pair is empty: a football-data load
-    may already hold it, and the pair is never split.
+    may already hold it, and the pair is never split. `season` labels an
+    inserted row, as in insert_scheduled_match.
 
     A 'cancelled' row is never touched (the same rule as promote_raw's
     upsert). That status is set on purpose, by an operator or by
@@ -526,7 +579,7 @@ def insert_finished_match(
             away_id,
             match_dt,
             venue,
-            cfg.season_func(match_dt),
+            season if season is not None else cfg.season_func(match_dt),
             home_score,
             away_score,
             json.dumps(result_meta),
@@ -607,13 +660,16 @@ IDENTITY_WINDOW_HOURS = 72
 LARGE_SHIFT_HOURS = 24
 
 # Competitions a sweep REFUSED to write because the write would corrupt a
-# fixture's identity: forks_refused (see ForkRefused) and same_team (see
-# _resolve_teams). The rest of the sweep is still written and committed;
+# fixture: its identity — forks_refused (see ForkRefused) and same_team (see
+# _resolve_teams) — its score — score_mismatch (see _record_result: ESPN's
+# header score contradicted by its own scoring plays) — or its status —
+# status_refused (see _record_status_change: the ESPN id names a row for
+# another team pair). The rest of the sweep is still written and committed;
 # main() then exits IDENTITY_EXIT_CODE so the run fails, and the DAG's
 # failure callback alerts someone. An ERROR line alone was not enough: from
 # 2026-09-29 to 2026-10-10 the soccer fixtures path logged the same refusal on
 # about 1,075 runs while it forked FC Juarez v Tijuana into two rows.
-IDENTITY_STATS = {"forks_refused": 0, "same_team": 0}
+IDENTITY_STATS = {"forks_refused": 0, "same_team": 0, "score_mismatch": 0, "status_refused": 0}
 IDENTITY_EXIT_CODE = 3
 
 
@@ -1265,11 +1321,20 @@ def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict, even
 
     `event_context` carries the season_type that lives on the parent ESPN
     event; it defaults to None so a caller with only a competition in hand
-    still works (the marker is simply not written, i.e. "unknown")."""
+    still works (the marker is simply not written, i.e. "unknown").
+
+    A fixture ESPN has postponed or cancelled (state 'post', not completed)
+    goes to _record_status_change: this sweep sees the 14 days ahead, where
+    a postponement is usually announced."""
     parts = _competition_parts(comp, cfg)
     if parts is None:
         return False
     home, away, home_name, away_name, match_dt, state, venue, espn_id = parts
+
+    terminal = espn_terminal_status(comp)
+    if terminal is not None:
+        _record_status_change(cur, cfg, league_id, parts, *terminal)
+        return False
 
     if state != "pre":
         return False  # results path (--results) handles post events
@@ -1293,7 +1358,11 @@ def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict, even
     except ForkRefused as refusal:
         _log_refused_fork(cfg, espn_id, refusal, home_name, home_id, away_name, away_id, match_dt)
         return False
-    written = bool(insert_scheduled_match(cur, cfg, league_id, home_id, away_id, match_dt, venue))
+    written = bool(
+        insert_scheduled_match(
+            cur, cfg, league_id, home_id, away_id, match_dt, venue, season=season_label(cfg, match_dt, event_context)
+        )
+    )
     _stamp_identity(cur, home_id, away_id, match_dt, espn_id if identity_safe else None, season_type)
     if espn_id and not identity_safe:
         logger.error(
@@ -1327,36 +1396,294 @@ def _final_scores(cfg: SportConfig, home: dict, away: dict) -> tuple[int, int] |
 
 _EXTRA_TIME_TOKENS = ("/OT", "/SO", "/2OT", "OVERTIME", "SHOOTOUT", "AET", "PEN")
 
+# A soccer match decided after 90 minutes: ESPN's STATUS_FINAL_AET ('AET')
+# and STATUS_FINAL_PEN ('FT-Pens'). A two-legged tie that goes straight to a
+# shootout is STATUS_FINAL_PEN with no extra time (Copa Libertadores).
+_SOCCER_PAST_90_STATUSES = frozenset({"STATUS_FINAL_AET", "STATUS_FINAL_PEN"})
+_SOCCER_PAST_90_DETAIL = re.compile(r"\b(?:AET|PENS?)\b", re.IGNORECASE)
+
 _PLAY_MINUTE = re.compile(r"\s*(\d+)'")
 
 
-def halftime_scores(comp: dict, home: dict, away: dict, final: tuple[int, int]) -> tuple[int, int] | None:
-    """Soccer half-time (home, away) from the scoreboard's scoring plays.
+def _competitor_id(competitor: dict) -> str:
+    """ESPN's id for a side; a play's team.id is the team id, which the
+    competitor id repeats."""
+    return str(competitor.get("id") or (competitor.get("team") or {}).get("id") or "")
+
+
+def _goal_plays(comp: dict) -> list[dict]:
+    """The scoreboard's goals: scoring plays that are not shootout kicks."""
+    return [p for p in comp.get("details") or [] if p.get("scoringPlay") and not p.get("shootout")]
+
+
+def soccer_goals(comp: dict, home: dict, away: dict) -> list[tuple[str, int]] | None:
+    """Every goal in a soccer scoreboard's scoring plays as (side, minute).
 
     ESPN's soccer scoreboard has no linescores, but `details` lists every
     goal with its clock and the credited team (an own goal is credited to
-    the side it benefits). Base minute <= 45, first-half stoppage included
-    ("45'+2'"), is a first-half goal; shootout kicks are not goals. Returns
-    None unless the plays reproduce the final score exactly — a partial
-    play list must not grade four half-time markets."""
-    home_id, away_id = str(home.get("id") or ""), str(away.get("id") or "")
+    the side it benefits). `side` is 'home' or 'away'; `minute` is the base
+    minute of the clock, so stoppage time counts in the period it ends
+    ("45'+2'" -> 45, "90'+7'" -> 90, "120'+5'" -> 120). Shootout kicks are
+    not goals. None when a goal names neither side or has no readable clock:
+    such a list cannot be trusted for any per-period score."""
+    home_id, away_id = _competitor_id(home), _competitor_id(away)
     if not home_id or not away_id or home_id == away_id:
         return None
-    first_half = {home_id: 0, away_id: 0}
-    total = {home_id: 0, away_id: 0}
-    for play in comp.get("details") or []:
-        if not play.get("scoringPlay") or play.get("shootout"):
-            continue
+    goals: list[tuple[str, int]] = []
+    for play in _goal_plays(comp):
         team = str((play.get("team") or {}).get("id") or "")
         minute = _PLAY_MINUTE.match((play.get("clock") or {}).get("displayValue") or "")
-        if team not in total or minute is None:
+        if team not in (home_id, away_id) or minute is None:
             return None
-        total[team] += 1
-        if int(minute.group(1)) <= 45:
-            first_half[team] += 1
-    if (total[home_id], total[away_id]) != tuple(final):
+        goals.append(("home" if team == home_id else "away", int(minute.group(1))))
+    return goals
+
+
+def _goals_until(
+    comp: dict, home: dict, away: dict, final: tuple[int, int], last_minute: int
+) -> tuple[int, int] | None:
+    """(home, away) goals scored by `last_minute` (stoppage time included),
+    or None unless the plays reproduce `final` exactly: a partial play list
+    must not grade a market."""
+    goals = soccer_goals(comp, home, away)
+    if goals is None:
         return None
-    return first_half[home_id], first_half[away_id]
+    total = (sum(s == "home" for s, _ in goals), sum(s == "away" for s, _ in goals))
+    if total != tuple(final):
+        return None
+    return (
+        sum(s == "home" and m <= last_minute for s, m in goals),
+        sum(s == "away" and m <= last_minute for s, m in goals),
+    )
+
+
+def halftime_scores(comp: dict, home: dict, away: dict, final: tuple[int, int]) -> tuple[int, int] | None:
+    """Soccer half-time (home, away) from the scoreboard's scoring plays:
+    base minute <= 45, first-half stoppage included. None unless the plays
+    reproduce the final score exactly — a partial play list must not grade
+    four half-time markets."""
+    return _goals_until(comp, home, away, final, 45)
+
+
+def regulation_scores(comp: dict, home: dict, away: dict, final: tuple[int, int]) -> tuple[int, int] | None:
+    """Soccer 90-minute (home, away) from the scoreboard's scoring plays:
+    base minute <= 90, second-half stoppage included ("90'+3'"), extra time
+    and the shootout excluded. Books settle every full-time market on it.
+    None unless the plays reproduce the final, post-extra-time score."""
+    return _goals_until(comp, home, away, final, 90)
+
+
+def scoring_play_tally(comp: dict, home: dict, away: dict) -> tuple[int, int, int] | None:
+    """(home, away, unattributed) goals counted from the scoring plays, or
+    None when the scoreboard lists no goal at all (nothing to check the
+    header score against). Needs only the credited team, not the clock."""
+    plays = _goal_plays(comp)
+    if not plays:
+        return None
+    home_id, away_id = _competitor_id(home), _competitor_id(away)
+    teams = [str((p.get("team") or {}).get("id") or "") for p in plays]
+    h = sum(t == home_id for t in teams) if home_id else 0
+    a = sum(t == away_id for t in teams) if away_id and away_id != home_id else 0
+    return h, a, len(teams) - h - a
+
+
+def _soccer_went_past_90(status_type: dict, detail: str) -> bool:
+    """ESPN says this soccer match was decided after 90 minutes."""
+    return status_type.get("name") in _SOCCER_PAST_90_STATUSES or bool(_SOCCER_PAST_90_DETAIL.search(detail))
+
+
+def _log_score_mismatch(
+    cfg: SportConfig, espn_id, home_name, away_name, match_dt, header: tuple[int, int], tally, comp: dict
+) -> None:
+    """Count and log a result refused because ESPN's header score is
+    contradicted by its own scoring plays."""
+    IDENTITY_STATS["score_mismatch"] += 1
+    plays = ", ".join(
+        f"{(p.get('clock') or {}).get('displayValue') or '?'} team {(p.get('team') or {}).get('id')}"
+        f"{' (own goal)' if p.get('ownGoal') else ''}"
+        for p in _goal_plays(comp)
+    )
+    logger.error(
+        "Refusing %s result %s vs %s at %s (ESPN %s): the header says %d-%d but its scoring plays add up to %d-%d"
+        "%s [%s]. Nothing written: the header score is not stored when ESPN's own plays contradict it. This run "
+        "exits %d until ESPN corrects it or the row is repaired by hand.",
+        cfg.sport,
+        home_name,
+        away_name,
+        match_dt,
+        espn_id,
+        header[0],
+        header[1],
+        tally[0],
+        tally[1],
+        f" with {tally[2]} goal(s) credited to neither side" if tally[2] else "",
+        plays,
+        IDENTITY_EXIT_CODE,
+    )
+
+
+# ESPN statuses that end a fixture without a result, and the matches.status
+# each is recorded as. Until 2026-10-31 neither mode wrote them, so a
+# postponed fixture sat 'scheduled' for good (Atromitos v AEK, gre.1
+# 401896749, 2026-10-17: STATUS_POSTPONED, state 'post', completed false).
+_ESPN_STATUS_RECORDED_AS = {
+    "STATUS_POSTPONED": "postponed",
+    "STATUS_CANCELED": "cancelled",
+    "STATUS_CANCELLED": "cancelled",
+    "STATUS_ABANDONED": "cancelled",
+}
+
+# The statuses each may replace. 'finished' is never touched (a result
+# stands), and neither is 'cancelled': it is set on purpose, by an operator
+# (an awarded match), by _release_redrawn_slot or by an earlier sweep.
+_STATUS_REPLACES = {"postponed": ("scheduled", "live"), "cancelled": ("scheduled", "live", "postponed")}
+
+# Stamped on the first postponement only (never overwritten): the kickoff
+# the recs were priced for and when the postponement was recorded.
+# grade_completed_matches (POSTPONED_KICKOFF_KEY / POSTPONED_AT_KEY) voids a
+# rec written before it when the match is played more than 72 h later.
+POSTPONED_KICKOFF_KEY = "postponed_kickoff"
+POSTPONED_AT_KEY = "postponed_at"
+
+STATUS_ROW_BY_ESPN_SQL = """
+    SELECT m.id, m.status, m.home_team_id, m.away_team_id, m.match_date, m.metadata
+      FROM matches m
+      JOIN leagues l ON l.id = m.league_id
+     WHERE m.external_ids->>'espn' = %s
+       AND l.sport = %s
+     ORDER BY m.match_date DESC
+     LIMIT 2
+"""
+
+STATUS_ROW_BY_TRIPLE_SQL = """
+    SELECT id, status, home_team_id, away_team_id, match_date, metadata
+      FROM matches
+     WHERE home_team_id = %s AND away_team_id = %s AND match_date = %s
+"""
+
+# Guarded on the status the row was read with.
+STATUS_UPDATE_SQL = """
+    UPDATE matches
+       SET status = %s,
+           metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb,
+           updated_at = NOW()
+     WHERE id = %s
+       AND status = %s
+    RETURNING id
+"""
+
+
+def espn_terminal_status(comp: dict) -> tuple[str, str] | None:
+    """(matches.status, ESPN status name) when ESPN says this competition
+    was postponed, cancelled or abandoned, else None."""
+    name = (comp.get("status", {}).get("type", {}).get("name") or "").upper()
+    target = _ESPN_STATUS_RECORDED_AS.get(name)
+    return (target, name) if target else None
+
+
+def _status_target_row(cur, cfg: SportConfig, espn_id, home_id, away_id, match_dt, home_name, away_name):
+    """The existing row a status change applies to, or None. By ESPN id
+    (scoped to the sport), else the exact (home, away, kickoff) triple — no
+    healing: a status change never moves a row or guesses one. An ESPN id on
+    two rows, or on a row for another team pair, is refused, and counted for
+    team sports; in a 1v1 sport another pair under the id is a re-drawn slot
+    (see _resolve_match_id), so it is only logged."""
+    if espn_id:
+        cur.execute(STATUS_ROW_BY_ESPN_SQL, (str(espn_id), cfg.sport))
+        rows = cur.fetchall() or []
+        if len(rows) > 1 or (rows and (rows[0]["home_team_id"], rows[0]["away_team_id"]) != (home_id, away_id)):
+            if cfg.is_individual and len(rows) == 1:
+                logger.warning(
+                    "Not recording ESPN's status for %s %s vs %s at %s: ESPN %s names row %s for another pairing "
+                    "(a re-drawn slot)",
+                    cfg.sport,
+                    home_name,
+                    away_name,
+                    match_dt,
+                    espn_id,
+                    rows[0]["id"],
+                )
+                return None
+            IDENTITY_STATS["status_refused"] += 1
+            logger.error(
+                "Refusing to record ESPN's status for %s %s vs %s at %s (ESPN %s): the id names %s — not this "
+                "team pair (%s v %s) alone. Nothing written; repair the fixture identity. This run exits %d.",
+                cfg.sport,
+                home_name,
+                away_name,
+                match_dt,
+                espn_id,
+                ", ".join(f"row {r['id']} ({r['home_team_id']} v {r['away_team_id']})" for r in rows),
+                home_id,
+                away_id,
+                IDENTITY_EXIT_CODE,
+            )
+            return None
+        if rows:
+            return rows[0]
+    cur.execute(STATUS_ROW_BY_TRIPLE_SQL, (home_id, away_id, match_dt))
+    return cur.fetchone()
+
+
+def _record_status_change(cur, cfg: SportConfig, league_id: str, parts: tuple, target: str, espn_status: str) -> bool:
+    """Record ESPN's postponement / cancellation on the EXISTING row for
+    this competition. Never inserts a row or a team (teams resolve through
+    find_team), never touches a 'finished' or 'cancelled' row, and writes
+    only when the status changes, guarded on the status read. Returns True
+    when a row was written."""
+    _home, _away, home_name, away_name, match_dt, _state, _venue, espn_id = parts
+    home_id = find_team(cur, cfg, home_name, league_id)
+    away_id = find_team(cur, cfg, away_name, league_id)
+    if not (home_id and away_id) or home_id == away_id:
+        return False  # no row of ours can be this fixture
+    row = _status_target_row(cur, cfg, espn_id, home_id, away_id, match_dt, home_name, away_name)
+    if row is None or row["status"] == target:
+        return False
+    old = row["status"]
+    if old not in _STATUS_REPLACES[target]:
+        if old == "finished":
+            logger.warning(
+                "ESPN reports %s for %s %s vs %s at %s (ESPN %s) but row %s is 'finished' — the result stands; "
+                "check which is right",
+                espn_status,
+                cfg.sport,
+                home_name,
+                away_name,
+                match_dt,
+                espn_id,
+                row["id"],
+            )
+        return False
+    meta = dict(row.get("metadata") or {})
+    patch: dict = {"espn_status": espn_status, "status_source": "espn_scoreboard"}
+    if target == "postponed" and POSTPONED_KICKOFF_KEY not in meta:
+        patch[POSTPONED_KICKOFF_KEY] = row["match_date"].isoformat()
+        patch[POSTPONED_AT_KEY] = datetime.now(timezone.utc).isoformat()
+    cur.execute(STATUS_UPDATE_SQL, (target, json.dumps(patch), row["id"], old))
+    if cur.fetchone() is None:
+        logger.error(
+            "Row %s (%s %s vs %s at %s) changed while recording ESPN's %s — left as it is",
+            row["id"],
+            cfg.sport,
+            home_name,
+            away_name,
+            match_dt,
+            espn_status,
+        )
+        return False
+    logger.warning(
+        "Recorded %s %s vs %s at %s (ESPN %s, row %s) as '%s' (was '%s'): ESPN reports %s",
+        cfg.sport,
+        home_name,
+        away_name,
+        match_dt,
+        espn_id,
+        row["id"],
+        target,
+        old,
+        espn_status,
+    )
+    return True
 
 
 def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_context: dict | None = None) -> bool:
@@ -1366,15 +1693,32 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
     — grading_outcomes.nhl_regulation_outcome reads it). ESPN's status
     detail ('Final/OT', 'Final/SO') tells us that.
 
-    Known limitation (documented, accepted): soccer cup ties decided in
-    extra time / on penalties store the post-ET score, so a 1x2 grade on
-    such a match reflects the ET result rather than the 90-minute result.
-    League play (the overwhelming bulk) is unaffected; result_detail is
-    stored in metadata for a later refinement."""
+    Soccer, two guards on the score:
+      * the header score must agree with ESPN's own scoring plays. ESPN
+        401843358 (Aalesund v HamKam, 2026-05-29) reports FT 0-0 while its
+        plays are 24' own goal (Aalesund), 44' and 54' HamKam, 57' Aalesund
+        — 2-2, as football-data has it. Such a result is refused, logged and
+        counted (exit 3), never stored. No plays at all is not a
+        contradiction: a goalless match lists none.
+      * a tie decided in extra time or on penalties stores the final,
+        post-extra-time score in home_score/away_score and its 90-minute
+        score in metadata.regulation_home_score / regulation_away_score
+        with went_extra=true, when the plays reproduce the final score.
+        Soccer full-time markets and recs settle on the 90-minute score
+        (grading_outcomes.settlement_scores). Until 2026-10-31 they graded
+        on the post-extra-time score.
+
+    ESPN's postponed / cancelled / abandoned statuses go to
+    _record_status_change instead (the existing row only)."""
     parts = _competition_parts(comp, cfg)
     if parts is None:
         return False
     home, away, home_name, away_name, match_dt, state, venue, espn_id = parts
+
+    terminal = espn_terminal_status(comp)
+    if terminal is not None:
+        _record_status_change(cur, cfg, league_id, parts, *terminal)
+        return False
 
     status_type = comp.get("status", {}).get("type", {})
     if state != "post" or not status_type.get("completed", False):
@@ -1384,6 +1728,12 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
     if scores is None:
         return False
     home_score, away_score = scores
+
+    if cfg.sport == "soccer":
+        tally = scoring_play_tally(comp, home, away)
+        if tally is not None and tally != (home_score, away_score, 0):
+            _log_score_mismatch(cfg, espn_id, home_name, away_name, match_dt, scores, tally, comp)
+            return False
 
     detail = (status_type.get("detail") or status_type.get("shortDetail") or "").upper()
     went_extra = any(tok in detail for tok in _EXTRA_TIME_TOKENS)
@@ -1396,10 +1746,29 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
         # 2026-10) graded every correct tie pick as a miss and silently
         # dropped every live-season regulation tie from the training frame.
         result_meta["regulation_winner"] = "tie" if went_extra else ("home" if home_score > away_score else "away")
+    if cfg.sport == "soccer" and _soccer_went_past_90(status_type, detail):
+        regulation = regulation_scores(comp, home, away, scores)
+        if regulation is None:
+            logger.warning(
+                "%s %s vs %s at %s (ESPN %s) was decided after 90 minutes (%s) but its scoring plays do not give "
+                "the 90-minute score; its full-time markets will grade on the final %d-%d",
+                cfg.sport,
+                home_name,
+                away_name,
+                match_dt,
+                espn_id,
+                detail,
+                home_score,
+                away_score,
+            )
+        else:
+            result_meta.update(
+                {"regulation_home_score": regulation[0], "regulation_away_score": regulation[1], "went_extra": True}
+            )
     # Soccer half-time goes to matches.half_time_home/away, where the HT
     # trainers, the match API and the HT-market grader read it; None when
     # the plays don't reproduce the final score.
-    ht = halftime_scores(comp, home, away, (home_score, away_score)) if cfg.sport == "soccer" else None
+    ht = halftime_scores(comp, home, away, scores) if cfg.sport == "soccer" else None
 
     teams = _resolve_teams(cur, cfg, league_id, home_name, away_name, espn_id, match_dt)
     if teams is None:
@@ -1426,7 +1795,18 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
         return False
     written = bool(
         insert_finished_match(
-            cur, cfg, league_id, home_id, away_id, match_dt, venue, home_score, away_score, result_meta, halftime=ht
+            cur,
+            cfg,
+            league_id,
+            home_id,
+            away_id,
+            match_dt,
+            venue,
+            home_score,
+            away_score,
+            result_meta,
+            halftime=ht,
+            season=season_label(cfg, match_dt, event_context),
         )
     )
     if not written:
@@ -1461,17 +1841,23 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
     return written
 
 
-def process_event(cur, cfg: SportConfig, league_id: str, event: dict, handler=None, pair_index=None) -> int:
+def process_event(
+    cur, cfg: SportConfig, league_id: str, event: dict, handler=None, pair_index=None, league_slug: str | None = None
+) -> int:
     """Process every match in an ESPN event with `handler` (default: the
     scheduled-fixture path; the results path passes _record_result).
     Returns the count of matches handled. For team sports this is 0 or 1
     (one match per event); for tennis tournaments it can be dozens (one
-    event = full bracket of matches in progress on the same day)."""
+    event = full bracket of matches in progress on the same day).
+    `league_slug` reaches the handlers in the event context (season_label
+    reads it)."""
     handler = handler or _process_competition
     inserted = 0
     for comp, context in _iter_event_competitions(event, cfg):
         if pair_index is not None:
             context = {**context, "pair_index": pair_index}
+        if league_slug is not None:
+            context = {**context, "league_slug": league_slug}
         if handler(cur, cfg, league_id, comp, context):
             inserted += 1
     return inserted
@@ -1504,7 +1890,7 @@ def fetch_all(database_url: str, cfg: SportConfig, leagues: list[str], days: int
                     # process_event returns the count of matches inserted
                     # (>=1 for tennis tournaments that contain multiple
                     # matches per ESPN event).
-                    n += process_event(cur, cfg, league_id, ev, pair_index=pair_index)
+                    n += process_event(cur, cfg, league_id, ev, pair_index=pair_index, league_slug=slug)
                 counts[slug] = n
                 conn.commit()
                 logger.info("Fetched %d upcoming %s fixtures for %s (%s)", n, cfg.sport, name, slug)
@@ -1538,7 +1924,9 @@ def fetch_results_all(database_url: str, cfg: SportConfig, leagues: list[str], d
                 pair_index = build_pair_index(cfg, events)
                 n = 0
                 for ev in events:
-                    n += process_event(cur, cfg, league_id, ev, handler=_record_result, pair_index=pair_index)
+                    n += process_event(
+                        cur, cfg, league_id, ev, handler=_record_result, pair_index=pair_index, league_slug=slug
+                    )
                 counts[slug] = n
                 conn.commit()
                 if n:
@@ -1614,16 +2002,21 @@ def identity_exit_code(cfg: SportConfig) -> int:
     """0, or IDENTITY_EXIT_CODE when the sweep refused any competition (see
     IDENTITY_STATS). The rest of the sweep has already been committed."""
     forks, same_team = IDENTITY_STATS["forks_refused"], IDENTITY_STATS["same_team"]
-    if not (forks or same_team):
+    scores, statuses = IDENTITY_STATS["score_mismatch"], IDENTITY_STATS["status_refused"]
+    refused = forks + same_team + scores + statuses
+    if not refused:
         return 0
     logger.error(
         "%s sweep REFUSED %d write(s): %d would have forked an ESPN-identified fixture, %d resolved both sides to "
-        "one team. Everything else was written and committed; exiting %d so this run fails until the team "
-        "mapping is repaired (details in the ERROR lines above).",
+        "one team, %d carried a header score its own scoring plays contradict, %d status change(s) named a row "
+        "for another team pair. Everything else was written and committed; exiting %d so this run fails until "
+        "they are repaired or ESPN corrects them (details in the ERROR lines above).",
         cfg.sport,
-        forks + same_team,
+        refused,
         forks,
         same_team,
+        scores,
+        statuses,
         IDENTITY_EXIT_CODE,
     )
     return IDENTITY_EXIT_CODE

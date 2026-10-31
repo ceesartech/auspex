@@ -15,6 +15,21 @@ with status='finished' in the lookback window we:
      hindsight. scripts/void_post_kickoff_recs.py corrects the ones
      settled before this guard existed.
 
+Soccer full-time markets and soccer recs settle on 90 minutes: a cup tie
+decided in extra time or on penalties carries its 90-minute score in
+metadata (grading_outcomes.settlement_scores). The DB trigger grades
+match_result / over_under / btts on the post-extra-time home_score /
+away_score at the status flip, so on a match carrying that score this
+script also re-grades the already-graded full-time predictions whose
+verdict changes (guarded on the old values, never un-grading); the trigger's
+rec settlements carry no P&L and are re-settled here anyway.
+
+Postponements (fetch_upcoming records ESPN's STATUS_POSTPONED): a rec on a
+match still 'postponed' POSTPONED_VOID_HOURS after its kickoff, or on one
+played more than that after its original kickoff when the rec predates the
+postponement, is VOIDED (profit 0, actual_result 'void: match postponed
+>72h'), as books void them.
+
 Phantom-line guard: NBA/NFL spread + total grade against the closing
 line stored in features_cache, but compute_features_{nba,nfl}.py write
 NEUTRAL_DEFAULTS (spread 0.0, total 45.0) for matches no book ever
@@ -50,6 +65,7 @@ import argparse
 import logging
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -60,6 +76,8 @@ from psycopg2.extras import RealDictCursor
 sys.path.insert(0, os.path.dirname(__file__))
 
 from grading_outcomes import (  # noqa: E402
+    REGULATION_HOME_KEY,
+    SOCCER_FT_TYPES,
     actual_outcome,
     grade_prediction,
     grade_rec_selection,
@@ -68,7 +86,10 @@ from grading_outcomes import (  # noqa: E402
     is_nba_total,
     is_nfl_spread,
     is_nfl_total,
+    is_push,
     rec_status_and_pl,
+    regulation_scores,
+    soccer_went_past_90,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
@@ -79,6 +100,15 @@ logger = logging.getLogger("grade_completed_matches")
 # such row is findable by this one prefix.
 POST_KICKOFF_VOID_RESULT = "void: written after kickoff"
 
+# A postponed match not played within this many hours of its kickoff voids
+# the recs priced for it (books void them too). fetch_upcoming stamps the
+# original kickoff and the time it recorded the postponement under these
+# metadata keys, so a match played after a longer delay is still recognised.
+POSTPONED_VOID_HOURS = 72
+POSTPONED_VOID_RESULT = "void: match postponed >72h"
+POSTPONED_KICKOFF_KEY = "postponed_kickoff"
+POSTPONED_AT_KEY = "postponed_at"
+
 
 # ── DB I/O ────────────────────────────────────────────────────────────
 
@@ -87,16 +117,20 @@ def list_finished_matches(cur, days: int, match_id: Optional[str]) -> list[dict]
     """Finished matches needing grading. If --match-id is given we
     short-circuit to that one row (operator escape hatch for ad-hoc
     re-grading). Otherwise: matches that finished in the last `days`
-    days AND have at least one ungraded prediction OR unsettled rec.
-    The EXISTS subqueries keep this from churning over already-graded
-    matches on every run."""
+    days AND have at least one ungraded prediction OR unsettled rec, or
+    that carry a 90-minute score (their trigger-graded full-time markets
+    need re-grading; a no-op once done, and such ties are a handful a
+    month). The EXISTS subqueries keep this from churning over
+    already-graded matches on every run. `sport` and `match_date` feed the
+    90-minute and postponement rules in grade_match."""
     if match_id is not None:
         cur.execute(
             """
-            SELECT id::text AS match_id,
-                   home_score, away_score, status, metadata, half_time_home, half_time_away
-            FROM matches
-            WHERE id = %s AND status = 'finished'
+            SELECT m.id::text AS match_id, m.match_date, l.sport,
+                   m.home_score, m.away_score, m.status, m.metadata, m.half_time_home, m.half_time_away
+            FROM matches m
+            LEFT JOIN leagues l ON l.id = m.league_id
+            WHERE m.id = %s AND m.status = 'finished'
             """,
             (match_id,),
         )
@@ -104,9 +138,10 @@ def list_finished_matches(cur, days: int, match_id: Optional[str]) -> list[dict]
 
     cur.execute(
         """
-        SELECT m.id::text AS match_id,
+        SELECT m.id::text AS match_id, m.match_date, l.sport,
                m.home_score, m.away_score, m.status, m.metadata, m.half_time_home, m.half_time_away
         FROM matches m
+        LEFT JOIN leagues l ON l.id = m.league_id
         WHERE m.status = 'finished'
           AND m.match_date >= NOW() - (%s || ' days')::interval
           AND (
@@ -126,10 +161,13 @@ def list_finished_matches(cur, days: int, match_id: Optional[str]) -> list[dict]
                            AND br.profit_loss IS NULL)
                     )
               )
+              -- decided after 90 minutes: the trigger graded its full-time
+              -- markets on the post-extra-time score
+              OR m.metadata ? %s
           )
         ORDER BY m.match_date ASC
         """,
-        (str(days),),
+        (str(days), REGULATION_HOME_KEY),
     )
     return [dict(r) for r in cur.fetchall()]
 
@@ -286,6 +324,165 @@ def update_prediction(cur, prediction_id: str, actual: Optional[str], correct: O
         """,
         (actual, correct, prediction_id),
     )
+
+
+def list_graded_full_time_predictions(cur, match_id: str) -> list[dict]:
+    """The match's GRADED soccer full-time predictions (is_correct set), with
+    the verdict they hold. Only read for a match carrying a 90-minute score:
+    the DB trigger graded match_result / over_under / btts on the
+    post-extra-time score when the match flipped to 'finished'. Pushes
+    (is_correct NULL) are list_ungraded_predictions' rows already."""
+    cur.execute(
+        """
+        SELECT p.id::text AS prediction_id,
+               p.prediction_type, p.model_name, p.predicted_outcome,
+               p.probabilities, p.actual_outcome, p.is_correct,
+               (p.created_at > m.match_date) AS after_kickoff
+        FROM predictions p
+        JOIN matches m ON m.id = p.match_id
+        WHERE p.match_id = %s
+          AND p.is_correct IS NOT NULL
+          AND p.prediction_type = ANY(%s)
+        """,
+        (match_id, sorted(SOCCER_FT_TYPES)),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def regrade_prediction(cur, pred: dict, actual: Optional[str], correct: Optional[bool]) -> bool:
+    """Rewrite one graded prediction's verdict, guarded on the verdict it
+    was read with: a row anything else rewrote in between is left alone.
+    True when the row was written."""
+    cur.execute(
+        """
+        UPDATE predictions
+        SET actual_outcome = %s,
+            is_correct = %s,
+            updated_at = NOW()
+        WHERE id = %s
+          AND actual_outcome IS NOT DISTINCT FROM %s
+          AND is_correct IS NOT DISTINCT FROM %s
+        """,
+        (actual, correct, pred["prediction_id"], pred["actual_outcome"], pred["is_correct"]),
+    )
+    return cur.rowcount == 1
+
+
+def regrade_on_regulation(cur, match: dict, ctx: dict) -> int:
+    """Re-grade a 90-minute-scored soccer match's already-graded full-time
+    predictions under the current code, writing only verdicts that change
+    and never un-grading one (a NULL verdict is written only for a push),
+    the same rule scripts/regrade_predictions.py applies. Returns the rows
+    rewritten. A no-op for every other match."""
+    if (match.get("sport") or "soccer") != "soccer" or regulation_scores(match.get("metadata")) is None:
+        return 0
+    written = 0
+    for pred in list_graded_full_time_predictions(cur, match["match_id"]):
+        skip, actual, correct = compute_prediction_grade(pred, match, ctx)
+        if skip is not None or (actual, correct) == (pred["actual_outcome"], pred["is_correct"]):
+            continue
+        if correct is None and not is_push(actual):
+            continue
+        if regrade_prediction(cur, pred, actual, correct):
+            written += 1
+            logger.warning(
+                "Re-graded prediction %s (match %s, %s/%s, pick %r) on the 90-minute score: (%r, %r) -> (%r, %r)",
+                pred["prediction_id"],
+                match["match_id"],
+                pred["model_name"],
+                pred["prediction_type"],
+                pred["predicted_outcome"],
+                pred["actual_outcome"],
+                pred["is_correct"],
+                actual,
+                correct,
+            )
+        else:
+            logger.error(
+                "Prediction %s (match %s) changed while it was being re-graded — left as it is",
+                pred["prediction_id"],
+                match["match_id"],
+            )
+    return written
+
+
+def _as_utc(value) -> Optional[datetime]:
+    """A timestamp from metadata (ISO string) or the DB (datetime), tz-aware
+    (naive read as UTC), or None when it cannot be read."""
+    if isinstance(value, datetime):
+        ts = value
+    else:
+        try:
+            ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    return ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+
+
+def postponed_past_void_limit(match: dict, rec: dict) -> bool:
+    """True for a rec written before ESPN postponed its match (fetch_upcoming
+    stamps metadata.postponed_kickoff / postponed_at) when the match was then
+    played more than POSTPONED_VOID_HOURS after that original kickoff: the
+    rec priced a fixture that did not take place when it was priced for."""
+    meta = match.get("metadata") or {}
+    if POSTPONED_KICKOFF_KEY not in meta:
+        return False
+    original, recorded = _as_utc(meta.get(POSTPONED_KICKOFF_KEY)), _as_utc(meta.get(POSTPONED_AT_KEY))
+    kickoff, created = _as_utc(match.get("match_date")), _as_utc(rec.get("created_at"))
+    if original is None or recorded is None or kickoff is None or created is None:
+        logger.warning(
+            "Rec %s (match %s): cannot apply the postponement rule (postponed_kickoff=%r, postponed_at=%r, "
+            "kickoff=%r, created_at=%r) — settled as usual",
+            rec.get("rec_id"),
+            match.get("match_id"),
+            meta.get(POSTPONED_KICKOFF_KEY),
+            meta.get(POSTPONED_AT_KEY),
+            match.get("match_date"),
+            rec.get("created_at"),
+        )
+        return False
+    return kickoff - original > timedelta(hours=POSTPONED_VOID_HOURS) and created < recorded
+
+
+def list_recs_on_long_postponed_matches(cur) -> list[dict]:
+    """Open recs on matches still 'postponed' POSTPONED_VOID_HOURS after their
+    kickoff. A rescheduled match flips back to 'scheduled' (fetch_upcoming's
+    fixtures path) and is judged by postponed_past_void_limit when it
+    finishes instead."""
+    cur.execute(
+        """
+        SELECT br.id::text AS rec_id, br.match_id::text AS match_id,
+               br.bet_type, br.selection, br.status, br.created_at,
+               m.match_date AS kickoff
+        FROM betting_recommendations br
+        JOIN matches m ON m.id = br.match_id
+        WHERE br.status IN ('pending', 'placed')
+          AND m.status = 'postponed'
+          AND m.match_date < NOW() - (%s || ' hours')::interval
+        ORDER BY m.match_date, br.id
+        """,
+        (str(POSTPONED_VOID_HOURS),),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def void_recs_on_long_postponed_matches(cur) -> int:
+    """Void (profit 0) every open rec list_recs_on_long_postponed_matches
+    finds. Returns how many."""
+    recs = list_recs_on_long_postponed_matches(cur)
+    for rec in recs:
+        logger.warning(
+            "Voiding rec %s (match %s, %s %s, status %s): the match is still postponed %dh after its kickoff %s",
+            rec["rec_id"],
+            rec["match_id"],
+            rec.get("bet_type"),
+            rec.get("selection"),
+            rec.get("status"),
+            POSTPONED_VOID_HOURS,
+            rec.get("kickoff"),
+        )
+        settle_recommendation(cur, rec["rec_id"], "void", POSTPONED_VOID_RESULT, Decimal("0"))
+    return len(recs)
 
 
 def list_open_recs_for_match(cur, match_id: str) -> list[dict]:
@@ -446,27 +643,46 @@ def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
 
     `stats`, when given, accumulates cross-match diagnostics that don't
     belong in the per-match counts — 'phantom_line_skips',
-    'after_kickoff_skips' and 'post_kickoff_rec_voids' (recs voided
+    'after_kickoff_skips', 'post_kickoff_rec_voids' (recs voided
     because they were written at or after kickoff; not counted in
-    recs_settled). run() passes one so it can log a single summary line;
+    recs_settled), 'postponed_rec_voids' (recs priced before a postponement
+    longer than POSTPONED_VOID_HOURS; not counted either) and
+    'regulation_regrades' (graded predictions rewritten on the 90-minute
+    score). run() passes one so it can log a single summary line;
     callers that don't care omit it.
     """
     counts = {"predictions_graded": 0, "predictions_skipped": 0, "recs_settled": 0}
+    stats = stats if stats is not None else {}
+    meta = match.get("metadata") or {}
+    is_soccer = (match.get("sport") or "soccer") == "soccer"
+    # Decided after 90 minutes but without the 90-minute score (the plays
+    # could not give it): its full-time markets grade on the final score.
+    final_score_fallback = is_soccer and regulation_scores(meta) is None and soccer_went_past_90(meta)
+    full_time_graded = 0
 
     # Features carry the closing line for NBA/NFL spread/total grading,
     # and the odds probes say whether that line was ever real. Fetched
     # once per match instead of per-prediction.
     ctx = fetch_match_grading_context(cur, match["match_id"])
 
+    # First, so the rows graded below are not read back: the trigger's
+    # post-extra-time verdicts on a 90-minute-scored match.
+    regraded = regrade_on_regulation(cur, match, ctx)
+    if regraded:
+        stats["regulation_regrades"] = stats.get("regulation_regrades", 0) + regraded
+
     for pred in list_ungraded_predictions(cur, match["match_id"]):
         skip, actual, correct = compute_prediction_grade(pred, match, ctx)
         if skip is not None:
             counts["predictions_skipped"] += 1
-            if stats is not None and skip in (SKIP_AFTER_KICKOFF, SKIP_PHANTOM_LINE):
+            if skip in (SKIP_AFTER_KICKOFF, SKIP_PHANTOM_LINE):
                 stats[f"{skip}_skips"] = stats.get(f"{skip}_skips", 0) + 1
             continue
         update_prediction(cur, pred["prediction_id"], actual, correct)
         counts["predictions_graded"] += 1
+        # A push stays is_correct NULL and is re-read every tick; only a
+        # verdict counts, so the warning below fires once per match.
+        full_time_graded += correct is not None and pred["prediction_type"] in SOCCER_FT_TYPES
 
     # Recs join to predictions for the actual_outcome — the prediction
     # update we just did is visible in the same txn via the join.
@@ -489,8 +705,26 @@ def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
                 rec.get("kickoff"),
             )
             settle_recommendation(cur, rec["rec_id"], "void", POST_KICKOFF_VOID_RESULT, Decimal("0"))
-            if stats is not None:
-                stats["post_kickoff_rec_voids"] = stats.get("post_kickoff_rec_voids", 0) + 1
+            stats["post_kickoff_rec_voids"] = stats.get("post_kickoff_rec_voids", 0) + 1
+            continue
+        # Priced before a postponement longer than POSTPONED_VOID_HOURS:
+        # void, as books void it, whatever the rescheduled match produced.
+        if postponed_past_void_limit(match, rec):
+            logger.warning(
+                "Voiding rec %s (match %s, %s %s, status %s): written %s, before the match was postponed from %s "
+                "to %s (more than %dh)",
+                rec["rec_id"],
+                match["match_id"],
+                rec.get("bet_type"),
+                rec.get("selection"),
+                rec.get("status"),
+                rec.get("created_at"),
+                meta.get(POSTPONED_KICKOFF_KEY),
+                match.get("match_date"),
+                POSTPONED_VOID_HOURS,
+            )
+            settle_recommendation(cur, rec["rec_id"], "void", POSTPONED_VOID_RESULT, Decimal("0"))
+            stats["postponed_rec_voids"] = stats.get("postponed_rec_voids", 0) + 1
             continue
         if match["home_score"] is None or match["away_score"] is None:
             continue
@@ -501,6 +735,7 @@ def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
             match["away_score"],
             sport=rec["sport"],
             model_name=rec["p_model_name"],
+            metadata=meta,
         )
         if outcome is None:
             continue
@@ -508,7 +743,29 @@ def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
         settle_recommendation(cur, rec["rec_id"], new_status, outcome, pl)
         counts["recs_settled"] += 1
 
+    if final_score_fallback and (full_time_graded or counts["recs_settled"]):
+        # Once per match that graded something, not every tick.
+        logger.warning(
+            "Match %s was decided after 90 minutes (%s) but carries no 90-minute score: %d full-time "
+            "prediction(s) and %d rec(s) graded on the final, post-extra-time %s-%s. Stamp it with "
+            "scripts/backfill_soccer_regulation_scores.py, then re-grade.",
+            match["match_id"],
+            meta.get("result_detail"),
+            full_time_graded,
+            counts["recs_settled"],
+            match.get("home_score"),
+            match.get("away_score"),
+        )
     return counts
+
+
+STAT_KEYS = (
+    "phantom_line_skips",
+    "after_kickoff_skips",
+    "post_kickoff_rec_voids",
+    "postponed_rec_voids",
+    "regulation_regrades",
+)
 
 
 def run(database_url: str, days: int, match_id: Optional[str]) -> dict:
@@ -517,27 +774,39 @@ def run(database_url: str, days: int, match_id: Optional[str]) -> dict:
         "predictions_graded": 0,
         "predictions_skipped": 0,
         "recs_settled": 0,
-        "phantom_line_skips": 0,
-        "after_kickoff_skips": 0,
-        "post_kickoff_rec_voids": 0,
+        **{k: 0 for k in STAT_KEYS},
     }
-    stats: dict = {"phantom_line_skips": 0, "after_kickoff_skips": 0, "post_kickoff_rec_voids": 0}
+    stats: dict = {k: 0 for k in STAT_KEYS}
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if match_id is None:
+                # Not tied to a finished match, so not in grade_match.
+                stats["postponed_rec_voids"] += void_recs_on_long_postponed_matches(cur)
             matches = list_finished_matches(cur, days, match_id)
             if not matches:
                 logger.info("No finished matches needing grading in the last %d days", days)
-                return summary
-            logger.info("Grading %d finished matches", len(matches))
+            else:
+                logger.info("Grading %d finished matches", len(matches))
             for m in matches:
                 per = grade_match(cur, m, stats)
                 summary["matches_processed"] += 1
                 for k in ("predictions_graded", "predictions_skipped", "recs_settled"):
                     summary[k] += per[k]
             conn.commit()
-    summary["phantom_line_skips"] = stats["phantom_line_skips"]
-    summary["after_kickoff_skips"] = stats["after_kickoff_skips"]
-    summary["post_kickoff_rec_voids"] = stats["post_kickoff_rec_voids"]
+    for k in STAT_KEYS:
+        summary[k] = stats[k]
+    if stats["postponed_rec_voids"]:
+        logger.warning(
+            "Voided %d recommendation(s) on matches postponed more than %dh (%r)",
+            stats["postponed_rec_voids"],
+            POSTPONED_VOID_HOURS,
+            POSTPONED_VOID_RESULT,
+        )
+    if stats["regulation_regrades"]:
+        logger.warning(
+            "Re-graded %d full-time prediction(s) on the 90-minute score of matches decided after 90 minutes",
+            stats["regulation_regrades"],
+        )
     if stats["post_kickoff_rec_voids"]:
         # ERROR, not WARNING: rec generation must never write a rec for a
         # match that has started, so each of these is an upstream defect
