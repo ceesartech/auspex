@@ -104,9 +104,10 @@ COLUMN_MAP: dict[str, str] = {
     "MaxH": "MaxH",
     "MaxD": "MaxD",
     "MaxA": "MaxA",
-    # Over/under 2.5 — keep if present.
-    "AvgCAHH": "Avg>2.5",
-    "AvgCAHA": "Avg<2.5",
+    # No over/under source: AvgCAHH/AvgCAHA are the closing Asian-handicap
+    # average (home/away), not over/under 2.5, and were mapped onto
+    # Avg>2.5/Avg<2.5 until 2026-10-31 (no /new/ file carried them, so no row
+    # was written that way). Pinned by tests/unit/test_load_football_data_extra.py.
 }
 
 # Keep only columns we care about post-rename (mirrors load_football_data.py).

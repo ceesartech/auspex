@@ -18,6 +18,13 @@ is an abandoned, awarded or unplayed fixture, never a finished match, and
 its HTHG/HTAG can hold the awarded score rather than a half-time one. A
 re-run never downgrades a row already written (see INSERT_MATCH_SQL).
 
+A fixture that already has a row for the same home and away team ids within
+3 h, on football-data's date (the ESPN results path's, at ESPN's kickoff),
+is written onto that row, never beside it (find_existing_match,
+update_existing_match), and an ESPN row's score is never overwritten. A raw
+row refused that way is logged at ERROR, and the run exits 3 once
+everything else is committed.
+
 Usage (inside the api container or anywhere DATABASE_URL is set):
     python /app/scripts/promote_raw.py
     python /app/scripts/promote_raw.py --database-url postgres://...
@@ -31,7 +38,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone, tzinfo
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
@@ -210,6 +217,9 @@ class Promotion:
     skipped_no_result: int = 0  # raw rows without a full-time score (not promoted)
     ht_dropped: int = 0  # promoted without the half-time value the raw row carried
     left_cancelled: int = 0  # existing row is 'cancelled' — not resurrected
+    merged: int = 0  # written onto an existing row at another kickoff (would have been a second row)
+    refused: int = 0  # not written: an ESPN row's score disagrees, or which row is meant is ambiguous
+    ht_conflicts: int = 0  # an ESPN row kept its half-time where football-data's differs
 
 
 @dataclass(frozen=True)
@@ -301,7 +311,11 @@ def check_legacy_kickoffs(cur, rows: list[dict], league_ids: dict[str, str], tea
     (stranded_legacy_kickoffs). Every run re-promotes the whole raw table,
     and on 2026-10-31 about 63,800 timed summer-time rows still sat at the
     legacy kickoff, so one run after the timezone fix would have inserted
-    that many duplicate finished matches into the training corpus."""
+    that many duplicate finished matches into the training corpus. Since
+    find_existing_match the run would update the legacy row instead, leaving
+    it 1 h late for good and without a word; this keeps promote() refusing
+    until scripts/repair_football_data_kickoffs.py has moved them (its
+    --check runs this)."""
     cur.execute("SHOW TimeZone")
     db_tz = ZoneInfo(cur.fetchone()["TimeZone"])  # loud if Postgres reports a zone Python cannot load
     cur.execute(EXISTING_SOCCER_KICKOFFS_SQL)
@@ -312,8 +326,8 @@ def check_legacy_kickoffs(cur, rows: list[dict], league_ids: dict[str, str], tea
         raise LegacyKickoffsPresent(
             f"{len(stranded)} raw row(s) would be promoted as a second matches row: promote_raw wrote them at the "
             f"UK wall clock read as {db_tz} (before 2026-10-31) and their corrected UTC kickoff is free. Move "
-            f"those rows' match_date from UK local time to UTC first (an operator task), then re-run. "
-            f"First {min(5, len(stranded))}: {sample}"
+            f"those rows' match_date from UK local time to UTC first (scripts/ops/repair_football_data_kickoffs.sh: "
+            f"--dedupe, then --shift), then re-run. First {min(5, len(stranded))}: {sample}"
         )
 
 
@@ -375,13 +389,14 @@ def upsert_teams(cur, team_names: set[str], league_id_by_team: dict[str, str]) -
     return {r["normalized_name"]: r["id"] for r in cur.fetchall()}
 
 
-# The conflict branch never downgrades the row already there: each score
-# pair is replaced only by a complete pair (a load without half-time
-# columns — the /new/ country files — used to NULL a half-time the ESPN
-# results path had written), 'finished' is set only with a full-time pair
-# in hand, season is left alone, and a 'cancelled' row is not touched at
-# all (RETURNING then yields no row): that status is recorded on purpose,
-# e.g. by scripts/fix_unplayed_soccer_rows.py.
+# promote() inserts only where find_existing_match found no row, so this
+# conflict branch catches a row written in between. It never downgrades the
+# row already there: each score pair is replaced only by a complete pair (a
+# load without half-time columns — the /new/ country files — used to NULL a
+# half-time the ESPN results path had written), 'finished' is set only with
+# a full-time pair in hand, season is left alone, and a 'cancelled' row is
+# not touched at all (RETURNING then yields no row): that status is recorded
+# on purpose, e.g. by scripts/fix_unplayed_soccer_rows.py.
 INSERT_MATCH_SQL = """
     INSERT INTO matches (
         league_id, home_team_id, away_team_id, match_date, status,
@@ -405,6 +420,153 @@ INSERT_MATCH_SQL = """
 """
 
 
+# A fixture already in matches under the same home and away team ids, within
+# EXISTING_MATCH_WINDOW of the football-data kickoff and on football-data's
+# (UK) date, is the same fixture: no pair meets twice in a few hours. ESPN's
+# kickoff can differ from football-data's by minutes, and until 2026-10-31
+# promote_raw read football-data's an hour late; the exact-triple upsert
+# missed both, and 228 finished matches came to exist twice
+# (scripts/repair_football_data_kickoffs.py merges them).
+EXISTING_MATCH_WINDOW = timedelta(hours=3)
+# main()'s exit code when write_match refused a raw row (everything else committed),
+# as fetch_upcoming exits on a refused fork.
+REFUSED_EXIT_CODE = 3
+
+EXISTING_MATCH_SQL = """
+    SELECT id::text AS id, match_date, status, home_score, away_score, half_time_home, half_time_away,
+           external_ids->>'espn' AS espn_id, metadata->>'result_source' AS result_source
+      FROM matches
+     WHERE home_team_id = %s AND away_team_id = %s
+       AND match_date >= %s AND match_date <= %s
+"""
+
+# Guarded on every value update_existing_match decided from: a row that moved
+# after the lookup is not written (RETURNING yields no row).
+UPDATE_EXISTING_MATCH_SQL = """
+    UPDATE matches
+       SET home_score = %(home)s, away_score = %(away)s,
+           half_time_home = %(ht_home)s, half_time_away = %(ht_away)s,
+           status = 'finished', updated_at = NOW()
+     WHERE id = %(id)s
+       AND status = %(old_status)s
+       AND home_score IS NOT DISTINCT FROM %(old_home)s AND away_score IS NOT DISTINCT FROM %(old_away)s
+       AND half_time_home IS NOT DISTINCT FROM %(old_ht_home)s
+       AND half_time_away IS NOT DISTINCT FROM %(old_ht_away)s
+    RETURNING id
+"""
+
+
+def has_espn_identity(espn_id: str | None, result_source: str | None) -> bool:
+    """A matches row the ESPN path owns: it carries the ESPN competition id
+    (fetch_upcoming, since migration 023) or its result came off the ESPN
+    scoreboard (rows the results path wrote before that)."""
+    return bool(espn_id) or result_source == "espn_scoreboard"
+
+
+def existing_match_window(match_dt: datetime, fixture_day: date) -> tuple[datetime, datetime]:
+    """The kickoffs find_existing_match looks at, as aware UTC bounds, both
+    inclusive: within EXISTING_MATCH_WINDOW of a timed kickoff and on
+    `fixture_day`, football-data's Date, read as the UK date it is (an MLS
+    19:30 ET kickoff is 00:30 the next day there, and on ESPN's row too). A
+    date-only row (naive midnight) has no kickoff to be near: its whole UK
+    date, which holds its own naive midnight in a UTC session (prod's)."""
+    day_start = datetime.combine(fixture_day, time(), tzinfo=FOOTBALL_DATA_TZ).astimezone(timezone.utc)
+    next_day = datetime.combine(fixture_day + timedelta(days=1), time(), tzinfo=FOOTBALL_DATA_TZ)
+    day_end = next_day.astimezone(timezone.utc) - timedelta(microseconds=1)
+    if match_dt.tzinfo is None:
+        return day_start, day_end
+    kickoff = match_dt.astimezone(timezone.utc)
+    return max(kickoff - EXISTING_MATCH_WINDOW, day_start), min(kickoff + EXISTING_MATCH_WINDOW, day_end)
+
+
+def choose_existing(candidates: list[dict]) -> tuple[dict | None, str | None]:
+    """(row, None) for the row a football-data fixture belongs on, (None, None)
+    when there is none, (None, why) when it is ambiguous. An ESPN row beats
+    any other (its identity is the one predictions, odds and recommendations
+    hang off), then a finished row an unfinished one; two rows still level
+    are ambiguous. Pure."""
+    if not candidates:
+        return None, None
+
+    def rank(c: dict) -> tuple[bool, bool]:
+        return not has_espn_identity(c.get("espn_id"), c.get("result_source")), c.get("status") != "finished"
+
+    best = min(rank(c) for c in candidates)
+    top = [c for c in candidates if rank(c) == best]
+    if len(top) > 1:
+        rows = ", ".join(f"{c['id']} {c['status']} {c['match_date']}" for c in top)
+        return None, f"{len(top)} existing rows for this team pair could each be it ({rows})"
+    return top[0], None
+
+
+def same_kickoff(stored: datetime, match_dt: datetime) -> bool:
+    """Whether a stored timestamptz is the kickoff promote() would write.
+    psycopg2 hands it back in the session TimeZone, the zone a naive
+    (date-only) kickoff is read in."""
+    if match_dt.tzinfo is None:
+        return stored.replace(tzinfo=None) == match_dt
+    return stored == match_dt
+
+
+def find_existing_match(cur, home_id, away_id, match_dt: datetime, fixture_day: date) -> tuple[dict | None, str | None]:
+    """choose_existing over this team pair's rows in existing_match_window."""
+    lo, hi = existing_match_window(match_dt, fixture_day)
+    cur.execute(EXISTING_MATCH_SQL, (home_id, away_id, lo, hi))
+    return choose_existing([dict(r) for r in cur.fetchall()])
+
+
+def update_existing_match(cur, existing: dict, result: RawResult) -> tuple[str | None, str]:
+    """Write a football-data result onto the row choose_existing picked;
+    returns (match_id or None, outcome).
+
+    'cancelled': the row is 'cancelled' and stays as it is (see
+    INSERT_MATCH_SQL). 'score_conflict': an ESPN row holds a different final
+    score, which is never overwritten; nothing written. 'ht_conflict':
+    written, but an ESPN row keeps a half-time that differs from
+    football-data's. 'score_changed': a row without ESPN identity
+    (football-data's own) took football-data's new score, as the upsert always
+    let it. 'changed': the row moved after the lookup; nothing written.
+    Otherwise 'updated'. A half-time pair is only ever replaced by a complete
+    one, an ESPN row's only when it has none; the kickoff, season and
+    identity stay the row's own."""
+    if existing["status"] == "cancelled":
+        return None, "cancelled"
+    old_ft = (existing["home_score"], existing["away_score"])
+    old_ht = (existing["half_time_home"], existing["half_time_away"])
+    new_ft = (result.home_score, result.away_score)
+    raw_ht = (result.ht_home, result.ht_away) if result.ht_home is not None and result.ht_away is not None else None
+    outcome = "updated"
+    if has_espn_identity(existing.get("espn_id"), existing.get("result_source")):
+        if old_ft != (None, None) and old_ft != new_ft:
+            return None, "score_conflict"
+        new_ht = raw_ht if raw_ht is not None and old_ht == (None, None) else old_ht
+        if raw_ht is not None and old_ht != (None, None) and old_ht != raw_ht:
+            outcome = "ht_conflict"
+    else:
+        new_ht = raw_ht or old_ht
+        if old_ft != (None, None) and old_ft != new_ft:
+            outcome = "score_changed"
+    cur.execute(
+        UPDATE_EXISTING_MATCH_SQL,
+        {
+            "id": existing["id"],
+            "home": new_ft[0],
+            "away": new_ft[1],
+            "ht_home": new_ht[0],
+            "ht_away": new_ht[1],
+            "old_status": existing["status"],
+            "old_home": old_ft[0],
+            "old_away": old_ft[1],
+            "old_ht_home": old_ht[0],
+            "old_ht_away": old_ht[1],
+        },
+    )
+    r = cur.fetchone()
+    if r is None:
+        return None, "changed"
+    return r["id"], outcome
+
+
 def insert_match(
     cur, *, league_id, home_id, away_id, match_dt, season, home_score, away_score, ht_home, ht_away
 ) -> str | None:
@@ -425,6 +587,90 @@ def insert_match(
     )
     r = cur.fetchone()
     return r["id"] if r else None
+
+
+def write_match(
+    cur, stats: Promotion, row: dict, *, league_id, home_id, away_id, match_dt, result: RawResult
+) -> str | None:
+    """The matches row a raw row's result goes on: the existing row for the
+    pair (find_existing_match, update_existing_match) or a new one
+    (insert_match). Returns its id, or None when nothing was written (counted
+    in `stats` and logged; the caller then writes no stats or odds)."""
+    label = fixture_label(row)
+    fixture_day = parse_wall_clock(row.get("Date") or "", None)
+    if fixture_day is None:
+        raise ValueError(f"write_match needs a football-data Date, got {row.get('Date')!r} ({label})")
+    existing, ambiguity = find_existing_match(cur, home_id, away_id, match_dt, fixture_day.date())
+    if ambiguity:
+        stats.refused += 1
+        logger.error("Not promoting %s: %s — merge them first", label, ambiguity)
+        return None
+    if existing is None:
+        match_id = insert_match(
+            cur,
+            league_id=league_id,
+            home_id=home_id,
+            away_id=away_id,
+            match_dt=match_dt,
+            season=season_label(row.get("season", ""), row.get("league")),
+            home_score=result.home_score,
+            away_score=result.away_score,
+            ht_home=result.ht_home,
+            ht_away=result.ht_away,
+        )
+        outcome = "inserted" if match_id else "cancelled"
+    else:
+        match_id, outcome = update_existing_match(cur, existing, result)
+    where = f"row {existing['id']} at {existing['match_date']}" if existing else "the existing row"
+    if outcome == "cancelled":
+        stats.left_cancelled += 1
+        logger.warning(
+            "Left %s as it is: %s is 'cancelled' but football-data now has a full-time score for it — check "
+            "which is right",
+            label,
+            where,
+        )
+        return None
+    if outcome in ("score_conflict", "changed"):
+        stats.refused += 1
+        logger.error(
+            "Not promoting %s: %s %s (football-data %d-%d) — nothing written; check which score is right",
+            label,
+            where,
+            (
+                f"is an ESPN row with final score {existing['home_score']}-{existing['away_score']}"
+                if outcome == "score_conflict"
+                else "changed after the lookup"
+            ),
+            result.home_score,
+            result.away_score,
+        )
+        return None
+    if outcome == "ht_conflict":
+        stats.ht_conflicts += 1
+        logger.error(
+            "%s: kept the half-time %s-%s on ESPN %s; football-data says %s-%s — check which is right",
+            label,
+            existing["half_time_home"],
+            existing["half_time_away"],
+            where,
+            result.ht_home,
+            result.ht_away,
+        )
+    elif outcome == "score_changed":
+        logger.warning(
+            "%s: football-data changed the score on %s from %s-%s to %d-%d",
+            label,
+            where,
+            existing["home_score"],
+            existing["away_score"],
+            result.home_score,
+            result.away_score,
+        )
+    if existing is not None and not same_kickoff(existing["match_date"], match_dt):
+        stats.merged += 1
+        logger.info("%s written onto %s (football-data kickoff %s)", label, where, match_dt)
+    return match_id
 
 
 def insert_match_stats(
@@ -616,25 +862,17 @@ def promote(database_url: str, *, batch_size: int = 1000) -> Promotion:
                 if result.ht_dropped:
                     stats.ht_dropped += 1
                     logger.warning("Promoting %s without its half-time: %s", fixture_label(r), result.ht_dropped)
-                match_id = insert_match(
+                match_id = write_match(
                     cur,
+                    stats,
+                    r,
                     league_id=league_ids[code],
                     home_id=home_id,
                     away_id=away_id,
                     match_dt=match_dt,
-                    season=season_label(r.get("season", ""), code),
-                    home_score=result.home_score,
-                    away_score=result.away_score,
-                    ht_home=result.ht_home,
-                    ht_away=result.ht_away,
+                    result=result,
                 )
                 if not match_id:
-                    stats.left_cancelled += 1
-                    logger.warning(
-                        "Left %s as it is: the existing row is 'cancelled' but football-data now has a "
-                        "full-time score for it — check which is right",
-                        fixture_label(r),
-                    )
                     continue
                 stats.matches += 1
 
@@ -684,7 +922,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     logger.info(
         "Promotion complete: leagues=%d teams=%d matches=%d match_stats=%d odds=%d "
-        "skipped_no_result=%d ht_dropped=%d left_cancelled=%d",
+        "skipped_no_result=%d ht_dropped=%d left_cancelled=%d merged=%d refused=%d ht_conflicts=%d",
         stats.leagues,
         stats.teams,
         stats.matches,
@@ -693,7 +931,18 @@ def main(argv: list[str] | None = None) -> int:
         stats.skipped_no_result,
         stats.ht_dropped,
         stats.left_cancelled,
+        stats.merged,
+        stats.refused,
+        stats.ht_conflicts,
     )
+    if stats.refused:
+        logger.error(
+            "REFUSED %d raw row(s) (ERROR lines above): an existing row's score disagrees or the row is ambiguous. "
+            "Everything else is committed; exiting %d until they are resolved.",
+            stats.refused,
+            REFUSED_EXIT_CODE,
+        )
+        return REFUSED_EXIT_CODE
     return 0
 
 

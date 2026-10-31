@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import re
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -136,13 +137,15 @@ class TestSeasonLabel:
 
 
 class _SqliteCursor:
-    """Just enough of a RealDictCursor over SQLite for insert_match."""
+    """Just enough of a RealDictCursor over SQLite for insert_match and
+    update_existing_match (named %(x)s parameters become :x)."""
 
     def __init__(self, conn: sqlite3.Connection):
         self._cur = conn.cursor()
 
     def execute(self, sql, params=()):
-        self._cur.execute(sql.replace("%s", "?").replace("NOW()", "CURRENT_TIMESTAMP"), params)
+        sql = re.sub(r"%\((\w+)\)s", r":\1", sql).replace("%s", "?").replace("NOW()", "CURRENT_TIMESTAMP")
+        self._cur.execute(sql, params)
 
     def fetchone(self):
         row = self._cur.fetchone()
@@ -272,9 +275,15 @@ def promote_with(monkeypatch):
     insert_match calls."""
     calls: list[dict] = []
 
-    def run(rows, insert_returns="m-1", legacy_check=lambda cur, rows, league_ids, team_ids: None):
+    def run(
+        rows,
+        insert_returns="m-1",
+        legacy_check=lambda cur, rows, league_ids, team_ids: None,
+        existing=lambda cur, home_id, away_id, match_dt, fixture_day: (None, None),
+    ):
         monkeypatch.setattr(pr.psycopg2, "connect", lambda url: _FakeConn(rows))
         monkeypatch.setattr(pr, "check_legacy_kickoffs", legacy_check)
+        monkeypatch.setattr(pr, "find_existing_match", existing)
         monkeypatch.setattr(pr, "upsert_leagues", lambda cur, codes: {c: f"lg-{c}" for c in codes})
         monkeypatch.setattr(
             pr, "upsert_teams", lambda cur, names, by_team: {pr.normalize_team_name(n): f"t-{n}" for n in names}
@@ -449,3 +458,233 @@ class TestCheckLegacyKickoffs:
         paris = datetime(2025, 7, 5, 17, 0, tzinfo=ZoneInfo("Europe/Paris"))  # 15:00Z
         with pytest.raises(pr.LegacyKickoffsPresent):
             pr.check_legacy_kickoffs(_GuardCursor([_key(paris)]), [SUMMER], LEAGUE_IDS, TEAM_IDS)
+
+    def test_the_refusal_names_the_repair(self):
+        cur = _GuardCursor([_key(datetime(2025, 7, 5, 15, 0, tzinfo=UTC))])
+        with pytest.raises(pr.LegacyKickoffsPresent, match="repair_football_data_kickoffs.sh: --dedupe, then --shift"):
+            pr.check_legacy_kickoffs(cur, [SUMMER], LEAGUE_IDS, TEAM_IDS)
+
+
+# --- the insert path: write onto the existing row for the pair, never beside it ---------------------------------
+
+
+class TestExistingMatchWindow:
+    """Within 3 h of the kickoff and on football-data's Date, read as the UK
+    date it is."""
+
+    def test_a_daytime_kickoff_is_plus_minus_three_hours(self):
+        lo, hi = pr.existing_match_window(datetime(2026, 7, 10, 11, 35, tzinfo=UTC), date(2026, 7, 10))
+        assert (lo, hi) == (datetime(2026, 7, 10, 8, 35, tzinfo=UTC), datetime(2026, 7, 10, 14, 35, tzinfo=UTC))
+
+    def test_a_late_us_kickoff_keeps_the_espn_row_on_the_uk_date(self):
+        # FC Cincinnati v San Jose (MLS), prod: football-data 02/08/2026 00:30 UK = 23:30Z on the 1st; ESPN's
+        # row kicked off at 01:46Z on the 2nd, a stale fixture row sits at 23:30Z. Both are on the UK date.
+        lo, hi = pr.existing_match_window(datetime(2026, 8, 1, 23, 30, tzinfo=UTC), date(2026, 8, 2))
+        assert lo == datetime(2026, 8, 1, 23, 0, tzinfo=UTC)  # midnight BST, not 20:30Z
+        assert hi == datetime(2026, 8, 2, 2, 30, tzinfo=UTC)
+        assert lo <= datetime(2026, 8, 2, 1, 46, tzinfo=UTC) <= hi
+
+    def test_the_window_stops_at_the_end_of_the_uk_date(self):
+        lo, hi = pr.existing_match_window(datetime(2025, 12, 5, 22, 0, tzinfo=UTC), date(2025, 12, 5))
+        assert lo == datetime(2025, 12, 5, 19, 0, tzinfo=UTC)
+        assert hi == datetime(2025, 12, 5, 23, 59, 59, 999999, tzinfo=UTC)
+
+    def test_a_date_only_row_looks_at_its_whole_uk_date(self):
+        lo, hi = pr.existing_match_window(datetime(2016, 8, 13), date(2016, 8, 13))
+        assert lo == datetime(2016, 8, 12, 23, 0, tzinfo=UTC)  # BST midnight
+        assert hi == datetime(2016, 8, 13, 22, 59, 59, 999999, tzinfo=UTC)
+        assert lo <= datetime(2016, 8, 13, tzinfo=UTC) <= hi  # its own naive midnight, read as UTC
+
+
+def _cand(id_, status="finished", espn_id=None, result_source=None, when=datetime(2026, 7, 10, 11, 35, tzinfo=UTC)):
+    return {"id": id_, "status": status, "espn_id": espn_id, "result_source": result_source, "match_date": when}
+
+
+class TestChooseExisting:
+    def test_none(self):
+        assert pr.choose_existing([]) == (None, None)
+
+    def test_the_espn_row_beats_football_datas_own(self):
+        espn, fd = _cand("espn", espn_id="747597"), _cand("fd")
+        assert pr.choose_existing([fd, espn]) == (espn, None)
+
+    def test_a_results_path_row_counts_as_espn(self):
+        espn, fd = _cand("espn", result_source="espn_scoreboard"), _cand("fd")
+        assert pr.choose_existing([fd, espn]) == (espn, None)
+
+    def test_a_finished_espn_row_beats_a_stale_scheduled_one(self):
+        # Atlas v Monterrey (MX1), prod: a pre-023 fixture row at 01:00Z and the ESPN result at 01:05Z.
+        stale, result = _cand("stale", status="scheduled"), _cand("result", result_source="espn_scoreboard")
+        assert pr.choose_existing([stale, result]) == (result, None)
+
+    def test_two_level_rows_are_ambiguous(self):
+        row, why = pr.choose_existing([_cand("a"), _cand("b")])
+        assert row is None and "2 existing rows" in why
+
+    def test_a_single_row_is_it(self):
+        assert pr.choose_existing([_cand("only", status="scheduled")])[0]["id"] == "only"
+
+
+def _result(home=2, away=1, ht_home=None, ht_away=None):
+    return pr.RawResult(home, away, ht_home, ht_away)
+
+
+class TestUpdateExistingMatch:
+    """update_existing_match against SQLite, same table as TestInsertMatch."""
+
+    def _existing(self, db, status="finished", ft=(None, None), ht=(None, None), espn=True):
+        _existing(db, status, ft[0], ft[1], ht[0], ht[1])
+        row = db.execute("SELECT id, match_date FROM matches").fetchone()
+        return {
+            "id": row[0],
+            "match_date": row[1],
+            "status": status,
+            "home_score": ft[0],
+            "away_score": ft[1],
+            "half_time_home": ht[0],
+            "half_time_away": ht[1],
+            "espn_id": "747597" if espn else None,
+            "result_source": None,
+        }
+
+    def test_a_scheduled_espn_row_gets_the_result(self, db):
+        existing = self._existing(db, status="scheduled")
+        assert pr.update_existing_match(_SqliteCursor(db), existing, _result(ht_home=1, ht_away=0)) == (
+            existing["id"],
+            "updated",
+        )
+        assert _row(db) == ("finished", 2, 1, 1, 0, "espn-season")  # season stays the row's own
+
+    def test_an_espn_rows_score_is_never_overwritten(self, db):
+        existing = self._existing(db, ft=(1, 1), ht=(0, 0))
+        assert pr.update_existing_match(_SqliteCursor(db), existing, _result(2, 1)) == (None, "score_conflict")
+        assert _row(db)[:5] == ("finished", 1, 1, 0, 0)
+
+    def test_an_espn_row_without_half_time_takes_football_datas(self, db):
+        existing = self._existing(db, ft=(2, 1))
+        assert pr.update_existing_match(_SqliteCursor(db), existing, _result(ht_home=1, ht_away=1))[1] == "updated"
+        assert _row(db)[:5] == ("finished", 2, 1, 1, 1)
+
+    def test_an_espn_rows_half_time_is_kept_and_the_conflict_reported(self, db):
+        existing = self._existing(db, ft=(2, 1), ht=(0, 0))
+        assert pr.update_existing_match(_SqliteCursor(db), existing, _result(ht_home=1, ht_away=1))[1] == (
+            "ht_conflict"
+        )
+        assert _row(db)[:5] == ("finished", 2, 1, 0, 0)
+
+    def test_football_datas_own_row_takes_its_new_score_as_before(self, db):
+        existing = self._existing(db, ft=(1, 1), ht=(0, 0), espn=False)
+        assert pr.update_existing_match(_SqliteCursor(db), existing, _result(2, 1, 1, 0))[1] == "score_changed"
+        assert _row(db)[:5] == ("finished", 2, 1, 1, 0)
+
+    def test_a_half_time_is_only_replaced_by_a_complete_pair(self, db):
+        existing = self._existing(db, ft=(2, 1), ht=(1, 0), espn=False)
+        assert pr.update_existing_match(_SqliteCursor(db), existing, _result())[1] == "updated"
+        assert _row(db)[:5] == ("finished", 2, 1, 1, 0)
+
+    def test_a_cancelled_row_is_left_alone(self, db):
+        existing = self._existing(db, status="cancelled")
+        assert pr.update_existing_match(_SqliteCursor(db), existing, _result()) == (None, "cancelled")
+        assert _row(db)[0] == "cancelled"
+
+    def test_a_row_that_moved_after_the_lookup_is_not_written(self, db):
+        existing = self._existing(db, status="scheduled")
+        db.execute("UPDATE matches SET status = 'finished', home_score = 3, away_score = 3")
+        assert pr.update_existing_match(_SqliteCursor(db), existing, _result()) == (None, "changed")
+        assert _row(db)[:3] == ("finished", 3, 3)
+
+
+ESPN_ROW = {
+    "id": "e77e612a",
+    "match_date": datetime(2026, 7, 10, 11, 35, tzinfo=UTC),
+    "status": "finished",
+    "home_score": 4,
+    "away_score": 3,
+    "half_time_home": 3,
+    "half_time_away": 1,
+    "espn_id": None,
+    "result_source": "espn_scoreboard",
+}
+SHANDONG = {
+    **NORMAL,
+    "league": "CN1",
+    "season": "2026",
+    "Date": "10/07/2026",
+    "Time": "12:35",
+    "HomeTeam": "Shandong Taishan",
+    "AwayTeam": "Yunnan Yukun",
+    "FTHG": "4",
+    "FTAG": "3",
+    "HTHG": "",
+    "HTAG": "",
+}
+
+
+class TestWriteMatch:
+    """promote() writes a fixture onto the existing row for its pair."""
+
+    def _promote(self, monkeypatch, promote_with, existing_row, update_returns):
+        lookups, updates = [], []
+
+        def existing(cur, home_id, away_id, match_dt, fixture_day):
+            lookups.append((match_dt, fixture_day))
+            return existing_row, None
+
+        def update(cur, row, result):
+            updates.append((row["id"], result))
+            return update_returns
+
+        monkeypatch.setattr(pr, "update_existing_match", update)
+        stats, inserts = promote_with([SHANDONG], existing=existing)
+        return stats, inserts, lookups, updates
+
+    def test_the_prod_duplicate_goes_onto_the_espn_row(self, monkeypatch, promote_with):
+        # Shandong Taishan v Yunnan Yukun (CN1): football-data 12:35 UK = 11:35Z, ESPN's row e77e612a.
+        stats, inserts, lookups, updates = self._promote(monkeypatch, promote_with, ESPN_ROW, ("e77e612a", "updated"))
+        assert lookups == [(datetime(2026, 7, 10, 11, 35, tzinfo=UTC), date(2026, 7, 10))]
+        assert updates == [("e77e612a", pr.RawResult(4, 3))] and inserts == []
+        assert (stats.matches, stats.merged, stats.refused) == (1, 0, 0)  # same kickoff: not a merge
+
+    def test_a_row_at_another_kickoff_is_counted_as_merged(self, monkeypatch, promote_with):
+        moved = {**ESPN_ROW, "match_date": ESPN_ROW["match_date"] + timedelta(minutes=5)}
+        stats, inserts, _lookups, _updates = self._promote(monkeypatch, promote_with, moved, ("e77e612a", "updated"))
+        assert (stats.matches, stats.merged, inserts) == (1, 1, [])
+
+    def test_a_score_conflict_writes_nothing_and_exits_3(self, monkeypatch, promote_with, caplog):
+        with caplog.at_level(logging.ERROR, logger="promote_raw"):
+            stats, inserts, _lookups, _updates = self._promote(
+                monkeypatch, promote_with, {**ESPN_ROW, "home_score": 1}, (None, "score_conflict")
+            )
+        assert (stats.matches, stats.refused, inserts) == (0, 1, [])
+        assert "is an ESPN row with final score 1-3 (football-data 4-3)" in caplog.text
+        monkeypatch.setattr(pr, "promote", lambda url, batch_size: stats)
+        assert pr.main(["--database-url", "postgres://fake"]) == pr.REFUSED_EXIT_CODE == 3
+
+    def test_a_half_time_conflict_is_written_and_logged(self, monkeypatch, promote_with, caplog):
+        with caplog.at_level(logging.ERROR, logger="promote_raw"):
+            stats, _inserts, _lookups, _updates = self._promote(
+                monkeypatch, promote_with, ESPN_ROW, ("e77e612a", "ht_conflict")
+            )
+        assert (stats.matches, stats.ht_conflicts, stats.refused) == (1, 1, 0)
+        assert "kept the half-time 3-1" in caplog.text
+
+    def test_an_ambiguous_pair_is_refused(self, promote_with, caplog):
+        with caplog.at_level(logging.ERROR, logger="promote_raw"):
+            stats, inserts = promote_with(
+                [SHANDONG], existing=lambda cur, h, a, dt, day: (None, "2 existing rows for this team pair")
+            )
+        assert (stats.matches, stats.refused, inserts) == (0, 1, [])
+        assert "merge them first" in caplog.text
+
+    def test_no_existing_row_inserts(self, promote_with):
+        stats, inserts = promote_with([SHANDONG])
+        assert stats.matches == 1 and inserts[0]["match_dt"] == datetime(2026, 7, 10, 11, 35, tzinfo=UTC)
+
+    def test_a_clean_run_exits_0(self, monkeypatch):
+        monkeypatch.setattr(pr, "promote", lambda url, batch_size: pr.Promotion(matches=3))
+        assert pr.main(["--database-url", "postgres://fake"]) == 0
+
+    def test_same_kickoff_reads_a_date_only_row_in_the_session_zone(self):
+        assert pr.same_kickoff(datetime(2016, 8, 13, tzinfo=UTC), datetime(2016, 8, 13))
+        assert not pr.same_kickoff(datetime(2016, 8, 13, 1, tzinfo=UTC), datetime(2016, 8, 13))
+        assert pr.same_kickoff(datetime(2026, 7, 10, 13, 35, tzinfo=ZoneInfo("Europe/Paris")), ESPN_ROW["match_date"])
