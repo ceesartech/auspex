@@ -7,6 +7,7 @@ exercised by running the harness on prod."""
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -242,3 +243,75 @@ class TestCalibration:
         assert c["pred"]["draw_draw"] == pytest.approx(0.5) and c["real"]["draw_draw"] == pytest.approx(1.0)
         assert c["max_abs_gap"] == pytest.approx(0.5) and c["worst_cell"] in ("home_home", "draw_draw")
         assert c["argmax_hit"] == pytest.approx(0.5)
+
+
+class TestSyntheticRun:
+    """run() end to end on a synthetic frame, no DB: the bookkeeping that makes
+    the paired comparisons honest (disqualified arms dropped everywhere, the
+    frozen arm equal to the first fold's refit, valid JSON, the decision line)."""
+
+    @staticmethod
+    def _setup(monkeypatch, tmp_path):
+        rng = np.random.default_rng(0)
+        h2_rows, score_rows = [], []
+        leagues = {f"L{i}": [f"L{i}T{j}" for j in range(8)] for i in range(2)}
+        mid = 0
+        for d in pd.date_range("2025-01-01", "2025-10-20", freq="D", tz="UTC"):
+            for lg, teams in leagues.items():
+                h, a = rng.choice(teams, 2, replace=False)
+                hth, hta, h2h, h2a = rng.poisson(0.65), rng.poisson(0.5), rng.poisson(0.8), rng.poisson(0.65)
+                h2_rows.append(
+                    dict(
+                        match_id=f"m{mid}",
+                        match_date=d,
+                        league_id=lg,
+                        home_team=h,
+                        away_team=a,
+                        home_score=h2h,
+                        away_score=h2a,
+                        match_outcome=0 if h2h > h2a else (1 if h2h == h2a else 2),
+                    )
+                )
+                score_rows.append(
+                    dict(match_id=f"m{mid}", ht_home=hth, ht_away=hta, ft_home=hth + h2h, ft_away=hta + h2a)
+                )
+                mid += 1
+        h2, scores = pd.DataFrame(h2_rows), pd.DataFrame(score_rows)
+        monkeypatch.setattr(ab, "load_frame", lambda url: ab.assemble_frame(h2, scores))
+        from predictors.poisson_models import DixonColesPredictor
+
+        served = DixonColesPredictor(ab.arm_configs()["refit"])
+        served.train(
+            h2[h2["match_date"] < "2025-04-01"][
+                ["home_team", "away_team", "home_score", "away_score", "match_date", "league_id"]
+            ]
+        )
+        path = tmp_path / "served.bin"
+        served.save(str(path))
+        return ab.parse_args(["--start", "2025-09-01", "--served-artifact", str(path), "--database-url", "x"])
+
+    def test_bookkeeping_and_decision_line(self, monkeypatch, tmp_path):
+        r = ab.run(self._setup(monkeypatch, tmp_path))
+        json.dumps(ab.ht.clean_json(r), allow_nan=False)
+        assert set(r["verdicts_vs_served"]) >= {"refit", "refit_frozen"}
+        first = r["per_fold_vs_served"]
+        assert first["refit_frozen"][0]["delta"] == pytest.approx(first["refit"][0]["delta"], abs=1e-12)
+        assert "DECISION (pre-registered: refit AND refit_frozen" in ab.format_report(r)
+
+    def test_every_challenger_disqualified_still_reports(self, monkeypatch, tmp_path):
+        args = self._setup(monkeypatch, tmp_path)
+        orig = ab.fit_config
+
+        def unconverged(fit_df, hc, ac, cfg, tmp, tag):
+            model, res, path = orig(fit_df, hc, ac, cfg, tmp, tag)
+            if not tag.startswith("ht_side"):
+                res = dict(res)
+                res["iterations"] = None
+            return model, res, path
+
+        monkeypatch.setattr(ab, "fit_config", unconverged)
+        r = ab.run(args)
+        assert r["verdicts_vs_served"] == {} and set(r["disqualified"]) >= {"refit", "refit_frozen"}
+        text = ab.format_report(r)
+        assert "DO-NOT-SHIP" in text and "no challenger survived" in text
+        json.dumps(ab.ht.clean_json(r), allow_nan=False)

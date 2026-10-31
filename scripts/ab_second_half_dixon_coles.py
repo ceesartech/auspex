@@ -80,12 +80,17 @@ PRE-REGISTERED DESIGN (fixed before the first run)
            (pinned, refit, refit_frozen) is DISQUALIFIED — not scored on any
            row, its earlier folds dropped, never fitted again — the first time
            a fit does not converge (train result 'iterations' is None) or it
-           emits an invalid probability: the trainer must refuse that fit, so
-           it could not be served. Scoring a subset of rows would run the
+           emits an invalid probability: a hardened trainer would refuse that
+           fit (train_second_half_dixon_coles.py as written in 2026-10 did NOT
+           — it wrote unconverged fits straight into production). Scoring a subset of rows would run the
            paired comparisons on different row sets.
 
-READING THE RESULT
-  A challenger ships only on ship_strict vs served. If the conditional constant
+READING THE RESULT (pre-registered 2026-10-31, before the full-window run)
+  The H2 artifact is fitted by hand and then frozen, so the deployable object is
+  a single all-data fit: SHIP only if BOTH refit AND refit_frozen pass
+  ship_strict (the -0.005 gate plus the t(n_folds-1) clustered bound) vs served
+  on ht_ft. pinned is report-only (its trainer config never converges). Verdicts
+  vs the constants are context and never decide. If the conditional constant
   beats every model arm (served included), the lever is the independence
   assumption in the convolution, not this artifact's fit — a finding to act on
   separately, not a reason to ship any arm here.
@@ -132,6 +137,7 @@ logger = logging.getLogger("ab_second_half_dixon_coles")
 
 SERVED_ARTIFACT = ht.H2_ARTIFACT  # /app/models/production/dixon_coles_h2_soccer/1.0.0/model.bin
 LEGACY_SERVED_TEAMS = 175
+DECIDING_ARMS = ("refit", "refit_frozen")  # the pre-registered SHIP rule (see READING THE RESULT)
 
 CLASSES = ht.CLASSES  # home/draw/away == match_outcome 0/1/2
 HTFT_KEYS = ht.HTFT_KEYS  # index = ht_outcome * 3 + ft_outcome
@@ -366,7 +372,7 @@ def disqualification(
     broken."""
     reason = None
     if train_result is not None and train_result.get("iterations") is None:
-        reason = "fit did not converge (train result 'iterations' is None) — the trainer must refuse it"
+        reason = "fit did not converge (train result 'iterations' is None) — a hardened trainer would refuse it"
     elif probs is not None:
         reason = invalid_probabilities(probs)
     if reason is not None and arm not in CHALLENGERS:
@@ -828,13 +834,24 @@ def format_report(r: Dict[str, Any]) -> str:
         if f.get("converged_at") is None:
             unconv[f["arm"]] = unconv.get(f["arm"], 0) + 1
     L += ["", f"fits that did not converge (per arm): {unconv or 'none'}"]
-    L += ["", "Verdicts (§4.3 gate on ht_ft vs served; 'strict' also needs the t(n_folds-1) clustered bound < 0):"]
-    for a in r["verdicts_vs_served"]:
-        for key in ("verdicts_vs_served", "verdicts_vs_matched_constant", "verdicts_vs_conditional_constant"):
-            v = r[key][a]
-            L.append(f"  {a:<15} strict={'SHIP' if v['ship_strict'] else 'no'}  {v['line']}")
-    if not r["verdicts_vs_served"]:
+    vs = r["verdicts_vs_served"]
+    decision = all(a in vs and vs[a]["ship_strict"] for a in DECIDING_ARMS)
+    L += [
+        "",
+        f"DECISION (pre-registered: {' AND '.join(DECIDING_ARMS)} must pass ship_strict vs served on ht_ft): "
+        + ("SHIP" if decision else "DO-NOT-SHIP"),
+    ]
+    for a in vs:
+        v = vs[a]
+        verb = "PASS" if v["ship_strict"] else "FAIL"
+        L.append(f"  {a:<15} {verb}  {v['line'].split(': ', 1)[-1]}  (t-bound {_f(v.get('upper_95_cluster_t'))})")
+    if not vs:
         L.append("  no challenger survived — nothing can ship")
+    L += ["", "context only — never decides (vs the matched and the HT-conditional constants):"]
+    for a in vs:
+        for key in ("verdicts_vs_matched_constant", "verdicts_vs_conditional_constant"):
+            v = r[key][a]
+            L.append(f"  {a:<15} {'PASS' if v['ship_strict'] else 'FAIL'}  {v['line'].split(': ', 1)[-1]}")
     return "\n".join(L)
 
 
