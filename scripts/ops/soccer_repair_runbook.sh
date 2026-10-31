@@ -83,6 +83,11 @@
 #    come from /app/backups/merge_soccer_teams_last_apply.env.
 #
 # Before step 1 (read-only) it REFUSES TO START unless:
+#   * no other runbook run is going: it takes ~/.auspex_ops/soccer_repair_runbook.lock
+#     (scripts/ops/_airflow_lib.sh af_lock; a lock whose run is gone — killed
+#     outright — is taken over, and the ledger says so; a refused run touches
+#     nothing). The merge wrapper takes its own lock, so step 3 runs under this
+#     one without a wait;
 #   * the file being run is byte-identical to this runbook as committed at
 #     the VM HEAD (git rev-parse HEAD:<path> equals git hash-object of the
 #     file), so HEAD carries the commit that holds it, and scripts/ and
@@ -104,7 +109,9 @@
 #     05:30 UTC) has a run in flight. Both fit on the soccer corpus this
 #     sequence rewrites, so each one that is unpaused is drained and paused
 #     (Airflow 3.3 never advances a paused DAG's runs) — a DAG paused before
-#     the run stays paused and is never unpaused here.
+#     the run stays paused and is never unpaused here, unless its marker names
+#     an earlier runbook run that is gone (then it is adopted; a marker naming
+#     a run still going refuses the start).
 # They are unpaused when the runbook exits ONLY if the corpus is consistent:
 # no corpus step (1, 3, 4, 5, 7) failed or was cut short in this run, and the
 # state file records step 10's feature recompute after the last corpus change
@@ -115,13 +122,16 @@
 # later run that reads that step ALREADY DONE does not clear it; only step
 # 10's next completion does. Otherwise — a failed or interrupted corpus
 # step, or a run that leaves step 10 still to do — they STAY PAUSED and the
-# runbook prints an ALERT with the unpause commands: unpaused, either would
-# start its missed run at once and train on a half-repaired corpus with stale
-# features (retrain_models' swap_production then serves it and restarts the
-# api). A later runbook run (--from N) adopts them (their markers in
-# ~/.auspex_ops, scripts/ops/_airflow_lib.sh) and unpauses them once step 10
-# has completed. A failure in steps 2, 6, 8, 9 or 11 (none feeds the
-# training corpus or its features) leaves that decision to the state file.
+# runbook prints an ALERT: unpause them only after step 10 has run (re-run
+# with --from N, or --only 10, which unpauses them itself once step 10
+# completes; the ALERT's command, for after that, also removes the marker).
+# Unpaused now, either would start its missed run at once and train on a
+# half-repaired corpus with stale features (retrain_models' swap_production
+# then serves it and restarts the api). A later runbook run (--from N) adopts
+# them (their markers in ~/.auspex_ops, scripts/ops/_airflow_lib.sh) and
+# unpauses them once step 10 has completed. A failure in steps 2, 6, 8, 9 or
+# 11 (none feeds the training corpus or its features) leaves that decision
+# to the state file.
 # Every pause, unpause and ALERT is also appended to
 # ~/.auspex_ops/airflow_pauses.log, which survives a dropped terminal.
 #
@@ -191,7 +201,11 @@ CURRENT_STEP=""
 STATE_WRITE_FAILED=""
 # The steps that change the training corpus or its features (step 10 recomputes the features after them).
 CORPUS_STEPS=" 1 3 4 5 7 "
-RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/soccer_runbook.XXXXXX") || { log "ABORT: mktemp failed"; exit 1; }
+# One runbook run at a time, taken before anything this run could leave behind (a refused run exits here, with no
+# trap: it touches nothing of the run that holds the lock). finish releases it last; the merge wrapper takes its own
+# lock, so step 3 does not wait.
+af_lock soccer_repair_runbook || exit 1
+RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/soccer_runbook.XXXXXX") || { log "ABORT: mktemp failed"; af_unlock; exit 1; }
 # The state file's last record among step 10's completions and the corpus steps' 'changed' and 'failed' ones
 # (records are appended in order): 10, a corpus step, or nothing.
 last_corpus_record() {
@@ -231,12 +245,14 @@ finish() {
     if corpus_consistent; then
       af_resume
     else
-      af_keep_paused "the soccer repair is not complete (exit $rc${CURRENT_STEP:+ in step $CURRENT_STEP}; no feature recompute (step 10) since the last corpus change) and a retrain now would fit a half-repaired corpus. A later runbook run (--from N) unpauses it once step 10 has completed"
+      af_keep_paused "the soccer repair is not complete (exit $rc${CURRENT_STEP:+ in step $CURRENT_STEP}) and no feature recompute (step 10) has run since the last corpus change: a retrain now would fit a half-repaired corpus" \
+        "Unpause it only after step 10 has run: re-run the runbook (--from ${CURRENT_STEP:-N}, or --only 10), which unpauses it itself once step 10 completes; by hand, only after step 10"
     fi
   fi
   rm -f "$RUN_DIR"/*.sql
   $DC exec -T postgres rm -f /tmp/soccer_runbook_q.sql </dev/null >/dev/null 2>&1
   af_say "logs of this run: $RUN_DIR"
+  af_unlock
 }
 trap finish EXIT
 trap 'exit 130' INT TERM HUP
@@ -307,7 +323,7 @@ esac
 
 # shellcheck disable=SC2086  # $RETRAIN_DAGS is a word list
 if ! af_drain_and_pause 1 4 $RETRAIN_DAGS; then
-  log "REFUSED: $RETRAIN_DAGS: a run in flight or a DAG that cannot be paused (above) — start the runbook after it finishes"
+  log "REFUSED: $RETRAIN_DAGS: a run in flight, a DAG that cannot be paused, or one another run still holds (above) — start the runbook after it finishes"
   exit 1
 fi
 

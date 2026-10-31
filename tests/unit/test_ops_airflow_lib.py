@@ -2,7 +2,8 @@
 for an apply still running (af_applies_running): the in-container script it
 sends, run by dash and sh against a fake /proc tree (the api image has no ps or
 pgrep). Pausing as the wrappers use it is run for real in
-test_merge_soccer_teams_wrapper.py and test_soccer_repair_runbook.py."""
+test_merge_soccer_teams_wrapper.py and test_soccer_repair_runbook.py.
+The run lock's edge cases (af_lock / af_unlock)."""
 
 from __future__ import annotations
 
@@ -101,3 +102,21 @@ def test_no_running_apply_is_1(tmp_path, shell):
 def test_a_scan_that_does_not_run_is_2(tmp_path):
     rc, out = _lib(tmp_path, 'af_applies_running merge_soccer_teams; echo "rc=$?"', DC_FAILS="1")
     assert out.strip() == "rc=2", out
+
+
+def test_a_lock_dir_without_a_holder_is_taken_over(tmp_path):
+    """A run killed between its mkdir and its holder write leaves an empty lock: it names no live run."""
+    (tmp_path / "afstate" / "x.lock").mkdir(parents=True)
+    rc, out = _lib(tmp_path, 'af_lock x; echo "rc=$?"; cat "$AF_STATE_DIR/x.lock/holder"')
+    assert "its holder (none recorded) is gone — taken over" in out and "rc=0" in out, out
+    assert (tmp_path / "afstate" / "x.lock" / "holder").exists()
+
+
+def test_unlock_releases_only_this_runs_lock(tmp_path):
+    rc, out = _lib(
+        tmp_path,
+        'af_lock x; echo "999999 someone_else.sh" > "$AF_STATE_DIR/x.lock/holder"; af_unlock; '
+        'test -d "$AF_STATE_DIR/x.lock" && echo kept; '
+        'af_lock y; af_unlock; test -d "$AF_STATE_DIR/y.lock" || echo gone',
+    )
+    assert "kept" in out and "gone" in out, out

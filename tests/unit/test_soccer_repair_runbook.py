@@ -13,7 +13,10 @@ A retrain DAG whose pause read-back fails or is interrupted still ends
 unpaused.
 A corpus step that failed or was cut short is recorded 'failed', so a later
 ALREADY DONE re-run of it does not clear it.
-An apply still running in the api container refuses the start."""
+An apply still running in the api container refuses the start.
+Another live run holding the lock refuses the start (a killed run's lock is
+taken over), and the real merge wrapper runs as step 3 under the runbook's
+lock with its own."""
 
 from __future__ import annotations
 
@@ -229,7 +232,12 @@ def test_a_failing_corpus_step_stops_keeps_the_retrains_paused_and_from_n_restor
     assert steps == EXPECTED_ORDER[:4]
     assert _paused(af) == {"retrain_models": True, "retrain_halftime_dc": True}
     assert "ALERT: retrain_models stays PAUSED" in out and "ALERT: retrain_halftime_dc stays PAUSED" in out
-    assert "airflow dags unpause -y retrain_models" in out
+    # Unpausing now would train on a half-repaired corpus: the ALERT says to unpause only after step 10, and its
+    # command (for then) drops the marker with the pause.
+    assert "Unpause it only after step 10 has run: re-run the runbook (--from 4, or --only 10)" in out
+    assert "Unpause by hand" not in out
+    marker = tmp_path / "afstate" / "paused_retrain_models"
+    assert f"airflow dags unpause -y retrain_models && rm -f {marker}" in out
     assert "step=4 result=failed" in (tmp_path / "state").read_text()
     assert "stays PAUSED" in (tmp_path / "afstate" / "airflow_pauses.log").read_text()
     assert _markers(tmp_path) == ["paused_retrain_halftime_dc", "paused_retrain_models"]
@@ -554,3 +562,87 @@ def test_the_scan_covers_every_repair_tool_the_runbook_drives(tmp_path):
         "backfill_season_labels",
     ):
         assert f"*/app/scripts/{tool}[.]py*--apply*" in scan, tool
+
+
+# --- the run lock -----------------------------------------------------------------------------------------------------
+
+
+def test_a_second_runbook_is_refused_while_one_runs_and_a_killed_ones_lock_is_taken_over(tmp_path):
+    """Two terminals: the second run must not adopt (and later unpause) the first one's retrain pause. Then the first
+    is killed outright (no trap): its lock and markers are left, and the next run takes both over."""
+    repo = _repo(tmp_path)
+    env = {**_env(tmp_path, install=True), "AUSPEX_DIR": str(repo)}
+    first = subprocess.Popen(
+        ["bash", str(RUNBOOK_IN(tmp_path))],
+        env={**os.environ, **env, "HANG_MERGE_SOCCER_TEAMS": "1"},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    steps_log = tmp_path / "fake" / "steps.log"
+    try:
+        assert _wait_for(lambda: steps_log.exists() and "merge_soccer_teams" in steps_log.read_text())
+        calls_before, steps_before = len(fd.calls(tmp_path)), steps_log.read_text()
+        rc, out = fd.run(RUNBOOK_IN(tmp_path), env, "--from", "3")
+        assert rc == 1 and "REFUSED: another run holds" in out and f"pid {first.pid}" in out, out
+        assert fd.calls(tmp_path)[calls_before:] == [] and steps_log.read_text() == steps_before
+        assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": True, "retrain_halftime_dc": True}
+    finally:
+        os.killpg(first.pid, signal.SIGKILL)
+        first.wait()
+    assert (tmp_path / "afstate" / "soccer_repair_runbook.lock").exists()
+
+    rc, out = fd.run(RUNBOOK_IN(tmp_path), env, "--from", "3")
+    assert rc == 0 and "taken over" in out and out.count("— adopted") == 2 and "not complete" not in out, out
+    assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": False, "retrain_halftime_dc": False}
+    assert not (tmp_path / "afstate" / "soccer_repair_runbook.lock").exists() and _markers(tmp_path) == []
+
+
+MERGE_NOT_DONE = "PLAN pairs_merge=171 pairs_done=0 pairs_refuse=0 kickoffs_adopted=0"
+
+
+def test_the_real_merge_wrapper_runs_as_step_3_under_the_runbooks_lock_with_its_own(tmp_path):
+    """The runbook holds soccer_repair_runbook.lock and runs merge_soccer_teams.sh, which takes
+    merge_soccer_teams.lock: separate names, so no wait; both are released at the end."""
+    repo = _repo(tmp_path)
+    shutil.copy(OPS / "merge_soccer_teams.sh", repo / "scripts" / "ops")
+    (repo / "scripts" / "data").mkdir()
+    shutil.copy(HERE.parents[1] / "scripts" / "data" / "soccer_team_merge_map.csv", repo / "scripts" / "data")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "add", "-A")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "real merge wrapper")
+    rules = _rules() + [
+        {"match": r"merge_teams_pre\.log 2>&1; echo", "out": "tool exit 0"},
+        {"match": r"grep -o 'PLAN pairs_merge.*merge_teams_pre\.log", "out": MERGE_NOT_DONE},
+        {"match": r"merge_teams_dry\.log 2>&1; rc", "out": MERGE_NOT_DONE},
+        {"match": r"grep -o 'PLAN pairs_merge.*merge_teams_dry\.log", "out": MERGE_NOT_DONE},
+        {"match": r"GRADE_AFTER", "out": "11111111-1111-1111-1111-111111111111"},
+        {"match": r"--apply --expect-plan", "out": "Archived 10 row(s)", "delay": 2},
+        {"match": r"grep -o 'WRITTEN \.\*' /tmp/merge_teams\.log", "out": "WRITTEN odds_spellings_unmatched_before=0"},
+        {"match": r"grade_completed_matches\.py --match-id", "out": "1"},
+        {"match": r"--check-after \S+dryrun\S+ > /tmp/merge_teams_after\.log", "out": "AFTER ok"},
+    ]
+    base = fd.install(tmp_path, rules, _airflow())
+    env = {**base, "AUSPEX_DIR": str(repo), "RUNBOOK_STATE": str(tmp_path / "state"), "ODDS_WAIT_POLLS": "3"}
+    proc = subprocess.Popen(
+        ["bash", str(RUNBOOK_IN(tmp_path)), "--only", "3"],
+        env={**os.environ, **env},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    locks = tmp_path / "afstate"
+    held = {}
+    try:
+        assert _wait_for(lambda: any("--apply --expect-plan" in c for c in fd.calls(tmp_path)))
+        held = {d.name: (d / "holder").read_text() for d in locks.glob("*.lock")}
+        out, _ = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode == 0 and "DONE: 171/171 pairs merged" in out, out
+    assert held["soccer_repair_runbook.lock"].split()[1] == "soccer_repair_runbook.sh"
+    assert held["merge_soccer_teams.lock"].split()[1] == "merge_soccer_teams.sh"
+    assert not list(locks.glob("*.lock"))
+    af = fd.airflow_state(tmp_path)["dags"]
+    assert not af["auspex_pipeline"]["paused"] and not af["fetch_live_odds"]["paused"]
+    assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": True, "retrain_halftime_dc": True}  # step 10 to do

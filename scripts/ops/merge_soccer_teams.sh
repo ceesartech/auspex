@@ -29,8 +29,11 @@
 #      fetch_live_odds run has FINISHED after the merge (the runbook waits for
 #      one; the plan and MERGED_AT are in /app/backups/merge_soccer_teams_last_apply.env)
 #
-#   It REFUSES TO START while a merge_soccer_teams.py --apply is still running
-#   in the api container: a run cut short during its apply (Ctrl-C, a
+#   It REFUSES TO START while another run of it holds its lock
+#   (~/.auspex_ops/merge_soccer_teams.lock: scripts/ops/_airflow_lib.sh af_lock;
+#   the runbook holds its own, so its step 3 does not wait; a lock whose run is
+#   gone is taken over), or while a merge_soccer_teams.py --apply is still
+#   running in the api container: a run cut short during its apply (Ctrl-C, a
 #   dropped session) leaves the apply running there — `docker compose exec -T`
 #   does not forward the interrupt — and a re-run would race it.
 #   0/5 already done? A read-only dry run first. When it plans all EXPECTED
@@ -110,6 +113,8 @@ log() { echo "[$(date -u +%FT%TZ)] $*"; }
 . "$(dirname "${BASH_SOURCE[0]}")/_airflow_lib.sh" || { log "ABORT: cannot load _airflow_lib.sh — nothing changed"; exit 1; }
 trap af_resume_on_exit EXIT
 trap 'exit 130' INT TERM HUP
+# One merge run at a time (the runbook holds its own lock, not this one, so its step 3 does not wait).
+af_lock merge_soccer_teams || exit 1
 latest_dump() {
   $DC exec -T api python -c "import sys; sys.path.insert(0,'/app/scripts'); import b2_io; s=b2_io.s3_client(); o=max(b2_io._list(s,'postgres/'), key=lambda o:o['LastModified']); print(int(o['LastModified'].timestamp()), o['Key'])" 2>/dev/null | tail -1
 }

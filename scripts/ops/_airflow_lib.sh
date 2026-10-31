@@ -1,8 +1,8 @@
 #!/bin/bash
 # Shared helpers for scripts/ops wrappers (sourced, never run on its own; not a
-# step of any run order): Airflow 3.3 pausing and the check for an apply still
-# running in the api container. The caller defines DC (the compose command)
-# and log().
+# step of any run order): Airflow 3.3 pausing, a run lock, and the check for
+# an apply still running in the api container. The caller defines DC (the
+# compose command) and log().
 #
 # Airflow 3.3 never advances a PAUSED DAG's runs: the scheduler examines only
 # runs of unpaused DAGs (dagrun.py get_running_dag_runs_to_examine and the
@@ -14,10 +14,11 @@
 #
 #   af_drain_and_pause <attempts> <polls> <dag>...   0 when drained and paused
 #   af_resume                                        unpause what we paused
-#   af_resume_on_exit                                the same, then AF_EXIT_NOTE, for an EXIT trap
-#   af_keep_paused <why>                             leave ours paused, loudly
+#   af_resume_on_exit                                the same, AF_EXIT_NOTE, then af_unlock: an EXIT trap
+#   af_keep_paused <why> [<when to unpause>]         leave ours paused, loudly
 #   af_dag_paused <dag>                              True / False / '' (unreadable)
 #   af_runs_in_flight <dag>...                       queued+running runs, or exit 1
+#   af_lock <name>, af_unlock                        one run at a time per name
 #   af_applies_running <tool>...                     an /app/scripts/<tool>.py --apply still running?
 # AF_PAUSED_BY_US lists the DAGs this run paused or adopted. A DAG that was
 # already paused is left as it is and never unpaused, unless a marker says a
@@ -45,10 +46,21 @@
 # something else and the ledger would fill with stale lines. Every pause,
 # unpause and ALERT is also appended to $AF_STATE_DIR/airflow_pauses.log
 # (default ~/.auspex_ops), and each DAG we pause gets a marker
-# $AF_STATE_DIR/paused_<dag>, removed only once it reads unpaused again: a
-# DAG still paused with its marker (the wrapper was killed outright, or the
-# unpause failed) is adopted by the next wrapper or runbook run that drains
-# it, and unpaused when that run ends.
+# $AF_STATE_DIR/paused_<dag> naming this run (script and pid), removed only
+# once it reads unpaused again: a DAG still paused with its marker (the
+# wrapper was killed outright, or the unpause failed) is adopted by the next
+# wrapper or runbook run that drains it, and unpaused when that run ends —
+# but only when the run the marker names is gone. A marker whose run is still
+# going (`ps -p <pid> -o args=` names its script) is left to that run, loudly,
+# and this run does not start. Every ALERT's unpause command also removes the
+# marker, so a marker does not outlive a hand unpause and later adopt (and
+# undo) the operator's own pause.
+#
+# af_lock <name>: the directory $AF_STATE_DIR/<name>.lock holds "<pid>
+# <script>" (mkdir is atomic; flock is not on every host). A live holder
+# refuses this run; a holder that is gone (killed outright) is taken over.
+# Each script takes its own name, so the runbook (which holds its lock) runs
+# the merge wrapper (which takes the merge lock) as a child without a wait.
 #
 # af_applies_running: `docker compose exec -T` does not forward an interrupt,
 # so an apply cut short on the host keeps running in the api container. The
@@ -57,6 +69,7 @@
 
 trap '' PIPE
 AF_PAUSED_BY_US=""
+AF_LOCK=""
 AF_EXIT_NOTE=""
 AF_POLL_SECONDS="${AF_POLL_SECONDS:-30}"
 AF_STATE_DIR="${AF_STATE_DIR:-${HOME:-/tmp}/.auspex_ops}"
@@ -69,6 +82,26 @@ af_say() { ( log "$*" ) 2>/dev/null; }
 af_note() {
   { mkdir -p "$AF_STATE_DIR" && echo "[$(date -u +%FT%TZ)] $(basename "$0"): $*" >> "$AF_LEDGER"; } 2>/dev/null
   af_say "$*"
+}
+
+# The command an ALERT prints: unpause, and drop the marker with it.
+af_unpause_cmd() {
+  echo "docker compose exec -T airflow-scheduler airflow dags unpause -y $1 && rm -f $AF_STATE_DIR/paused_$1"
+}
+
+# af_live_other <pid> <script>: 0 when <pid> is a live process, not this shell, whose command line names <script>.
+# When ps cannot read even this shell, the holder counts as live: never take over what may still be running.
+af_live_other() {
+  case "${1:-}" in '' | *[!0-9]*) return 1 ;; esac
+  [ -n "${2:-}" ] && [ "$1" != "$$" ] || return 1
+  [ -n "$(ps -p $$ -o args= 2>/dev/null)" ] || return 0
+  case "$(ps -p "$1" -o args= 2>/dev/null)" in *"$2"*) return 0 ;; esac
+  return 1
+}
+
+# "<pid> <script>" of the run a marker names, or nothing.
+af_marker_holder() {
+  sed -n 's/^paused by \([^ ][^ ]*\) pid \([0-9][0-9]*\) .*/\2 \1/p' "$1" 2>/dev/null | head -1
 }
 
 # Airflow 3.3 CLI: dag_id positional, -o json; structlog lines are filtered
@@ -101,30 +134,33 @@ af_resume() {
       rm -f "$AF_STATE_DIR/paused_$d" 2>/dev/null
       af_note "unpaused $d"
     else
-      af_note "ALERT: $d is STILL PAUSED (or unreadable) — unpause it now: docker compose exec -T airflow-scheduler airflow dags unpause -y $d"
+      af_note "ALERT: $d is STILL PAUSED (or unreadable) — unpause it now: $(af_unpause_cmd "$d")"
     fi
   done
   AF_PAUSED_BY_US=""
 }
 
-# For an EXIT trap: a second Ctrl-C (or the HUP of a dropped session) must not cut the unpausing short.
+# For an EXIT trap: a second Ctrl-C (or the HUP of a dropped session) must not cut the unpausing short. The run lock
+# goes last, so no other run starts while this one still unpauses.
 af_resume_on_exit() {
   trap '' INT TERM HUP
   af_resume
   [ -z "$AF_EXIT_NOTE" ] || af_note "$AF_EXIT_NOTE"
+  af_unlock
 }
 
-# Leave the DAGs this run paused PAUSED (their markers stay, so the next run adopts them), loudly.
+# Leave the DAGs this run paused PAUSED (their markers stay, so the next run adopts them), loudly:
+# af_keep_paused <why> [<when to unpause, ending where the command follows>].
 af_keep_paused() {
   local d
   for d in $AF_PAUSED_BY_US; do
-    af_note "ALERT: $d stays PAUSED — $1. Unpause by hand: docker compose exec -T airflow-scheduler airflow dags unpause -y $d"
+    af_note "ALERT: $d stays PAUSED — $1. ${2:-Unpause it by hand}: $(af_unpause_cmd "$d")"
   done
   AF_PAUSED_BY_US=""
 }
 
 af_drain_and_pause() {
-  local attempts="$1" polls="$2" attempt i n st d already marker
+  local attempts="$1" polls="$2" attempt i n st d already marker holder
   shift 2
   for attempt in $(seq 1 "$attempts"); do
     n=""
@@ -147,10 +183,19 @@ af_drain_and_pause() {
         return 1
       fi
       case " $AF_PAUSED_BY_US " in *" $d "*) continue ;; esac
+      holder=""
+      [ -f "$marker" ] && holder=$(af_marker_holder "$marker")
+      if [ -n "$holder" ] && af_live_other "${holder%% *}" "${holder#* }"; then
+        af_note "$d is held by a run that is still going (${holder#* } pid ${holder%% *}; its marker $marker) — left to that run, which unpauses it when it ends: this run does not start while another run holds $d. Wait for that run to end, then re-run"
+        return 1
+      fi
       if [ "$st" = "True" ]; then
-        if [ -f "$marker" ]; then
+        if [ -f "$marker" ] && [ "${holder%% *}" = "$$" ]; then
           AF_PAUSED_BY_US="$AF_PAUSED_BY_US $d"
-          af_note "$d is paused by an earlier wrapper run that never unpaused it ($(cat "$marker" 2>/dev/null)) — adopted: this run unpauses it when it ends"
+          af_note "$d is still paused by this run (an unpause above did not take) — back on its list: it is unpaused when this run ends"
+        elif [ -f "$marker" ]; then
+          AF_PAUSED_BY_US="$AF_PAUSED_BY_US $d"
+          af_note "$d is paused by an earlier wrapper run that never unpaused it ($(cat "$marker" 2>/dev/null); that run is gone) — adopted: this run unpauses it when it ends"
         else
           log "$d is already paused — left as it is"
         fi
@@ -178,6 +223,55 @@ af_drain_and_pause() {
   done
   log "could not pause $* with no run in flight in $attempts attempts"
   return 1
+}
+
+# A lock directory: its holder file, then the (then empty) directory — nothing else is ever removed.
+af_drop_lockdir() {
+  unlink "$1/holder" 2>/dev/null
+  rmdir "$1" 2>/dev/null
+}
+
+# af_lock <name>: 0 when this run holds $AF_STATE_DIR/<name>.lock (af_unlock releases it); 1, loudly, when another
+# run that is still going holds it, or it cannot be taken.
+af_lock() {
+  local dir="$AF_STATE_DIR/$1.lock" held try
+  mkdir -p "$AF_STATE_DIR" 2>/dev/null
+  for try in 1 2; do
+    if mkdir "$dir" 2>/dev/null; then
+      if echo "$$ $(basename "$0")" > "$dir/holder" 2>/dev/null; then
+        AF_LOCK="$dir"
+        return 0
+      fi
+      af_drop_lockdir "$dir"
+      log "REFUSED: could not write $dir/holder — is $AF_STATE_DIR writable? Nothing changed"
+      return 1
+    fi
+    held=$(cat "$dir/holder" 2>/dev/null)
+    if af_live_other "${held%% *}" "${held#* }"; then
+      log "REFUSED: another run holds $dir: pid ${held%% *} ($(ps -p "${held%% *}" -o args= 2>/dev/null)) — wait for it to end; nothing changed"
+      return 1
+    fi
+    [ "$try" = 1 ] || break
+    # Its holder is gone (killed outright): move it aside, which only one of two runs taking it over at once can do,
+    # and put it back if it turns out to be a fresh lock that a live run took meanwhile.
+    if mv "$dir" "$dir.stale.$$" 2>/dev/null; then
+      if [ "$(cat "$dir.stale.$$/holder" 2>/dev/null)" = "$held" ]; then
+        af_drop_lockdir "$dir.stale.$$"
+        af_note "lock $dir: its holder (${held:-none recorded}) is gone — taken over"
+      else
+        mv "$dir.stale.$$" "$dir" 2>/dev/null
+      fi
+    fi
+  done
+  log "REFUSED: could not take $dir (another run took it at the same moment?) — re-run; nothing changed"
+  return 1
+}
+
+af_unlock() {
+  if [ -n "$AF_LOCK" ] && [ "$(cat "$AF_LOCK/holder" 2>/dev/null)" = "$$ $(basename "$0")" ]; then
+    af_drop_lockdir "$AF_LOCK"
+  fi
+  AF_LOCK=""
 }
 
 # af_applies_running <tool>...: prints "pid <n>: <command line>" for every /app/scripts/<tool>.py process with

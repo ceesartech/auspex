@@ -11,7 +11,9 @@ that fails, or an interrupt during it, still ends with the DAG unpaused (or an
 ALERT, marker kept).
 The plan, MERGED_AT, the rows to grade and STATUS=applying are recorded BEFORE
 the apply; a re-run refuses while an apply still runs in the api container,
-then finishes an apply whose run ended during it."""
+then finishes an apply whose run ended during it.
+It refuses to start while another live run holds its lock, and leaves a DAG
+whose marker names a live run to that run."""
 
 from __future__ import annotations
 
@@ -321,6 +323,9 @@ def test_an_unpause_that_does_not_take_is_an_alert_in_the_ledger_and_keeps_its_m
     airflow["unpause_fails"] = ["fetch_live_odds"]
     rc, out, _, af = _run(tmp_path, airflow=airflow)
     assert "ALERT: fetch_live_odds is STILL PAUSED" in out
+    # Its command drops the marker too: a marker that outlived a hand unpause would adopt the operator's next pause.
+    marker = tmp_path / "afstate" / "paused_fetch_live_odds"
+    assert f"airflow dags unpause -y fetch_live_odds && rm -f {marker}" in out
     assert "ALERT: fetch_live_odds is STILL PAUSED" in (tmp_path / "afstate" / "airflow_pauses.log").read_text()
     assert (tmp_path / "afstate" / "paused_fetch_live_odds").exists()
     assert (
@@ -499,3 +504,84 @@ def test_an_apply_of_another_tool_does_not_refuse_the_merge(tmp_path):
     airflow["procs"] = ["python /app/scripts/repoint_team_matches.py --apply --expect-repoint 6"]
     rc, out, _, _ = _run(tmp_path, airflow=airflow)
     assert rc == 0 and "REFUSED" not in out, out
+
+
+# --- the run lock and a live marker ---------------------------------------------------------------------------------
+
+
+def test_an_own_marker_left_by_a_failed_unpause_in_the_retry_is_adopted_not_refused(tmp_path):
+    """The first attempt's unpause (after a run slipped in) fails: the marker naming THIS run stays. The second
+    attempt must take the DAG back, not refuse it as held by a live run (this run is live)."""
+    airflow = _airflow()
+    airflow["slip_in"] = {"fetch_live_odds": 1}  # its run advances once fetch_live_odds is unpaused again
+    airflow["unpause_fails"] = ["auspex_pipeline"]
+    rc, out, calls, _ = _run(tmp_path, airflow=airflow)
+    assert "2/5 dry run" in out and "held by a run that is still going" not in out, out
+    assert "auspex_pipeline is still paused by this run" in out and [c for c in calls if "--apply --expect-plan" in c]
+    assert out.count("ALERT: auspex_pipeline is STILL PAUSED") == 2  # the retry's unpause, then the exit's
+
+
+def _live(name):
+    """A live process whose command line names `name`, like a wrapper still running."""
+    return subprocess.Popen(["/bin/bash", "-c", "/bin/sleep 60; :", name])
+
+
+def test_another_live_run_holding_the_lock_refuses_to_start(tmp_path):
+    env = _install(tmp_path)
+    holder = _live("merge_soccer_teams.sh")
+    try:
+        lock = tmp_path / "afstate" / "merge_soccer_teams.lock"
+        lock.mkdir(parents=True)
+        (lock / "holder").write_text(f"{holder.pid} merge_soccer_teams.sh\n")
+        rc, out = fd.run(WRAPPER, env)
+        assert rc == 1 and "REFUSED: another run holds" in out and f"pid {holder.pid}" in out, out
+        assert fd.calls(tmp_path) == [] and (lock / "holder").exists()
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def test_a_lock_whose_run_is_gone_is_taken_over_and_released(tmp_path):
+    env = _install(tmp_path)
+    gone = subprocess.Popen(["/bin/bash", "-c", ":"])
+    gone.wait()
+    lock = tmp_path / "afstate" / "merge_soccer_teams.lock"
+    lock.mkdir(parents=True)
+    (lock / "holder").write_text(f"{gone.pid} merge_soccer_teams.sh\n")
+    rc, out = fd.run(WRAPPER, env)
+    assert rc == 0 and "taken over" in out and "taken over" in _ledger(tmp_path), out
+    assert not lock.exists() and not list((tmp_path / "afstate").glob("*.stale.*"))
+
+
+def test_a_marker_naming_a_run_still_going_is_left_to_it(tmp_path):
+    """fetch_live_odds is paused by a merge run that is still going (another terminal): adopting it would unpause it
+    under that run when this one ends. This run leaves it alone, says who holds it, and does not start."""
+    holder = _live("merge_soccer_teams.sh")
+    try:
+        env = _install(tmp_path, airflow=_airflow(fetch_live_odds={"paused": True, "runs": []}))
+        (tmp_path / "afstate").mkdir()
+        marker = tmp_path / "afstate" / "paused_fetch_live_odds"
+        marker.write_text(f"paused by merge_soccer_teams.sh pid {holder.pid} at 2026-10-31T13:00:00Z\n")
+        rc, out = fd.run(WRAPPER, env)
+        af = fd.airflow_state(tmp_path)["dags"]
+        assert rc == 1 and "held by a run that is still going" in out and f"pid {holder.pid}" in out, out
+        assert "held by a run that is still going" in _ledger(tmp_path)
+        assert af["fetch_live_odds"]["paused"] and marker.exists() and "— adopted" not in out
+        assert not af["auspex_pipeline"]["paused"]  # this run's own pause is undone at its exit
+        assert not [c for c in fd.calls(tmp_path) if "unpause -y fetch_live_odds" in c or "--apply" in c]
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def test_a_marker_whose_run_is_gone_is_adopted(tmp_path):
+    gone = subprocess.Popen(["/bin/bash", "-c", ":"])
+    gone.wait()
+    env = _install(tmp_path, airflow=_airflow(fetch_live_odds={"paused": True, "runs": []}))
+    (tmp_path / "afstate").mkdir()
+    (tmp_path / "afstate" / "paused_fetch_live_odds").write_text(
+        f"paused by merge_soccer_teams.sh pid {gone.pid} at 2026-10-31T13:00:00Z\n"
+    )
+    rc, out = fd.run(WRAPPER, env)
+    assert rc == 0 and "adopted" in out and not fd.airflow_state(tmp_path)["dags"]["fetch_live_odds"]["paused"], out
+    assert _markers(tmp_path) == []
