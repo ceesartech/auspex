@@ -73,13 +73,13 @@ def test_a_pass_is_required(tmp_path, args):
     [
         (
             1,
-            "--expect-repoint 33 --expect-done 0 --expect-refused 6",
-            "--expect-repoint 0 --expect-done 33 --expect-refused 6",
+            "--expect-repoint 33 --expect-done 0 --expect-refused 6 --expect-not-found 0",
+            "--expect-repoint 0 --expect-done 33 --expect-refused 6 --expect-not-found 0",
         ),
         (
             2,
-            "--expect-repoint 6 --expect-done 32 --expect-refused 1",
-            "--expect-repoint 0 --expect-done 38 --expect-refused 1",
+            "--expect-repoint 6 --expect-done 32 --expect-refused 1 --expect-not-found 1",
+            "--expect-repoint 0 --expect-done 38 --expect-refused 1 --expect-not-found 1",
         ),
     ],
 )

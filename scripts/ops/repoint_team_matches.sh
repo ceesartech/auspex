@@ -28,8 +28,10 @@
 #     'América' -> 'Club America': the tool reads teams.metadata.aliases /
 #     merged_from), 1 refused: cb4e21fc 'match row not found' (the merge
 #     folded that stale fork into its played twin 45064ae5). Step 2 refuses
-#     unless exactly those 6 sides are left on santos/guadalajara. After:
-#     re-plan 0 / 38 / 1 (the not-found row), left=0, stamps unchanged.
+#     unless exactly those 6 sides are left on santos/guadalajara, and every
+#     run pins that the 1 refusal is 'match row not found' (--expect-not-found
+#     1; pass 1 pins 0). After: re-plan 0 / 38 / 1 (the not-found row), left=0,
+#     stamps unchanged.
 #     Rehearsed on the 11:08Z read-only export (pass 1, merge, fd repair,
 #     pass 2) on 2026-10-31.
 #
@@ -101,14 +103,18 @@ STAMPS="Guadalajara Chivas:219,Santos:2674,Santos Laguna:225"
 # The 6 sides pass 1 refuses (a football-data copy on the target pair).
 PASS1_LEFT="a398e0fe-e7cb-4c71-9231-009f343e9c50,e78e7e49-9ce9-4584-8e35-7c5e0048150c,9a6bcea3-1740-4c89-8f43-fda6b1c5267c,d1f660b6-edce-4297-89bd-fb6993b88c6d,b03fc978-cd00-41c8-a0f8-c11c49e032a5,30e7868a-9c93-4bf7-bdf9-7c44de661c5b"
 MAP_SIDES=$(tail -n +2 "$MAP" | grep -c .)
+# --expect-not-found pins how many refusals are 'match row not found' (a row
+# the team merge folded away): pass 1 none, pass 2 exactly cb4e21fc. Without
+# it, one side that genuinely drifted while cb4e21fc read 'done' would give
+# pass 2 the same 6/32/1 and pass.
 if [ "$PASS" = "1" ]; then
-  PINS="--expect-repoint 33 --expect-done 0 --expect-refused 6"
-  AFTER="0 33 6"        # re-plan repoint done refuse
+  PINS="--expect-repoint 33 --expect-done 0 --expect-refused 6 --expect-not-found 0"
+  AFTER="0 33 6 0"        # re-plan repoint done refuse not_found
   LEFT_BEFORE=$MAP_SIDES
   LEFT_AFTER=6
 else
-  PINS="--expect-repoint 6 --expect-done 32 --expect-refused 1"
-  AFTER="0 38 1"
+  PINS="--expect-repoint 6 --expect-done 32 --expect-refused 1 --expect-not-found 1"
+  AFTER="0 38 1 1"
   LEFT_BEFORE=6
   LEFT_AFTER=0
 fi
@@ -180,8 +186,8 @@ log "step 3 exit $rc"
 if [ "$rc" -ne 0 ]; then log "ABORT at step 3 (see above; full log /tmp/repoint_team_apply.log in the api container): the transaction rolled back — nothing changed"; exit 1; fi
 
 log "4/4 after-state"
-read -r want_rp want_done want_ref <<< "$AFTER"
-$DC exec -T api sh -c "$TOOL --expect-repoint $want_rp --expect-done $want_done --expect-refused $want_ref --out-csv /app/backups/repoint_team_matches_p${PASS}_after_\$(date -u +%Y%m%dT%H%M%SZ).csv > /tmp/repoint_team_after.log 2>&1; rc=\$?; grep -E 'PLAN |Pinned|ERROR|Traceback|Error' /tmp/repoint_team_after.log | tail -8; echo \"tool exit \$rc\"; exit \$rc"
+read -r want_rp want_done want_ref want_nf <<< "$AFTER"
+$DC exec -T api sh -c "$TOOL --expect-repoint $want_rp --expect-done $want_done --expect-refused $want_ref --expect-not-found $want_nf --out-csv /app/backups/repoint_team_matches_p${PASS}_after_\$(date -u +%Y%m%dT%H%M%SZ).csv > /tmp/repoint_team_after.log 2>&1; rc=\$?; grep -E 'PLAN |Pinned|ERROR|Traceback|Error' /tmp/repoint_team_after.log | tail -8; echo \"tool exit \$rc\"; exit \$rc"
 replan=$?
 read_state
 echo "$STATE"
@@ -195,6 +201,6 @@ if [ "$replan" = "0" ] && [ "$stamps" = "$STAMPS" ] && [ "$left" = "$LEFT_AFTER"
     log "DONE: 6 sides left for --pass 2 (after merge_soccer_teams and repair_football_data_kickoffs)"
   fi
 else
-  log "FAILED: re-plan exit $replan (want 0: $want_rp repoint / $want_done done / $want_ref refused), stamps '$stamps', $left Liga MX side(s) left on santos/guadalajara (want $LEFT_AFTER), soccer rows created before $T0: $n_before -> $n_after — inspect"
+  log "FAILED: re-plan exit $replan (want 0: $want_rp repoint / $want_done done / $want_ref refused, $want_nf of them not found), stamps '$stamps', $left Liga MX side(s) left on santos/guadalajara (want $LEFT_AFTER), soccer rows created before $T0: $n_before -> $n_after — inspect"
   exit 1
 fi

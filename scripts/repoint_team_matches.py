@@ -46,8 +46,10 @@ Safety: dry run by default; the write-once audit CSV lands before any write
 (dry run included); --apply plans again inside one transaction after locking
 the rows (SELECT ... FOR UPDATE), and every UPDATE is guarded on the observed
 values with a rowcount check — any mismatch rolls the whole thing back.
---expect-repoint / --expect-refused / --expect-done pin the reviewed plan: a
-different plan writes nothing. Re-runnable: a moved side plans as 'done'. One
+--expect-repoint / --expect-refused / --expect-done / --expect-not-found pin
+the reviewed plan (--expect-not-found: how many of the refusals are 'match
+row not found', rows the team merge folded away): a different plan writes
+nothing. Re-runnable: a moved side plans as 'done'. One
 fixed-format line 'PLAN repoint=N done=N refuse=N not_found=N stamp_...=N' is
 logged for scripts/ops/repoint_team_matches.sh.
 
@@ -63,7 +65,8 @@ scripts/ops/repoint_team_matches.sh --pass N with its own backup and pins):
 
 Usage (inside the api container; the wrapper is the supported way to apply):
     python /app/scripts/repoint_team_matches.py                      # dry run
-    python /app/scripts/repoint_team_matches.py --apply --expect-repoint 33 --expect-done 0 --expect-refused 6
+    python /app/scripts/repoint_team_matches.py --apply --expect-repoint 33 --expect-done 0 --expect-refused 6 \
+        --expect-not-found 0
 """
 
 from __future__ import annotations
@@ -658,6 +661,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--expect-repoint", type=int, help="Pin: sides to move.")
     p.add_argument("--expect-refused", type=int, help="Pin: sides refused.")
     p.add_argument("--expect-done", type=int, help="Pin: sides already moved.")
+    p.add_argument("--expect-not-found", type=int, help="Pin: refusals that are 'match row not found'.")
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
 
@@ -675,7 +679,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     import psycopg2
 
-    expect = {"repoint": args.expect_repoint, "refuse": args.expect_refused, "done": args.expect_done}
+    expect = {
+        "repoint": args.expect_repoint,
+        "refuse": args.expect_refused,
+        "done": args.expect_done,
+        "not_found": args.expect_not_found,
+    }
     with psycopg2.connect(args.database_url) as conn:
         counts = run(conn, rows, seed, args.apply, args.out_csv or default_out_csv(), expect)
     logger.info("Done: %s", dict(sorted(counts.items())))

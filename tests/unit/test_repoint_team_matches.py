@@ -253,6 +253,22 @@ class TestMergedNames:
         action, reason = actions(p)[("m1", "away")]
         assert action == "refuse" and "drifted since the review" in reason
 
+    @pytest.mark.parametrize(
+        "meta",
+        [{"aliases": ["Santos Laguna"]}, {"merged_from": [{"team_id": "Z", "name": "Santos Laguna"}]}],
+        ids=["aliases", "merged_from"],
+    )
+    def test_a_side_on_another_row_that_only_claims_the_targets_name_is_never_done(self, meta):
+        """'done' means the side sits on the target ROW: an alias can excuse a
+        renamed opponent, never the side itself. Here the real 'Santos Laguna'
+        row L exists and the side sits on a different row that lists the name."""
+        impostor = {"id": "SL2", "name": "Laguna FC", "normalized_name": "laguna fc", "espn": None, "metadata": meta}
+        m = self._match("m1", "CX", "SL2", "Club Cruz Azul", "Laguna FC")
+        p = plan([row("m1", "away")], [m], teams=self._teams(impostor))
+        action, reason = actions(p)[("m1", "away")]
+        assert action == "refuse" and "drifted since the review" in reason
+        assert p.counts["done"] == 0 and p.updates == {}
+
     def test_an_alias_two_rows_claim_counts_for_neither_as_a_target(self):
         other = {**self.CLUB, "id": "CX2", "name": "Cruz Azul Hidalgo", "normalized_name": "cruz azul hidalgo"}
         teams = self._teams(other)
@@ -447,6 +463,22 @@ class TestApply:
         assert not any(sql.startswith("UPDATE") for sql, _ in cur.calls)
         assert conn.committed == 0
 
+    def test_a_refusal_for_another_reason_than_not_found_misses_the_not_found_pin(self, monkeypatch, tmp_path):
+        """Pass 2 pins refused=1 AND not_found=1: one side that genuinely drifted
+        (refused for another reason) while cb4e21fc read 'done' would otherwise
+        give the same 6/32/1 counts and pass."""
+        drifted = match("m1", "X", "A") | {"away": "Atlas"}  # the away side is neither 'Santos' nor the target
+        expect = {"refuse": 1, "not_found": 1}
+        counts, conn, cur, _ = self._run(monkeypatch, tmp_path, apply_changes=True, expect=expect, matches=[drifted])
+        assert counts["refuse"] == 1 and counts["not_found"] == 0 and counts["pin_mismatch"] == 1
+        assert not any(sql.startswith("UPDATE") for sql, _ in cur.calls) and conn.committed == 0
+
+    def test_the_not_found_pin_passes_when_the_refusal_is_a_folded_row(self, monkeypatch, tmp_path):
+        rows = [row("m1", "away"), row("gone", "away")]
+        expect = {"repoint": 1, "refuse": 1, "not_found": 1}
+        counts, conn, _, _ = self._run(monkeypatch, tmp_path, apply_changes=True, expect=expect, rows=rows)
+        assert counts["pin_mismatch"] == 0 and counts["not_found"] == 1 and conn.committed == 1
+
     def test_a_refused_stamp_writes_nothing(self, monkeypatch, tmp_path):
         teams = {**TEAMS, "santos laguna": {**TEAMS["santos laguna"], "espn": "999"}}
         matches = {"m1": match("m1", "X", "S")}
@@ -465,7 +497,8 @@ class TestApply:
     def test_main_fails_on_unpinned_refusals_and_passes_pinned_ones(self, monkeypatch, tmp_path):
         monkeypatch.setattr(rtm, "load_map", lambda path: [])
         monkeypatch.setattr(rtm.team_identity, "load_espn_seed", lambda path=None: {})
-        monkeypatch.setattr(rtm, "run", lambda *a, **k: Counter(refuse=6, repoint=33))
+        seen = []
+        monkeypatch.setattr(rtm, "run", lambda *a, **k: seen.append(a[-1]) or Counter(refuse=6, repoint=33))
 
         class _Conn:
             def __enter__(self):
@@ -480,3 +513,5 @@ class TestApply:
         base = ["--database-url", "postgresql://x", "--out-csv", str(tmp_path / "o.csv")]
         assert rtm.main(base) == 1
         assert rtm.main(base + ["--expect-refused", "6"]) == 0
+        assert rtm.main(base + ["--expect-refused", "6", "--expect-not-found", "0"]) == 0
+        assert seen[-1] == {"repoint": None, "refuse": 6, "done": None, "not_found": 0}
