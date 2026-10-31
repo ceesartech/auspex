@@ -609,6 +609,8 @@ class TestSharedConfigScoping:
         a separate, backed-up step."""
         repo = Path(__file__).resolve().parents[4]
         source = (repo / "scripts" / "train_halftime_dixon_coles.py").read_text()
-        assert 'replace(DIXON_COLES_CONFIG, name="dixon_coles_ht_soccer")' in source
+        assert 'MODEL_NAME = "dixon_coles_ht_soccer"' in source
+        assert "replace(DIXON_COLES_CONFIG, name=MODEL_NAME)" in source
+        assert "dixon_coles_config_pinned_to_legacy_fit" not in source
         assert "ab_halftime_dixon_coles.py" in source
-        assert 'default=Path("/app/models/staging-ht/dixon_coles_ht_soccer/1.0.0")' in source
+        assert 'DEFAULT_OUTPUT_DIR = Path("/app/models/staging-ht/dixon_coles_ht_soccer/1.0.0")' in source
