@@ -181,7 +181,7 @@ IFS='|' read -r stranded1 recs1 <<< "$state"
 run_tool stranded_soccer_verify --out-csv /app/backups/repaired_rec_ids_soccer_verify_$STAMP.csv
 replan=$(plan_of stranded_soccer_verify)
 want_stranded=$((stranded0 - p_void_post_kickoff - p_settle))
-log "after: void_post_kickoff recs voided onto their twin $voided (expected $p_void_post_kickoff), pending soccer recs on stale scheduled rows $stranded1 (expected $want_stranded), recs created before T0 $recs1 (expected $recs0), re-plan '$replan' (expected 0 to write)"
+log "after: void_post_kickoff recs voided onto their twin $voided (expected $p_void_post_kickoff), pending soccer recs on stale rows $stranded1 (expected $want_stranded), recs created before T0 $recs1 (expected $recs0), re-plan '$replan' (expected 0 to write)"
 if [ "$voided" = "$p_void_post_kickoff" ] && [ "$stranded1" = "$want_stranded" ] && [ "$recs1" = "$recs0" ] && [ "$(writes_of "$replan")" = "0" ]; then
   log "DONE: $p_void_post_kickoff rec(s) voided as written after kickoff and re-pointed onto their twins; $p_no_twin without a twin left for cleanup_soccer_orphans (postponed) and the grader"
 else

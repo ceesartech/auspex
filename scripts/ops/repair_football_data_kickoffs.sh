@@ -271,7 +271,7 @@ log "recs without a profit_loss on the folded rows (directly or through their pr
 if [ "$check_rc" -eq 0 ] && [ "$soccer1" = "$want_soccer" ] && [ "$stale1" = "$want_stale" ] && [ "$replanned" = "0 0 0 0 0 0" ] \
    && { [ "$unsettled" = "0" ] || [ "$unsettled" = "none folded" ]; }; then
   if [ -n "$aliased" ]; then
-    log "DONE: check_legacy_kickoffs passes, but promote_raw runs and refuses the $(echo $aliased | wc -w) alias-merged fixture(s) (exit 3) until the second re-point pass has moved them. Folded rows (for the optional grading in the header; it settles no rec on them): ${folded:-none}"
+    log "DONE: check_legacy_kickoffs passes, but promote_raw runs and refuses the $(echo $aliased | wc -w | tr -d " ") alias-merged fixture(s) (exit 3) until the second re-point pass has moved them. Folded rows (for the optional grading in the header; it settles no rec on them): ${folded:-none}"
     log "NEXT (runbook step 5, its own approval): bash /opt/auspex/scripts/ops/repoint_team_matches.sh --pass 2 — these alias-merged rows are still on the wrong club and now have no twin: $aliased"
   else
     log "DONE: promote_raw may run again (its check_legacy_kickoffs passes). Folded rows (for the optional grading in the header; it settles no rec on them): ${folded:-none}"

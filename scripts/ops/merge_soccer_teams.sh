@@ -153,7 +153,7 @@ if [ "$kickoffs" != "$EXPECTED_KICKOFFS_ADOPTED" ]; then
 fi
 # The rows to grade come from the dry run, like the after-state.
 grade_ids=$($DC exec -T api sh -c "grep -o 'GRADE_AFTER [0-9a-f-]*' /tmp/merge_teams_dry.log | awk '{print \$2}' | sort -u" | tr '\n' ' ')
-log "plan: $merge to merge, $done_ already done; $(echo $grade_ids | wc -w) kept row(s) to grade after; plan file $PLAN"
+log "plan: $merge to merge, $done_ already done; $(echo $grade_ids | wc -w | tr -d " ") kept row(s) to grade after; plan file $PLAN"
 
 apply_rc=0
 if [ "$merge" = "0" ]; then
