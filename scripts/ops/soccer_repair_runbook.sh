@@ -10,7 +10,14 @@
 # are prod's (read only, 2026-10-31) and the rehearsal's: this runbook and the
 # real wrappers and tools, end to end through a docker/Airflow shim, against
 # a local Postgres built from the migrations (011's trigger restored) and a
-# read-only export of prod taken 11:08Z (compute_features stubbed).
+# read-only export of prod taken 11:08Z (compute_features stubbed). Rehearsed
+# again on a 13:02Z export (TimeZone UTC, as prod) with every count below
+# unchanged, through three runs: step 4's backup never landing (exit 1, the
+# retrain DAGs kept paused with an ALERT) then --from 4 (adopted, steps 4-11,
+# unpaused at the end); the merge's grading failing after its commit (STATUS
+# failed, unsettled_recs_on_adopted 3) then --from 3 (step 3 finishes that
+# apply: 52 rows graded, 0 unsettled, COMPLETED); and a full re-run that only
+# reads (every step ALREADY DONE, 0 backups, row fingerprint unchanged).
 # Start it right after the deploy: until step 1 runs, results for the mapped
 # upcoming Liga MX fixtures are refused as identity drift, and the results
 # sweep only looks back 3 days.
