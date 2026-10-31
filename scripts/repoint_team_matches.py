@@ -22,6 +22,14 @@ odds, recommendations and features_cache stay attached; match_stats rows of
 the moved side move with it. The seeded ESPN team ids of every team the map
 names are stamped too (guarded like team_identity.stamp_espn_id).
 
+A team the review named may since have been merged into another row by
+scripts/merge_soccer_teams.py (the ESPN spelling 'América' folded into
+'Club America'): a side or an opponent counts as that team when the row it
+sits on is the named team, or a team whose metadata.aliases
+(team_identity.alias_form) or metadata.merged_from names it. So a side the
+first pass moved still plans as 'done' after the merge renamed its opponent,
+and a genuine drift (another opponent) is still refused.
+
 Refused (written to the CSV, counted, never written):
   * a row that is not what the review saw (moved, re-dated, another opponent);
   * a target team that does not exist, or a side that would play itself;
@@ -39,11 +47,23 @@ Safety: dry run by default; the write-once audit CSV lands before any write
 the rows (SELECT ... FOR UPDATE), and every UPDATE is guarded on the observed
 values with a rowcount check — any mismatch rolls the whole thing back.
 --expect-repoint / --expect-refused / --expect-done pin the reviewed plan: a
-different plan writes nothing. Re-runnable: a moved side plans as 'done'.
+different plan writes nothing. Re-runnable: a moved side plans as 'done'. One
+fixed-format line 'PLAN repoint=N done=N refuse=N not_found=N stamp_...=N' is
+logged for scripts/ops/repoint_team_matches.sh.
 
-Usage (inside the api container):
+TWO PASSES (scripts/ops/soccer_repair_runbook.sh runs both, each through
+scripts/ops/repoint_team_matches.sh --pass N with its own backup and pins):
+  pass 1 (runbook step 1, right after the deploy): 33 sides move, 6 refused
+    (a football-data copy sits on the target pair 1 h later);
+  pass 2 (runbook step 5, after merge_soccer_teams and
+    repair_football_data_kickoffs alias-merged those copies): the 6 move,
+    32 read 'done' (13 of them through a merged opponent's alias), 1 is
+    refused as 'match row not found' (cb4e21fc: the team merge folded that
+    stale fork into its played twin 45064ae5, itself 'done').
+
+Usage (inside the api container; the wrapper is the supported way to apply):
     python /app/scripts/repoint_team_matches.py                      # dry run
-    python /app/scripts/repoint_team_matches.py --apply --expect-repoint 33 --expect-refused 6
+    python /app/scripts/repoint_team_matches.py --apply --expect-repoint 33 --expect-done 0 --expect-refused 6
 """
 
 from __future__ import annotations
@@ -125,9 +145,13 @@ SELECT_MATCHES_SQL = """
      WHERE m.id = ANY(%s::uuid[])
 """
 LOCK_MATCHES_SQL = "SELECT id FROM matches WHERE id = ANY(%s::uuid[]) ORDER BY id FOR UPDATE"
+# The named teams, plus every team carrying a merge record: a named team may
+# have been merged into one of those (resolve_team).
 SELECT_TEAMS_SQL = """
-    SELECT id::text AS id, name, normalized_name, external_ids->>'espn' AS espn
-      FROM teams WHERE sport = 'soccer' AND normalized_name = ANY(%s)
+    SELECT id::text AS id, name, normalized_name, external_ids->>'espn' AS espn, metadata
+      FROM teams
+     WHERE sport = 'soccer'
+       AND (normalized_name = ANY(%s) OR metadata ? 'aliases' OR metadata ? 'merged_from')
 """
 ESPN_HOLDERS_SQL = """
     SELECT id::text AS id, external_ids->>'espn' AS espn FROM teams
@@ -198,6 +222,44 @@ def _kickoff(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime(KICKOFF_FORMAT)
 
 
+def merged_names(team: Optional[dict]) -> set[str]:
+    """alias_form of every name a team row answers to besides its own: its
+    metadata.aliases (an array of strings, team_identity's contract; any
+    other value is ignored, as team_identity ignores it) and the names in its
+    metadata.merged_from records (merge_soccer_teams writes both). Pure."""
+    meta = (team or {}).get("metadata") or {}
+    out: set[str] = set()
+    aliases = meta.get("aliases")
+    if isinstance(aliases, list) and all(isinstance(a, str) for a in aliases):
+        out |= {team_identity.alias_form(a) for a in aliases}
+    merged = meta.get("merged_from")
+    if isinstance(merged, list):
+        out |= {team_identity.alias_form(e["name"]) for e in merged if isinstance(e, dict) and e.get("name")}
+    out.discard("")
+    return out
+
+
+def resolve_team(teams: dict[str, dict], name: str) -> Optional[dict]:
+    """The team row a reviewed name means now: the row with that normalized
+    name, else the ONE row that took it over in a team merge (merged_names);
+    None when none does or two claim it. Pure."""
+    exact = teams.get(_norm(name))
+    if exact is not None:
+        return exact
+    form = team_identity.alias_form(name)
+    claims = [t for t in teams.values() if form in merged_names(t)]
+    return claims[0] if len(claims) == 1 else None
+
+
+def answers_to(team_id: str, team_name: str, wanted: str, by_id: dict[str, dict]) -> bool:
+    """True when the team on a side (its id and name) is the team the review
+    named `wanted`: the same name, or a team that took `wanted` over in a
+    merge (its row is in `by_id`, the teams read_state loaded). Pure."""
+    if _norm(team_name) == _norm(wanted):
+        return True
+    return team_identity.alias_form(wanted) in merged_names(by_id.get(team_id))
+
+
 @dataclass
 class Plan:
     entries: list[dict]  # one per map row
@@ -218,11 +280,13 @@ def plan_repoints(  # noqa: C901 — one rule per refusal, in order
     money: Optional[dict[str, dict]] = None,
 ) -> Plan:
     """The plan for every map row. Pure: `matches` by id (SELECT_MATCHES_SQL),
-    `teams` by normalized name (SELECT_TEAMS_SQL), `neighbours` every match of
-    the teams involved near the kickoffs (NEIGHBOURS_SQL), `stats` the
-    match_stats rows of the mapped matches, `espn_holders` {espn id: [team
-    ids holding it]}."""
+    `teams` by normalized name (SELECT_TEAMS_SQL: the named teams and every
+    team with a merge record), `neighbours` every match of the teams involved
+    near the kickoffs (NEIGHBOURS_SQL), `stats` the match_stats rows of the
+    mapped matches, `espn_holders` {espn id: [team ids holding it]}. A name
+    the review used counts through a team merge (resolve_team, answers_to)."""
     money = money or {}
+    by_id = {t["id"]: t for t in teams.values()}
     by_match: dict[str, list[MapRow]] = defaultdict(list)
     for row in rows:
         by_match[row.match_id].append(row)
@@ -240,10 +304,14 @@ def plan_repoints(  # noqa: C901 — one rule per refusal, in order
         for row in sides:
             key = (match_id, row.side)
             on_side = m["home"] if row.side == "home" else m["away"]
+            on_side_id = m["home_id"] if row.side == "home" else m["away_id"]
             other = m["away"] if row.side == "home" else m["home"]
+            other_id = m["away_id"] if row.side == "home" else m["home_id"]
             other_side = "away" if row.side == "home" else "home"
-            opp_ok = _norm(other) in {_norm(row.opponent), _norm(moved_to.get(other_side, row.opponent))}
-            target = teams.get(_norm(row.to_team))
+            opp_ok = answers_to(other_id, other, row.opponent, by_id) or answers_to(
+                other_id, other, moved_to.get(other_side, row.opponent), by_id
+            )
+            target = resolve_team(teams, row.to_team)
             if m.get("sport") != "soccer" or m["league"] != row.league or _kickoff(m["match_date"]) != row.kickoff_utc:
                 verdict[key] = (
                     "refuse",
@@ -252,9 +320,9 @@ def plan_repoints(  # noqa: C901 — one rule per refusal, in order
                 )
             elif target is None:
                 verdict[key] = ("refuse", f"target team {row.to_team!r} does not exist")
-            elif _norm(on_side) == _norm(row.to_team) and opp_ok:
+            elif on_side_id == target["id"] and opp_ok:
                 verdict[key] = ("done", "already on the target team")
-            elif _norm(on_side) != _norm(row.from_team) or not opp_ok:
+            elif not answers_to(on_side_id, on_side, row.from_team, by_id) or not opp_ok:
                 verdict[key] = (
                     "refuse",
                     f"drifted since the review: {row.side} is {on_side!r} v {other!r} "
@@ -291,7 +359,7 @@ def plan_repoints(  # noqa: C901 — one rule per refusal, in order
         m = matches.get(match_id)
         for row in sides:
             if m and verdict[(match_id, row.side)][0] == "repoint":
-                target = teams[_norm(row.to_team)]["id"]
+                target = resolve_team(teams, row.to_team)["id"]  # type: ignore[index]  # planned: it resolved
                 if target in stats_by_match.get(match_id, set()):
                     refuse_match(match_id, f"match_stats already has a row for {row.to_team!r} on this match")
 
@@ -339,14 +407,16 @@ def plan_repoints(  # noqa: C901 — one rule per refusal, in order
         if not changed:
             break
 
-    entries, updates, stats_moves = [], {}, []
+    entries: list[dict] = []
+    updates: dict[str, dict] = {}
+    stats_moves: list[dict] = []
     for row in rows:
         action, reason = verdict[(row.match_id, row.side)]
         m = matches.get(row.match_id) or {}
-        moving = action == "repoint"
+        moves = action == "repoint"
         stats_moved = 0
-        if moving:
-            target = teams[_norm(row.to_team)]["id"]
+        if moves:
+            target = resolve_team(teams, row.to_team)["id"]  # type: ignore[index]  # planned: it resolved
             source = m["home_id"] if row.side == "home" else m["away_id"]
             stats_moved = 1 if source in stats_by_match.get(row.match_id, set()) else 0
             if stats_moved:
@@ -371,8 +441,8 @@ def plan_repoints(  # noqa: C901 — one rule per refusal, in order
                 "espn_competition": m.get("espn"),
                 "home_before": m.get("home"),
                 "away_before": m.get("away"),
-                "home_after": row.to_team if moving and row.side == "home" else m.get("home"),
-                "away_after": row.to_team if moving and row.side == "away" else m.get("away"),
+                "home_after": target_name(teams, row.to_team) if moves and row.side == "home" else m.get("home"),
+                "away_after": target_name(teams, row.to_team) if moves and row.side == "away" else m.get("away"),
                 "match_stats_moved": stats_moved,
                 "predictions": (money.get(row.match_id) or {}).get("predictions"),
                 "recs": (money.get(row.match_id) or {}).get("recs"),
@@ -380,9 +450,9 @@ def plan_repoints(  # noqa: C901 — one rule per refusal, in order
         )
     # A both-sides match carries the moves of both entries in one UPDATE.
     for match_id, params in updates.items():
-        sides = {r.side for r in by_match[match_id] if verdict[(match_id, r.side)][0] == "repoint"}
-        params["new_home"] = post[match_id][0] if "home" in sides else params["old_home"]
-        params["new_away"] = post[match_id][1] if "away" in sides else params["old_away"]
+        moved_sides = {r.side for r in by_match[match_id] if verdict[(match_id, r.side)][0] == "repoint"}
+        params["new_home"] = post[match_id][0] if "home" in moved_sides else params["old_home"]
+        params["new_away"] = post[match_id][1] if "away" in moved_sides else params["old_away"]
 
     stamps = []
     named = sorted({_norm(r.from_team) for r in rows} | {_norm(r.to_team) for r in rows})
@@ -412,8 +482,22 @@ def plan_repoints(  # noqa: C901 — one rule per refusal, in order
             }
         )
     counts = Counter(e["action"] for e in entries)
+    counts["not_found"] = sum(1 for e in entries if e["action"] == "refuse" and e["reason"] == "match row not found")
     counts.update(f"stamp_{s['action']}" for s in stamps)
     return Plan(entries, stamps, updates, stats_moves, counts)
+
+
+def target_name(teams: dict[str, dict], name: str) -> str:
+    """The name of the row a reviewed target name resolves to (the name itself
+    when it resolves to none). Pure."""
+    t = resolve_team(teams, name)
+    return t["name"] if t else name
+
+
+def plan_line(counts: Counter) -> str:
+    """The fixed-format line scripts/ops/repoint_team_matches.sh parses."""
+    keys = ("repoint", "done", "refuse", "not_found", "stamp_stamp", "stamp_done", "stamp_refuse")
+    return "PLAN " + " ".join(f"{k}={counts.get(k, 0)}" for k in keys)
 
 
 def read_state(cur, rows: list[MapRow], seed: dict) -> tuple:
@@ -502,7 +586,8 @@ def features_command(cur, plan: Plan, teams: dict[str, dict]) -> Optional[str]:
     moved = [e for e in plan.entries if e["action"] in ("repoint", "done")]
     if not moved:
         return None
-    team_ids = sorted({teams[_norm(e[k])]["id"] for e in moved for k in ("from_team", "to_team")})
+    resolved = (resolve_team(teams, e[k]) for e in moved for k in ("from_team", "to_team"))
+    team_ids = sorted({t["id"] for t in resolved if t is not None})
     since = min(datetime.strptime(e["kickoff_utc"], KICKOFF_FORMAT).replace(tzinfo=timezone.utc) for e in moved)
     cur.execute(AFFECTED_MATCHES_SQL, {"teams": team_ids, "since": since})
     ids = [r["id"] for r in cur.fetchall()]
@@ -535,6 +620,7 @@ def run(conn, rows: list[MapRow], seed: dict, apply_changes: bool, out_csv: str,
             )
         counts = plan.counts
         logger.info("Planned %s; audit CSV %s", dict(sorted(counts.items())), out_csv)
+        logger.info("%s", plan_line(counts))
         command = features_command(cur, plan, teams)
         if not pins_ok(counts, expect):
             conn.rollback()

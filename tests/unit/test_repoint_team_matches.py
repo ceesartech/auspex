@@ -195,6 +195,104 @@ class TestPlan:
         assert "match_stats already has a row" in actions(p)[("m1", "away")][1]
 
 
+class TestMergedNames:
+    """After merge_soccer_teams folded an ESPN spelling into its established
+    row, the reviewed names still count: through metadata.aliases or
+    metadata.merged_from of the row that took them over."""
+
+    CLUB = {
+        "id": "CX",
+        "name": "Club Cruz Azul",
+        "normalized_name": "club cruz azul",
+        "espn": None,
+        "metadata": {"aliases": ["cruz azul"], "merged_from": [{"team_id": "X", "name": "Cruz Azul"}]},
+    }
+
+    def _teams(self, *extra):
+        teams = {k: v for k, v in TEAMS.items() if k != "cruz azul"}  # the ESPN spelling was merged away
+        for t in (self.CLUB, *extra):
+            teams[t["normalized_name"]] = t
+        return teams
+
+    def _match(self, match_id, home, away, home_name, away_name, when=T0):
+        return {
+            **match(match_id, "S", "L", when),
+            "home_id": home,
+            "away_id": away,
+            "home": home_name,
+            "away": away_name,
+        }
+
+    def test_a_moved_side_whose_opponent_the_merge_renamed_is_done(self):
+        m = self._match("m1", "CX", "L", "Club Cruz Azul", "Santos Laguna")
+        p = plan([row("m1", "away")], [m], teams=self._teams())
+        assert actions(p)[("m1", "away")] == ("done", "already on the target team")
+        assert p.updates == {} and p.counts["done"] == 1 and p.counts["refuse"] == 0
+
+    def test_a_merged_from_record_alone_also_counts(self):
+        club = {**self.CLUB, "metadata": {"merged_from": [{"team_id": "X", "name": "Cruz Azul"}]}}
+        m = self._match("m1", "CX", "L", "Club Cruz Azul", "Santos Laguna")
+        p = plan([row("m1", "away")], [m], teams=self._teams(club))
+        assert actions(p)[("m1", "away")][0] == "done"
+
+    def test_an_accent_folded_alias_counts(self):
+        club = {**self.CLUB, "metadata": {"aliases": ["Crúz  Azul"]}}
+        m = self._match("m1", "CX", "L", "Club Cruz Azul", "Santos Laguna")
+        p = plan([row("m1", "away")], [m], teams=self._teams(club))
+        assert actions(p)[("m1", "away")][0] == "done"
+
+    def test_a_side_still_to_move_whose_opponent_was_renamed_moves(self):
+        m = self._match("m1", "CX", "S", "Club Cruz Azul", "Santos")
+        p = plan([row("m1", "away")], [m], teams=self._teams())
+        assert actions(p)[("m1", "away")] == ("repoint", "")
+        assert p.updates["m1"]["new_away"] == "L"
+
+    def test_another_opponent_is_still_drift(self):
+        m = self._match("m1", "A", "L", "Atlas", "Santos Laguna")
+        p = plan([row("m1", "away")], [m], teams=self._teams())
+        action, reason = actions(p)[("m1", "away")]
+        assert action == "refuse" and "drifted since the review" in reason
+
+    def test_an_alias_two_rows_claim_counts_for_neither_as_a_target(self):
+        other = {**self.CLUB, "id": "CX2", "name": "Cruz Azul Hidalgo", "normalized_name": "cruz azul hidalgo"}
+        teams = self._teams(other)
+        assert rtm.resolve_team(teams, "Cruz Azul") is None
+        assert rtm.resolve_team(teams, "Club Cruz Azul")["id"] == "CX"
+
+    def test_a_target_merged_into_another_row_is_followed(self):
+        kept = {
+            "id": "LF",
+            "name": "Santos Laguna FC",
+            "normalized_name": "santos laguna fc",
+            "espn": None,
+            "metadata": {"merged_from": [{"team_id": "L", "name": "Santos Laguna"}]},
+        }
+        teams = {k: v for k, v in TEAMS.items() if k != "santos laguna"}
+        teams["santos laguna fc"] = kept
+        done = plan(
+            [row("m1", "away")], [match("m1", "X", "S") | {"away_id": "LF", "away": "Santos Laguna FC"}], teams=teams
+        )
+        assert actions(done)[("m1", "away")][0] == "done"
+        moving = plan([row("m2", "away")], [match("m2", "X", "S")], teams=teams)
+        assert actions(moving)[("m2", "away")] == ("repoint", "")
+        assert moving.updates["m2"]["new_away"] == "LF"
+        assert moving.entries[0]["away_after"] == "Santos Laguna FC"
+
+    def test_a_malformed_alias_value_is_ignored_like_team_identity_does(self):
+        club = {**self.CLUB, "metadata": {"aliases": "cruz azul"}}
+        assert rtm.merged_names(club) == set()
+
+    def test_the_plan_line_counts_rows_the_merge_folded_away(self):
+        p = plan([row("gone", "away"), row("m1", "away")], [match("m1", "X", "L")])
+        assert rtm.plan_line(p.counts) == (
+            "PLAN repoint=0 done=1 refuse=1 not_found=1 stamp_stamp=2 stamp_done=0 stamp_refuse=0"
+        )
+
+    def test_read_state_loads_every_team_with_a_merge_record(self):
+        sql = " ".join(rtm.SELECT_TEAMS_SQL.split())
+        assert "metadata ? 'aliases' OR metadata ? 'merged_from'" in sql and "metadata" in sql.split("FROM")[0]
+
+
 class TestStamps:
     def test_every_seeded_team_the_map_names_is_stamped(self):
         p = plan([row("m1", "away")], [match("m1", "X", "S")])
