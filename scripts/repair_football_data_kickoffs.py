@@ -1,17 +1,35 @@
 """Move the football-data kickoffs promote_raw stored 1 h late back to UTC,
-and merge the duplicate matches that left behind into their ESPN rows.
+and merge the duplicate matches that left behind into the row that stays.
 
 Until 2026-10-31 promote_raw.parse_match_date stored football-data's Time,
 which is UK local time, as if it were UTC, so every kickoff on a British
 Summer Time date sits 1 h late (63,768 of the 101,158 timed promoted rows on
-2026-10-31; the GMT ones are right). Where the ESPN results path had also
-written the fixture at its real kickoff, the exact-triple upsert missed and
-the fixture exists twice: 228 finished matches, 68 of them under the same
-team ids (in the other 160 ESPN created its own team row; they become
-same-id pairs once those teams are merged). promote_raw now parses UTC,
-writes onto an existing row for the pair near the kickoff instead of beside
-it (find_existing_match), and refuses to run while a legacy row is left
-(check_legacy_kickoffs). This tool moves them.
+2026-10-31; the GMT ones are right). Where the ESPN path had also written
+the fixture at its real kickoff, the exact-triple upsert missed and the
+fixture exists twice: 228 finished matches, 68 of them under the same team
+ids (in the other 160 ESPN created its own team row), plus 26 football-data
+results beside a stale 'scheduled' ESPN fixture row from before migration
+023. promote_raw now parses UTC, writes onto an existing row for the pair
+near the kickoff instead of beside it (find_existing_matches), and refuses
+to run while any row is left at a legacy kickoff (check_legacy_kickoffs).
+This tool merges and moves them; until it has run, promote_raw stays blocked.
+
+RUN ORDER (decided 2026-10-31): scripts/ops/merge_soccer_teams.sh FIRST,
+then this tool (scripts/ops/repair_football_data_kickoffs.sh), then the
+soccer orphan cleanup (scripts/ops/cleanup_soccer_orphans.sh). The team
+merge folds the 160 alias pairs itself (it keeps the ESPN row and deletes
+about 171 football-data rows; promote_raw then writes those fixtures onto
+the surviving ESPN row, never beside it). If the merge has NOT run, those
+160 pairs are left for it: --shift refuses each copy whose new kickoff is
+the exact kickoff of the same fixture under other team ids (see below),
+so this tool never creates a pair the merge would trip over, and the
+wrapper aborts on the refusals before writing anything. The orphan cleanup
+runs after: the 26 stale rows this tool folds are finished by then and
+leave its candidate set. The same rule holds back the 6 football-data
+copies beside the 36 Liga MX rows ESPN filed under Santos (Brazil) and
+Guadalajara (Spain) (2026-10-31 rehearsal): the merge does not touch them
+(different clubs, not spellings); once a team-identity repair re-points
+them, --dedupe merges those 6 like the 68.
 
 A matches row is tied to its raw_football_data row the way promote_raw tied
 them and backfill_season_labels ties them: league code, normalised team
@@ -20,59 +38,89 @@ promote_raw.parse_wall_clock, read in the database TimeZone) or, once moved,
 the one it writes now.
 
 --dedupe (run first). A football-data row is a copy when the row
-promote_raw would now write its fixture onto is another row: an ESPN row
-for the same home and away team ids within 3 h of the corrected kickoff, on
+promote_raw would now write its fixture onto is another row for the same
+home and away team ids within 3 h of the corrected kickoff, on
 football-data's date (promote_raw.existing_match_window / choose_existing).
-On prod that row sits 1 h (+-10 min) earlier for 67 of the 68 same-id pairs;
-the 68th ESPN row kicked off 76 min after football-data's legacy time, and
-two fixtures also keep a stale 'scheduled' row 60-70 min earlier, so a
-strict 1 h +-10 min rule would miss three. The copy must be finished with
-the ESPN row's final score. It is merged INTO the ESPN row: its half-time
-score when the ESPN row has none, the pair is complete and neither half
-exceeds the ESPN final score (promote_raw.raw_result's check; it needs no
-ESPN plays); its odds where the ESPN row has no price under the same key
-(uq_odds_current_price_key); its match_stats where the ESPN row has none for
-that team. Then the copy row, the ESPN row's before-state and every row that
+Two kinds, both one guarded transaction per batch:
+  merge: that row is an ESPN row, finished with the copy's final score. On
+    prod it sits 1 h (+-10 min) earlier for 67 of the 68 same-id pairs; the
+    68th ESPN row kicked off 76 min after football-data's legacy time, and
+    two fixtures also keep a stale 'scheduled' row 60-70 min earlier, so a
+    strict 1 h +-10 min rule would miss three. The copy's half-time goes onto
+    the ESPN row when it has none, the pair is complete and neither half
+    exceeds the ESPN final score (promote_raw.raw_result's check; it needs no
+    ESPN plays).
+  fold: that row is a stale 'scheduled' fixture row without ESPN identity
+    (pre-migration 023) at EXACTLY the copy's corrected kickoff, with no
+    score, no pending/placed recommendation (on the row or on one of its
+    predictions) and no prediction written after its kickoff. The copy's
+    final score (and its half-time, when complete and within the final)
+    goes onto it and it becomes 'finished', guarded on the values observed:
+    the outcome trigger then grades its pre-kickoff predictions, identically
+    under migration 011 and 027 because there is no post-kickoff row for 027
+    to skip, and settles no recommendation because none is open. The audit
+    CSV lists, per fold, the row's recommendations by status and its
+    ungraded predictions; the run logs what the trigger graded.
+Then, for both: the copy's odds move where the kept row has no price under
+the same key (uq_odds_current_price_key), its match_stats where the kept
+row has none for that team; the copy row, the kept row's before-state (for
+a fold also its predictions and recommendations), and every row that
 references the copy, moved rows included (every FK to matches, read from
-pg_constraint so a new table is never missed), go to a write-once gzip JSONL
-archive, and the copy is deleted, guarded: never while a prediction,
-recommendation or betting_history row (or any FK that does not cascade)
-references it. Refused and reported: a copy whose nearby row has no ESPN
-identity (on prod: stale 'scheduled' fixture rows from before migration 023,
-repair_fixture_orphans' business), is not finished, has another score, or is
-ambiguous.
+pg_constraint so a new table is never missed), go to a write-once gzip
+JSONL archive before the first write; and the copy is deleted, guarded:
+never while a prediction, recommendation or betting_history row (or any FK
+that does not cascade) references it. Refused and reported: a copy that is
+not finished or has another score, a kept row that is ambiguous or wanted by
+two copies, a stale row off the corrected kickoff or with open recs or
+post-kickoff predictions (repair_stranded_recs / repair_fixture_orphans'
+business), and two football-data rows.
 
 --shift. Every remaining football-data row on a BST date moves back 1 h, to
 the kickoff promote_raw now writes. Refused and reported: a row with ESPN
-identity, a row whose score is no longer its raw row's, and a row whose new
+identity, a row whose score is no longer its raw row's, a row whose new
 kickoff lands within 3 h of another row for the same team pair (a UNIQUE
-(home_team_id, away_team_id, match_date) collision included; --dedupe
-first). A shifted row that lands within 10 min of an ESPN row for a
-DIFFERENT team pair in the same league, with the same score, is a probable
-alias twin (one fixture under two team rows): shifted, and listed in
-alias_twin_id for the team merge.
+(home_team_id, away_team_id, match_date) collision included), and an
+'alias slot': a row whose new kickoff is the exact kickoff of the same
+fixture under other team ids, i.e. a row in the same league at that kickoff
+that shares a team with it (no club plays twice at once), or that has ESPN
+identity, the same final score and, on both sides, a name that could spell
+the same club (same_club_name; 'Inter Miami v Columbus Crew' 2-2 beside
+'DC United v Nashville SC' 2-2 at 23:30Z is not one). Two football-data rows
+sharing a team that would both land on one kickoff are refused the same
+way. Shifting beside an alias pair would leave two rows of one match on one
+slot, and whatever later unifies the team ids would collide on UNIQUE. A
+copy --dedupe still plans to merge or fold is not shifted (counted as
+left_to_dedupe; the PLAN line's dedupe_pending counts every copy --dedupe
+still plans), and --shift --apply refuses to write anything while
+dedupe_pending is not 0. A shifted row that lands within 10 min of an
+ESPN row for a DIFFERENT team pair in the same league, with the same score,
+and is not refused as above, is a probable alias twin: shifted, and listed
+in alias_twin_id for whoever unifies the teams.
 
---check (read-only). Runs promote_raw.check_legacy_kickoffs and counts the
+--check (read-only). Runs promote_raw.check_legacy_kickoffs (every row at a
+legacy kickoff, whether its corrected slot is free or not) and counts the
 football-data rows that still have another FINISHED row for the pair where
 promote_raw looks; exits 1 unless both are clear. Also counts, for
 information, football-data rows beside an unfinished row (stale fixtures)
 and probable alias twins.
 
 Both writing modes plan first and write every planned row, refusals
-included, to a write-once audit CSV, dry run included. --expect-planned and
---expect-refused pin the plan an operator reviewed: a plan that differs
-writes nothing and exits 1. --apply writes the planned rows in bounded
-batches, one transaction each, every UPDATE and DELETE guarded on the values
-the plan observed; refused rows are left alone (exit 1 unless they were
-expected). A batch whose guard misses a row rolls back and stops the run;
-earlier batches stay committed and a re-run plans them as done.
+included, to a write-once audit CSV, dry run included, and log one line
+'PLAN mode=<mode> <action>=<n> ...' for the wrapper. --expect-plan pins the
+plan an operator reviewed (dedupe: merge=,fold=,refuse=; shift: shift=,
+refuse=): a plan that differs writes nothing and exits 1. --apply writes the
+planned rows in bounded batches, one transaction each, every UPDATE and
+DELETE guarded on the values the plan observed; refused rows are left alone
+(exit 1 unless the refusals were pinned). A batch whose guard misses a row
+rolls back and stops the run; earlier batches stay committed and a re-run
+plans them as done.
 
 Usage (inside the api container; scripts/ops/repair_football_data_kickoffs.sh
 runs the whole sequence with a verified backup first):
     python /app/scripts/repair_football_data_kickoffs.py --dedupe            # dry run
-    python /app/scripts/repair_football_data_kickoffs.py --dedupe --apply --expect-planned 68 --expect-refused 26
+    python /app/scripts/repair_football_data_kickoffs.py --dedupe --apply --expect-plan merge=74,fold=26,refuse=0
     python /app/scripts/repair_football_data_kickoffs.py --shift             # dry run
-    python /app/scripts/repair_football_data_kickoffs.py --shift --apply --expect-planned 63718 --expect-refused 26
+    python /app/scripts/repair_football_data_kickoffs.py --shift --apply --expect-plan shift=63533,refuse=0
     python /app/scripts/repair_football_data_kickoffs.py --check
 """
 
@@ -81,11 +129,14 @@ from __future__ import annotations
 import argparse
 import bisect
 import csv
+import difflib
 import gzip
 import json
 import logging
 import os
+import re
 import sys
+import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone, tzinfo
@@ -103,15 +154,22 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(me
 logger = logging.getLogger("repair_football_data_kickoffs")
 
 # A shifted row may not land this close to another row for the same pair:
-# promote_raw would then have to pick between them (find_existing_match).
+# promote_raw would then have to pick between them (find_existing_matches).
 NEAR_WINDOW = pr.EXISTING_MATCH_WINDOW
 # A different team pair in the same league with the same score, kicking off this close to a
 # football-data row (or 1 h before it, at the legacy kickoff): a probable alias twin.
 ALIAS_TOLERANCE = timedelta(minutes=10)
 LEGACY_OFFSET = timedelta(hours=1)
+# Words two spellings of one club may share without that saying anything (alias_slot_rows).
+GENERIC_CLUB_WORDS = frozenset(
+    "fc cf sc ac afc cd ca club de del la el fk if ik bk sk ff rj sp mg pr sv us as ss cfc united city sporting "
+    "real athletic atletico deportivo football futbol calcio the and san santa sao central new".split()
+)
 # Tables whose rows keep a copy from being deleted, on top of every FK to matches that does not cascade.
 GUARD_TABLES = frozenset({"predictions", "betting_recommendations", "betting_history"})
 DEFAULT_BATCH_SIZE = {"dedupe": 100, "shift": 5000}
+# The actions each mode plans; --expect-plan pins any of them (refuse included).
+PLAN_KEYS = {"dedupe": ("merge", "fold", "refuse"), "shift": ("shift", "refuse")}
 
 RAW_SQL = (
     'SELECT league, season, "Date", "Time", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "HTHG", "HTAG" '
@@ -142,6 +200,34 @@ FK_SQL = """
 """
 COUNT_REFS_SQL = "SELECT {col}::text AS match_id, count(*) AS n FROM {tbl} WHERE {col} = ANY(%s::uuid[]) GROUP BY 1"
 
+# A stale row's recommendations: on the row itself, or on one of its predictions
+# (the outcome trigger settles through the prediction).
+_RECS_OF = "(br.match_id = m.id OR br.prediction_id IN (SELECT p.id FROM predictions p WHERE p.match_id = m.id))"
+# What a fold depends on, per stale row: it folds only with open_recs = 0 and
+# post_kickoff_predictions = 0 (planned, and re-checked under the batch lock).
+FOLD_FACTS_SQL = f"""
+    SELECT m.id::text AS id,
+           (SELECT count(*) FROM betting_recommendations br
+             WHERE br.status IN ('pending', 'placed') AND {_RECS_OF}) AS open_recs,
+           (SELECT count(*) FROM predictions p WHERE p.match_id = m.id AND p.created_at > m.match_date)
+               AS post_kickoff_predictions,
+           (SELECT count(*) FROM predictions p WHERE p.match_id = m.id) AS predictions,
+           (SELECT count(*) FROM predictions p WHERE p.match_id = m.id AND p.is_correct IS NULL)
+               AS ungraded_predictions,
+           (SELECT COALESCE(json_object_agg(x.status, x.n), '{{}}'::json)
+              FROM (SELECT br.status, count(*) AS n FROM betting_recommendations br WHERE {_RECS_OF}
+                     GROUP BY br.status) x) AS recs_by_status
+      FROM matches m
+     WHERE m.id = ANY(%s::uuid[])
+"""
+# Graded predictions per type on the fold rows, before and after the flip.
+GRADED_SQL = """
+    SELECT prediction_type, count(*) FILTER (WHERE is_correct IS NOT NULL) AS graded
+      FROM predictions
+     WHERE match_id = ANY(%s::uuid[])
+     GROUP BY prediction_type
+"""
+
 # What a row looked like when planned; every dedupe write is guarded on it.
 OBSERVED = (
     "match_date",
@@ -165,6 +251,15 @@ ARCHIVE_MATCHES_SQL = (
     "SELECT m.id::text AS match_id, row_to_json(m) AS data FROM matches m WHERE m.id = ANY(%s::uuid[])"
 )
 ARCHIVE_REFS_SQL = "SELECT {col}::text AS match_id, row_to_json(x) AS data FROM {tbl} x WHERE {col} = ANY(%s::uuid[])"
+# A fold row's predictions and recommendations before the outcome trigger grades them.
+ARCHIVE_FOLD_PREDICTIONS_SQL = (
+    "SELECT p.match_id::text AS match_id, row_to_json(p) AS data FROM predictions p WHERE p.match_id = ANY(%s::uuid[])"
+)
+ARCHIVE_FOLD_RECS_SQL = f"""
+    SELECT m.id::text AS match_id, row_to_json(br) AS data
+      FROM matches m JOIN betting_recommendations br ON {_RECS_OF}
+     WHERE m.id = ANY(%s::uuid[])
+"""
 
 # The ESPN row has no row under the moving row's unique key (odds:
 # uq_odds_current_price_key; match_stats: UNIQUE(match_id, team_id)).
@@ -204,6 +299,28 @@ COPY_HT_SQL = """
      WHERE id = %(id)s::uuid
        AND status = 'finished' AND home_score = %(home)s AND away_score = %(away)s
        AND half_time_home IS NULL AND half_time_away IS NULL
+"""
+# A stale 'scheduled' fixture row takes the copy's result: guarded on every
+# value observed and, in the same statement, on no open recommendation and no
+# post-kickoff prediction, so the outcome trigger this fires grades only
+# pre-kickoff predictions and settles nothing (the same under migrations 011
+# and 027).
+FOLD_SQL = f"""
+    UPDATE matches m
+       SET status = 'finished', home_score = %(home)s, away_score = %(away)s,
+           half_time_home = %(ht_home)s, half_time_away = %(ht_away)s,
+           metadata = COALESCE(m.metadata, '{{}}'::jsonb)
+                      || jsonb_build_object('result_source', 'football_data', 'result_adopted_from', %(copy_id)s::text),
+           updated_at = NOW()
+     WHERE m.id = %(id)s::uuid
+       AND m.status = 'scheduled' AND m.match_date = %(kickoff)s
+       AND m.home_score IS NULL AND m.away_score IS NULL
+       AND m.half_time_home IS NULL AND m.half_time_away IS NULL
+       AND m.external_ids->>'espn' IS NULL
+       AND m.metadata->>'result_source' IS DISTINCT FROM 'espn_scoreboard'
+       AND NOT EXISTS (SELECT 1 FROM betting_recommendations br WHERE br.status IN ('pending', 'placed') AND {_RECS_OF})
+       AND NOT EXISTS (SELECT 1 FROM predictions p WHERE p.match_id = m.id AND p.created_at > m.match_date)
+    RETURNING m.id::text
 """
 # {guards}: one NOT EXISTS per guard table (delete_sql).
 DELETE_COPY_SQL = """
@@ -260,6 +377,11 @@ DEDUPE_FIELDS = (
     "copy_match_stats",
     "stats_to_move",
     "copy_refs",
+    "fold_open_recs",
+    "fold_post_kickoff_predictions",
+    "fold_predictions",
+    "fold_ungraded_predictions",
+    "fold_recs_by_status",
     "action",
     "reason",
     "batch",
@@ -279,6 +401,7 @@ SHIFT_FIELDS = (
     "action",
     "reason",
     "near_row_id",
+    "alias_slot_row_id",
     "alias_twin_id",
     "batch",
 )
@@ -394,7 +517,7 @@ def link_rows(snap: Snapshot, counts: Counter) -> dict[str, Link]:
         if result is None:
             counts["raw_no_result"] += 1  # never promoted
             continue
-        league_id = snap.league_ids.get(r.get("league"))
+        league_id = snap.league_ids.get(r.get("league") or "")
         home_id = snap.team_ids.get(pr.normalize_team_name(r.get("HomeTeam") or ""))
         away_id = snap.team_ids.get(pr.normalize_team_name(r.get("AwayTeam") or ""))
         wall = pr.parse_wall_clock(r.get("Date") or "", r.get("Time"))
@@ -479,17 +602,53 @@ def ht_plan(copy: dict, twin: dict) -> tuple[str, Optional[tuple[int, int]]]:
     return "copy", copy_ht  # type: ignore[return-value]
 
 
+def fold_refusal(link: Link, row: dict, facts: Optional[dict]) -> str:
+    """Why a copy may not be folded into `row`, the unfinished row without
+    ESPN identity promote_raw would pick for it, or '' when it may (the
+    copy's own checks are plan_dedupe's). Pure."""
+    if row["status"] != "scheduled":
+        return (
+            f"the row for this pair nearby is a '{row['status']}' row without ESPN identity, not a stale "
+            "'scheduled' fixture row: inspect"
+        )
+    if row["kickoff"] != link.corrected:
+        return (
+            f"the stale 'scheduled' row for this pair sits at {_iso(row['kickoff'])}, not on the corrected kickoff "
+            f"{_iso(link.corrected)} (a stale fixture row: repair_fixture_orphans' business)"
+        )
+    if any(row.get(k) is not None for k in ("home_score", "away_score", "half_time_home", "half_time_away")):
+        return "the stale 'scheduled' row carries a score: inspect"
+    if facts is None:
+        return "no fold facts were read for the stale row"
+    if facts["open_recs"]:
+        return (
+            f"the stale row holds {facts['open_recs']} pending/placed recommendation(s) (on it or its predictions): "
+            "settle them first (repair_stranded_recs)"
+        )
+    if facts["post_kickoff_predictions"]:
+        return (
+            f"the stale row has {facts['post_kickoff_predictions']} prediction(s) written after its kickoff: the "
+            "outcome trigger would grade them under migration 011 but not under 027 — inspect"
+        )
+    return ""
+
+
 def plan_dedupe(
     snap: Snapshot,
     candidates: list[tuple[Link, list[dict]]],
     refs: dict[str, dict[str, int]],
     guard_tables: Iterable[str],
     counts: Counter,
+    fold_facts: Optional[dict[str, dict]] = None,
 ) -> list[dict]:
-    """One entry per candidate copy: action 'merge' (into the row
-    promote_raw.choose_existing picks among the nearby rows) or 'refuse'.
-    `refs` is {copy_id: {table: rows referencing it}}. Pure."""
+    """One entry per candidate copy: action 'merge' (into the ESPN row
+    promote_raw.choose_existing picks among the nearby rows), 'fold' (into
+    the stale 'scheduled' row it picks, see fold_refusal) or 'refuse'.
+    `refs` is {copy_id: {table: rows referencing it}}, `fold_facts`
+    {row_id: FOLD_FACTS_SQL row} for the unfinished rows without ESPN
+    identity. Pure."""
     guards = set(guard_tables)
+    facts_by_row = fold_facts or {}
     chosen = [pr.choose_existing(nearby) for _link, nearby in candidates]
     twin_uses = Counter(row["id"] for row, _why in chosen if row is not None)
     entries = []
@@ -497,6 +656,7 @@ def plan_dedupe(
         copy = link.match
         shown = [twin] if twin is not None else nearby
         copy_refs = {t: n for t, n in sorted(refs.get(copy["id"], {}).items()) if n}
+        facts = facts_by_row.get(twin["id"]) if twin is not None and not twin["espn"] else None
         entry = {
             **_base_entry(snap, link),
             "copy_id": copy["id"],
@@ -516,35 +676,77 @@ def plan_dedupe(
             "ht_action": "",
             "ht_write": None,
         }
+        if facts is not None:
+            entry.update(
+                fold_open_recs=facts["open_recs"],
+                fold_post_kickoff_predictions=facts["post_kickoff_predictions"],
+                fold_predictions=facts["predictions"],
+                fold_ungraded_predictions=facts["ungraded_predictions"],
+                fold_recs_by_status=json.dumps(facts["recs_by_status"] or {}, sort_keys=True),
+            )
         blocking = sorted(t for t in copy_refs if t in guards)
+        copy_score = (copy["home_score"], copy["away_score"])
         if twin is None:
             entry["reason"] = f"ambiguous: {ambiguity}"
-        elif not twin["espn"]:
-            entry["reason"] = f"the row for this pair nearby is a '{twin['status']}' row without ESPN identity" + (
-                " (a stale fixture row: repair_fixture_orphans' business)"
-                if twin["status"] != "finished"
-                else " (two football-data rows? inspect)"
-            )
         elif twin_uses[twin["id"]] > 1:
-            entry["reason"] = f"the ESPN row is the nearby row of {twin_uses[twin['id']]} football-data rows"
-        elif copy["status"] != "finished" or twin["status"] != "finished":
-            entry["reason"] = f"not both finished (copy {copy['status']}, ESPN row {twin['status']})"
-        elif None in (copy["home_score"], copy["away_score"]) or (copy["home_score"], copy["away_score"]) != (
-            twin["home_score"],
-            twin["away_score"],
-        ):
-            entry["reason"] = (
-                f"scores differ (copy {copy['home_score']}-{copy['away_score']}, "
-                f"ESPN row {twin['home_score']}-{twin['away_score']})"
-            )
+            entry["reason"] = f"the kept row is the nearby row of {twin_uses[twin['id']]} football-data rows"
+        elif copy["status"] != "finished" or None in copy_score:
+            entry["reason"] = f"the copy is not a finished result ({copy['status']} {copy_score[0]}-{copy_score[1]})"
         elif blocking:
             entry["reason"] = "copy referenced by " + ", ".join(f"{t} ({copy_refs[t]})" for t in blocking)
+        elif twin["espn"]:
+            if twin["status"] != "finished":
+                entry["reason"] = f"not both finished (copy {copy['status']}, ESPN row {twin['status']})"
+            elif copy_score != (twin["home_score"], twin["away_score"]):
+                entry["reason"] = (
+                    f"scores differ (copy {copy_score[0]}-{copy_score[1]}, "
+                    f"ESPN row {twin['home_score']}-{twin['away_score']})"
+                )
+            else:
+                entry["action"] = "merge"
+                entry["ht_action"], entry["ht_write"] = ht_plan(copy, twin)
+        elif twin["status"] == "finished":
+            entry["reason"] = (
+                "the row for this pair nearby is a finished row without ESPN identity (two football-data rows? inspect)"
+            )
+        elif copy_score not in link.raw_scores:
+            # the fold's result comes from the copy alone: it must still be football-data's
+            entry["reason"] = (
+                f"the copy's score {copy_score[0]}-{copy_score[1]} is not its raw row's {sorted(link.raw_scores)}: "
+                "edited since, not folded"
+            )
         else:
-            entry["action"] = "merge"
-            entry["ht_action"], entry["ht_write"] = ht_plan(copy, twin)
+            why = fold_refusal(link, twin, facts)
+            if why:
+                entry["reason"] = why
+            else:
+                entry["action"] = "fold"
+                # the stale row has no score: the copy's half-time goes on whole and within its own final
+                entry["ht_action"], entry["ht_write"] = ht_plan(
+                    copy, {**twin, "home_score": copy["home_score"], "away_score": copy["away_score"]}
+                )
         counts[f"dedupe_{entry['action']}"] += 1
         entries.append(entry)
     return entries
+
+
+def load_fold_facts(cur, row_ids: list[str]) -> dict[str, dict]:
+    """FOLD_FACTS_SQL for each row id."""
+    if not row_ids:
+        return {}
+    cur.execute(FOLD_FACTS_SQL, (row_ids,))
+    return {r["id"]: dict(r) for r in cur.fetchall()}
+
+
+def fold_fact_rows(candidates: list[tuple[Link, list[dict]]]) -> list[str]:
+    """The unfinished rows without ESPN identity promote_raw would pick for a
+    candidate copy: the rows a fold needs facts for. Pure."""
+    rows = set()
+    for _link, nearby in candidates:
+        row, _why = pr.choose_existing(nearby)
+        if row is not None and not row["espn"] and row["status"] != "finished":
+            rows.add(row["id"])
+    return sorted(rows)
 
 
 def load_fk_tables(cur) -> list[FkTable]:
@@ -577,7 +779,7 @@ def load_refs(cur, fk_tables: list[FkTable], match_ids: list[str]) -> dict[str, 
 
 
 def add_move_counts(cur, entries: list[dict]) -> None:
-    merges = [e for e in entries if e["action"] == "merge"]
+    merges = [e for e in entries if e["action"] in ("merge", "fold")]
     if not merges:
         return
     rows = execute_values(
@@ -605,29 +807,58 @@ def write_archive(path: Path, records: list[dict]) -> None:
             fh.write(json.dumps(rec, default=str, sort_keys=True) + "\n")
 
 
+def _graded(cur, row_ids: list[str]) -> Counter:
+    """Graded predictions per type on these rows."""
+    if not row_ids:
+        return Counter()
+    cur.execute(GRADED_SQL, (row_ids,))
+    return Counter({r["prediction_type"]: int(r["graded"]) for r in cur.fetchall()})
+
+
 def apply_dedupe_batch(conn, batch: list[dict], batch_no: int, fk_tables: list[FkTable], archive_path: Path) -> Counter:
-    """Merge one batch in one transaction: lock and re-check every row,
-    archive, then write. Raises PlanDrift (rolled back) when a guard misses."""
+    """Merge and fold one batch in one transaction: lock and re-check every
+    row (a fold row's open recs and post-kickoff predictions too), archive,
+    then write. Raises PlanDrift (rolled back) when a guard misses."""
     done: Counter = Counter()
     copy_ids = [e["copy_id"] for e in batch]
-    twin_ids = [e["twin"]["id"] for e in batch]
+    merge_ids = [e["twin"]["id"] for e in batch if e["action"] == "merge"]
+    folds = [e for e in batch if e["action"] == "fold"]
+    fold_ids = [e["twin"]["id"] for e in folds]
     pairs = [(e["copy_id"], e["twin"]["id"]) for e in batch]
     guard_names = guard_table_names(fk_tables)
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(LOCK_SQL, (copy_ids + twin_ids,))
+            cur.execute(LOCK_SQL, (copy_ids + merge_ids + fold_ids,))
             now = {r["id"]: r for r in cur.fetchall()}
             for e in batch:
                 for role in ("copy", "twin"):
                     planned = e[role]
                     if planned["id"] not in now or observed(now[planned["id"]]) != observed(planned):
                         raise PlanDrift(f"batch {batch_no}: {role} {planned['id']} changed since the plan")
+            # The lock blocks new rows referencing the fold rows (their FK takes KEY SHARE on them); a
+            # rec on one of their predictions is caught by FOLD_SQL itself.
+            for row_id, facts in load_fold_facts(cur, fold_ids).items():
+                if facts["open_recs"] or facts["post_kickoff_predictions"]:
+                    raise PlanDrift(
+                        f"batch {batch_no}: fold row {row_id} gained {facts['open_recs']} open rec(s) / "
+                        f"{facts['post_kickoff_predictions']} post-kickoff prediction(s) since the plan"
+                    )
 
             records = []
             cur.execute(ARCHIVE_MATCHES_SQL, (copy_ids,))
             records += [{"table": "matches", "role": "copy", **r} for r in cur.fetchall()]
-            cur.execute(ARCHIVE_MATCHES_SQL, (twin_ids,))
-            records += [{"table": "matches", "role": "espn_row_before", **r} for r in cur.fetchall()]
+            if merge_ids:
+                cur.execute(ARCHIVE_MATCHES_SQL, (merge_ids,))
+                records += [{"table": "matches", "role": "espn_row_before", **r} for r in cur.fetchall()]
+            if fold_ids:
+                cur.execute(ARCHIVE_MATCHES_SQL, (fold_ids,))
+                records += [{"table": "matches", "role": "fold_row_before", **r} for r in cur.fetchall()]
+                cur.execute(ARCHIVE_FOLD_PREDICTIONS_SQL, (fold_ids,))
+                records += [{"table": "predictions", "role": "fold_row_before", **r} for r in cur.fetchall()]
+                cur.execute(ARCHIVE_FOLD_RECS_SQL, (fold_ids,))
+                records += [
+                    {"table": "betting_recommendations", "role": "fold_row_before", **r} for r in cur.fetchall()
+                ]
             for t in fk_tables:
                 cur.execute(
                     ARCHIVE_REFS_SQL.format(col=t.column, tbl=t.ident),
@@ -640,7 +871,7 @@ def apply_dedupe_batch(conn, batch: list[dict], batch_no: int, fk_tables: list[F
             done["archived_records"] += len(records)
 
             for e in batch:
-                if e["ht_write"] is None:
+                if e["action"] != "merge" or e["ht_write"] is None:
                     continue
                 twin = e["twin"]
                 cur.execute(
@@ -660,6 +891,34 @@ def apply_dedupe_batch(conn, batch: list[dict], batch_no: int, fk_tables: list[F
             done["match_stats_moved"] += len(
                 execute_values(cur, MOVE_STATS_SQL, pairs, page_size=len(pairs), fetch=True)
             )
+
+            graded_before = _graded(cur, fold_ids)
+            for e in folds:
+                ht = e["ht_write"] or (None, None)
+                cur.execute(
+                    FOLD_SQL,
+                    {
+                        "id": e["twin"]["id"],
+                        "kickoff": e["twin"]["match_date"],
+                        "home": e["home_score"],
+                        "away": e["away_score"],
+                        "ht_home": ht[0],
+                        "ht_away": ht[1],
+                        "copy_id": e["copy_id"],
+                    },
+                )
+                if cur.rowcount != 1:
+                    raise PlanDrift(
+                        f"batch {batch_no}: fold row {e['twin']['id']} changed since the plan (or gained an open "
+                        "rec / a post-kickoff prediction)"
+                    )
+                done["folded"] += 1
+                done["fold_ht_copied"] += int(e["ht_write"] is not None)
+            graded = _graded(cur, fold_ids) - graded_before
+            for ptype, n in graded.items():
+                done[f"trigger_graded:{ptype}"] += n
+            done["trigger_graded_predictions"] += sum(graded.values())
+
             deleted = execute_values(
                 cur,
                 delete_sql([t for t in fk_tables if t.table_name in guard_names]),
@@ -714,9 +973,74 @@ def alias_twins(index: _LeagueKickoffs, row: dict, when: datetime) -> list[dict]
     ]
 
 
-def plan_shift(snap: Snapshot, links: dict[str, Link], counts: Counter) -> list[dict]:
+def _fold_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", " ", unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower())
+
+
+def same_club_name(a: str, b: str) -> bool:
+    """Whether two team names could spell one club: one inside the other
+    once accents, case and punctuation go ('Hacken' / 'BK Häcken'), a
+    distinctive word one starts the other's with ('Inter Miami' / 'Inter
+    Miami CF', 'Man City' / 'Manchester City'), or a close spelling. Loose
+    on purpose: alias_slot_rows needs it on BOTH sides of a fixture, at the
+    same kickoff, in the same league, with the same score. Pure."""
+    fa, fb = _fold_name(a), _fold_name(b)
+    ca, cb = fa.replace(" ", ""), fb.replace(" ", "")
+    if not ca or not cb:
+        return False
+    if ca in cb or cb in ca:
+        return True
+    words_a = {w for w in fa.split() if len(w) >= 3 and w not in GENERIC_CLUB_WORDS}
+    words_b = {w for w in fb.split() if len(w) >= 3 and w not in GENERIC_CLUB_WORDS}
+    if any(x.startswith(y) or y.startswith(x) for x in words_a for y in words_b):  # 'Man' / 'Manchester'
+        return True
+    return difflib.SequenceMatcher(None, ca, cb).ratio() >= 0.75
+
+
+def alias_slot_rows(
+    index: _LeagueKickoffs, row: dict, when: datetime, planned_away: frozenset[str], names: dict[str, str]
+) -> list[dict]:
+    """Rows in `row`'s league at exactly `when` under another team pair that
+    are the same fixture: one shares a team with it (no club plays twice at
+    once), or one with ESPN identity, the same final score and, on both
+    sides, a name that could spell the same club (same_club_name; `names`
+    is teams.id -> name). Shifting `row` onto `when` would leave one match on
+    one slot twice, under two team ids, and the repair that later unifies
+    those ids (the team merge, or a re-point of a row filed under the wrong
+    club) would collide on UNIQUE(home_team_id, away_team_id, match_date);
+    --shift leaves such a row for it. A row --dedupe still plans to merge or
+    fold away (`planned_away`) does not count: it is gone before the shift
+    writes. Pure."""
+    teams = {row["home_id"], row["away_id"]}
+    score = (row["home_score"], row["away_score"])
+
+    def spells(a: str, b: str) -> bool:
+        return same_club_name(names.get(a, a), names.get(b, b))
+
+    return [
+        m
+        for m in index.near(row["league_id"], when, timedelta(0))
+        if m is not row
+        and m["id"] not in planned_away
+        and (m["home_id"], m["away_id"]) != (row["home_id"], row["away_id"])
+        and (
+            {m["home_id"], m["away_id"]} & teams
+            or (
+                m["espn"]
+                and (m["home_score"], m["away_score"]) == score
+                and spells(m["home_id"], row["home_id"])
+                and spells(m["away_id"], row["away_id"])
+            )
+        )
+    ]
+
+
+def plan_shift(
+    snap: Snapshot, links: dict[str, Link], counts: Counter, planned_away: frozenset[str] = frozenset()
+) -> list[dict]:
     """One entry per linked BST row still at its legacy kickoff: action
-    'shift' or 'refuse'. Pure."""
+    'shift' or 'refuse'. A copy in `planned_away` (--dedupe still plans to
+    merge or fold it) gets no entry: it is counted as left_to_dedupe. Pure."""
     index = _LeagueKickoffs(snap.matches)
     entries = []
     for link in links.values():
@@ -725,8 +1049,11 @@ def plan_shift(snap: Snapshot, links: dict[str, Link], counts: Counter) -> list[
             counts["gmt_kickoff_right"] += 1
             continue
         if not link.at_legacy:
-            # a moved football-data row, or the ESPN row a copy was merged into
+            # a moved football-data row, or the row a copy was merged or folded into
             counts["corrected_slot_espn_row" if m["espn"] else "already_shifted"] += 1
+            continue
+        if m["id"] in planned_away:
+            counts["left_to_dedupe"] += 1
             continue
         target = link.corrected
         near = [
@@ -734,6 +1061,7 @@ def plan_shift(snap: Snapshot, links: dict[str, Link], counts: Counter) -> list[
             for x in snap.by_pair[(m["home_id"], m["away_id"])]
             if x is not m and abs(x["kickoff"] - target) <= NEAR_WINDOW
         ]
+        slot = alias_slot_rows(index, m, target, planned_away, snap.team_names)
         entry = {
             **_base_entry(snap, link),
             "match_id": m["id"],
@@ -743,6 +1071,7 @@ def plan_shift(snap: Snapshot, links: dict[str, Link], counts: Counter) -> list[
             "new_kickoff": _iso(target),
             "status": m["status"],
             "near_row_id": ";".join(x["id"] for x in near),
+            "alias_slot_row_id": ";".join(x["id"] for x in slot),
             "alias_twin_id": "",
             "old": m["kickoff"],
             "new": target,
@@ -763,14 +1092,48 @@ def plan_shift(snap: Snapshot, links: dict[str, Link], counts: Counter) -> list[
                 + (" (one on it: a UNIQUE collision)" if exact else "")
                 + f": {', '.join(x['status'] for x in near)} — --dedupe first, or inspect"
             )
+        elif slot:
+            names = ", ".join(
+                f"{x['id']} ({snap.team_names.get(x['home_id'], x['home_id'])} v "
+                f"{snap.team_names.get(x['away_id'], x['away_id'])}, {x['status']} {x['home_score']}-{x['away_score']})"
+                for x in slot
+            )
+            entry["reason"] = (
+                f"alias slot: the new kickoff is the exact kickoff of the same fixture under other team ids ({names}) "
+                "— unify the teams first (scripts/ops/merge_soccer_teams.sh, or re-point a row filed under the wrong "
+                "club), then re-run"
+            )
         else:
             entry["action"] = "shift"
-            twins = alias_twins(index, m, target)
-            if twins:
-                entry["alias_twin_id"] = ";".join(t["id"] for t in twins)
-                counts["shift_alias_twins"] += 1
-        counts[f"shift_{entry['action']}"] += 1
+            entry["alias_twin_id"] = ";".join(t["id"] for t in alias_twins(index, m, target))
         entries.append(entry)
+    # Two shifts onto one kickoff in one league that share a team: the same fixture twice in the raw table under
+    # two spellings of the other club. Neither moves.
+    by_slot: dict[tuple, list[dict]] = defaultdict(list)
+    for e in entries:
+        if e["action"] == "shift":
+            by_slot[(links[e["match_id"]].match["league_id"], e["new"])].append(e)
+    for group in by_slot.values():
+        for e in group:
+            row = links[e["match_id"]].match
+            mates = [
+                o
+                for o in group
+                if o is not e
+                and {links[o["match_id"]].match["home_id"], links[o["match_id"]].match["away_id"]}
+                & {row["home_id"], row["away_id"]}
+            ]
+            if mates:
+                e["action"] = "refuse"
+                e["alias_slot_row_id"] = ";".join(o["match_id"] for o in mates)
+                e["reason"] = (
+                    "alias slot: another football-data row sharing a team would shift onto the same kickoff "
+                    f"({e['alias_slot_row_id']}) — the same fixture twice in raw_football_data? inspect"
+                )
+    for e in entries:
+        counts[f"shift_{e['action']}"] += 1
+        if e["action"] == "shift" and e["alias_twin_id"]:
+            counts["shift_alias_twins"] += 1
     return entries
 
 
@@ -808,7 +1171,8 @@ def football_data_neighbours(snap: Snapshot, links: dict[str, Link]) -> tuple[li
     row)]) for each linked row without ESPN identity and each other row for
     its pair in window_rows. The first list is the duplicates; the second is
     stale fixture rows beside a result. Pure."""
-    finished, unfinished = [], []
+    finished: list[tuple[dict, dict]] = []
+    unfinished: list[tuple[dict, dict]] = []
     for link in links.values():
         if link.match["espn"]:
             continue
@@ -871,7 +1235,7 @@ def run_check(conn) -> int:
 
 def default_path(kind: str, suffix: str, base: Optional[str] = None) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
-    base = (base or os.environ.get("BACKUP_LOCAL_DIR", "/app/backups")).rstrip("/")
+    base = (base or os.environ.get("BACKUP_LOCAL_DIR") or "/app/backups").rstrip("/")
     return f"{base}/football_data_{kind}_{stamp}{suffix}"
 
 
@@ -886,8 +1250,8 @@ def write_csv(path: str, fields: tuple[str, ...], entries: list[dict]) -> None:
         w.writerows(entries)
 
 
-def assign_batches(entries: list[dict], action: str, size: int) -> list[list[dict]]:
-    todo = [e for e in entries if e["action"] == action]
+def assign_batches(entries: list[dict], actions: tuple[str, ...], size: int) -> list[list[dict]]:
+    todo = [e for e in entries if e["action"] in actions]
     batches = [todo[i : i + size] for i in range(0, len(todo), size)]
     for n, batch in enumerate(batches, 1):
         for e in batch:
@@ -895,27 +1259,51 @@ def assign_batches(entries: list[dict], action: str, size: int) -> list[list[dic
     return batches
 
 
-def plan_mismatch(planned: int, refused: int, expect_planned: Optional[int], expect_refused: Optional[int]) -> str:
-    """Why the plan is not the one the operator pinned, or ''."""
-    wrong = []
-    if expect_planned is not None and planned != expect_planned:
-        wrong.append(f"{planned} planned, expected {expect_planned}")
-    if expect_refused is not None and refused != expect_refused:
-        wrong.append(f"{refused} refused, expected {expect_refused}")
+def plan_counts(mode: str, entries: list[dict]) -> dict[str, int]:
+    """{action: rows} over PLAN_KEYS[mode], zeros included. Pure."""
+    by_action = Counter(e["action"] for e in entries)
+    return {k: by_action.get(k, 0) for k in PLAN_KEYS[mode]}
+
+
+def plan_mismatch(counts: dict[str, int], expect: Optional[dict[str, int]]) -> str:
+    """Why the plan is not the one the operator pinned, or ''. Pure."""
+    wrong = [
+        f"{counts.get(k, 0)} {k}, expected {n}" for k, n in sorted((expect or {}).items()) if counts.get(k, 0) != n
+    ]
     return "; ".join(wrong)
 
 
+def parse_expect_plan(text: str, mode: str) -> dict[str, int]:
+    """'merge=68,fold=26,refuse=0' -> {'merge': 68, 'fold': 26, 'refuse': 0}; ValueError on anything else."""
+    out: dict[str, int] = {}
+    for part in (p.strip() for p in text.split(",")):
+        key, sep, value = part.partition("=")
+        if not sep or key not in PLAN_KEYS[mode] or not value.isdigit() or key in out:
+            raise ValueError(f"--expect-plan {text!r}: want KEY=N pairs with KEY one of {', '.join(PLAN_KEYS[mode])}")
+        out[key] = int(value)
+    return out
+
+
 def _log_plan(
-    mode: str, planned: list[dict], refused: list[dict], batches: list, counts: Counter, out_csv: str, pinned: bool
+    mode: str,
+    planned: list[dict],
+    refused: list[dict],
+    batches: list,
+    counts: Counter,
+    out_csv: str,
+    pinned: bool,
 ) -> None:
     """The plan's summary; refusals at ERROR unless `pinned` (the operator expected exactly these many)."""
     log_refusal = logger.warning if pinned else logger.error
     by_league = dict(sorted(Counter(e["league"] for e in planned).items()))
     if mode == "dedupe":
+        merges = [e for e in planned if e["action"] == "merge"]
+        folds = [e for e in planned if e["action"] == "fold"]
         logger.info(
-            "Planned %d merge(s) in %d batch(es) %s: %d BST copies, offsets (copy - ESPN, min) %s, half-time to copy "
-            "%d, odds to move %d of %d, match_stats to move %d of %d; audit CSV %s",
-            len(planned),
+            "Planned %d merge(s) and %d fold(s) in %d batch(es) %s: %d BST copies, offsets (copy - kept row, min) "
+            "%s, half-time to copy %d, odds to move %d of %d, match_stats to move %d of %d; audit CSV %s",
+            len(merges),
+            len(folds),
             len(batches),
             by_league,
             sum(1 for e in planned if e["bst"]),
@@ -927,7 +1315,21 @@ def _log_plan(
             sum(e.get("copy_match_stats", 0) for e in planned),
             out_csv,
         )
-        for e in planned:
+        if folds:
+            recs: Counter = Counter()
+            for e in folds:
+                recs.update(json.loads(e.get("fold_recs_by_status") or "{}"))
+            logger.info(
+                "Folds: %d stale 'scheduled' rows take the copy's result and become 'finished' %s; on them %d "
+                "predictions (%d ungraded, 0 written after kickoff: the outcome trigger grades the pre-kickoff ones "
+                "it knows) and recommendations by status %s (none open: the trigger settles none)",
+                len(folds),
+                dict(sorted(Counter(e["league"] for e in folds).items())),
+                sum(e.get("fold_predictions", 0) for e in folds),
+                sum(e.get("fold_ungraded_predictions", 0) for e in folds),
+                dict(sorted(recs.items())),
+            )
+        for e in merges:
             if e["ht_action"] == "conflict_kept_espn":
                 logger.error(
                     "%s %s v %s: half-time differs (copy %s, ESPN row %s); keeping the ESPN row's",
@@ -939,11 +1341,13 @@ def _log_plan(
                 )
     else:
         logger.info(
-            "Planned %d shift(s) in %d batch(es) %s; %d land on a probable alias twin (alias_twin_id); audit CSV %s",
+            "Planned %d shift(s) in %d batch(es) %s; %d land on a probable alias twin (alias_twin_id); %d copies "
+            "--dedupe still merges or folds (not shifted; --shift --apply refuses until it has run); audit CSV %s",
             len(planned),
             len(batches),
             by_league,
             counts["shift_alias_twins"],
+            counts["dedupe_pending"],
             out_csv,
         )
     reasons = Counter(e["reason"].split(" (")[0].split(":")[0] for e in refused)
@@ -960,6 +1364,16 @@ def _log_plan(
         log_refusal("%d row(s) refused and left alone (all in the audit CSV): %s", len(refused), dict(reasons))
 
 
+def plan_dedupe_from_db(cur, snap: Snapshot, links: dict[str, Link], counts: Counter) -> tuple[list[dict], list]:
+    """(dedupe entries, FK tables to matches): plan_dedupe over what the
+    database says references each copy and each fold row."""
+    fk_tables = load_fk_tables(cur)
+    candidates = dedupe_candidates(snap, links, counts)
+    refs = load_refs(cur, fk_tables, [link.match["id"] for link, _nearby in candidates])
+    facts = load_fold_facts(cur, fold_fact_rows(candidates))
+    return plan_dedupe(snap, candidates, refs, guard_table_names(fk_tables), counts, facts), fk_tables
+
+
 def run(
     conn,
     mode: str,
@@ -967,8 +1381,7 @@ def run(
     out_csv: Optional[str] = None,
     archive_dir: Optional[str] = None,
     batch_size: Optional[int] = None,
-    expect_planned: Optional[int] = None,
-    expect_refused: Optional[int] = None,
+    expect_plan: Optional[dict[str, int]] = None,
 ) -> Counter:
     counts: Counter = Counter()
     fk_tables: list[FkTable] = []
@@ -976,13 +1389,14 @@ def run(
         snap = load_snapshot(cur)
         links = link_rows(snap, counts)
         if mode == "dedupe":
-            fk_tables = load_fk_tables(cur)
-            candidates = dedupe_candidates(snap, links, counts)
-            refs = load_refs(cur, fk_tables, [link.match["id"] for link, _nearby in candidates])
-            entries = plan_dedupe(snap, candidates, refs, guard_table_names(fk_tables), counts)
+            entries, fk_tables = plan_dedupe_from_db(cur, snap, links, counts)
             add_move_counts(cur, entries)
         else:
-            entries = plan_shift(snap, links, counts)
+            # what --dedupe would still merge or fold, so the shift plan is the one after it
+            pending, _fks = plan_dedupe_from_db(cur, snap, links, Counter())
+            planned_away = frozenset(e["copy_id"] for e in pending if e["action"] in ("merge", "fold"))
+            counts["dedupe_pending"] = len(planned_away)
+            entries = plan_shift(snap, links, counts, planned_away)
     conn.rollback()  # close the read snapshot before writing
     logger.info(
         "Loaded %d raw rows, %d soccer matches (db TimeZone %s); linked %d football-data rows",
@@ -992,32 +1406,54 @@ def run(
         len(links),
     )
 
-    action = "merge" if mode == "dedupe" else "shift"
-    batches = assign_batches(entries, action, batch_size or DEFAULT_BATCH_SIZE[mode])
-    planned = [e for e in entries if e["action"] == action]
+    batches = assign_batches(
+        entries, ("merge", "fold") if mode == "dedupe" else ("shift",), batch_size or DEFAULT_BATCH_SIZE[mode]
+    )
+    planned = [e for e in entries if e["action"] != "refuse"]
     refused = [e for e in entries if e["action"] == "refuse"]
     out_csv = out_csv or default_path(mode, ".csv", archive_dir)
     write_csv(out_csv, DEDUPE_FIELDS if mode == "dedupe" else SHIFT_FIELDS, entries)
+    plan = plan_counts(mode, entries)
     counts["planned"], counts["refused"] = len(planned), len(refused)
-    _log_plan(mode, planned, refused, batches, counts, out_csv, pinned=expect_refused == len(refused))
+    _log_plan(
+        mode, planned, refused, batches, counts, out_csv, pinned=(expect_plan or {}).get("refuse") == len(refused)
+    )
+    extra = f" dedupe_pending={counts['dedupe_pending']}" if mode == "shift" else ""
+    logger.info("PLAN mode=%s %s%s", mode, " ".join(f"{k}={v}" for k, v in plan.items()), extra)
 
-    mismatch = plan_mismatch(len(planned), len(refused), expect_planned, expect_refused)
+    mismatch = plan_mismatch(plan, expect_plan)
     if mismatch:
         counts["plan_mismatch"] = 1
         logger.error("The plan is not the one pinned (%s): nothing written; review the audit CSV", mismatch)
         return counts
-    counts["refused_unexpected"] = 0 if expect_refused is not None else len(refused)
+    counts["refused_unexpected"] = 0 if "refuse" in (expect_plan or {}) else len(refused)
     if not apply_changes:
         logger.info("DRY-RUN: re-run with --apply to write %d row(s)", len(planned))
         return counts
+    if mode == "shift" and counts["dedupe_pending"]:
+        counts["shift_blocked"] = 1
+        logger.error(
+            "Refusing to shift: --dedupe still plans to merge or fold %d copies — run it first (nothing written)",
+            counts["dedupe_pending"],
+        )
+        return counts
     if mode == "dedupe":
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
-        base = (archive_dir or os.environ.get("BACKUP_LOCAL_DIR", "/app/backups")).rstrip("/")
+        base = (archive_dir or os.environ.get("BACKUP_LOCAL_DIR") or "/app/backups").rstrip("/")
         for n, batch in enumerate(batches, 1):
             archive = Path(f"{base}/football_data_dedupe_{stamp}_b{n:03d}.jsonl.gz")
             done = apply_dedupe_batch(conn, batch, n, fk_tables, archive)
             counts.update(done)
-            logger.info("Batch %d/%d committed: %s; archive %s", n, len(batches), dict(done), archive)
+            logger.info("Batch %d/%d committed: %s; archive %s", n, len(batches), dict(sorted(done.items())), archive)
+        graded = {k.split(":", 1)[1]: v for k, v in counts.items() if k.startswith("trigger_graded:")}
+        if counts["folded"]:
+            logger.info(
+                "Folded %d stale rows; the outcome trigger graded %d of their predictions %s (other types stay "
+                "ungraded until grade_completed_matches.py --match-id runs on them)",
+                counts["folded"],
+                counts["trigger_graded_predictions"],
+                dict(sorted(graded.items())),
+            )
     else:
         for n, batch in enumerate(batches, 1):
             counts["shifted"] += apply_shift_batch(conn, batch, n)
@@ -1032,15 +1468,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     mode.add_argument("--shift", action="store_const", dest="mode", const="shift", help="Move BST kickoffs.")
     mode.add_argument("--check", action="store_const", dest="mode", const="check", help="Read-only after-state.")
     p.add_argument("--apply", action="store_true", help="Write (default: dry run).")
-    p.add_argument("--expect-planned", type=int, default=None, help="Write nothing unless exactly this many planned.")
-    p.add_argument("--expect-refused", type=int, default=None, help="Write nothing unless exactly this many refused.")
+    p.add_argument(
+        "--expect-plan",
+        default=None,
+        help="Write nothing unless the plan has exactly these counts: dedupe merge=N,fold=N,refuse=N; "
+        "shift shift=N,refuse=N (any subset).",
+    )
     p.add_argument("--out-csv", default=None, help="Audit CSV (default $BACKUP_LOCAL_DIR or /app/backups).")
     p.add_argument("--archive-dir", default=None, help="Archive/CSV dir (default $BACKUP_LOCAL_DIR or /app/backups).")
     p.add_argument("--batch-size", type=int, default=None, help="Rows per transaction (dedupe 100, shift 5000).")
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     args = p.parse_args(argv)
-    if args.mode == "check" and (args.apply or args.expect_planned is not None or args.expect_refused is not None):
+    if args.mode == "check" and (args.apply or args.expect_plan is not None):
         p.error("--check is read-only and plans nothing")
+    if args.expect_plan is not None:
+        try:
+            args.expect_plan = parse_expect_plan(args.expect_plan, args.mode)
+        except ValueError as e:
+            p.error(str(e))
     if args.batch_size is not None and args.batch_size < 1:
         p.error("--batch-size must be at least 1")
     return args
@@ -1062,14 +1507,13 @@ def main(argv: list[str] | None = None) -> int:
                 args.out_csv,
                 args.archive_dir,
                 args.batch_size,
-                args.expect_planned,
-                args.expect_refused,
+                args.expect_plan,
             )
         except PlanDrift as e:
             logger.error("Stopped, batch rolled back (earlier batches are committed; a re-run re-plans): %s", e)
             return 1
     logger.info("Done: %s", dict(sorted(counts.items())))
-    return 1 if counts["plan_mismatch"] or counts["refused_unexpected"] else 0
+    return 1 if counts["plan_mismatch"] or counts["refused_unexpected"] or counts["shift_blocked"] else 0
 
 
 if __name__ == "__main__":

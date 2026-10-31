@@ -8,6 +8,7 @@ placeholder and NOW() are translated."""
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 import re
 import sqlite3
@@ -136,20 +137,47 @@ class TestSeasonLabel:
         assert codes <= pr.CALENDAR_SEASON_LEAGUES, codes - pr.CALENDAR_SEASON_LEAGUES
 
 
+def _sqlite_ts(value):
+    """A timestamp as fixed-width UTC text, so SQLite compares it the way
+    Postgres compares timestamptz; anything else unchanged."""
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.strftime("%Y-%m-%dT%H:%M:%S.%f")
+    return value
+
+
 class _SqliteCursor:
-    """Just enough of a RealDictCursor over SQLite for insert_match and
-    update_existing_match (named %(x)s parameters become :x)."""
+    """Just enough of a RealDictCursor over SQLite for insert_match,
+    update_existing_match and find_existing_matches: named %(x)s parameters
+    become :x, '::text' casts go, "col->>'key'" becomes json_extract, and
+    timestamps travel as fixed-width UTC text and come back aware."""
 
     def __init__(self, conn: sqlite3.Connection):
         self._cur = conn.cursor()
 
     def execute(self, sql, params=()):
         sql = re.sub(r"%\((\w+)\)s", r":\1", sql).replace("%s", "?").replace("NOW()", "CURRENT_TIMESTAMP")
+        sql = re.sub(r"(\w+)->>'(\w+)'", r"json_extract(\1, '$.\2')", sql.replace("::text", ""))
+        if isinstance(params, dict):
+            params = {k: _sqlite_ts(v) for k, v in params.items()}
+        else:
+            params = tuple(_sqlite_ts(v) for v in params)
         self._cur.execute(sql, params)
+
+    def _dict(self, row):
+        out = dict(zip([d[0] for d in self._cur.description], row))
+        when = out.get("match_date")
+        if isinstance(when, str) and "T" in when:
+            out["match_date"] = datetime.fromisoformat(when).replace(tzinfo=timezone.utc)
+        return out
 
     def fetchone(self):
         row = self._cur.fetchone()
-        return None if row is None else {"id": row[0]}
+        return None if row is None else self._dict(row)
+
+    def fetchall(self):
+        return [self._dict(r) for r in self._cur.fetchall()]
 
 
 @pytest.fixture
@@ -162,7 +190,7 @@ def db():
             league_id TEXT, home_team_id TEXT, away_team_id TEXT, match_date TEXT,
             status TEXT CHECK (status IN ('scheduled', 'live', 'finished', 'postponed', 'cancelled')),
             home_score INTEGER, away_score INTEGER, half_time_home INTEGER, half_time_away INTEGER,
-            season TEXT, updated_at TEXT,
+            season TEXT, updated_at TEXT, external_ids TEXT DEFAULT '{}', metadata TEXT DEFAULT '{}',
             UNIQUE (home_team_id, away_team_id, match_date)
         )
         """
@@ -279,11 +307,11 @@ def promote_with(monkeypatch):
         rows,
         insert_returns="m-1",
         legacy_check=lambda cur, rows, league_ids, team_ids: None,
-        existing=lambda cur, home_id, away_id, match_dt, fixture_day: (None, None),
+        existing=lambda cur, home_id, away_id, match_dt, fixture_day: [],
     ):
         monkeypatch.setattr(pr.psycopg2, "connect", lambda url: _FakeConn(rows))
         monkeypatch.setattr(pr, "check_legacy_kickoffs", legacy_check)
-        monkeypatch.setattr(pr, "find_existing_match", existing)
+        monkeypatch.setattr(pr, "find_existing_matches", existing)
         monkeypatch.setattr(pr, "upsert_leagues", lambda cur, codes: {c: f"lg-{c}" for c in codes})
         monkeypatch.setattr(
             pr, "upsert_teams", lambda cur, names, by_team: {pr.normalize_team_name(n): f"t-{n}" for n in names}
@@ -413,10 +441,12 @@ class TestStrandedLegacyKickoffs:
     def test_a_row_already_moved_to_utc_is_fine(self):
         assert self._stranded([SUMMER], [_key(datetime(2025, 7, 5, 14, 0, tzinfo=UTC))]) == []
 
-    def test_a_legacy_row_beside_an_espn_twin_does_not_block(self):
-        # The upsert lands on the ESPN row; the old twin is the operator's job.
+    def test_a_legacy_row_beside_an_espn_twin_blocks_until_it_is_merged(self):
+        # promote() would write onto the ESPN row and leave the legacy copy beside it for good: a duplicate in the
+        # training corpus that only --dedupe merges (review finding, 2026-10-31).
         legacy, espn = datetime(2025, 7, 5, 15, 0, tzinfo=UTC), datetime(2025, 7, 5, 14, 0, tzinfo=UTC)
-        assert self._stranded([SUMMER], [_key(legacy), _key(espn)]) == []
+        assert self._stranded([SUMMER], [_key(legacy), _key(espn)]) == [SUMMER]
+        assert self._stranded([SUMMER], [_key(espn)]) == []  # merged: the copy is gone
 
     def test_date_only_unresolved_and_unfinished_rows_are_ignored(self):
         midnight = datetime(2025, 7, 5, 0, 0, tzinfo=UTC)
@@ -628,7 +658,7 @@ class TestWriteMatch:
 
         def existing(cur, home_id, away_id, match_dt, fixture_day):
             lookups.append((match_dt, fixture_day))
-            return existing_row, None
+            return [existing_row]
 
         def update(cur, row, result):
             updates.append((row["id"], result))
@@ -671,7 +701,7 @@ class TestWriteMatch:
     def test_an_ambiguous_pair_is_refused(self, promote_with, caplog):
         with caplog.at_level(logging.ERROR, logger="promote_raw"):
             stats, inserts = promote_with(
-                [SHANDONG], existing=lambda cur, h, a, dt, day: (None, "2 existing rows for this team pair")
+                [SHANDONG], existing=lambda cur, h, a, dt, day: [dict(ESPN_ROW), {**ESPN_ROW, "id": "other"}]
             )
         assert (stats.matches, stats.refused, inserts) == (0, 1, [])
         assert "merge them first" in caplog.text
@@ -688,3 +718,195 @@ class TestWriteMatch:
         assert pr.same_kickoff(datetime(2016, 8, 13, tzinfo=UTC), datetime(2016, 8, 13))
         assert not pr.same_kickoff(datetime(2016, 8, 13, 1, tzinfo=UTC), datetime(2016, 8, 13))
         assert pr.same_kickoff(datetime(2026, 7, 10, 13, 35, tzinfo=ZoneInfo("Europe/Paris")), ESPN_ROW["match_date"])
+
+
+# --- the existing-row lookup against SQLite: the real EXISTING_MATCH_SQL, choose_existing and the writes -----------
+
+
+def _put(db, when, home="h", away="a", status="finished", score=(None, None), ht=(None, None), espn_id=None, rs=None):
+    """A matches row; returns its id. `rs` is metadata.result_source."""
+    db.execute(
+        "INSERT INTO matches (league_id, home_team_id, away_team_id, match_date, status, home_score, away_score, "
+        "half_time_home, half_time_away, season, external_ids, metadata) "
+        "VALUES ('lg', ?, ?, ?, ?, ?, ?, ?, ?, 's', ?, ?)",
+        (
+            home,
+            away,
+            _sqlite_ts(when),
+            status,
+            *score,
+            *ht,
+            json.dumps({"espn": espn_id} if espn_id else {}),
+            json.dumps({"result_source": rs} if rs else {}),
+        ),
+    )
+    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def _rows(db):
+    return db.execute(
+        "SELECT id, home_team_id, away_team_id, match_date, status, home_score, away_score FROM matches ORDER BY id"
+    ).fetchall()
+
+
+def _fixture(date_, time_, ft=("2", "1"), home="Home", away="Away"):
+    teams = {"HomeTeam": home, "AwayTeam": away}
+    scores = {"FTHG": ft[0], "FTAG": ft[1], "HTHG": "", "HTAG": ""}
+    return {**NORMAL, "league": "MLS", "season": "2026", "Date": date_, "Time": time_, **teams, **scores}
+
+
+def _write(db, raw, home="h", away="a"):
+    stats = pr.Promotion()
+    match_id = pr.write_match(
+        _SqliteCursor(db),
+        stats,
+        raw,
+        league_id="lg",
+        home_id=home,
+        away_id=away,
+        match_dt=pr.parse_match_date(raw["Date"], raw["Time"]),
+        result=pr.raw_result(raw),
+    )
+    return match_id, stats
+
+
+def _lookup(db, when, day, home="h", away="a"):
+    return pr.find_existing_matches(_SqliteCursor(db), home, away, when, day)
+
+
+class TestFindExistingMatches:
+    """EXISTING_MATCH_SQL itself (the review found every promote() test faked it): team ids, both bounds, the
+    UK-date clamp, and which row choose_existing then picks."""
+
+    K = datetime(2026, 7, 10, 11, 35, tzinfo=UTC)
+
+    def test_only_the_same_home_and_away_ids_are_candidates(self, db):
+        mine = _put(db, self.K, score=(4, 3))
+        _put(db, self.K, home="h", away="other", score=(4, 3))
+        _put(db, self.K, home="a", away="h", score=(4, 3))  # the reverse fixture
+        assert [r["id"] for r in _lookup(db, self.K, date(2026, 7, 10))] == [mine]
+
+    def test_the_three_hour_bounds_are_inclusive_and_stop_there(self, db):
+        inside = [_put(db, self.K - timedelta(hours=3)), _put(db, self.K + timedelta(hours=3), away="a")]
+        _put(db, self.K - timedelta(hours=3, seconds=1), home="h", away="a", status="scheduled")
+        _put(db, self.K + timedelta(hours=3, minutes=1), home="h", away="a", status="scheduled")
+        assert sorted(r["id"] for r in _lookup(db, self.K, date(2026, 7, 10))) == sorted(inside)
+
+    def test_the_espn_row_is_chosen_over_football_datas_own(self, db):
+        _put(db, self.K + timedelta(hours=1), score=(4, 3))  # the 1 h late football-data copy
+        espn = _put(db, self.K, score=(4, 3), rs="espn_scoreboard")
+        row, why = pr.choose_existing(_lookup(db, self.K, date(2026, 7, 10)))
+        assert (row["id"], why) == (espn, None)
+        assert row["result_source"] == "espn_scoreboard" and row["match_date"] == self.K
+
+    def test_an_espn_competition_id_counts_too(self, db):
+        _put(db, self.K + timedelta(hours=1), score=(4, 3))
+        espn = _put(db, self.K, score=(4, 3), espn_id="747597")
+        row, _why = pr.choose_existing(_lookup(db, self.K, date(2026, 7, 10)))
+        assert (row["id"], row["espn_id"]) == (espn, "747597")
+
+    def test_a_legacy_row_on_the_next_uk_date_is_outside_the_window(self, db):
+        # 20/07/2026 23:30 UK = 22:30Z; the legacy row sits at 23:30Z, which is 00:30 on the 21st in the UK.
+        stale = _put(db, datetime(2026, 7, 20, 22, 30, tzinfo=UTC), status="scheduled")
+        _put(db, datetime(2026, 7, 20, 23, 30, tzinfo=UTC), score=(2, 1))
+        got = _lookup(db, pr.parse_match_date("20/07/2026", "23:30"), date(2026, 7, 20))
+        assert [r["id"] for r in got] == [stale]
+
+
+class TestStaleFixtureRows:
+    """A stale fixture row (unfinished, no ESPN identity: pre-migration 023) is never finished by promote_raw:
+    the outcome trigger would grade its predictions and settle its recs (review finding, 2026-10-31)."""
+
+    def test_update_existing_match_refuses_and_writes_nothing(self, db):
+        row_id = _put(db, datetime(2026, 7, 20, 22, 30, tzinfo=UTC), status="scheduled")
+        (existing,) = _lookup(db, datetime(2026, 7, 20, 22, 30, tzinfo=UTC), date(2026, 7, 20))
+        assert pr.update_existing_match(_SqliteCursor(db), existing, _result()) == (None, "stale_fixture")
+        assert _rows(db)[0][0] == row_id and _rows(db)[0][4:] == ("scheduled", None, None)
+
+    def test_the_late_evening_bst_case_is_refused_not_finished(self, db, monkeypatch, caplog):
+        # The reviewer's reproduction: 20/07/2026 23:30 UK. The window [19:30Z, 22:59:59Z] holds only the stale
+        # row at the corrected kickoff (22:30Z); the never-shifted legacy copy (23:30Z) is on the next UK date.
+        stale = _put(db, datetime(2026, 7, 20, 22, 30, tzinfo=UTC), status="scheduled")
+        copy = _put(db, datetime(2026, 7, 20, 23, 30, tzinfo=UTC), score=(2, 1))
+        with caplog.at_level(logging.ERROR, logger="promote_raw"):
+            match_id, stats = _write(db, _fixture("20/07/2026", "23:30"))
+        assert (match_id, stats.refused, stats.matches) == (None, 1, 0)
+        assert "fixture row without ESPN identity" in caplog.text
+        assert [(r[0], r[4], r[5]) for r in _rows(db)] == [(stale, "scheduled", None), (copy, "finished", 2)]
+        monkeypatch.setattr(pr, "promote", lambda url, batch_size: stats)
+        assert pr.main(["--database-url", "postgres://fake"]) == pr.REFUSED_EXIT_CODE
+
+    def test_a_scheduled_espn_row_still_takes_the_result(self, db):
+        espn = _put(db, datetime(2026, 7, 20, 22, 30, tzinfo=UTC), status="scheduled", espn_id="747597")
+        match_id, stats = _write(db, _fixture("20/07/2026", "23:30"))
+        assert (match_id, stats.refused) == (espn, 0) and _rows(db)[0][4:] == ("finished", 2, 1)
+
+    def test_a_finished_football_data_row_beats_a_stale_one(self, db):
+        _put(db, datetime(2026, 7, 10, 11, 0, tzinfo=UTC), status="scheduled")
+        fd = _put(db, datetime(2026, 7, 10, 11, 35, tzinfo=UTC), score=(2, 1))
+        match_id, stats = _write(db, _fixture("10/07/2026", "12:35"))
+        assert (match_id, stats.refused) == (fd, 0)
+
+
+class TestDuplicatesBeside:
+    """Writing onto the ESPN row while football-data's own finished row for the pair sits beside it is a duplicate
+    in the corpus: logged at ERROR, counted, exit 3 (review finding, 2026-10-31)."""
+
+    def test_written_onto_the_espn_row_and_reported(self, db, monkeypatch, caplog):
+        espn = _put(db, datetime(2026, 7, 10, 11, 35, tzinfo=UTC), score=(2, 1), rs="espn_scoreboard")
+        copy = _put(db, datetime(2026, 7, 10, 12, 35, tzinfo=UTC), score=(2, 1))
+        with caplog.at_level(logging.ERROR, logger="promote_raw"):
+            match_id, stats = _write(db, _fixture("10/07/2026", "12:35"))
+        assert (match_id, stats.duplicates, stats.refused) == (espn, 1, 0)
+        assert f"sit beside it ({copy} at" in caplog.text and "--dedupe" in caplog.text
+        monkeypatch.setattr(pr, "promote", lambda url, batch_size: stats)
+        assert pr.main(["--database-url", "postgres://fake"]) == pr.REFUSED_EXIT_CODE
+
+    def test_a_stale_row_beside_the_espn_row_is_not_a_duplicate(self, db):
+        _put(db, datetime(2026, 7, 10, 11, 0, tzinfo=UTC), status="scheduled")
+        espn = _put(db, datetime(2026, 7, 10, 11, 35, tzinfo=UTC), score=(2, 1), rs="espn_scoreboard")
+        match_id, stats = _write(db, _fixture("10/07/2026", "12:35"))
+        assert (match_id, stats.duplicates) == (espn, 0)
+
+    def test_only_an_espn_row_can_have_duplicates_beside_it(self):
+        fd, other = _cand("fd"), _cand("other")
+        assert pr.duplicates_beside(fd, [fd, other]) == []
+        espn = _cand("espn", espn_id="1")
+        assert pr.duplicates_beside(espn, [espn, fd, _cand("stale", status="scheduled")]) == [fd]
+
+
+# The team merge (scripts/merge_soccer_teams.py, run before the kickoff repair) deletes about 171 football-data rows
+# whose ESPN twin survives, re-pointing that twin onto the football-data team ids. The raw rows stay, and every
+# promote_raw run re-promotes the whole table: these are the prod pairs whose ESPN kickoff is NOT the corrected
+# football-data one (dup_pairs_alias_160, 2026-10-31), where an exact-key upsert would insert the copy again.
+AFTER_MERGE = [
+    # (raw Date, raw Time, ESPN kickoff, score): Orlando City v Nashville SC, Inter Miami v Columbus Crew, Club Leon v
+    # Pachuca; and the usual case, ESPN exactly on the corrected kickoff.
+    ("26/07/2026", "00:30", datetime(2026, 7, 26, 0, 46, tzinfo=UTC), ("1", "0")),
+    ("02/08/2026", "00:30", datetime(2026, 8, 2, 0, 10, tzinfo=UTC), ("2", "2")),
+    ("02/08/2026", "02:00", datetime(2026, 8, 2, 1, 6, tzinfo=UTC), ("1", "0")),
+    ("10/07/2026", "12:35", datetime(2026, 7, 10, 11, 35, tzinfo=UTC), ("4", "3")),
+]
+
+
+class TestAfterTheTeamMerge:
+    @pytest.mark.parametrize("raw_date, raw_time, espn_kickoff, ft", AFTER_MERGE)
+    def test_the_dropped_copy_is_not_inserted_again(self, db, raw_date, raw_time, espn_kickoff, ft):
+        score = (int(ft[0]), int(ft[1]))
+        espn = _put(db, espn_kickoff, home="old-h", away="old-a", score=score, rs="espn_scoreboard")
+        match_id, stats = _write(db, _fixture(raw_date, raw_time, ft), home="old-h", away="old-a")
+        assert (match_id, stats.matches, stats.refused, stats.duplicates) == (espn, 0, 0, 0)
+        corrected = pr.parse_match_date(raw_date, raw_time)
+        assert stats.merged == (corrected != espn_kickoff)
+        assert [(r[0], r[3], r[5], r[6]) for r in _rows(db)] == [(espn, _sqlite_ts(espn_kickoff), *score)]
+
+    @pytest.mark.parametrize("raw_date, raw_time, espn_kickoff, ft", AFTER_MERGE)
+    def test_promote_raw_is_not_blocked_by_them(self, raw_date, raw_time, espn_kickoff, ft):
+        raw = {**_fixture(raw_date, raw_time, ft), "league": "F2", "HomeTeam": "Bastia", "AwayTeam": "Red Star"}
+        assert pr.stranded_legacy_kickoffs([raw], LEAGUE_IDS, TEAM_IDS, {_key(espn_kickoff)}, UTC) == []
+
+    def test_an_espn_score_that_disagrees_is_refused_not_duplicated(self, db):
+        espn = _put(db, AFTER_MERGE[0][2], home="old-h", away="old-a", score=(0, 0), rs="espn_scoreboard")
+        match_id, stats = _write(db, _fixture("26/07/2026", "00:30", ("1", "0")), home="old-h", away="old-a")
+        assert (match_id, stats.refused) == (None, 1)
+        assert [(r[0], r[5], r[6]) for r in _rows(db)] == [(espn, 0, 0)]

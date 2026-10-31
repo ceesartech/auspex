@@ -10,6 +10,7 @@ import csv
 import gzip
 import importlib.util
 import json
+import logging
 import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -110,18 +111,28 @@ ESPN = _m("e77e612a", _t(2026, 7, 10, 11, 35), ht=(3, 1), result_source="espn_sc
 SHANDONG = _raw()
 
 
-def _plan_dedupe(raw_rows, matches, refs=None, guards=("predictions", "betting_recommendations")):
+def _facts(open_recs=0, post_kickoff_predictions=0, predictions=30, ungraded=30, recs=None):
+    return {
+        "open_recs": open_recs,
+        "post_kickoff_predictions": post_kickoff_predictions,
+        "predictions": predictions,
+        "ungraded_predictions": ungraded,
+        "recs_by_status": recs if recs is not None else {"void": 1},
+    }
+
+
+def _plan_dedupe(raw_rows, matches, refs=None, guards=("predictions", "betting_recommendations"), facts=None):
     snap = _snap(raw_rows, matches)
     counts: Counter = Counter()
     links = rfk.link_rows(snap, counts)
     candidates = rfk.dedupe_candidates(snap, links, counts)
-    return rfk.plan_dedupe(snap, candidates, refs or {}, guards, counts), counts
+    return rfk.plan_dedupe(snap, candidates, refs or {}, guards, counts, facts), counts
 
 
-def _plan_shift(raw_rows, matches, db_tz=UTC):
+def _plan_shift(raw_rows, matches, db_tz=UTC, planned_away=frozenset()):
     snap = _snap(raw_rows, matches, db_tz)
     counts: Counter = Counter()
-    return rfk.plan_shift(snap, rfk.link_rows(snap, counts), counts), counts
+    return rfk.plan_shift(snap, rfk.link_rows(snap, counts), counts, planned_away), counts
 
 
 class TestLinkRows:
@@ -203,10 +214,10 @@ class TestPlanDedupe:
         (entry,), _ = _plan_dedupe([raw], [copy, stale, espn])
         assert (entry["action"], entry["espn_row_id"], entry["offset_min"]) == ("merge", "a88486bc", "-76")
 
-    def test_only_a_stale_fixture_row_nearby_is_refused(self):
+    def test_without_fold_facts_a_stale_row_is_refused(self):
         stale = _m("stale", _t(2026, 7, 10, 11, 35), status="scheduled", score=(None, None))
         (entry,), _ = _plan_dedupe([SHANDONG], [stale, COPY])
-        assert entry["action"] == "refuse" and "repair_fixture_orphans" in entry["reason"]
+        assert entry["action"] == "refuse" and "no fold facts" in entry["reason"]
 
     def test_two_football_data_rows_are_refused(self):
         other = _m("other", _t(2026, 7, 10, 11, 35))
@@ -316,14 +327,14 @@ class TestPlanShift:
         (entry,), _ = _plan_shift([SHANDONG], [{**COPY, "home_score": 0}])
         assert entry["action"] == "refuse" and "edited since" in entry["reason"]
 
-    def test_a_probable_alias_twin_is_shifted_and_listed(self):
-        # Mjallby v AIK shape: ESPN filed the fixture under its own team rows, same league, kickoff and score.
-        alias = _m("alias", _t(2026, 7, 10, 11, 35), home="t-wuh", result_source="espn_scoreboard")
+    def test_a_probable_alias_twin_minutes_away_is_shifted_and_listed(self):
+        # ESPN filed the fixture under its own team rows, same league and score, kicking off 5 min later.
+        alias = _m("alias", _t(2026, 7, 10, 11, 40), home="t-wuh", result_source="espn_scoreboard")
         (entry,), counts = _plan_shift([SHANDONG], [COPY, alias])
         assert (entry["action"], entry["alias_twin_id"], counts["shift_alias_twins"]) == ("shift", "alias", 1)
 
     def test_another_score_is_not_an_alias_twin(self):
-        other = _m("other", _t(2026, 7, 10, 11, 35), home="t-wuh", score=(0, 0), result_source="espn_scoreboard")
+        other = _m("other", _t(2026, 7, 10, 11, 40), home="t-wuh", score=(0, 0), result_source="espn_scoreboard")
         (entry,), _ = _plan_shift([SHANDONG], [COPY, other])
         assert entry["alias_twin_id"] == ""
 
@@ -410,19 +421,29 @@ class _Cur:
         self.conn.log.append(("execute", sql.split()[0], sql))
         if "FOR UPDATE" in sql:
             self._rows = self.conn.locked
+        elif "open_recs" in sql:
+            self._rows = [{"id": i, **f} for i, f in self.conn.facts.items() if i in params[0]]
+        elif "is_correct IS NOT NULL" in sql:
+            self._rows = self.conn.graded.pop(0)
         elif "row_to_json" in sql:
             self._rows = [{"match_id": "90455957", "data": {"id": "x"}}]
         elif sql.lstrip().startswith("UPDATE matches"):
             self.conn.writes_after_archive.append(self.conn.archive_exists())
-            self.rowcount = self.conn.ht_rowcount
+            if "result_adopted_from" in sql:
+                self.conn.folds.append(params)
+                self.rowcount = self.conn.fold_rowcount
+            else:
+                self.rowcount = self.conn.ht_rowcount
 
     def fetchall(self):
         return self._rows
 
 
 class _Conn:
-    def __init__(self, locked=(), ht_rowcount=1, archive=None):
+    def __init__(self, locked=(), ht_rowcount=1, archive=None, facts=None, graded=None, fold_rowcount=1):
         self.locked, self.ht_rowcount, self.archive = list(locked), ht_rowcount, archive
+        self.facts, self.graded, self.fold_rowcount = facts or {}, list(graded or []), fold_rowcount
+        self.folds: list = []
         self.log: list = []
         self.writes_after_archive: list[bool] = []
         self.committed = self.rolled_back = 0
@@ -568,9 +589,13 @@ def offline(monkeypatch):
     """run() over an in-memory snapshot; records the apply calls."""
     state = {"snap": None, "applied": []}
 
+    state["facts"] = {}
     monkeypatch.setattr(rfk, "load_snapshot", lambda cur: state["snap"])
     monkeypatch.setattr(rfk, "load_fk_tables", lambda cur: FKS)
     monkeypatch.setattr(rfk, "load_refs", lambda cur, fks, ids: {})
+    monkeypatch.setattr(
+        rfk, "load_fold_facts", lambda cur, ids: {i: state["facts"][i] for i in ids if i in state["facts"]}
+    )
     monkeypatch.setattr(rfk, "add_move_counts", lambda cur, entries: None)
     monkeypatch.setattr(
         rfk,
@@ -613,18 +638,20 @@ class TestRun:
 
     def test_a_plan_that_is_not_the_pinned_one_writes_nothing(self, offline, tmp_path, caplog):
         offline["snap"] = _snap([SHANDONG], [dict(COPY), dict(ESPN)])
-        counts = rfk.run(_Conn(), "dedupe", True, out_csv=str(tmp_path / "d.csv"), expect_planned=68)
+        counts = rfk.run(_Conn(), "dedupe", True, out_csv=str(tmp_path / "d.csv"), expect_plan={"merge": 68})
         assert counts["plan_mismatch"] == 1 and offline["applied"] == []
-        assert "1 planned, expected 68" in caplog.text and (tmp_path / "d.csv").exists()
+        assert "1 merge, expected 68" in caplog.text and (tmp_path / "d.csv").exists()
 
     def test_pinned_refusals_are_accepted(self, offline, tmp_path):
         stale = _m("stale", _t(2026, 7, 10, 11, 35), status="scheduled", score=(None, None))
         offline["snap"] = _snap([SHANDONG], [dict(COPY), stale])
-        counts = rfk.run(_Conn(), "dedupe", True, out_csv=str(tmp_path / "d.csv"), expect_planned=0, expect_refused=1)
+        offline["facts"] = {"stale": _facts(open_recs=1)}
+        pin = {"merge": 0, "fold": 0, "refuse": 1}
+        counts = rfk.run(_Conn(), "dedupe", True, out_csv=str(tmp_path / "d.csv"), expect_plan=pin)
         assert (counts["refused"], counts["refused_unexpected"], counts["plan_mismatch"]) == (1, 0, 0)
 
     def test_unpinned_refusals_count_against_the_exit(self, offline, tmp_path):
-        offline["snap"] = _snap([SHANDONG], [dict(COPY), dict(ESPN)])
+        offline["snap"] = _snap([SHANDONG], [dict(COPY), {**ESPN, "home_score": 0}])  # not a merge: scores differ
         counts = rfk.run(_Conn(), "shift", False, out_csv=str(tmp_path / "s.csv"))
         assert counts["refused_unexpected"] == 1  # the ESPN row sits on the corrected slot
 
@@ -662,6 +689,7 @@ class TestMain:
             (Counter(planned=3, refused=2, refused_unexpected=2), 1),
             (Counter(planned=3, refused=2), 0),
             (Counter(plan_mismatch=1), 1),
+            (Counter(planned=3, shift_blocked=1), 1),
         ],
     )
     def test_exit_codes(self, monkeypatch, counts, code):
@@ -673,7 +701,23 @@ class TestMain:
         with pytest.raises(SystemExit):
             rfk.parse_args(["--check", "--apply"])
         with pytest.raises(SystemExit):
-            rfk.parse_args(["--check", "--expect-planned", "1"])
+            rfk.parse_args(["--check", "--expect-plan", "shift=1"])
+
+    def test_expect_plan_is_parsed_per_mode(self):
+        args = rfk.parse_args(["--dedupe", "--expect-plan", "merge=68,fold=26,refuse=0"])
+        assert args.expect_plan == {"merge": 68, "fold": 26, "refuse": 0}
+        assert rfk.parse_args(["--shift", "--expect-plan", "shift=63533,refuse=0"]).expect_plan == {
+            "shift": 63533,
+            "refuse": 0,
+        }
+        for mode, pin in (
+            ("--shift", "merge=1"),
+            ("--dedupe", "merge=x"),
+            ("--dedupe", "merge=1,merge=2"),
+            ("--dedupe", "68"),
+        ):
+            with pytest.raises(SystemExit):
+                rfk.parse_args([mode, "--expect-plan", pin])
 
     def test_one_mode_at_a_time(self):
         with pytest.raises(SystemExit):
@@ -684,3 +728,291 @@ class TestMain:
     def test_no_database_url_exits_2(self, monkeypatch):
         monkeypatch.delenv("DATABASE_URL", raising=False)
         assert rfk.main(["--check", "--database-url", ""]) == 2
+
+
+# --- the fold: a copy beside a stale 'scheduled' row at exactly its corrected kickoff ------------------------------
+
+# Liaoning Tieren v Shanghai Port (CN1), prod 2026-10-31: the stale pre-023 fixture row sits at 11:35Z, the
+# football-data copy at 12:35Z (its legacy kickoff); 31 recs on the 26 such rows, all 'void', 810 predictions.
+STALE = _m("stale", _t(2026, 7, 10, 11, 35), status="scheduled", score=(None, None))
+
+
+class TestFoldPlan:
+    def test_the_copy_folds_into_the_stale_row(self):
+        (entry,), counts = _plan_dedupe([SHANDONG], [STALE, COPY], facts={"stale": _facts(recs={"void": 2})})
+        assert (entry["action"], entry["copy_id"], entry["espn_row_id"]) == ("fold", "90455957", "stale")
+        assert (entry["ht_action"], entry["ht_write"], counts["dedupe_fold"]) == ("none_on_copy", None, 1)
+        assert json.loads(entry["fold_recs_by_status"]) == {"void": 2} and entry["fold_open_recs"] == 0
+
+    def test_the_copys_half_time_goes_on_whole_and_within_its_final(self):
+        copy = {**COPY, "half_time_home": 2, "half_time_away": 1}
+        (entry,), _ = _plan_dedupe([SHANDONG], [STALE, copy], facts={"stale": _facts()})
+        assert (entry["action"], entry["ht_write"]) == ("fold", (2, 1))
+        bad = {**COPY, "half_time_home": 5, "half_time_away": 1}
+        (entry,), _ = _plan_dedupe([SHANDONG], [STALE, bad], facts={"stale": _facts()})
+        assert (entry["action"], entry["ht_action"], entry["ht_write"]) == ("fold", "exceeds_espn_final", None)
+
+    @pytest.mark.parametrize(
+        "stale, facts, why",
+        [
+            (STALE, _facts(open_recs=1), "pending/placed recommendation"),
+            (STALE, _facts(post_kickoff_predictions=3), "written after its kickoff"),
+            ({**STALE, "match_date": _t(2026, 7, 10, 11, 0)}, _facts(), "not on the corrected kickoff"),
+            ({**STALE, "home_score": 0, "away_score": 0}, _facts(), "carries a score"),
+            ({**STALE, "status": "postponed"}, _facts(), "'postponed' row without ESPN identity"),
+        ],
+    )
+    def test_refused(self, stale, facts, why):
+        (entry,), _ = _plan_dedupe([SHANDONG], [stale, COPY], facts={"stale": facts})
+        assert entry["action"] == "refuse" and why in entry["reason"]
+
+    def test_a_copy_whose_score_was_edited_is_never_folded(self):
+        (entry,), _ = _plan_dedupe([SHANDONG], [STALE, {**COPY, "home_score": 5}], facts={"stale": _facts()})
+        assert entry["action"] == "refuse" and "not its raw row's [(4, 3)]" in entry["reason"]
+
+    def test_a_copy_with_predictions_is_never_folded(self):
+        refs = {"90455957": {"predictions": 1}}
+        (entry,), _ = _plan_dedupe([SHANDONG], [STALE, COPY], refs=refs, facts={"stale": _facts()})
+        assert entry["action"] == "refuse" and entry["reason"] == "copy referenced by predictions (1)"
+
+    def test_a_stale_row_wanted_by_two_copies_is_refused(self):
+        copy2 = {**COPY, "id": "copy2", "match_date": _t(2026, 7, 10, 12, 40)}
+        entries, _ = _plan_dedupe([SHANDONG, _raw(time="12:40")], [STALE, COPY, copy2], facts={"stale": _facts()})
+        assert [e["action"] for e in entries] == ["refuse", "refuse"]
+
+    def test_facts_are_read_only_for_stale_rows(self):
+        snap = _snap([SHANDONG], [STALE, COPY])
+        cands = rfk.dedupe_candidates(snap, rfk.link_rows(snap, Counter()), Counter())
+        assert rfk.fold_fact_rows(cands) == ["stale"]
+        snap = _snap([SHANDONG], [COPY, ESPN])
+        assert rfk.fold_fact_rows(rfk.dedupe_candidates(snap, rfk.link_rows(snap, Counter()), Counter())) == []
+
+    def test_after_the_fold_nothing_is_planned_again(self):
+        folded = {**STALE, "status": "finished", "home_score": 4, "away_score": 3}
+        assert _plan_dedupe([SHANDONG], [folded], facts={"stale": _facts()})[0] == []
+        entries, counts = _plan_shift([SHANDONG], [folded])
+        assert entries == [] and counts["already_shifted"] == 1
+
+
+def _fold_entry(ht_write=None):
+    copy = {**COPY, "kickoff": COPY["match_date"]}
+    twin = {**STALE, "kickoff": STALE["match_date"]}
+    return {
+        "copy_id": copy["id"],
+        "copy": copy,
+        "twin": twin,
+        "home_score": 4,
+        "away_score": 3,
+        "ht_write": ht_write,
+        "action": "fold",
+    }
+
+
+class TestApplyFold:
+    def _conn(self, entry, tmp_path, **kw):
+        kw.setdefault("facts", {"stale": _facts()})
+        kw.setdefault("graded", [[], [{"prediction_type": "match_result", "graded": 2}]])
+        return _Conn(locked=_locked(entry), archive=tmp_path / "a.jsonl.gz", **kw)
+
+    def test_archives_first_then_finishes_the_stale_row_and_deletes_the_copy(self, tmp_path, fake_values):
+        entry = _fold_entry(ht_write=(2, 1))
+        conn = self._conn(entry, tmp_path)
+        fake_values["returns"] = {"DELETE": [{"id": "90455957"}]}
+        done = rfk.apply_dedupe_batch(conn, [entry], 1, FKS, tmp_path / "a.jsonl.gz")
+        assert (done["folded"], done["fold_ht_copied"], done["copies_deleted"], conn.committed) == (1, 1, 1, 1)
+        assert (done["trigger_graded_predictions"], done["trigger_graded:match_result"]) == (2, 2)
+        assert all(conn.writes_after_archive)
+        (params,) = conn.folds
+        assert params == {
+            "id": "stale",
+            "kickoff": STALE["match_date"],
+            "home": 4,
+            "away": 3,
+            "ht_home": 2,
+            "ht_away": 1,
+            "copy_id": "90455957",
+        }
+        roles = {(r["table"], r["role"]) for r in map(json.loads, gzip.open(tmp_path / "a.jsonl.gz", "rt"))}
+        assert {("matches", "fold_row_before"), ("predictions", "fold_row_before")} <= roles
+        assert ("betting_recommendations", "fold_row_before") in roles
+
+    def test_a_rec_that_appeared_rolls_back_before_anything_is_written(self, tmp_path, fake_values):
+        entry = _fold_entry()
+        conn = self._conn(entry, tmp_path, facts={"stale": _facts(open_recs=1)})
+        with pytest.raises(rfk.PlanDrift, match="gained 1 open rec"):
+            rfk.apply_dedupe_batch(conn, [entry], 1, FKS, tmp_path / "a.jsonl.gz")
+        assert conn.rolled_back == 1 and not conn.committed and not (tmp_path / "a.jsonl.gz").exists()
+        assert fake_values["calls"] == [] and conn.folds == []
+
+    def test_a_guard_miss_on_the_flip_rolls_back(self, tmp_path, fake_values):
+        entry = _fold_entry()
+        conn = self._conn(entry, tmp_path, fold_rowcount=0)
+        with pytest.raises(rfk.PlanDrift, match="fold row stale changed"):
+            rfk.apply_dedupe_batch(conn, [entry], 1, FKS, tmp_path / "a.jsonl.gz")
+        assert conn.rolled_back == 1 and not conn.committed
+
+
+class TestFoldSql:
+    def test_the_flip_is_guarded_on_everything_the_trigger_depends_on(self):
+        for clause in (
+            "m.status = 'scheduled' AND m.match_date = %(kickoff)s",
+            "m.home_score IS NULL AND m.away_score IS NULL",
+            "m.half_time_home IS NULL AND m.half_time_away IS NULL",
+            "m.external_ids->>'espn' IS NULL",
+            "br.status IN ('pending', 'placed')",
+            "br.prediction_id IN (SELECT p.id FROM predictions p WHERE p.match_id = m.id)",
+            "p.created_at > m.match_date",
+        ):
+            assert clause in rfk.FOLD_SQL
+        assert "status = 'finished'" in rfk.FOLD_SQL
+
+    def test_the_facts_count_open_recs_through_predictions_and_post_kickoff_predictions(self):
+        assert "br.prediction_id IN (SELECT p.id FROM predictions p WHERE p.match_id = m.id)" in rfk.FOLD_FACTS_SQL
+        assert "p.created_at > m.match_date" in rfk.FOLD_FACTS_SQL  # migration 027's prediction rule
+
+
+# --- --shift never puts a row on the exact kickoff of the same fixture under other team ids ----------------------
+
+
+class TestAliasSlot:
+    def test_a_row_sharing_a_team_at_the_new_kickoff_blocks_the_shift(self):
+        # Monterrey v Santos Laguna (MX1): ESPN filed it under Monterrey v Santos (the Brazilian club's row).
+        alias = _m("alias", _t(2026, 7, 10, 11, 35), home="t-sha", away="t-wuh", result_source="espn_scoreboard")
+        (entry,), counts = _plan_shift([SHANDONG], [COPY, alias])
+        assert (entry["action"], entry["alias_slot_row_id"]) == ("refuse", "alias")
+        assert entry["reason"].startswith("alias slot") and counts["shift_refuse"] == 1
+
+    def test_an_espn_row_with_the_same_score_and_club_names_blocks_it(self):
+        alias = _m("alias", _t(2026, 7, 10, 11, 35), home="t-sha2", away="t-yun2", result_source="espn_scoreboard")
+        snap = _snap([SHANDONG], [COPY, alias])
+        snap.team_names.update({"t-sha2": "Shandong Taishan FC", "t-yun2": "Yunnan Yukun FC"})
+        (entry,) = rfk.plan_shift(snap, rfk.link_rows(snap, Counter()), Counter())
+        assert (entry["action"], entry["alias_slot_row_id"]) == ("refuse", "alias")
+
+    def test_another_fixture_with_the_same_score_does_not(self):
+        # Inter Miami v Columbus Crew 2-2 (MLS, 2026-08-01 23:30Z) beside DC United v Nashville SC 2-2 at the same
+        # kickoff: same league, kickoff and score, but no club in common and nothing alike in the names.
+        other = _m("other", _t(2026, 7, 10, 11, 35), home="t-ars", away="t-che", result_source="espn_scoreboard")
+        (entry,), _ = _plan_shift([SHANDONG], [COPY, other])
+        assert (entry["action"], entry["alias_slot_row_id"]) == ("shift", "")
+
+    def test_a_row_dedupe_will_remove_does_not_count(self):
+        alias = _m("alias", _t(2026, 7, 10, 11, 35), home="t-sha", away="t-wuh")
+        (entry,), _ = _plan_shift([SHANDONG], [COPY, alias], planned_away=frozenset({"alias"}))
+        assert entry["action"] == "shift"
+
+    def test_two_football_data_rows_sharing_a_team_onto_one_kickoff_both_stay(self):
+        other_raw = _raw(home="Shandong Taishan", away="Wuhan Three Towns")
+        other = _m("other", _t(2026, 7, 10, 12, 35), home="t-sha", away="t-wuh")
+        entries, counts = _plan_shift([SHANDONG, other_raw], [COPY, other])
+        assert [e["action"] for e in entries] == ["refuse", "refuse"] and counts["shift_shift"] == 0
+        assert {e["alias_slot_row_id"] for e in entries} == {"90455957", "other"}
+
+    def test_a_copy_dedupe_still_plans_is_left_to_it(self):
+        entries, counts = _plan_shift([SHANDONG], [COPY, ESPN], planned_away=frozenset({"90455957"}))
+        assert entries == [] and counts["left_to_dedupe"] == 1
+
+    @pytest.mark.parametrize(
+        "a, b, same",
+        [
+            ("Hacken", "BK Häcken", True),
+            ("Inter Miami", "Inter Miami CF", True),
+            ("Santos Laguna", "Santos", True),
+            ("Man City", "Manchester City", True),
+            ("Inter Miami", "DC United", False),
+            ("Columbus Crew", "Nashville SC", False),
+            ("San Diego FC", "San Jose Earthquakes", False),
+            ("Atlanta United FC", "Minnesota United", False),
+        ],
+    )
+    def test_same_club_name(self, a, b, same):
+        assert rfk.same_club_name(a, b) is same
+
+
+class TestRunShiftAfterDedupe:
+    def test_shift_apply_refuses_while_dedupe_has_work(self, offline, tmp_path, caplog):
+        caplog.set_level(logging.INFO, logger="repair_football_data_kickoffs")
+        offline["snap"] = _snap(
+            [SHANDONG, _raw(date="11/07/2026")], [dict(COPY), dict(ESPN), _m("c2", _t(2026, 7, 11, 12, 35))]
+        )
+        counts = rfk.run(_Conn(), "shift", True, out_csv=str(tmp_path / "s.csv"))
+        assert (counts["dedupe_pending"], counts["shift_blocked"], offline["applied"]) == (1, 1, [])
+        assert "PLAN mode=shift shift=1 refuse=0 dedupe_pending=1" in caplog.text
+        assert "Refusing to shift: --dedupe still plans to merge or fold 1 copies" in caplog.text
+
+    def test_the_plan_line_counts_every_action(self, offline, tmp_path, caplog):
+        caplog.set_level(logging.INFO, logger="repair_football_data_kickoffs")
+        offline["snap"] = _snap(
+            [SHANDONG, _raw(date="11/07/2026")],
+            [
+                dict(COPY),
+                dict(ESPN),
+                dict(STALE) | {"id": "s2", "match_date": _t(2026, 7, 11, 11, 35)},
+                _m("c2", _t(2026, 7, 11, 12, 35)),
+            ],
+        )
+        offline["facts"] = {"s2": _facts()}
+        counts = rfk.run(
+            _Conn(), "dedupe", True, out_csv=str(tmp_path / "d.csv"), expect_plan={"merge": 1, "fold": 1, "refuse": 0}
+        )
+        assert "PLAN mode=dedupe merge=1 fold=1 refuse=0" in caplog.text
+        assert counts["planned"] == 2 and offline["applied"][0][2] == 2  # one batch, merge and fold together
+
+
+# --- --check ---------------------------------------------------------------------------------------------------------
+
+
+class _CheckCur:
+    """load_snapshot is faked; this answers check_legacy_kickoffs' two queries from the snapshot's rows."""
+
+    def __init__(self, matches):
+        self._matches, self._last = matches, ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self._last = sql
+
+    def fetchone(self):
+        return {"TimeZone": "UTC"}
+
+    def fetchall(self):
+        return [
+            {"home_id": m["home_id"], "away_id": m["away_id"], "match_date": m["match_date"]} for m in self._matches
+        ]
+
+
+class _CheckConn(_Conn):
+    def __init__(self, matches):
+        super().__init__()
+        self._matches = matches
+
+    def cursor(self, cursor_factory=None):
+        return _CheckCur(self._matches)
+
+
+class TestRunCheck:
+    @pytest.fixture(autouse=True)
+    def _info(self, caplog):
+        caplog.set_level(logging.INFO, logger="repair_football_data_kickoffs")
+
+    def _check(self, monkeypatch, matches):
+        snap = _snap([SHANDONG], matches)
+        monkeypatch.setattr(rfk, "load_snapshot", lambda cur: snap)
+        return rfk.run_check(_CheckConn(matches))
+
+    def test_a_row_at_the_legacy_kickoff_fails(self, monkeypatch, caplog):
+        assert self._check(monkeypatch, [COPY]) == 1
+        assert "CHECK legacy_kickoffs=FAIL" in caplog.text
+
+    def test_a_copy_beside_its_espn_row_fails_twice_over(self, monkeypatch, caplog):
+        assert self._check(monkeypatch, [COPY, ESPN]) == 1
+        assert "CHECK legacy_kickoffs=FAIL football_data_duplicates=1" in caplog.text
+
+    def test_the_repaired_state_passes(self, monkeypatch, caplog):
+        assert self._check(monkeypatch, [ESPN]) == 0
+        assert "CHECK legacy_kickoffs=PASS football_data_duplicates=0" in caplog.text
