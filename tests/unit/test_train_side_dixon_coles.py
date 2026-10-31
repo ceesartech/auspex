@@ -272,6 +272,86 @@ class TestMain:
         assert calls == {"rho": 0.0, "leagues": {None}}
 
 
+class TestNhlHoldoutDiagnostic:
+    """--holdout-fraction in hockey terms: the held-out over-5.5 Brier read from
+    the matrices production would serve — never DixonColesPredictor's own 1x2
+    validation, which scores a soccer 3-way result against NHL's binary one."""
+
+    def test_reads_the_served_over_5_5_and_grades_the_final_score(self):
+        from predictors.market_derivation import build_dc_matrix
+        from scipy.stats import poisson
+
+        seen = []
+
+        class Fake:
+            rho = 0.0
+            team_attack = {"A": 1.0, "B": 1.0}
+
+            def lambdas_for_match(self, home, away, league="NOT PASSED"):
+                seen.append(league)
+                return 3.0, 2.5
+
+        hold = pd.DataFrame(
+            {
+                "home_team": ["A", "A", "C"],
+                "away_team": ["B", "B", "A"],
+                "home_score": [4, 2, 5],
+                "away_score": [3, 1, 2],
+            }
+        )
+        train = pd.DataFrame({"home_score": [4, 1], "away_score": [2, 1]})
+        d = nhl.holdout_diagnostic(Fake(), train, hold)
+        P = build_dc_matrix(3.0, 2.5, 0.0, max_goals=10)
+        p = float(sum(P[i, j] for i in range(11) for j in range(11) if i + j > 5.5))
+        assert p == pytest.approx(poisson.sf(5, 5.5), abs=2e-3)  # Poisson(3.0) + Poisson(2.5) = Poisson(5.5)
+        assert seen == ["NOT PASSED"] * 3  # no league, as precompute_predictions_nhl calls it
+        y = np.array([1.0, 0.0, 1.0])  # totals 7, 3, 7 — the FINAL score
+        assert d["n"] == 3 and d["mean_p_over_5.5"] == pytest.approx(p)
+        assert d["over_5.5_brier"] == pytest.approx(float(np.mean((p - y) ** 2)))
+        assert d["constant_over_5.5_rate"] == 0.5 and d["constant_over_5.5_brier"] == pytest.approx(0.25)
+        assert d["realised_over_5.5"] == pytest.approx(2 / 3) and d["realised_mean_total"] == pytest.approx(17 / 3)
+        assert d["mean_expected_total"] == pytest.approx(5.5, abs=0.01)
+        assert d["matches_with_an_unknown_team"] == 1  # 'C'
+
+    def test_main_logs_it_and_never_passes_a_val_df(self, monkeypatch, tmp_path, caplog):
+        from predictors.poisson_models import DixonColesPredictor
+
+        val_dfs = []
+        orig = DixonColesPredictor.train
+
+        def spy(self, train_df, val_df=None, **kwargs):
+            val_dfs.append(val_df)
+            return orig(self, train_df, val_df=val_df, **kwargs)
+
+        monkeypatch.setattr(DixonColesPredictor, "train", spy)
+        frame = nhl_frame()
+        import utils.training_data as td
+
+        monkeypatch.setattr(td, "load_training_frame", lambda **kw: frame.copy())
+        out = tmp_path / "s"
+        with caplog.at_level("INFO", logger=nhl.LOGGER.name):
+            assert nhl.main(["--database-url", "x", "--output-dir", str(out), "--holdout-fraction", "0.25"]) == 0
+        assert [v is None for v in val_dfs] == [True]
+        n_hold = int(len(frame) * 0.25)
+        manifest = json.loads((out / "manifest.json").read_text())
+        assert manifest["n_rows"] == len(frame) - n_hold and manifest["holdout_fraction"] == 0.25
+        assert f"Holdout diagnostic (newest {n_hold} matches" in caplog.text and "over 5.5 Brier" in caplog.text
+
+    def test_no_holdout_no_diagnostic(self, monkeypatch, tmp_path, caplog):
+        import utils.training_data as td
+
+        monkeypatch.setattr(td, "load_training_frame", lambda **kw: nhl_frame())
+        with caplog.at_level("INFO", logger=nhl.LOGGER.name):
+            assert nhl.main(["--database-url", "x", "--output-dir", str(tmp_path / "s")]) == 0
+        assert "Holdout diagnostic" not in caplog.text
+
+    def test_the_help_says_the_1x2_metrics_are_not_computed(self, capsys):
+        with pytest.raises(SystemExit):
+            nhl.main(["--help"])
+        out = " ".join(capsys.readouterr().out.split())
+        assert "over-5.5 Brier" in out and "No 1x2 validation metrics" in out
+
+
 # ── neither is promotable ────────────────────────────────────────────
 
 

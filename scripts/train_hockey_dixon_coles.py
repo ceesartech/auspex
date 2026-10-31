@@ -3,10 +3,11 @@
 NOT PROMOTABLE. The served NHL artifact
 (/app/models/production/dixon_coles_nhl/1.0.0/model.bin) has never been gated,
 and neither has anything this script writes: its gate is
-scripts/ab_nhl_dixon_coles.py (pre-registered there, not yet run over its full
-window). scripts/promote_dc_model.py has no "nhl" entry, and nothing staged here
-may be copied into production by hand. Until the gate passes, the config below
-stays the pinned legacy one and production keeps serving its current file.
+scripts/ab_nhl_dixon_coles.py (pre-registered there, amended 2026-10-31 after a
+smoke run, not yet run over its full window). scripts/promote_dc_model.py has no
+"nhl" entry, and nothing staged here may be copied into production by hand.
+Until the gate passes, the config below stays the pinned legacy one and
+production keeps serving its current file.
 
 Hockey scorelines are low-discrete just like soccer (modal ~3-2, median total
 ~5.5), so the same Dixon-Coles + Poisson machinery works directly. This trainer
@@ -24,7 +25,12 @@ Architecture (the half-time trainer's guards, reused — not copied):
   * Fit on ALL rows of NHL_DC_TRAINING_QUERY (preseason excluded) with
     nhl_config() — the pinned legacy config, which converges on the NHL frame
     (7 iterations). --holdout-fraction (default 0) only holds out the newest
-    slice as a diagnostic.
+    slice as a diagnostic, and the diagnostic is a hockey one
+    (holdout_diagnostic: over-5.5 Brier and level read from the matrices
+    production would serve). DixonColesPredictor.train's own validation
+    metrics are never computed here: they score a soccer 3-way 1x2 (class 1 =
+    draw) against this query's binary match_outcome (1 = AWAY win), before rho
+    is forced — numbers that mean nothing for NHL.
   * force_rho_zero: final scores are never 0-0 or 1-1, so the rho NLL runs away
     (~1e27 observed) instead of fitting; rho is forced to 0 (pure Poisson) after
     the fit, as before. The optimiser's value is logged.
@@ -184,6 +190,55 @@ def served_fixtures(frame: Any) -> Iterable[Tuple[str, str, None]]:
     return ((home, away, None) for home, away in pairs.itertuples(index=False))
 
 
+def holdout_diagnostic(model: Any, train_df: Any, holdout_df: Any) -> Dict[str, Any]:
+    """The --holdout-fraction diagnostic, in hockey terms: each held-out match
+    read exactly as precompute_predictions_nhl serves it —
+    lambdas_for_match(home, away) with NO league, build_dc_matrix(..., rho,
+    MAX_GOALS_DERIVE), derive_markets("nhl", P)["over_under"]["over_5.5"] —
+    and graded on the FINAL score as grading_outcomes grades over_under.
+
+    Returns the over-5.5 Brier, the same Brier for a constant at the train
+    slice's over-5.5 rate (the floor a fit has to beat), mean predicted vs
+    realised P(over 5.5), mean E[total goals] vs realised, and how many held-out
+    matches involve a team the fit never saw (served at attack = defense = 1.0).
+    A diagnostic only: one slice, one fit, no SE — scripts/ab_nhl_dixon_coles.py
+    is the gate.
+    """
+    import numpy as np
+    from predictors.market_derivation import MAX_GOALS_DERIVE, build_dc_matrix, derive_markets  # type: ignore
+
+    rho = float(getattr(model, "rho", 0.0) or 0.0)
+    known = set(getattr(model, "team_attack", {}) or {})
+    p_over, e_total = [], []
+    for home, away in zip(holdout_df["home_team"], holdout_df["away_team"]):
+        h_lam, a_lam = model.lambdas_for_match(home, away)
+        P = build_dc_matrix(float(h_lam), float(a_lam), rho, max_goals=MAX_GOALS_DERIVE)
+        p_over.append(float(derive_markets("nhl", P)["over_under"]["over_5.5"]))
+        i, j = np.indices(P.shape)
+        e_total.append(float((P * (i + j)).sum()))
+    p = np.asarray(p_over, dtype=float)
+    total = (holdout_df["home_score"].astype(int) + holdout_df["away_score"].astype(int)).to_numpy(dtype=float)
+    y = (total > 5.5).astype(float)
+    train_total = train_df["home_score"].astype(int) + train_df["away_score"].astype(int)
+    base_rate = float((train_total > 5.5).mean())
+    unknown = sum(
+        1
+        for home, away in zip(holdout_df["home_team"], holdout_df["away_team"])
+        if home not in known or away not in known
+    )
+    return {
+        "n": int(len(y)),
+        "over_5.5_brier": float(np.mean((p - y) ** 2)),
+        "constant_over_5.5_rate": base_rate,
+        "constant_over_5.5_brier": float(np.mean((base_rate - y) ** 2)),
+        "mean_p_over_5.5": float(p.mean()),
+        "realised_over_5.5": float(y.mean()),
+        "mean_expected_total": float(np.mean(e_total)),
+        "realised_mean_total": float(total.mean()),
+        "matches_with_an_unknown_team": int(unknown),
+    }
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
@@ -200,8 +255,11 @@ def main(argv: Optional[list] = None) -> int:
         "--holdout-fraction",
         type=float,
         default=0.0,
-        help="Diagnostic only: hold out the newest fraction and report its metrics. 0 (default) fits everything. "
-        "The manifest records it.",
+        help="Diagnostic only: hold out the newest fraction, fit the rest, and log the held-out over-5.5 Brier "
+        "(vs a constant at the train slice's rate), P(over 5.5) and E[total goals] vs realised, read from the "
+        "matrices production would serve. No 1x2 validation metrics: the predictor's would score a soccer 3-way "
+        "result against NHL's binary final result. 0 (default) fits everything. The manifest records it, and "
+        "promote_dc_model.py only ever promotes a 0.",
     )
     parser.add_argument(
         "--log-level",
@@ -245,11 +303,15 @@ def main(argv: Optional[list] = None) -> int:
     n = len(frame)
     cutoff = n - int(n * args.holdout_fraction)
     train_df = frame.iloc[:cutoff].copy()
-    val_df = frame.iloc[cutoff:].copy() if cutoff < n else None
-    LOGGER.info("Train=%d Holdout=%d", len(train_df), 0 if val_df is None else len(val_df))
+    holdout_df = frame.iloc[cutoff:].copy() if cutoff < n else None
+    LOGGER.info("Train=%d Holdout=%d", len(train_df), 0 if holdout_df is None else len(holdout_df))
 
     model = DixonColesPredictor(nhl_config())
-    result = model.train(train_df, val_df=val_df)
+    # No val_df, ever: DixonColesPredictor.train would evaluate its 3-way 1x2
+    # (class 1 = draw) against NHL_DC_TRAINING_QUERY's binary match_outcome
+    # (1 = AWAY win) with the optimiser's runaway rho — meaningless for NHL.
+    # The holdout gets holdout_diagnostic below instead.
+    result = model.train(train_df)
     rho_fitted = force_rho_zero(model, result)
     LOGGER.info(
         "Forced rho=0 for hockey (the optimiser produced %s; final scores carry no soccer-style low-score "
@@ -273,6 +335,25 @@ def main(argv: Optional[list] = None) -> int:
         result["observed_mean_total_goals"],
         len(fixtures),
     )
+    if holdout_df is not None:
+        diag = holdout_diagnostic(model, train_df, holdout_df)
+        LOGGER.info(
+            "Holdout diagnostic (newest %d matches, %s..%s; read as precompute_predictions_nhl serves, graded on the "
+            "final score): over 5.5 Brier %.5f vs %.5f for a constant at the train rate %.3f; mean P(over 5.5) %.3f "
+            "vs realised %.3f; mean E[total goals] %.3f vs realised %.3f; %d match(es) with a team the fit never saw. "
+            "One slice, no SE: ab_nhl_dixon_coles.py is the gate.",
+            diag["n"],
+            holdout_df["match_date"].min(),
+            holdout_df["match_date"].max(),
+            diag["over_5.5_brier"],
+            diag["constant_over_5.5_brier"],
+            diag["constant_over_5.5_rate"],
+            diag["mean_p_over_5.5"],
+            diag["realised_over_5.5"],
+            diag["mean_expected_total"],
+            diag["realised_mean_total"],
+            diag["matches_with_an_unknown_team"],
+        )
 
     manifest = halftime.write_artifact(
         model,
