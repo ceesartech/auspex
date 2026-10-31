@@ -16,7 +16,8 @@
 #      shifts the rest)
 #   5. scripts/ops/repoint_team_matches.sh --pass 2 (BEFORE this script: run
 #      after it, a398e0fe would be merge-deleted and d1f660b6 merge-cancelled
-#      while still on the wrong club, and the second pass could not move them)
+#      while still on the wrong club, and the second pass could not move them;
+#      step 2 below refuses while any Liga MX side sits on santos/guadalajara)
 #   6. scripts/ops/repair_stranded_recs_soccer.sh: settles/voids the pending
 #      recs on orphans that have a twin and re-points them onto the twin.
 #      After the team merge (which folds Lecce v Roma and Olympiakos v OFI
@@ -74,9 +75,13 @@
 #   1. verified backup (B2) — abort if it does not land;
 #   2. START = now (one instant for every run and state query below:
 #      --as-of START); before-state + dry run (write-once audit CSV) — abort
-#      if the tool fails, a pending rec blocks it, the postponed list no
-#      longer matches, or the plan exceeds the reviewed set (merges <= 204,
-#      placeholders <= 65, postponed <= 6, no no-twin deletes);
+#      if a Liga MX side still sits on santos/guadalajara (repoint pass 2, run
+#      order step 5, has not run or not finished: the repoint wrapper's 'left'
+#      count must be 0, or a398e0fe and d1f660b6 would be merged while still on
+#      the wrong club — `--from 7` after a failed step 5, or `--only 7` too
+#      early, stops here), the tool fails, a pending rec blocks it, the
+#      postponed list no longer matches, or the plan exceeds the reviewed set
+#      (merges <= 204, placeholders <= 65, postponed <= 6, no no-twin deletes);
 #   3. apply, pinned to the dry run's counts (--expect-plan: any drift refuses
 #      before a write); the archive (gzip JSONL) lands before the first write;
 #      batches commit separately, every write guarded on the observed values;
@@ -281,14 +286,25 @@ SELECT (SELECT count(*) FROM matches m JOIN leagues l ON l.id = m.league_id
            AND m.match_date < TIMESTAMPTZ '$START' - interval '4 days') AS recs,
        (SELECT count(*) FROM matches m JOIN leagues l ON l.id = m.league_id
          WHERE l.sport = 'soccer' AND m.status = 'postponed'
-           AND m.metadata->>'status_source' = 'repair_fixture_orphans') AS postponed;
+           AND m.metadata->>'status_source' = 'repair_fixture_orphans') AS postponed,
+       -- scripts/ops/repoint_team_matches.sh's 'left': Liga MX sides still on Santos FC / CD Guadalajara.
+       (SELECT count(*) FROM matches m JOIN leagues l ON l.id = m.league_id
+          JOIN teams t ON t.id IN (m.home_team_id, m.away_team_id)
+         WHERE l.name = 'Liga MX' AND l.sport = 'soccer' AND t.sport = 'soccer'
+           AND t.normalized_name IN ('santos', 'guadalajara')) AS liga_mx_left;
 SQLEOF
 
 log "2/6 before-state + dry run (as of $START)"
 state=$(psql_file "$STATE_SQL" -At | tr -d '[:space:]')
-IFS='|' read -r stale0 orphan0 recs0 postponed0 <<< "$state"
-if ! [[ "$stale0" =~ ^[0-9]+$ && "$orphan0" =~ ^[0-9]+$ && "$recs0" =~ ^[0-9]+$ && "$postponed0" =~ ^[0-9]+$ ]]; then
+IFS='|' read -r stale0 orphan0 recs0 postponed0 left0 <<< "$state"
+if ! [[ "$stale0" =~ ^[0-9]+$ && "$orphan0" =~ ^[0-9]+$ && "$recs0" =~ ^[0-9]+$ && "$postponed0" =~ ^[0-9]+$ && "$left0" =~ ^[0-9]+$ ]]; then
   log "ABORT at step 2: the before-state query failed (got '$state') — nothing changed"; exit 1
+fi
+if [ "$left0" != "0" ]; then
+  log "ABORT at step 2: $left0 Liga MX side(s) still sit on santos/guadalajara — repoint pass 2 (runbook step 5) has not run or did not"
+  log "  finish, and this cleanup would merge a398e0fe and d1f660b6 while they are still on the wrong club. Run it first:"
+  log "    bash /opt/auspex/scripts/ops/repoint_team_matches.sh --pass 2   (the runbook: --from 5) — nothing changed"
+  exit 1
 fi
 log "before: stale soccer rows=$stale0, cancelled orphan_of rows=$orphan0, recs on past fixtures=$recs0, postponed by this tool=$postponed0"
 $DC exec -T api sh -c "$TOOL --as-of $START --out-csv /app/backups/fixture_orphans_soccer_dryrun_$STAMP.csv > /tmp/rfo_soccer_dry.log 2>&1; rc=\$?; grep -E 'candidates=| PLAN |postponed list|PENDING|ERROR|Traceback|Error' /tmp/rfo_soccer_dry.log | tail -15; echo \"tool exit \$rc\"; exit \$rc"
@@ -333,7 +349,7 @@ fi
 
 log "4/6 after-state (as of $START)"
 state=$(psql_file "$STATE_SQL" -At | tr -d '[:space:]')
-IFS='|' read -r stale1 orphan1 recs1 postponed1 <<< "$state"
+IFS='|' read -r stale1 orphan1 recs1 postponed1 _ <<< "$state"
 want_stale=$((stale0 - md - mc - dp - mp)); want_orphan=$((orphan0 + mc)); want_postponed=$((postponed0 + mp))
 log "after: stale soccer rows=$stale1 (expected $want_stale), cancelled orphan_of rows=$orphan1 (expected $want_orphan), postponed by this tool=$postponed1 (expected $want_postponed), recs on past fixtures=$recs1 (expected $recs0)"
 $DC exec -T api sh -c "$TOOL --as-of $START --out-csv /app/backups/fixture_orphans_soccer_verify_$STAMP.csv > /tmp/rfo_soccer_verify.log 2>&1; rc=\$?; grep -E 'candidates=| PLAN |postponed list' /tmp/rfo_soccer_verify.log; exit \$rc"

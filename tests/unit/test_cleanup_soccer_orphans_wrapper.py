@@ -58,8 +58,8 @@ ZERO_PLAN = (
     "PLAN merge_delete=0 merge_cancel=0 delete_no_twin=0 delete_placeholder=0 mark_postponed=0 left=5 "
     "blocked_pending_recs=0 list_mismatch=0"
 )
-BEFORE = "100|2|500|0"  # stale | orphan_of | recs on past fixtures | postponed by the tool
-AFTER = "93|3|500|1"  # 100 - 3 - 1 - 2 - 1, 2 + 1, unchanged, 0 + 1
+BEFORE = "100|2|500|0|0"  # stale | orphan_of | recs on past fixtures | postponed by the tool | Liga MX sides left
+AFTER = "93|3|500|1|0"  # 100 - 3 - 1 - 2 - 1, 2 + 1, unchanged, 0 + 1, unchanged
 
 
 def _run(tmp_path: Path, *args: str, **env: str) -> tuple[int, str, list[str]]:
@@ -196,7 +196,7 @@ def test_a_re_run_whose_follow_ups_fail_again_stays_incomplete_and_pending(tmp_p
 
 
 def test_a_failed_after_state_keeps_the_follow_ups_pending(tmp_path):
-    rc, out, calls = _run(tmp_path, AFTER_STATE="92|3|500|1")
+    rc, out, calls = _run(tmp_path, AFTER_STATE="92|3|500|1|0")
     assert rc == 1 and "FAILED after-state" in out and not _followups(calls), out
     assert len(_pending(tmp_path)) == 1
     rc, out, calls = _run(tmp_path, PRE_PLAN=ZERO_PLAN)
@@ -230,7 +230,7 @@ def test_an_unknown_argument_exits_2(tmp_path):
 
 
 def test_a_wrong_after_state_exits_1(tmp_path):
-    rc, out, _ = _run(tmp_path, AFTER_STATE="94|3|500|1")
+    rc, out, _ = _run(tmp_path, AFTER_STATE="94|3|500|1|0")
     assert rc == 1 and "FAILED after-state" in out and "DONE" not in out
 
 
@@ -249,3 +249,26 @@ def test_the_dry_run_gate_aborts_before_any_apply(tmp_path, plan):
     rc, out, calls = _run(tmp_path, DRY_PLAN=plan)
     assert rc == 1 and "ABORT at step 2" in out, out
     assert not [c for c in _tool_calls(calls) if "--apply" in c]
+
+
+@pytest.mark.parametrize("left", ["2", "6"])
+def test_a_liga_mx_side_left_on_santos_or_guadalajara_aborts_before_any_dry_run(tmp_path, left):
+    """Repoint pass 2 (runbook step 5) must have run first: `--from 7` after a failed step 5, or `--only 7` too
+    early, would merge-delete a398e0fe and merge-cancel d1f660b6 while they still sit on the wrong club."""
+    rc, out, calls = _run(tmp_path, BEFORE_STATE=f"100|2|500|0|{left}")
+    assert rc == 1 and f"ABORT at step 2: {left} Liga MX side(s) still sit on santos/guadalajara" in out, out
+    assert "repoint_team_matches.sh --pass 2" in out and "--from 5" in out
+    assert not _tool_calls(calls) and not _followups(calls)
+
+
+def test_the_before_state_counts_liga_mx_sides_with_the_repoint_wrappers_query(tmp_path):
+    rc, out, _ = _run(tmp_path)
+    assert rc == 0, out
+    sql = sorted((tmp_path / "fake").glob("state_sql.*"))[0].read_text()
+    assert "l.name = 'Liga MX'" in sql and "t.normalized_name IN ('santos', 'guadalajara')" in sql
+    assert "JOIN teams t ON t.id IN (m.home_team_id, m.away_team_id)" in sql
+
+
+def test_an_unreadable_liga_mx_count_aborts(tmp_path):
+    rc, out, calls = _run(tmp_path, BEFORE_STATE="100|2|500|0")
+    assert rc == 1 and "the before-state query failed" in out and not _tool_calls(calls), out
