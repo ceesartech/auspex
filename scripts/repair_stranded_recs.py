@@ -38,6 +38,23 @@ filters `m.status = 'finished'`. Settling without repointing produces a
 summary table that no product surface agrees with. The orphan id stays in
 the CSV's `match_id` column, so the move is reversible.
 
+A REC WRITTEN AT OR AFTER THE TWIN'S KICKOFF IS VOIDED, NEVER SETTLED
+--------------------------------------------------------------------
+The orphan row carries a STALE kickoff: ESPN moved the fixture, the
+fetcher forked a new row at the new time, and the orphan kept the old one.
+When ESPN moved the kickoff EARLIER, rec generation still saw the orphan
+as upcoming and wrote recs on it after the real match had started — or
+finished. Settling those is settling hindsight: the 2026-09-04 run settled
+35 soccer recs, 21 of them written 46 minutes to 24 hours after the twin's
+kickoff (8W/12L/1V, net -228.25), plus 2 MMA recs written after their bout.
+Such a rec (created_at >= the twin's match_date — the twin carries the
+kickoff ESPN reported with the result) is now planned as action
+`void_post_kickoff`: status 'void', profit 0, actual_result 'void: written
+after kickoff' (shared with grade_completed_matches), and REPOINTED onto
+the twin like a settlement, so its orphan can be cleaned up and the row
+sits on the real fixture. scripts/void_post_kickoff_recs.py corrects the
+ones the earlier runs settled.
+
 Because N orphan rows of one real fixture each carry their own duplicate
 rec, the summary also prints the COLLAPSE FACTOR (distinct twins, and how
 many settled rows are duplicates of an already-covered
@@ -95,6 +112,7 @@ from psycopg2.extras import RealDictCursor
 # scripts/grade_completed_matches.py).
 sys.path.insert(0, os.path.dirname(__file__))
 
+from grade_completed_matches import POST_KICKOFF_VOID_RESULT  # noqa: E402
 from grading_outcomes import grade_rec_selection, rec_status_and_pl  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
@@ -131,6 +149,8 @@ VOID_ACTUAL_RESULT = "void: match never resulted (fixture-identity duplicate)"
 
 ACTION_SETTLE = "settle"
 ACTION_VOID = "void"
+# Written at or after the twin's kickoff: hindsight, voided (see docstring).
+ACTION_VOID_POST_KICKOFF = "void_post_kickoff"
 
 REASON_OK = "ok"
 REASON_NO_TWIN = "no_twin"
@@ -157,6 +177,7 @@ CSV_COLUMNS = [
     "twin_match_date",
     "twin_count",  # finished twins seen in the window for this orphan
     "duplicate_of_group",  # 1 = another rec already covers (twin, bet, selection)
+    "rec_created_at",  # vs twin_match_date: the post-kickoff evidence
 ]
 
 
@@ -183,6 +204,7 @@ def list_candidates(cur, sport: str, stale_after_hours: int) -> list[dict]:
                br.selection,
                br.recommended_stake,
                br.odds_at_recommendation,
+               br.created_at,
                m.home_team_id::text AS home_team_id,
                m.away_team_id::text AS away_team_id,
                m.match_date,
@@ -306,6 +328,28 @@ def void_rec(cur, rec_id: str) -> int:
     return cur.rowcount
 
 
+def void_post_kickoff_rec(cur, rec_id: str, new_match_id: str) -> int:
+    """Void a rec written at or after its twin's kickoff, and REPOINT it
+    onto the twin like a settlement (the twin is the real fixture, and an
+    orphan that still holds a rec can never be cleaned up). Same mandatory
+    status guard as settle_rec; returns the rowcount for the same reason."""
+    cur.execute(
+        """
+        UPDATE betting_recommendations
+        SET status = 'void',
+            actual_result = %s,
+            profit_loss = 0,
+            match_id = %s,
+            settled_at = NOW(),
+            updated_at = NOW()
+        WHERE id = %s
+          AND status = 'pending'
+        """,
+        (POST_KICKOFF_VOID_RESULT, new_match_id, rec_id),
+    )
+    return cur.rowcount
+
+
 # ── Pure twin selection ───────────────────────────────────────────────
 
 
@@ -363,6 +407,16 @@ def select_twin(twins: list[dict], match_date: datetime) -> tuple[Optional[dict]
     return ranked[0], REASON_OK
 
 
+def written_after_kickoff(created_at: Optional[datetime], kickoff: Optional[datetime]) -> bool:
+    """True when a rec was written at or after the real kickoff — the
+    twin's match_date, not the orphan's stale one. A missing timestamp is
+    an error, not a pass: without it nobody can tell a bet from hindsight
+    (created_at defaults to NOW() and prod has no NULLs, 2026-10-30)."""
+    if created_at is None or kickoff is None:
+        raise ValueError(f"cannot tell whether a rec is post-kickoff: created_at={created_at!r} kickoff={kickoff!r}")
+    return created_at >= kickoff
+
+
 # ── Planning ──────────────────────────────────────────────────────────
 
 
@@ -376,6 +430,8 @@ def _new_counts() -> dict[str, Any]:
         "ungradable_skipped": 0,
         "no_twin": 0,
         "no_twin_voided": 0,
+        # Written at or after the twin's kickoff: voided, never settled.
+        "post_kickoff_voided": 0,
         # Rows planned but NOT written because the rec was no longer
         # pending at apply time (concurrent settlement).
         "skipped_not_pending": 0,
@@ -447,6 +503,7 @@ def plan_sport(
                         "twin_match_date": "",
                         "twin_count": 0,
                         "duplicate_of_group": 0,
+                        "rec_created_at": rec.get("created_at"),
                     }
                 )
                 continue
@@ -458,6 +515,48 @@ def plan_sport(
                 match_id,
                 sport,
                 len(twin_cache[match_id]),
+            )
+            continue
+
+        delta_hours = round(_delta_seconds(twin, rec["match_date"]) / 3600.0, 3)
+
+        # Hindsight check BEFORE grading: a rec written at or after the
+        # real kickoff is voided whatever the score says.
+        if written_after_kickoff(rec["created_at"], twin["match_date"]):
+            counts["post_kickoff_voided"] += 1
+            logger.warning(
+                "POST-KICKOFF: rec %s on match %s (%s) was written %s, at or after its twin %s kicked off at %s "
+                "— voiding, never settling",
+                rec["rec_id"],
+                match_id,
+                sport,
+                rec["created_at"],
+                twin["twin_id"],
+                twin["match_date"],
+            )
+            entries.append(
+                {
+                    "rec_id": rec["rec_id"],
+                    "match_id": match_id,
+                    "twin_id": twin["twin_id"],
+                    "new_match_id": twin["twin_id"],
+                    "sport": sport,
+                    "bet_type": rec["bet_type"],
+                    "selection": rec["selection"],
+                    "odds": rec["odds_at_recommendation"],
+                    "stake": rec["recommended_stake"],
+                    "outcome": "",
+                    "status": "void",
+                    "profit_loss": Decimal("0"),
+                    "action": ACTION_VOID_POST_KICKOFF,
+                    "twin_delta_hours": delta_hours,
+                    "twin_home_score": twin["home_score"],
+                    "twin_away_score": twin["away_score"],
+                    "twin_match_date": twin["match_date"],
+                    "twin_count": len(twin_cache[match_id]),
+                    "duplicate_of_group": 0,
+                    "rec_created_at": rec["created_at"],
+                }
             )
             continue
 
@@ -492,7 +591,6 @@ def plan_sport(
         counts["net_pl"] += profit_loss
         counts["total_stake"] += Decimal(str(rec["recommended_stake"] or 0))
 
-        delta_hours = round(_delta_seconds(twin, rec["match_date"]) / 3600.0, 3)
         if delta_hours > FAR_TWIN_WARN_HOURS:
             logger.warning(
                 "FAR TWIN (%.2fh, expected minutes-to-hours): rec %s on match %s (%s) settled from twin %s — "
@@ -536,6 +634,7 @@ def plan_sport(
                 "twin_match_date": twin["match_date"],
                 "twin_count": len(twin_cache[match_id]),
                 "duplicate_of_group": int(duplicate),
+                "rec_created_at": rec["created_at"],
             }
         )
 
@@ -599,7 +698,9 @@ def apply_entries(conn, entries: list[dict]) -> tuple[int, list[dict]]:
             for e in entries:
                 if e["action"] == ACTION_VOID:
                     rowcount = void_rec(cur, e["rec_id"])
-                else:
+                elif e["action"] == ACTION_VOID_POST_KICKOFF:
+                    rowcount = void_post_kickoff_rec(cur, e["rec_id"], e["twin_id"])
+                elif e["action"] == ACTION_SETTLE:
                     rowcount = settle_rec(
                         cur,
                         e["rec_id"],
@@ -608,6 +709,8 @@ def apply_entries(conn, entries: list[dict]) -> tuple[int, list[dict]]:
                         e["profit_loss"],
                         e["twin_id"],
                     )
+                else:
+                    raise ValueError(f"unknown action {e['action']!r} planned for rec {e['rec_id']}")
                 if rowcount == 1:
                     applied += 1
                     continue
@@ -636,6 +739,9 @@ def _discount_skipped(counts: dict[str, Any], skipped: list[dict]) -> None:
         if e["action"] == ACTION_VOID:
             counts["no_twin_voided"] -= 1
             continue
+        if e["action"] == ACTION_VOID_POST_KICKOFF:
+            counts["post_kickoff_voided"] -= 1
+            continue
         if e["status"] == "won":
             counts["settled_won"] -= 1
         elif e["status"] == "lost":
@@ -656,10 +762,10 @@ def _fmt_money(value: Decimal) -> str:
 def print_summary(per_sport: dict[str, dict], applied: bool) -> None:
     header = (
         f"{'sport':<10}{'cand':>7}{'won':>7}{'lost':>7}{'void':>7}"
-        f"{'ambig':>8}{'ungrad':>8}{'no_twin':>9}{'voided':>8}{'skipped':>9}"
+        f"{'ambig':>8}{'ungrad':>8}{'no_twin':>9}{'voided':>8}{'pk_void':>9}{'skipped':>9}"
         f"{'fixtures':>10}{'dups':>7}{'stake':>12}{'net_pl':>12}"
     )
-    row_fmt = "%-10s%7d%7d%7d%7d%8d%8d%9d%8d%9d%10d%7d%12s%12s"
+    row_fmt = "%-10s%7d%7d%7d%7d%8d%8d%9d%8d%9d%9d%10d%7d%12s%12s"
     logger.info("%s run summary:", "APPLIED" if applied else "DRY-RUN")
     logger.info(header)
     logger.info("-" * len(header))
@@ -676,6 +782,7 @@ def print_summary(per_sport: dict[str, dict], applied: bool) -> None:
             c["ungradable_skipped"],
             c["no_twin"],
             c["no_twin_voided"],
+            c["post_kickoff_voided"],
             c["skipped_not_pending"],
             c["distinct_twins"],
             c["duplicate_settles"],
@@ -696,6 +803,7 @@ def print_summary(per_sport: dict[str, dict], applied: bool) -> None:
         totals["ungradable_skipped"],
         totals["no_twin"],
         totals["no_twin_voided"],
+        totals["post_kickoff_voided"],
         totals["skipped_not_pending"],
         totals["distinct_twins"],
         totals["duplicate_settles"],
@@ -709,6 +817,13 @@ def print_summary(per_sport: dict[str, dict], applied: bool) -> None:
             totals["duplicate_settles"],
             totals["settled_won"] + totals["settled_lost"] + totals["settled_push_void"] - totals["duplicate_settles"],
             totals["settled_won"] + totals["settled_lost"] + totals["settled_push_void"],
+        )
+    if totals["post_kickoff_voided"]:
+        logger.warning(
+            "%d rec(s) were written at or after their twin's kickoff — %s, not settled (pk_void column). "
+            "They are hindsight and must never count as won/lost.",
+            totals["post_kickoff_voided"],
+            "voided" if applied else "would be voided",
         )
     if totals["skipped_not_pending"]:
         logger.error(

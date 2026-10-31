@@ -81,7 +81,10 @@ class FakeCursor:
             for r in self.recs.values():
                 if r["match_id"] != match_id:
                     continue
-                if r["status"] not in ("pending", "placed"):
+                # Mirrors the SQL: in flight, or trigger-settled without P&L.
+                in_flight = r["status"] in ("pending", "placed")
+                trigger_settled = r["status"] in ("won", "lost", "void") and r.get("profit_loss") is None
+                if not (in_flight or trigger_settled):
                     continue
                 p = self.predictions.get(r["prediction_id"], {})
                 row = {
@@ -99,8 +102,17 @@ class FakeCursor:
                 # above), so dropping either column fails the NHL rec tests.
                 if "p.model_name AS p_model_name" in sql_norm:
                     row["p_model_name"] = p.get("model_name")
-                if "l.sport AS sport" in sql_norm and "JOIN leagues l" in sql_norm:
+                if (
+                    "l.sport AS sport" in sql_norm
+                    and "LEFT JOIN matches m ON m.id = br.match_id" in sql_norm
+                    and "LEFT JOIN leagues l ON l.id = m.league_id" in sql_norm
+                ):
                     row["sport"] = r.get("sport")
+                # Only when the query computes it against the match's
+                # kickoff, so dropping that from the SQL fails the
+                # post-kickoff tests.
+                if "br.created_at >= m.match_date" in sql_norm and "JOIN matches m" in sql_norm:
+                    row["after_kickoff"] = r.get("after_kickoff", False)
                 rows.append(row)
             self._last = ("recs", rows)
             return
@@ -141,7 +153,19 @@ def _pred(
     }
 
 
-def _rec(rid, match_id, prediction_id, stake, odds, bet_type="1x2", selection="home", status="pending", sport="soccer"):
+def _rec(
+    rid,
+    match_id,
+    prediction_id,
+    stake,
+    odds,
+    bet_type="1x2",
+    selection="home",
+    status="pending",
+    sport="soccer",
+    after_kickoff=False,
+    actual_result=None,
+):
     return {
         "id": rid,
         "bet_type": bet_type,
@@ -152,8 +176,9 @@ def _rec(rid, match_id, prediction_id, stake, odds, bet_type="1x2", selection="h
         "recommended_stake": Decimal(str(stake)),
         "odds_at_recommendation": Decimal(str(odds)),
         "status": status,
-        "actual_result": None,
+        "actual_result": actual_result,
         "profit_loss": None,
+        "after_kickoff": after_kickoff,
     }
 
 
@@ -462,6 +487,146 @@ class TestRecSettlementGuards:
         assert cur.recs["r1"]["status"] == "pending" and cur.recs["r1"]["profit_loss"] is None
         assert cur.recs["r2"]["status"] == "won"
         assert cur.predictions["p1"]["is_correct"] is True
+
+
+# ── recs written after kickoff: void, never graded ───────────────────
+
+
+class TestPostKickoffRecs:
+    """A bet placed after kickoff is hindsight. The 2026-09-04 stranded-rec
+    repair settled 21 soccer + 2 MMA such recs (net -237.05); the settler
+    must void them, whatever the score says."""
+
+    MATCH = {"match_id": "m1", "home_score": 2, "away_score": 1, "metadata": {}}
+
+    def test_pending_rec_written_after_kickoff_is_voided_not_graded(self):
+        preds = [_pred("p1", "m1", "match_result", "ensemble", "home")]
+        # would have WON at 2.0: +25.00 of hindsight if graded
+        recs = [_rec("r1", "m1", "p1", stake=25, odds=2.0, after_kickoff=True)]
+        cur = FakeCursor(preds, recs)
+        stats: dict = {}
+
+        counts = gcm.grade_match(cur, self.MATCH, stats)
+
+        assert cur.recs["r1"]["status"] == "void"
+        assert cur.recs["r1"]["profit_loss"] == Decimal("0")
+        assert cur.recs["r1"]["actual_result"] == gcm.POST_KICKOFF_VOID_RESULT == "void: written after kickoff"
+        assert counts["recs_settled"] == 0
+        assert stats["post_kickoff_rec_voids"] == 1
+        # the prediction (written pre-kickoff) still grades as usual
+        assert cur.predictions["p1"]["is_correct"] is True
+
+    def test_trigger_settled_post_kickoff_rec_is_voided_not_money_filled(self):
+        # The migration-011 trigger settles from the prediction, so a
+        # post-kickoff rec can arrive already 'won' with no P&L.
+        preds = [_pred("p1", "m1", "match_result", "ensemble", "home", is_correct=True, actual_outcome="home")]
+        recs = [_rec("r1", "m1", "p1", stake=25, odds=2.0, status="won", actual_result="home", after_kickoff=True)]
+        cur = FakeCursor(preds, recs)
+
+        gcm.grade_match(cur, self.MATCH)
+
+        assert cur.recs["r1"]["status"] == "void"
+        assert cur.recs["r1"]["profit_loss"] == Decimal("0")
+        assert cur.recs["r1"]["actual_result"] == gcm.POST_KICKOFF_VOID_RESULT
+
+    def test_placed_rec_written_after_kickoff_is_voided(self):
+        recs = [_rec("r1", "m1", "p1", stake=25, odds=2.0, status="placed", after_kickoff=True)]
+        cur = FakeCursor([], recs)
+        gcm.grade_match(cur, self.MATCH)
+        assert cur.recs["r1"]["status"] == "void" and cur.recs["r1"]["profit_loss"] == Decimal("0")
+
+    def test_void_needs_no_score(self):
+        match = {"match_id": "m1", "home_score": None, "away_score": None, "metadata": {}}
+        recs = [
+            _rec("late", "m1", "p1", stake=25, odds=2.0, after_kickoff=True),
+            _rec("ok", "m1", "p1", stake=25, odds=2.0),
+        ]
+        cur = FakeCursor([], recs)
+        gcm.grade_match(cur, match)
+        assert cur.recs["late"]["status"] == "void"
+        assert cur.recs["ok"]["status"] == "pending"  # no score: stays open, as before
+
+    def test_pre_kickoff_rec_beside_a_post_kickoff_one_still_settles(self):
+        recs = [
+            _rec("late", "m1", "p1", stake=25, odds=2.0, after_kickoff=True),
+            _rec("ok", "m1", "p1", stake=25, odds=2.0, selection="away"),
+        ]
+        cur = FakeCursor([], recs)
+        counts = gcm.grade_match(cur, self.MATCH)
+        assert cur.recs["late"]["status"] == "void"
+        assert cur.recs["ok"]["status"] == "lost" and cur.recs["ok"]["profit_loss"] == Decimal("-25.00")
+        assert counts["recs_settled"] == 1
+
+    def test_open_recs_query_compares_created_at_with_the_kickoff(self):
+        seen = []
+
+        class Cur:
+            def execute(self, sql, params=None):
+                seen.append(" ".join(sql.split()))
+
+            def fetchall(self):
+                return []
+
+        gcm.list_open_recs_for_match(Cur(), "m1")
+        assert "(br.created_at >= m.match_date) AS after_kickoff" in seen[0]
+        assert "JOIN matches m ON m.id = br.match_id" in seen[0]
+
+    def test_run_reports_the_voids_at_error(self, monkeypatch, caplog):
+        recs = [_rec("r1", "m1", "p1", stake=25, odds=2.0, after_kickoff=True)]
+        cur = _RunCursor([dict(self.MATCH)], [], recs)
+        monkeypatch.setattr(gcm.psycopg2, "connect", lambda url: _RunConn(cur))
+
+        with caplog.at_level("WARNING", logger="grade_completed_matches"):
+            summary = gcm.run("postgresql://unused/db", 14, None)
+
+        assert summary["post_kickoff_rec_voids"] == 1
+        assert summary["recs_settled"] == 0
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert any("Voided 1 recommendation(s) written at or after kickoff" in r.getMessage() for r in errors)
+        assert cur.recs["r1"]["status"] == "void"
+
+
+class _RunCursor(FakeCursor):
+    """FakeCursor plus the finished-match listing run() starts with."""
+
+    def __init__(self, matches, predictions, recs):
+        super().__init__(predictions, recs)
+        self.matches = matches
+
+    def execute(self, sql, params=None):
+        if " ".join(sql.split()).startswith("SELECT m.id::text AS match_id"):
+            self._last = ("matches", [dict(m) for m in self.matches])
+            return
+        super().execute(sql, params)
+
+    def fetchall(self):
+        if self._last and self._last[0] == "matches":
+            return self._last[1]
+        return super().fetchall()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _RunConn:
+    def __init__(self, cur):
+        self.cur = cur
+        self.commits = 0
+
+    def cursor(self, cursor_factory=None):
+        return self.cur
+
+    def commit(self):
+        self.commits += 1
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
 
 
 # ── profit_loss math ─────────────────────────────────────────────────

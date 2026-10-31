@@ -47,7 +47,14 @@ STAKE = Decimal("50.00")
 ODDS = Decimal("2.5000")
 
 
-def make_rec(rec_id="rec-1", bet_type="1x2", selection="home", sport="tennis", match_id=ORPHAN):
+def make_rec(
+    rec_id="rec-1",
+    bet_type="1x2",
+    selection="home",
+    sport="tennis",
+    match_id=ORPHAN,
+    created_at=KICKOFF - timedelta(hours=2),
+):
     return {
         "rec_id": rec_id,
         "match_id": match_id,
@@ -55,6 +62,7 @@ def make_rec(rec_id="rec-1", bet_type="1x2", selection="home", sport="tennis", m
         "selection": selection,
         "recommended_stake": STAKE,
         "odds_at_recommendation": ODDS,
+        "created_at": created_at,
         "home_team_id": HOME,
         "away_team_id": AWAY,
         "match_date": KICKOFF,
@@ -585,3 +593,155 @@ def test_default_out_csv_is_unique_per_run_and_scoped(monkeypatch):
     assert a.startswith("/app/backups/repaired_rec_ids_") and a.endswith(".csv")
     # A same-day second run must not resolve to the same path as the first.
     assert "T" in a and a.endswith(".csv")
+
+
+# ── written after kickoff: void, never settle ─────────────────────────
+#
+# The orphan carries a STALE kickoff: ESPN moved the fixture EARLIER, the
+# fetcher forked the twin at the real time, and rec generation kept writing
+# recs on the orphan because it still looked upcoming. Prod 2026-09-04: 21
+# soccer + 2 MMA recs settled that way, written 46 min to 24 h after the
+# real kickoff. The twin's match_date is the reference, not the orphan's.
+
+
+def _moved_earlier(created_offset_hours: float):
+    """Orphan at KICKOFF; ESPN moved the real kickoff 20 h earlier (the
+    twin); the rec is written `created_offset_hours` after the twin's."""
+    twin = make_match(TWIN, home_score=2, away_score=1, offset_hours=-20.0)
+    rec = make_rec(created_at=twin["match_date"] + timedelta(hours=created_offset_hours))
+    return rec, twin
+
+
+def test_rec_written_after_the_twin_kickoff_is_voided_not_settled(tmp_path):
+    # Written 15 min before the orphan's stale kickoff, ~20 h after the real
+    # one — and on the winning side: settling it would book +75.00 of hindsight.
+    rec, twin = _moved_earlier(19.75)
+    assert rec["created_at"] < KICKOFF  # before the ORPHAN's kickoff...
+    assert go.rec_status_and_pl(go.grade_rec_selection("1x2", "home", 2, 1), STAKE, ODDS)[0] == "won"
+    conn = FakeConn([rec], [twin])
+    result = _run(conn, tmp_path)
+
+    assert len(conn.cur.updates) == 1
+    sql, params = conn.cur.updates[0]
+    assert "SET status = 'void'" in sql and "profit_loss = 0" in sql
+    assert "WHERE id = %s AND status = 'pending'" in sql
+    assert params == (rs.POST_KICKOFF_VOID_RESULT, TWIN, "rec-1")
+    assert rs.POST_KICKOFF_VOID_RESULT == "void: written after kickoff"
+
+    counts = result["per_sport"]["tennis"]
+    assert counts["post_kickoff_voided"] == 1
+    assert counts["settled_won"] == counts["settled_lost"] == counts["settled_push_void"] == 0
+    assert counts["net_pl"] == Decimal("0") and counts["total_stake"] == Decimal("0")
+    # a void is not a settled fixture: it must not feed the collapse factor
+    assert counts["distinct_twins"] == 0 and counts["duplicate_settles"] == 0
+    assert result["applied"] == 1
+
+    (row,) = _csv_rows(Path(result["csv_path"]))
+    assert row["action"] == rs.ACTION_VOID_POST_KICKOFF == "void_post_kickoff"
+    assert row["status"] == "void" and Decimal(row["profit_loss"]) == 0 and row["outcome"] == ""
+    assert row["match_id"] == ORPHAN and row["twin_id"] == row["new_match_id"] == TWIN
+    # the evidence travels with the row: written-at vs the real kickoff
+    assert row["rec_created_at"] == str(rec["created_at"])
+    assert row["twin_match_date"] == str(twin["match_date"])
+
+
+def test_rec_written_exactly_at_the_twin_kickoff_is_voided(tmp_path):
+    rec, twin = _moved_earlier(0.0)
+    conn = FakeConn([rec], [twin])
+    result = _run(conn, tmp_path)
+    assert result["per_sport"]["tennis"]["post_kickoff_voided"] == 1
+    assert conn.cur.updates[0][1][0] == rs.POST_KICKOFF_VOID_RESULT
+
+
+def test_rec_written_a_second_before_the_twin_kickoff_still_settles(tmp_path):
+    rec, twin = _moved_earlier(-1 / 3600)
+    conn = FakeConn([rec], [twin])
+    result = _run(conn, tmp_path)
+    counts = result["per_sport"]["tennis"]
+    assert counts["post_kickoff_voided"] == 0 and counts["settled_won"] == 1
+    assert conn.cur.updates[0][1][0] == "won"
+
+
+def test_twin_kickoff_not_the_orphan_kickoff_is_the_reference(tmp_path):
+    """Written after the orphan's stale kickoff but before the real (later)
+    one: a pre-kickoff bet, settled as usual."""
+    twin = make_match(TWIN, home_score=2, away_score=1, offset_hours=3.0)
+    rec = make_rec(created_at=KICKOFF + timedelta(hours=1))
+    conn = FakeConn([rec], [twin])
+    result = _run(conn, tmp_path)
+    assert result["per_sport"]["tennis"]["settled_won"] == 1
+    assert result["per_sport"]["tennis"]["post_kickoff_voided"] == 0
+
+
+def test_post_kickoff_void_and_settle_in_one_run(tmp_path):
+    rec_late, twin = _moved_earlier(2.0)
+    rec_ok = make_rec(rec_id="rec-2", selection="away", created_at=twin["match_date"] - timedelta(hours=1))
+    conn = FakeConn([rec_late, rec_ok], [twin])
+    result = _run(conn, tmp_path)
+
+    by_rec = {params[-1]: params for _, params in conn.cur.updates}
+    assert by_rec["rec-1"][0] == rs.POST_KICKOFF_VOID_RESULT
+    assert by_rec["rec-2"][0] == "lost"
+    counts = result["per_sport"]["tennis"]
+    assert counts["post_kickoff_voided"] == 1 and counts["settled_lost"] == 1
+    assert counts["net_pl"] == -STAKE  # only the pre-kickoff bet carries money
+
+
+def test_post_kickoff_void_is_not_gated_by_void_no_twin_or_the_backfill_rule(tmp_path):
+    """It has a twin, so it is not a no-twin void: allowed for nhl, and on
+    without --void-no-twin."""
+    rec, twin = _moved_earlier(1.0)
+    rec["sport"] = "nhl"
+    conn = FakeConn([rec], [twin])
+    result = _run(conn, tmp_path, sports=["nhl"])
+    assert result["per_sport"]["nhl"]["post_kickoff_voided"] == 1
+
+
+def test_concurrently_settled_post_kickoff_void_is_backed_out(tmp_path):
+    rec, twin = _moved_earlier(1.0)
+    conn = FakeConn([rec], [twin], update_rowcount=0)
+    result = _run(conn, tmp_path)
+    counts = result["per_sport"]["tennis"]
+    assert result["applied"] == 0
+    assert counts["post_kickoff_voided"] == 0 and counts["skipped_not_pending"] == 1
+    assert [r["rec_id"] for r in _csv_rows(Path(result["not_applied_csv_path"]))] == ["rec-1"]
+
+
+def test_dry_run_plans_the_post_kickoff_void_without_writing(tmp_path):
+    rec, twin = _moved_earlier(1.0)
+    conn = FakeConn([rec], [twin])
+    result = _run(conn, tmp_path, apply_changes=False)
+    assert conn.cur.updates == [] and conn.commits == 0
+    assert result["per_sport"]["tennis"]["post_kickoff_voided"] == 1
+    assert _csv_rows(Path(result["csv_path"]))[0]["action"] == rs.ACTION_VOID_POST_KICKOFF
+
+
+def test_missing_created_at_is_loud_and_writes_nothing(tmp_path):
+    rec = make_rec(created_at=None)
+    conn = FakeConn([rec], [make_match(TWIN)])
+    out = tmp_path / "never.csv"
+    with pytest.raises(ValueError, match="post-kickoff"):
+        rs.run(conn, sports=["tennis"], apply_changes=True, out_csv=str(out))
+    assert conn.cur.updates == [] and not out.exists()
+
+
+def test_candidate_query_selects_created_at():
+    seen = []
+
+    class Cur:
+        def execute(self, sql, params=None):
+            seen.append(" ".join(sql.split()))
+
+        def fetchall(self):
+            return []
+
+    rs.list_candidates(Cur(), "soccer", 24)
+    assert "br.created_at" in seen[0]
+
+
+def test_written_after_kickoff_boundaries():
+    assert rs.written_after_kickoff(KICKOFF, KICKOFF) is True
+    assert rs.written_after_kickoff(KICKOFF + timedelta(seconds=1), KICKOFF) is True
+    assert rs.written_after_kickoff(KICKOFF - timedelta(seconds=1), KICKOFF) is False
+    with pytest.raises(ValueError):
+        rs.written_after_kickoff(KICKOFF, None)

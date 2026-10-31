@@ -9,7 +9,11 @@ with status='finished' in the lookback window we:
      every row whose is_correct is still NULL.
   3. UPDATE betting_recommendations: status (won/lost/void),
      actual_result, profit_loss, settled_at for every row whose status
-     is still 'pending' or 'placed'.
+     is still 'pending' or 'placed'. A rec written at or after the
+     match's kickoff is VOIDED (profit 0, actual_result 'void: written
+     after kickoff'), never graded: a bet placed after kickoff is
+     hindsight. scripts/void_post_kickoff_recs.py corrects the ones
+     settled before this guard existed.
 
 Phantom-line guard: NBA/NFL spread + total grade against the closing
 line stored in features_cache, but compute_features_{nba,nfl}.py write
@@ -69,6 +73,11 @@ from grading_outcomes import (  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("grade_completed_matches")
+
+# actual_result of a rec voided because it was written at or after kickoff.
+# Shared with repair_stranded_recs.py and void_post_kickoff_recs.py, so every
+# such row is findable by this one prefix.
+POST_KICKOFF_VOID_RESULT = "void: written after kickoff"
 
 
 # ── DB I/O ────────────────────────────────────────────────────────────
@@ -291,13 +300,23 @@ def list_open_recs_for_match(cur, match_id: str) -> list[dict]:
     `sport` (leagues.sport) and `p_model_name` tell grade_rec_selection
     an NHL rec from a soccer one: NHL double_chance is the regulation
     3-way and must not settle on the final score. LEFT JOINs, so a rec
-    never drops out of settlement over a missing league or prediction."""
+    never drops out of settlement over a missing league or prediction.
+
+    `after_kickoff` flags a rec written at or after the match's kickoff
+    (created_at >= match_date): hindsight, not a bet. grade_match voids
+    those instead of grading them, in either shape — the trigger settles
+    from the prediction, so a post-kickoff rec can arrive already 'won'.
+    The 2026-09-04 stranded-rec repair settled 21 soccer + 2 MMA recs
+    written 46 minutes to 24 hours after the real kickoff."""
     cur.execute(
         """
         SELECT br.id::text AS rec_id,
                br.prediction_id::text AS prediction_id,
                br.bet_type, br.selection,
                br.recommended_stake, br.odds_at_recommendation, br.status,
+               br.created_at,
+               m.match_date AS kickoff,
+               (br.created_at >= m.match_date) AS after_kickoff,
                p.actual_outcome AS p_actual_outcome,
                p.is_correct AS p_is_correct,
                p.model_name AS p_model_name,
@@ -426,9 +445,11 @@ def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
     recommendation for one match. Returns counts for the run summary.
 
     `stats`, when given, accumulates cross-match diagnostics that don't
-    belong in the per-match counts — currently just
-    'phantom_line_skips'. run() passes one so it can log a single
-    summary line; callers that don't care omit it.
+    belong in the per-match counts — 'phantom_line_skips',
+    'after_kickoff_skips' and 'post_kickoff_rec_voids' (recs voided
+    because they were written at or after kickoff; not counted in
+    recs_settled). run() passes one so it can log a single summary line;
+    callers that don't care omit it.
     """
     counts = {"predictions_graded": 0, "predictions_skipped": 0, "recs_settled": 0}
 
@@ -454,6 +475,23 @@ def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
     # any non-argmax selection and for every lined market (audit §7
     # 2026-08-06). Ungradable selections stay open rather than guess.
     for rec in list_open_recs_for_match(cur, match["match_id"]):
+        # Written at or after kickoff: void before any grading. The score
+        # is irrelevant to a bet that should never have existed.
+        if rec.get("after_kickoff"):
+            logger.warning(
+                "Voiding rec %s (match %s, %s %s, status %s): written %s, at or after kickoff %s",
+                rec["rec_id"],
+                match["match_id"],
+                rec.get("bet_type"),
+                rec.get("selection"),
+                rec.get("status"),
+                rec.get("created_at"),
+                rec.get("kickoff"),
+            )
+            settle_recommendation(cur, rec["rec_id"], "void", POST_KICKOFF_VOID_RESULT, Decimal("0"))
+            if stats is not None:
+                stats["post_kickoff_rec_voids"] = stats.get("post_kickoff_rec_voids", 0) + 1
+            continue
         if match["home_score"] is None or match["away_score"] is None:
             continue
         outcome = grade_rec_selection(
@@ -481,8 +519,9 @@ def run(database_url: str, days: int, match_id: Optional[str]) -> dict:
         "recs_settled": 0,
         "phantom_line_skips": 0,
         "after_kickoff_skips": 0,
+        "post_kickoff_rec_voids": 0,
     }
-    stats: dict = {"phantom_line_skips": 0, "after_kickoff_skips": 0}
+    stats: dict = {"phantom_line_skips": 0, "after_kickoff_skips": 0, "post_kickoff_rec_voids": 0}
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             matches = list_finished_matches(cur, days, match_id)
@@ -498,6 +537,16 @@ def run(database_url: str, days: int, match_id: Optional[str]) -> dict:
             conn.commit()
     summary["phantom_line_skips"] = stats["phantom_line_skips"]
     summary["after_kickoff_skips"] = stats["after_kickoff_skips"]
+    summary["post_kickoff_rec_voids"] = stats["post_kickoff_rec_voids"]
+    if stats["post_kickoff_rec_voids"]:
+        # ERROR, not WARNING: rec generation must never write a rec for a
+        # match that has started, so each of these is an upstream defect
+        # (or a kickoff ESPN moved earlier) worth chasing.
+        logger.error(
+            "Voided %d recommendation(s) written at or after kickoff instead of settling them (%r)",
+            stats["post_kickoff_rec_voids"],
+            POST_KICKOFF_VOID_RESULT,
+        )
     if stats["after_kickoff_skips"]:
         logger.warning(
             "Left %d prediction(s) ungraded because they were written after kickoff",
