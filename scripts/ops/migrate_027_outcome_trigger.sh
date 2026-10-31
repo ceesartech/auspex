@@ -20,7 +20,16 @@
 #      graded prediction), and a pre- and a post-kickoff prediction. EXPECTED
 #      "m027 pre_pred=true post_pred=null pre_rec=won post_rec=pending";
 #      pre_rec=won proves the trigger fired at all.
-# Re-runnable: re-applying 027 is a no-op.
+# Re-runnable: when step 1 finds 027's body already live, only steps 5 and 6
+# run (read-only / rolled back) and it exits 0 without a backup.
+#
+# RUN ORDER (scripts/ops/soccer_repair_runbook.sh runs it, each step through
+# its own wrapper): 1 repoint_team_matches.sh --pass 1, 2 THIS (before the
+# first step that fires the outcome trigger), 3 merge_soccer_teams.sh,
+# 4 repair_football_data_kickoffs.sh, 5 repoint_team_matches.sh --pass 2,
+# 6 repair_stranded_recs_soccer.sh, 7 cleanup_soccer_orphans.sh,
+# 8 backfill_soccer_regulation_scores.sh (+ re-grade), 9 backfill_season_labels.sh,
+# 10 compute_features --backfill-finished soccer, 11 the merge's odds check.
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/migrate_027_outcome_trigger.sh 2>&1 | tee -a ~/migrate_027.log
 # (AUSPEX_DIR and TMPDIR exist for tests/unit/test_migrate_027_wrapper.py.)
@@ -105,11 +114,37 @@ run_sql "$W/m027_fn.sql" "$W/m027_fn.log" -tA
 rc=$?
 live=$(tr -d '[:space:]' < "$W/m027_fn.log")
 if [ $rc -ne 0 ]; then cat "$W/m027_fn.log"; log "ABORT at step 1: could not read calculate_match_outcome — nothing changed"; exit 1; fi
+ALREADY=""
 case "$live" in
   "$MD5_011") log "live function is 011's, as expected" ;;
-  "$MD5_027") log "live function is already 027's — re-applying is a no-op" ;;
+  "$MD5_027") log "live function is already 027's — checking it (steps 5 and 6 only)"; ALREADY=1 ;;
   *) log "ABORT at step 1: live calculate_match_outcome (md5 $live) is neither 011's nor 027's — an unknown edit 027 would overwrite; inspect. Nothing changed"; exit 1 ;;
 esac
+
+after_state() {  # step 5: 0 when the live body is 027's with both guards and the trigger
+  run_sql "$W/m027_verify.sql" "$W/m027_verify.log" -tA
+  local rc=$? state
+  state=$(tr -d '[:space:]' < "$W/m027_verify.log")
+  echo "md5|prediction guard|rec guard|trigger: $state"
+  [ $rc -eq 0 ] && [ "$state" = "$EXPECT_STATE" ]
+}
+prove() {  # step 6, rolled back: 0 when the proof reads EXPECT_PROOF
+  echo 'BEGIN;' > "$W/m027_prove.sql"
+  cat "$W/m027_prove_body.sql" >> "$W/m027_prove.sql"
+  echo 'ROLLBACK;' >> "$W/m027_prove.sql"
+  run_sql "$W/m027_prove.sql" "$W/m027_prove.log" -tA
+  local rc=$?
+  cat "$W/m027_prove.log"
+  [ $rc -eq 0 ] && grep -qFx "$EXPECT_PROOF" "$W/m027_prove.log"
+}
+if [ -n "$ALREADY" ]; then
+  log "5/6 after-state (027 already live)"
+  if ! after_state; then log "FAILED at step 5: expected $EXPECT_STATE — inspect now"; exit 1; fi
+  log "6/6 prove (rolled back)"
+  if ! prove; then log "FAILED at step 6: expected '$EXPECT_PROOF' — inspect now"; exit 1; fi
+  log "ALREADY DONE: 027 is live, its after-state and proof hold — nothing to do (no backup)"
+  exit 0
+fi
 
 log "2/6 backup"
 before=$(date -u +%s)
@@ -146,22 +181,12 @@ cat "$W/m027_apply.log"
 if [ $rc -ne 0 ]; then log "ABORT at step 4: migration failed (one transaction — nothing changed); re-run"; exit 1; fi
 
 log "5/6 after-state"
-run_sql "$W/m027_verify.sql" "$W/m027_verify.log" -tA
-rc=$?
-state=$(tr -d '[:space:]' < "$W/m027_verify.log")
-echo "md5|prediction guard|rec guard|trigger: $state"
-if [ $rc -ne 0 ] || [ "$state" != "$EXPECT_STATE" ]; then
+if ! after_state; then
   log "FAILED at step 5: expected $EXPECT_STATE — inspect now (revert: re-apply 011)"; exit 1
 fi
 
 log "6/6 prove: a post-kickoff rec stays pending (rolled back)"
-echo 'BEGIN;' > "$W/m027_prove.sql"
-cat "$W/m027_prove_body.sql" >> "$W/m027_prove.sql"
-echo 'ROLLBACK;' >> "$W/m027_prove.sql"
-run_sql "$W/m027_prove.sql" "$W/m027_prove.log" -tA
-rc=$?
-cat "$W/m027_prove.log"
-if [ $rc -eq 0 ] && grep -qFx "$EXPECT_PROOF" "$W/m027_prove.log"; then
+if prove; then
   log "DONE: post-kickoff rec left pending, post-kickoff prediction ungraded, pre-kickoff rec settled"
 else
   log "FAILED at step 6: expected '$EXPECT_PROOF' — inspect now (revert: re-apply 011)"; exit 1

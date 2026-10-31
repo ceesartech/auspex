@@ -331,6 +331,14 @@ def run(conn, days_back: int, apply_changes: bool, out_csv: Optional[str] = None
         counts[REFUSE],
         out_csv,
     )
+    # One fixed-format line for scripts/ops/backfill_soccer_regulation_scores.sh.
+    logger.info(
+        "PLAN candidates=%d stamp=%d already_set=%d refuse=%d",
+        len(cands),
+        counts[STAMP],
+        counts[ALREADY_SET],
+        counts[REFUSE],
+    )
     if fu.FETCH_STATS["failed"] and not fu.FETCH_STATS["ok"]:
         raise RuntimeError(f"Every ESPN request failed ({fu.FETCH_STATS['failed']}) — nothing written")
     if fu.FETCH_STATS["failed"]:

@@ -257,6 +257,12 @@ class TestRun:
             ("m-esp", "stamp", "0", "0"),
         ]
 
+    def test_the_plan_line_for_the_wrapper(self, espn, tmp_path, caplog):
+        cur, conn = self._setup(espn)
+        with caplog.at_level("INFO", logger=bf.logger.name):
+            bf.run(conn, 365, apply_changes=False, out_csv=str(tmp_path / "plan.csv"))
+        assert "PLAN candidates=2 stamp=2 already_set=0 refuse=0" in caplog.text
+
     def test_the_csv_is_write_once(self, espn, tmp_path):
         cur, conn = self._setup(espn)
         out = tmp_path / "audit.csv"

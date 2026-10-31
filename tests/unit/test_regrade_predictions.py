@@ -304,6 +304,20 @@ class TestRun:
         assert counts["changed"] == 2 and counts["scanned"] == 5
         assert not Path(rp.stale_ids_path(str(out))).exists()
 
+    def test_an_apply_pinned_to_another_count_writes_nothing(self, tmp_path, caplog):
+        out = tmp_path / "pinned.csv"
+        conn = FakeConn(_nhl_rows(), str(out))
+        counts = rp.run(conn, 30, None, None, True, str(out), None, 3)
+        assert counts["plan_mismatch"] == 1 and conn.updates == [] and conn.commits == 0
+        assert "Pinned 3 change(s) (--expect-changes), planned 2" in caplog.text
+        assert out.exists()  # the audit CSV still lands
+
+    def test_an_apply_pinned_to_its_dry_run_writes(self, tmp_path):
+        out = tmp_path / "pinned_ok.csv"
+        conn = FakeConn(_nhl_rows(), str(out))
+        counts = rp.run(conn, 30, None, None, True, str(out), None, 2)
+        assert not counts["plan_mismatch"] and counts["updated"] == 2 and conn.commits == 1
+
     def test_apply_updates_only_changed_rows_guarded_on_old_values(self, tmp_path):
         out = tmp_path / "apply.csv"
         conn = FakeConn(_nhl_rows(), str(out), stale={"cs"})

@@ -7,35 +7,43 @@
 # (check_legacy_kickoffs refuses every run while a row sits at a legacy
 # kickoff) until this has run and its --check passes; then it may run again.
 #
-# RUN ORDER (decided 2026-10-31; each step its own approval):
-#   1. scripts/ops/repoint_team_matches.sh — right after the team-identity
-#      deploy (until then every sweep meeting Santos Laguna's or Chivas' ESPN
-#      fixtures exits 3). It moves the Liga MX rows ESPN filed under Santos
-#      (the Brazilian club's row) and Guadalajara (the Spanish club's row): 33
-#      sides on 2026-10-31, refusing 6 because football-data's copy sits on the
-#      target pair (a same-pair twin), to be merged by THIS repair first.
-#   2. scripts/ops/merge_soccer_teams.sh — folds the 160 pairs where ESPN filed
+# RUN ORDER (2026-10-31; scripts/ops/soccer_repair_runbook.sh runs it, each
+# step through its own wrapper with its own verified backup and checks):
+#   1. scripts/ops/repoint_team_matches.sh --pass 1 — right after the
+#      team-identity deploy (until then every sweep meeting Santos Laguna's or
+#      Chivas' ESPN fixtures exits 3). It moves the Liga MX rows ESPN filed
+#      under Santos (the Brazilian club's row) and Guadalajara (the Spanish
+#      club's row): 33 sides, refusing 6 because football-data's copy sits on
+#      the target pair (a same-pair twin), to be merged by THIS repair first.
+#   2. scripts/ops/migrate_027_outcome_trigger.sh (before the first step that
+#      fires the outcome trigger: step 3's adoptions, this repair's folds).
+#   3. scripts/ops/merge_soccer_teams.sh — folds the 160 pairs where ESPN filed
 #      a fixture under its own team rows (keeps the ESPN row, deletes ~171
 #      football-data rows; promote_raw then writes those fixtures onto the
 #      surviving ESPN row, never beside it).
-#   3. this script. --dedupe alias-merges the 4 copies step 1 refused for:
+#   4. this script. --dedupe alias-merges the 4 copies step 1 refused for:
 #      each into its ESPN row, still on the wrong club, which the reviewed map
 #      (scripts/data/repoint_team_matches.csv) moves onto the copy's pair.
-#   4. scripts/repoint_team_matches.py again (dry run first, re-pinned): the 6
-#      sides it refused have no twin left and plan as 'repoint' (4 ESPN rows +
-#      the 2 stale rows that move with them). Until then promote_raw refuses
-#      those 4 fixtures (alias slot: no insert beside the same match under
-#      other team ids), loudly, exit 3. Rehearsed: repoint 6, done 19, and 14
-#      sides step 1 already moved read as 'drifted' (step 2 folded their
-#      opponent's ESPN spelling, e.g. 'América' -> 'Club America'; one row it
-#      folded away), so the re-pin is --expect-repoint 6 --expect-done 19
-#      --expect-refused 14 unless that tool learns the merged names.
-#   5. scripts/ops/cleanup_soccer_orphans.sh — AFTER: the 26 stale rows step 3
-#      here folds are finished by then and leave its set; the 2 stale Liga MX
-#      rows sit beside their ESPN rows once step 4 has run.
-# If step 1 moves every side (football-data twins allowed), step 3 plans those
-# 4 copies as ordinary merges (72 merges, 0 alias merges) and step 4 has
-# nothing to do. If the team merge (step 2) has NOT run, its alias pairs are
+#   5. scripts/ops/repoint_team_matches.sh --pass 2 (never a bare --apply):
+#      the 6 sides step 1 refused have no twin left and move (4 ESPN rows +
+#      the 2 stale rows that move with them); 32 read 'done' (the tool
+#      follows the opponents step 3 renamed, 'America' -> 'Club America',
+#      through teams.metadata.aliases), 1 is 'match row not found' (step 3
+#      folded cb4e21fc away). Until then promote_raw refuses those 4 fixtures
+#      (alias slot: no insert beside the same match under other team ids),
+#      loudly, exit 3. The alias-slot guard needs a SHARED CLUB: a fixture
+#      filed under two other team ids does not trip it, so step 1 must have
+#      moved the map's two-sided rows (Santos v Guadalajara 2026-08-17,
+#      4a31da6c / da444426) before any MX1 raw for that date is promoted.
+#   6. scripts/ops/repair_stranded_recs_soccer.sh; 7. scripts/ops/cleanup_soccer_orphans.sh
+#      (AFTER: the 26 stale rows step 4 folds are finished by then and leave
+#      its set; the 2 stale Liga MX rows sit beside their ESPN rows once step
+#      5 has run); 8. backfill_soccer_regulation_scores.sh (+ re-grade);
+#      9. backfill_season_labels.sh; 10. compute_features --backfill-finished
+#      soccer; 11. the merge's odds check.
+# If step 1 moves every side (football-data twins allowed), step 4 plans those
+# 4 copies as ordinary merges (72 merges, 0 alias merges) and step 5 has
+# nothing to do. If the team merge (step 3) has NOT run, its alias pairs are
 # left for it: --shift refuses every copy whose new kickoff is the exact
 # kickoff of the same fixture under other team ids, so this aborts at step 2
 # below with nothing written (never shift beside them: the merge would then
@@ -46,15 +54,16 @@
 # Reviewed plan (rehearsed 2026-10-31 on a local copy of a read-only prod
 # export taken 08:08Z: all soccer matches, raw_football_data, leagues, teams,
 # soccer odds and match_stats, the 2026-04-01+ soccer predictions, recs,
-# snapshots and features), after steps 1 and 2 run with their own tools:
+# snapshots and features), after steps 1 and 3 run with their own tools:
 #   dedupe merge=68 alias_merge=4 fold=26 refuse=0; shift 63,533 refuse=0
+#   (re-played on the 11:08Z export: the same dedupe, shift 63,532)
 #   (step 1 moving all 39 sides instead: merge=72 alias_merge=0, the same shift)
 #   --dedupe merge: a copy into its ESPN row (same team ids, same final score;
 #            65 SC0 odds and 136 match_stats move);
 #   --dedupe alias_merge: the same, into an ESPN row the re-point map is about
 #            to move onto the copy's pair (MX1 4); only the match_stats of a
 #            club in that row move (4 of 8; the other club's is archived and
-#            promote_raw writes it again after step 4);
+#            promote_raw writes it again after step 5, a separate approval);
 #   --dedupe fold: a copy into the stale pre-023 'scheduled' row at exactly its
 #            corrected kickoff (CN1 21, NO1 3, BR1 2): the row takes the copy's
 #            score and turns 'finished', guarded on the values observed, no
@@ -67,14 +76,20 @@
 #   --shift: every other BST row moves back 1 h.
 #   after:   check_legacy_kickoffs passes, 0 football-data duplicates.
 # The bounds below are that plan's: the merge that runs first lowers the counts.
+#   0. already done? Read-only dry runs and --check first: when both plans are
+#      empty (no merge, alias merge, fold, shift or refusal, nothing pending)
+#      and --check passes, this exits 0 without a backup (a re-run after
+#      success);
 #   1. verified backup (B2) — abort if it does not land;
 #   2. before-state, --check (expected to FAIL now), dedupe dry run and shift
 #      dry run — abort unless both plans are within the reviewed bounds with 0
 #      refusals, no fold row holds a rec without a profit_loss, and the shift
 #      sees exactly the dedupe's merges + alias merges + folds as still to do
 #      (nothing is written before this passes);
-#   3. dedupe apply, pinned to step 2's own counts (--expect-plan: any drift
-#      refuses before a write); each batch archives (gzip JSONL in /app/backups)
+#   3. dedupe apply, pinned to step 2's own counts, every key and
+#      fold_unsettled_recs=0 (--expect-plan: any drift refuses before a write;
+#      the tool also refuses unpinned folds holding unsettled recs); each
+#      batch archives (gzip JSONL in /app/backups)
 #      before its first write, one transaction per 100 copies;
 #   4. shift dry run again — abort unless it plans exactly step 2's shifts with
 #      0 refusals and nothing left to dedupe;
@@ -96,10 +111,17 @@
 # void and their P&L).
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/repair_football_data_kickoffs.sh 2>&1 | tee -a ~/repair_football_data_kickoffs.log
+# (AUSPEX_DIR and TMPDIR exist for tests and rehearsals.)
 set -uo pipefail
-cd /opt/auspex
+cd "${AUSPEX_DIR:-/opt/auspex}" || { echo "ABORT: cannot cd to ${AUSPEX_DIR:-/opt/auspex} — nothing changed"; exit 1; }
 DC="docker compose"
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
+W=$(mktemp -d "${TMPDIR:-/tmp}/fd_kickoffs.XXXXXX") || { echo "ABORT: mktemp failed — nothing changed"; exit 1; }
+cleanup() {
+  rm -rf "$W"
+  $DC exec -T postgres rm -f /tmp/fd_kickoffs_q.sql >/dev/null 2>&1
+}
+trap cleanup EXIT
 latest_dump() {
   $DC exec -T api python -c "import sys; sys.path.insert(0,'/app/scripts'); import b2_io; s=b2_io.s3_client(); o=max(b2_io._list(s,'postgres/'), key=lambda o:o['LastModified']); print(int(o['LastModified'].timestamp()), o['Key'])" 2>/dev/null | tail -1
 }
@@ -133,8 +155,22 @@ ids_of() {  # ids_of <audit CSV in the api container> <action>: the kept row ids
   $DC exec -T api python -c "import csv, sys; print(' '.join(r['espn_row_id'] for r in csv.DictReader(open(sys.argv[1])) if r['action'] == sys.argv[2]))" "$1" "$2" 2>/dev/null
 }
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+
+log "0/6 already done? (read-only dry runs + --check)"
+step "pre-check dedupe dry run" fd_kickoffs_dedupe_pre --dedupe --out-csv /app/backups/football_data_dedupe_precheck_$STAMP.csv
+step "pre-check shift dry run" fd_kickoffs_shift_pre --shift --out-csv /app/backups/football_data_shift_precheck_$STAMP.csv
+step "pre-check --check" fd_kickoffs_check_pre --check
+pre_check=$?
+pd=$(plan_of fd_kickoffs_dedupe_pre); ps=$(plan_of fd_kickoffs_shift_pre)
+pre="$(plan_num "$pd" merge) $(plan_num "$pd" alias_merge) $(plan_num "$pd" fold) $(plan_num "$pd" refuse) $(plan_num "$ps" shift) $(plan_num "$ps" refuse) $(plan_num "$ps" dedupe_pending)"
+if [ "$pre_check" -eq 0 ] && [ "$pre" = "0 0 0 0 0 0 0" ]; then
+  log "ALREADY DONE: nothing to merge, fold or shift and --check passes — nothing to do (no backup)"
+  exit 0
+fi
+log "not done yet (merge alias_merge fold refuse | shift refuse pending = '$pre', --check exit $pre_check) — continuing"
+
 T0=$(date -u +%FT%TZ)
-cat > /tmp/fd_kickoffs_state.sql <<SQLEOF
+cat > $W/fd_kickoffs_state.sql <<SQLEOF
 SELECT (SELECT count(*) FROM matches m JOIN leagues l ON l.id = m.league_id
          WHERE l.sport = 'soccer' AND m.created_at < TIMESTAMPTZ '$T0') AS soccer,
        (SELECT count(*) FROM matches m JOIN leagues l ON l.id = m.league_id
@@ -155,7 +191,7 @@ if [ -z "$landed" ]; then log "ABORT: backup did not land in B2 within 20 min �
 log "backup landed: $landed"
 
 log "2/6 before-state + dry runs"
-state=$(psql_at /tmp/fd_kickoffs_state.sql | tr -d '[:space:]')
+state=$(psql_at $W/fd_kickoffs_state.sql | tr -d '[:space:]')
 IFS='|' read -r soccer0 stale0 <<< "$state"
 if ! [[ "$soccer0" =~ ^[0-9]+$ && "$stale0" =~ ^[0-9]+$ ]]; then
   log "ABORT at step 2: the before-state query failed (got '$state') — nothing changed"; exit 1
@@ -186,7 +222,7 @@ fi
 log "plan: merge=$m alias_merge=$a fold=$f shift=$s"
 
 log "3/6 dedupe apply (pinned to the dry run's counts)"
-step "dedupe apply" fd_kickoffs_dedupe --dedupe --apply --expect-plan merge=$m,alias_merge=$a,fold=$f,refuse=0 \
+step "dedupe apply" fd_kickoffs_dedupe --dedupe --apply --expect-plan merge=$m,alias_merge=$a,fold=$f,refuse=0,fold_unsettled_recs=0 \
   --out-csv /app/backups/football_data_dedupe_apply_$STAMP.csv \
   || { log "ABORT at step 3 (full log /tmp/fd_kickoffs_dedupe.log in the api container): if it refused before 'Batch', nothing changed; a batch that raised rolled back, batches logged as committed stay merged (archives in /app/backups) — inspect before re-running"; exit 1; }
 
@@ -206,7 +242,7 @@ step "shift apply" fd_kickoffs_shift --shift --apply --expect-plan shift=$s,refu
 log "6/6 after-state"
 step "after-state check" fd_kickoffs_check_after --check
 check_rc=$?
-state=$(psql_at /tmp/fd_kickoffs_state.sql | tr -d '[:space:]')
+state=$(psql_at $W/fd_kickoffs_state.sql | tr -d '[:space:]')
 IFS='|' read -r soccer1 stale1 <<< "$state"
 want_soccer=$((soccer0 - m - a - f)); want_stale=$((stale0 - f))
 log "after: soccer rows=${soccer1:-unknown} (expected $want_soccer), stale 'scheduled' soccer rows=${stale1:-unknown} (expected $want_stale)"
@@ -220,27 +256,27 @@ unsettled="none folded"
 if [ -n "$folded" ]; then
   if [[ "$folded" =~ ^[0-9a-f-]+(\ [0-9a-f-]+)*$ ]]; then
     arr="ARRAY['$(echo "$folded" | sed "s/ /','/g")']::uuid[]"
-    cat > /tmp/fd_kickoffs_unsettled.sql <<SQLEOF
+    cat > $W/fd_kickoffs_unsettled.sql <<SQLEOF
 SELECT count(*) FROM betting_recommendations br
  WHERE br.profit_loss IS NULL
    AND (br.match_id = ANY($arr) OR br.prediction_id IN (SELECT p.id FROM predictions p WHERE p.match_id = ANY($arr)));
 SQLEOF
-    unsettled=$(psql_at /tmp/fd_kickoffs_unsettled.sql | tr -d '[:space:]')
-    rm -f /tmp/fd_kickoffs_unsettled.sql
+    unsettled=$(psql_at $W/fd_kickoffs_unsettled.sql | tr -d '[:space:]')
+    rm -f $W/fd_kickoffs_unsettled.sql
   else
     unsettled="unreadable ids"
   fi
 fi
 log "recs without a profit_loss on the folded rows (directly or through their predictions): $unsettled (needs 0)"
-rm -f /tmp/fd_kickoffs_state.sql
-$DC exec -T postgres rm -f /tmp/fd_kickoffs_q.sql >/dev/null 2>&1
 if [ "$check_rc" -eq 0 ] && [ "$soccer1" = "$want_soccer" ] && [ "$stale1" = "$want_stale" ] && [ "$replanned" = "0 0 0 0 0 0" ] \
    && { [ "$unsettled" = "0" ] || [ "$unsettled" = "none folded" ]; }; then
-  log "DONE: promote_raw may run again (its check_legacy_kickoffs passes). Folded rows (for the optional grading in the header; it settles no rec on them): ${folded:-none}"
   if [ -n "$aliased" ]; then
-    log "NEXT (separate approval): re-run scripts/repoint_team_matches.py, dry run first and re-pinned — these alias-merged rows are still on the wrong club and now have no twin: $aliased. Until it has moved them promote_raw refuses their fixtures (alias slot, exit 3)."
+    log "DONE: check_legacy_kickoffs passes, but promote_raw runs and refuses the $(echo $aliased | wc -w) alias-merged fixture(s) (exit 3) until the second re-point pass has moved them. Folded rows (for the optional grading in the header; it settles no rec on them): ${folded:-none}"
+    log "NEXT (runbook step 5, its own approval): bash /opt/auspex/scripts/ops/repoint_team_matches.sh --pass 2 — these alias-merged rows are still on the wrong club and now have no twin: $aliased"
+  else
+    log "DONE: promote_raw may run again (its check_legacy_kickoffs passes). Folded rows (for the optional grading in the header; it settles no rec on them): ${folded:-none}"
   fi
-  log "THEN (separate approval): scripts/ops/cleanup_soccer_orphans.sh"
+  log "THEN (runbook steps 6-7): scripts/ops/repair_stranded_recs_soccer.sh, scripts/ops/cleanup_soccer_orphans.sh"
 else
   log "FAILED after-state: --check exit $check_rc (needs 0), soccer rows ${soccer1:-unknown}/$want_soccer, stale rows ${stale1:-unknown}/$want_stale, re-plan '$replanned' (needs '0 0 0 0 0 0'), unsettled recs on folded rows '$unsettled' (needs 0) — inspect (archives and audit CSVs are in /app/backups); promote_raw stays blocked"
   exit 1

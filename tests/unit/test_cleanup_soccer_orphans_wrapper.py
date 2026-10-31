@@ -32,6 +32,7 @@ case "$args" in
     if [ "$n" = 0 ]; then echo "$BEFORE_STATE"; else echo "$AFTER_STATE"; fi
     exit 0 ;;
   "compose exec -T postgres rm"*) exit 0 ;;
+  *"grep -o 'PLAN .*' /tmp/rfo_soccer_pre.log"*) echo "${PRE_PLAN:-$DRY_PLAN}"; exit 0 ;;
   *"grep -o 'PLAN .*' /tmp/rfo_soccer_dry.log"*) echo "$DRY_PLAN"; exit 0 ;;
   *"grep -o 'PLAN .*' /tmp/rfo_soccer_verify.log"*) echo "$VERIFY_PLAN"; exit 0 ;;
   *"repair_fixture_orphans.py"*) echo "tool exit 0"; exit 0 ;;
@@ -85,7 +86,8 @@ def _run(tmp_path: Path, **env: str) -> tuple[int, str, list[str]]:
 
 
 def _tool_calls(calls: list[str]) -> list[str]:
-    return [c for c in calls if "repair_fixture_orphans.py" in c]
+    """The tool runs after the read-only pre-check (step 0)."""
+    return [c for c in calls if "repair_fixture_orphans.py" in c and "precheck" not in c]
 
 
 def test_a_clean_run_exits_0_and_says_done(tmp_path):
@@ -93,6 +95,22 @@ def test_a_clean_run_exits_0_and_says_done(tmp_path):
     assert rc == 0, out
     assert "after-state OK" in out and "DONE." in out
     assert len(_tool_calls(calls)) == 3  # dry run, apply, re-plan
+    precheck = [c for c in calls if "precheck" in c]
+    assert len(precheck) == 1 and "--apply" not in precheck[0]
+    assert calls.index(precheck[0]) < next(i for i, c in enumerate(calls) if "import b2_io" in c)
+
+
+def test_a_re_run_with_nothing_to_do_exits_0_before_the_backup(tmp_path):
+    rc, out, calls = _run(tmp_path, PRE_PLAN=ZERO_PLAN)
+    assert rc == 0 and "ALREADY DONE" in out, out
+    assert not [c for c in calls if "import b2_io" in c or "db_backup_daily" in c]
+    assert not _tool_calls(calls)
+
+
+@pytest.mark.parametrize("pre", [ZERO_PLAN.replace("blocked_pending_recs=0", "blocked_pending_recs=1"), ""])
+def test_a_pre_check_with_anything_left_or_unreadable_goes_the_full_way(tmp_path, pre):
+    rc, out, calls = _run(tmp_path, PRE_PLAN=pre or "garbage")
+    assert "ALREADY DONE" not in out and [c for c in calls if "import b2_io" in c]
 
 
 def test_every_run_and_both_state_queries_share_one_as_of_instant(tmp_path):

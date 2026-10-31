@@ -6,23 +6,33 @@
 # Cup knockout placeholders, and mark the ESPN-verified postponed ones, with
 # scripts/repair_fixture_orphans.py.
 #
-# RUN ORDER (decided 2026-10-31; each step has its own approval):
-#   1. team merge:                 scripts/ops/merge_soccer_teams.sh
-#   2. football-data kickoffs:     scripts/ops/repair_football_data_kickoffs.sh
-#      (folds each 1 h-late football-data copy INTO the stale row at its
-#      corrected kickoff, then shifts the rest);
-#   3. stranded recs:
-#      docker compose exec -T api python /app/scripts/repair_stranded_recs.py --sport soccer --apply
-#      It settles/voids the pending recs on orphans that have a twin and
-#      re-points them onto the twin. Replica of prod 2026-10-31: 15 pending
-#      soccer recs -> 7 voided (written after the twin's kickoff) and
-#      re-pointed, 8 left pending on rows with no twin. Until it has run,
-#      step 2 below aborts (blocked_pending_recs);
-#   4. this script.
+# RUN ORDER (2026-10-31; scripts/ops/soccer_repair_runbook.sh runs it, each
+# step through its own wrapper with its own verified backup and checks):
+#   1. scripts/ops/repoint_team_matches.sh --pass 1
+#   2. scripts/ops/migrate_027_outcome_trigger.sh
+#   3. scripts/ops/merge_soccer_teams.sh (folds the forks on twin teams)
+#   4. scripts/ops/repair_football_data_kickoffs.sh (folds each 1 h-late
+#      football-data copy INTO the stale row at its corrected kickoff, then
+#      shifts the rest)
+#   5. scripts/ops/repoint_team_matches.sh --pass 2 (BEFORE this script: run
+#      after it, a398e0fe would be merge-deleted and d1f660b6 merge-cancelled
+#      while still on the wrong club, and the second pass could not move them)
+#   6. scripts/ops/repair_stranded_recs_soccer.sh: settles/voids the pending
+#      recs on orphans that have a twin and re-points them onto the twin.
+#      After the team merge (which folds Lecce v Roma and Olympiakos v OFI
+#      Crete into their twins): 12 pending soccer recs -> 7 voided (written
+#      after the twin's kickoff) and re-pointed, 0 settled, 5 left pending on
+#      the row with no twin (Panathinaikos v Kifisia, which this script marks
+#      postponed). Until it has run, step 2 below aborts (blocked_pending_recs);
+#   7. THIS script
+#   8. scripts/ops/backfill_soccer_regulation_scores.sh (+ the re-grade it prints)
+#   9. scripts/ops/backfill_season_labels.sh
+#  10. compute_features.py --backfill-finished soccer
+#  11. merge_soccer_teams.py --check-after ... --odds-since ... (the merge's odds check)
 #
 # Plan, against a fresh replica of prod 2026-10-31 07:21Z (449 stale rows),
-# after step 3 of the run order but BEFORE steps 1-2 (those tools are not on
-# main yet):
+# after the stranded-recs step but BEFORE steps 3-5 (those tools were not on
+# main yet); the ceilings below only fall once they have run:
 #   merge_delete        185  pre-game odds/snapshots/predictions moved onto the
 #                            finished twin (cutoff LEAST(orphan, twin kickoff)),
 #                            orphan deleted
@@ -40,7 +50,7 @@
 #                            kickoff)
 #   left alone          174  fd_copy_awaiting_repair 27 (9 pinned): the twin is
 #                            a football-data row (no ESPN identity) exactly 1 h
-#                            later — run-order step 2 folds it into the orphan,
+#                            later — run-order step 4 folds it into the orphan,
 #                            so after it these rows are finished and gone from
 #                            this set; one still held means the fold refused it.
 #                            No twin: replayed_later 59, other_identity 42,
@@ -53,9 +63,13 @@
 #   moved: 2,369 odds rows, 23,311 snapshots, 1,754 predictions onto 197 twins.
 # Rehearsed end to end (this wrapper, through a docker shim) on that replica:
 # after-state exact, re-plan zero, every rec row byte-identical before/after.
-# Steps 1-2 should only lower the merge count (the team merge folds the forks
-# it creates itself; the fold finishes the held rows); if they raise it past a
-# ceiling below, step 2 aborts and the plan needs a new review.
+# Run-order steps 3-5 should only lower the merge count (the team merge folds
+# the forks it creates itself; the fold finishes the held rows); if they raise
+# it past a ceiling below, step 2 aborts and the plan needs a new review.
+#   0. already done? A read-only dry run first (as of now): when it plans no
+#      merge, placeholder, postponement or no-twin delete, no list mismatch
+#      and nothing blocked, this exits 0 without a backup (a re-run after
+#      success);
 #   1. verified backup (B2) — abort if it does not land;
 #   2. START = now (one instant for every run and state query below:
 #      --as-of START); before-state + dry run (write-once audit CSV) — abort
@@ -73,7 +87,7 @@
 #   5. recompute features for the twins that received prices;
 #   6. grade the predictions moved onto those twins (predictions only — no rec
 #      is written by any step of this script).
-# Exit: 0 all done; 1 aborted or the after-state failed; 2 the cleanup is
+# Exit: 0 all done (or already done); 1 aborted or the after-state failed; 2 the cleanup is
 # verified (steps 1-4) but step 5 or 6 failed — re-run those by hand.
 # Each tool step writes its output to a log file and exits with the tool's own
 # status; a pipe through tail would report tail's 0.
@@ -111,12 +125,23 @@ TOOL="python /app/scripts/repair_fixture_orphans.py --sport soccer --delete-plac
 MAX_MERGES=204
 MAX_PLACEHOLDERS=65
 MAX_POSTPONED=6
-STATE_SQL=$(mktemp /tmp/soccer_orphans_state.XXXXXX) || exit 1
+STATE_SQL=$(mktemp "${TMPDIR:-/tmp}/soccer_orphans_state.XXXXXX") || exit 1
 cleanup() {
   rm -f "$STATE_SQL"
   $DC exec -T postgres rm -f /tmp/soccer_orphans_q.sql >/dev/null 2>&1
 }
 trap cleanup EXIT
+
+log "0/6 already done? (read-only dry run)"
+PRE_AT=$(date -u +%FT%TZ)
+$DC exec -T api sh -c "$TOOL --as-of $PRE_AT --out-csv /app/backups/fixture_orphans_soccer_precheck_$(date -u +%Y%m%dT%H%M%SZ).csv > /tmp/rfo_soccer_pre.log 2>&1; echo \"tool exit \$?\""
+pre=$($DC exec -T api sh -c "grep -o 'PLAN .*' /tmp/rfo_soccer_pre.log | tail -1")
+pre_counts="$(plan_num "$pre" merge_delete) $(plan_num "$pre" merge_cancel) $(plan_num "$pre" delete_placeholder) $(plan_num "$pre" delete_no_twin) $(plan_num "$pre" mark_postponed) $(plan_num "$pre" list_mismatch) $(plan_num "$pre" blocked_pending_recs)"
+if [ "$pre_counts" = "0 0 0 0 0 0 0" ]; then
+  log "ALREADY DONE: $pre — nothing to merge, delete or mark (no backup)"
+  exit 0
+fi
+log "not done yet (pre-plan '${pre:-unreadable}') — continuing"
 
 log "1/6 backup"
 before=$(date -u +%s)
@@ -171,7 +196,7 @@ if ! [[ "$md $mc $dp $dn $mp $lm $blocked" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+\ [
   log "ABORT at step 2: could not read the PLAN line (got '$plan') — nothing changed"; exit 1
 fi
 if [ "$blocked" -ne 0 ]; then
-  log "ABORT at step 2: $blocked orphan(s) with a twin still hold pending recs — run repair_stranded_recs.py --sport soccer --apply first (see header) — nothing changed"; exit 1
+  log "ABORT at step 2: $blocked orphan(s) with a twin still hold open recs — run scripts/ops/repair_stranded_recs_soccer.sh first (runbook step 6; see header) — nothing changed"; exit 1
 fi
 if [ "$lm" -ne 0 ]; then
   log "ABORT at step 2: $lm row(s) of $POSTPONED_LIST no longer match the data (see the ERROR lines above) — review the list; nothing changed"; exit 1

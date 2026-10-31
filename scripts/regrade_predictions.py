@@ -315,6 +315,7 @@ def run(
     apply_changes: bool,
     out_csv: Optional[str] = None,
     match_ids: Optional[list[str]] = None,
+    expect_changes: Optional[int] = None,
 ) -> Counter:
     if model_name is None and types is None:
         scope = f"{len(match_ids)} match(es)" if match_ids is not None else f"{days} days"
@@ -356,6 +357,15 @@ def run(
             counts["skipped_would_ungrade"],
         )
 
+    if expect_changes is not None and len(changes) != expect_changes:
+        counts["plan_mismatch"] = 1
+        logger.error(
+            "Pinned %d change(s) (--expect-changes), planned %d — nothing written; review %s",
+            expect_changes,
+            len(changes),
+            out_csv,
+        )
+        return counts
     if not apply_changes:
         logger.info("DRY-RUN: re-run with --apply to rewrite %d row(s)", len(changes))
         return counts
@@ -414,6 +424,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--apply", action="store_true", help="Write (default: dry run).")
     p.add_argument(
+        "--expect-changes",
+        type=int,
+        default=None,
+        help="Write nothing unless the plan rewrites exactly this many rows (pin an --apply to its dry run).",
+    )
+    p.add_argument(
         "--out-csv",
         default=None,
         help="Write-once audit CSV (default $BACKUP_LOCAL_DIR or /app/backups, regrade_<utc>.csv).",
@@ -443,12 +459,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     with psycopg2.connect(args.database_url) as conn:
         try:
-            counts = run(conn, args.days, args.model_name, types, args.apply, args.out_csv, match_ids)
+            counts = run(
+                conn, args.days, args.model_name, types, args.apply, args.out_csv, match_ids, args.expect_changes
+            )
         except MatchIdsRefused as exc:
             logger.error("%s — nothing re-graded", exc)
             return 2
     logger.info("Done: %s", dict(sorted(counts.items())))
-    return 1 if counts["changed_since_plan"] else 0
+    return 1 if counts["changed_since_plan"] or counts["plan_mismatch"] else 0
 
 
 if __name__ == "__main__":
