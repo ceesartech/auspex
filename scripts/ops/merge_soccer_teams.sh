@@ -143,13 +143,13 @@ if [ "$(plan_field "$pre" pairs_merge)" = "0" ] && [ "$(plan_field "$pre" pairs_
     log "    printf 'PLAN=%s\\nMERGED_AT=%s\\nGRADE_IDS=\\nSTATUS=done\\n' <plan> <MERGED_AT> | docker compose exec -T api sh -c 'cat > $STATE_FILE'"
     exit 1
   fi
-  check_recorded "$rec_plan"
-  rec_rc=$?
   if [ "$pre_rc" != "0" ]; then
     log "all $EXPECTED pairs read 'done' but the after-state check failed (above) — FAILED: inspect; nothing changed"
     exit 1
   fi
   if [ "$rec_status" = "done" ]; then
+    check_recorded "$rec_plan"
+    rec_rc=$?
     if [ "$rec_rc" = "0" ]; then
       log "ALREADY DONE: all $EXPECTED pairs merged and the after-state holds — nothing to do (no backup, no pause)"
       echo "$REC" | sed 's/^/  last apply: /'
