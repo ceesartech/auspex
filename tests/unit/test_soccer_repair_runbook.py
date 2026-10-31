@@ -12,7 +12,8 @@ against a replica of prod (scripts/ops/soccer_repair_runbook.sh header).
 A retrain DAG whose pause read-back fails or is interrupted still ends
 unpaused.
 A corpus step that failed or was cut short is recorded 'failed', so a later
-ALREADY DONE re-run of it does not clear it."""
+ALREADY DONE re-run of it does not clear it.
+An apply still running in the api container refuses the start."""
 
 from __future__ import annotations
 
@@ -507,3 +508,49 @@ def test_a_failure_outside_the_corpus_steps_is_not_recorded(tmp_path):
     assert rc == 1, out
     state = tmp_path / "state"
     assert not state.exists() or "result=failed" not in state.read_text()
+
+
+# --- an apply still running in the api container ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "proc",
+    [
+        "python /app/scripts/repair_fixture_orphans.py --sport soccer --delete-placeholders --apply --expect-plan x",
+        "sh -c python /app/scripts/merge_soccer_teams.py --apply --expect-plan p > /tmp/merge_teams.log 2>&1; rc=$?",
+        "python /app/scripts/regrade_predictions.py --match-ids-file ids --apply --expect-changes 135",
+    ],
+)
+def test_an_apply_still_running_in_the_api_container_refuses_to_start(tmp_path, proc):
+    """A run cut short during an apply leaves it running there (docker exec does not forward the interrupt)."""
+    airflow = _airflow()
+    airflow["procs"] = [proc, "python /app/scripts/merge_soccer_teams.py --check-after p"]
+    rc, out, steps, calls, af = _run(tmp_path, airflow=airflow)
+    assert rc == 1 and "REFUSED: a repair apply is still running in the api container" in out, out
+    assert proc in out and "docker compose top api" in out and steps == []
+    assert not [c for c in calls if "dags pause" in c]
+
+
+def test_an_unreadable_process_list_refuses_to_start(tmp_path):
+    airflow = _airflow()
+    airflow["proc_scan_fails"] = True
+    rc, out, steps, calls, _ = _run(tmp_path, airflow=airflow)
+    assert rc == 1 and "could not read the api container's processes" in out and steps == [], out
+    assert not [c for c in calls if "dags pause" in c]
+
+
+def test_the_scan_covers_every_repair_tool_the_runbook_drives(tmp_path):
+    rc, out, _, _, _ = _run(tmp_path, "--only", "9")
+    assert rc == 0, out
+    (scan,) = [c for c in fd.calls(tmp_path, scans=True) if fd.is_scan(c)]
+    for tool in (
+        "repoint_team_matches",
+        "merge_soccer_teams",
+        "repair_football_data_kickoffs",
+        "repair_stranded_recs",
+        "repair_fixture_orphans",
+        "backfill_soccer_regulation_scores",
+        "regrade_predictions",
+        "backfill_season_labels",
+    ):
+        assert f"*/app/scripts/{tool}[.]py*--apply*" in scan, tool

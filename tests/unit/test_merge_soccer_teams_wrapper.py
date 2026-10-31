@@ -8,11 +8,15 @@ last apply finished, finish an apply whose grading failed, and unpause both
 DAGs when Ctrl-C kills the tee its output goes through.
 A DAG is on the run's list, with its marker, from before its pause: a read-back
 that fails, or an interrupt during it, still ends with the DAG unpaused (or an
-ALERT, marker kept)."""
+ALERT, marker kept).
+The plan, MERGED_AT, the rows to grade and STATUS=applying are recorded BEFORE
+the apply; a re-run refuses while an apply still runs in the api container,
+then finishes an apply whose run ended during it."""
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 import signal
@@ -184,8 +188,12 @@ def test_all_pairs_done_but_the_recorded_plans_after_state_fails(tmp_path):
 
 
 def test_all_pairs_done_with_no_recorded_apply_fails_and_says_how_to_record_one(tmp_path):
+    """The hint records the apply as unfinished with the rows its plan lists (grade_after), so the re-run grades
+    them: never STATUS=done with an empty GRADE_IDS, which would skip grading the adopted rows for good."""
     rc, out, calls, af = _run(tmp_path, rules=_rules(pre=ALL_DONE))
-    assert rc == 1 and "no apply is recorded" in out and "STATUS=done" in out, out
+    assert rc == 1 and "no apply is recorded" in out, out
+    assert "STATUS=failed" in out and "['grade_after']" in out and "GRADE_IDS=%s" in out and '"$ids"' in out
+    assert "STATUS=done" not in out and "GRADE_IDS=\\n" not in out
     assert af.get("triggers", 0) == 0
 
 
@@ -220,9 +228,12 @@ def test_an_unfinished_finish_stays_failed(tmp_path):
     assert rc == 1 and "finishing the last apply" in out and _recorded(tmp_path)["STATUS"] == "failed", out
 
 
-def test_rows_an_unfinished_earlier_apply_listed_are_graded_with_this_runs(tmp_path):
+@pytest.mark.parametrize("status", ["grading", "applying"])
+def test_rows_an_unfinished_earlier_apply_listed_are_graded_with_this_runs(tmp_path, status):
+    """'applying': that run ended during its apply and the apply was cut short — this run merges the rest and grades
+    the rows of both."""
     env = _install(tmp_path)
-    _record(tmp_path, "grading", OLD)
+    _record(tmp_path, status, OLD)
     rc, out = fd.run(WRAPPER, env)
     assert rc == 0, out
     (grade,) = [c for c in fd.calls(tmp_path) if "grade_completed_matches.py --match-id" in c]
@@ -388,3 +399,103 @@ def test_ctrl_c_during_the_read_right_after_a_pause_still_unpauses_it(tmp_path):
     finally:
         if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGKILL)
+
+
+# --- an apply cut short ------------------------------------------------------------------------------------------
+
+
+def _set_airflow(tmp_path, **kv):
+    """Change the fake's Airflow model / process list between runs."""
+    path = tmp_path / "fake" / "airflow.json"
+    st = json.loads(path.read_text())
+    st.update(kv)
+    path.write_text(json.dumps(st))
+
+
+APPLY_CMD = "python /app/scripts/merge_soccer_teams.py --apply --expect-plan /app/backups/p.plan.json --out-csv x"
+
+
+def test_an_interrupt_during_the_apply_leaves_its_record_and_the_re_run_waits_for_it_then_finishes_it(tmp_path):
+    """The plan, MERGED_AT, the rows to grade and STATUS=applying are recorded BEFORE the apply. Ctrl-C during it
+    (docker exec does not forward the interrupt: the apply may run on in the api container) still leaves them, and
+    says so in the ledger. A re-run refuses while the apply runs; once it has ended, it finishes it: grades the rows
+    and records done — never 'no apply is recorded' with a hint that skips the grading."""
+    rules = _rules()
+    next(r for r in rules if r["match"] == r"--apply --expect-plan")["delay"] = 60
+    env = _install(tmp_path, rules)
+    proc = subprocess.Popen(
+        ["bash", "-c", f'bash "{WRAPPER}" 2>&1 | tee "{tmp_path / "out.log"}" >/dev/null'],
+        env={**os.environ, **env},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        assert _wait_for(lambda: any("--apply --expect-plan" in c for c in fd.calls(tmp_path)))
+        rec = _recorded(tmp_path)
+        assert rec["STATUS"] == "applying" and rec["GRADE_IDS"].split() == [KEPT], rec
+        assert "merge_soccer_teams_dryrun_" in rec["PLAN"] and rec["MERGED_AT"].endswith("Z")
+        os.killpg(proc.pid, signal.SIGINT)
+        proc.wait(timeout=30)
+        assert _wait_for(lambda: "unpaused fetch_live_odds" in _ledger(tmp_path)), _ledger(tmp_path)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+    assert "ALERT: this run ended during its 3/5 apply" in _ledger(tmp_path)
+    assert "docker compose top api" in _ledger(tmp_path)
+    assert _recorded(tmp_path) == rec  # nothing after the apply ran
+
+    # The apply runs on in the api container: the re-run refuses before anything else.
+    _set_airflow(tmp_path, procs=[APPLY_CMD])
+    fd.set_rules(tmp_path, _rules(pre=ALL_DONE))
+    before = len(fd.calls(tmp_path))
+    rc, out = fd.run(WRAPPER, _env(tmp_path))
+    assert rc == 1 and "REFUSED: a merge_soccer_teams.py --apply is still running" in out, out
+    assert APPLY_CMD in out and "docker compose top api" in out
+    assert fd.calls(tmp_path)[before:] == [] and _recorded(tmp_path) == rec
+
+    # It has ended (every pair merged): step 0 finishes the 'applying' record.
+    _set_airflow(tmp_path, procs=[])
+    before = len(fd.calls(tmp_path))
+    rc, out = fd.run(WRAPPER, _env(tmp_path))
+    calls = fd.calls(tmp_path)[before:]
+    assert rc == 0 and "STATUS=applying (that run ended during its apply" in out and "COMPLETED" in out, out
+    (grade,) = [c for c in calls if "grade_completed_matches.py --match-id" in c]
+    assert KEPT in grade and not [c for c in calls if "db_backup_daily" in c or "dags pause" in c or "--apply" in c]
+    assert _recorded(tmp_path)["STATUS"] == "done" and _recorded(tmp_path)["MERGED_AT"] == rec["MERGED_AT"]
+
+
+def test_the_applying_record_precedes_the_apply_and_merged_at_is_kept_to_the_end(tmp_path):
+    rc, out, _, _ = _run(tmp_path)
+    assert rc == 0, out
+    calls = fd.calls(tmp_path)
+    writes = [i for i, c in enumerate(calls) if c.startswith(f"compose exec -T api sh -c cat > {STATE}.tmp")]
+    apply_ = next(i for i, c in enumerate(calls) if "--apply --expect-plan" in c)
+    assert len(writes) == 3 and writes[0] < apply_ < writes[1]  # applying, grading, done
+    assert "recorded STATUS=applying, MERGED_AT=" in out
+    merged_at = out.split("recorded STATUS=applying, MERGED_AT=")[1].split(")")[0]
+    assert _recorded(tmp_path)["MERGED_AT"] == merged_at and f"--odds-since {merged_at}" in out
+
+
+def test_no_apply_runs_when_its_record_cannot_be_written_first(tmp_path):
+    airflow = _airflow()
+    airflow["write_fails"] = [STATE]
+    rc, out, calls, af = _run(tmp_path, airflow=airflow)
+    assert rc == 1 and "ABORT at step 3: could not record the apply (STATUS=applying)" in out, out
+    assert not [c for c in calls if "--apply" in c]
+    assert not af["dags"]["auspex_pipeline"]["paused"] and not af["dags"]["fetch_live_odds"]["paused"]
+
+
+def test_an_unreadable_process_list_refuses_to_start(tmp_path):
+    airflow = _airflow()
+    airflow["proc_scan_fails"] = True
+    rc, out, calls, af = _run(tmp_path, airflow=airflow)
+    assert rc == 1 and "could not read the api container's processes" in out, out
+    assert calls == [] and af.get("triggers", 0) == 0
+
+
+def test_an_apply_of_another_tool_does_not_refuse_the_merge(tmp_path):
+    airflow = _airflow()
+    airflow["procs"] = ["python /app/scripts/repoint_team_matches.py --apply --expect-repoint 6"]
+    rc, out, _, _ = _run(tmp_path, airflow=airflow)
+    assert rc == 0 and "REFUSED" not in out, out

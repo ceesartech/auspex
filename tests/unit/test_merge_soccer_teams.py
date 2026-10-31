@@ -170,13 +170,17 @@ class TestCommittedMap:
         assert "airflow dags pause -y" in lib and "airflow dags unpause -y" in lib
         assert 'AF_PAUSED_BY_US="$AF_PAUSED_BY_US $d"' in lib  # only what it paused; an already paused DAG stays paused
         backup, pause = wrapper.index('log "backup landed'), wrapper.index("af_drain_and_pause 5 40 $DAGS")
-        dry, apply_, resume, grade = (
+        dry, merged_at, record, apply_, resume, grade = (
             wrapper.index('log "2/5 dry run"'),
-            wrapper.index('log "3/5 apply'),
-            wrapper.index("MERGED_AT=$(date -u +%FT%TZ)\naf_resume"),
+            wrapper.index("MERGED_AT=$(date -u +%FT%TZ)"),
+            wrapper.index('write_state_file "$PLAN" "$MERGED_AT" "$grade_ids" applying'),
+            wrapper.index("$TOOL --apply --expect-plan $PLAN"),
+            wrapper.index("\nfi\naf_resume\n"),
             wrapper.index('log "4/5 grade"'),
         )
-        assert backup < pause < dry < apply_ < resume < grade
+        # MERGED_AT and the 'applying' record come before the apply: a run that ends during it still leaves them.
+        assert backup < pause < dry < merged_at < record < apply_ < resume < grade
+        assert wrapper.count("MERGED_AT=$(date") == 1
 
     def test_wrapper_gates_on_the_reviewed_kickoff_moves_and_checks_the_odds_afterwards(self):
         wrapper = (SCRIPTS_DIR / "ops" / "merge_soccer_teams.sh").read_text()

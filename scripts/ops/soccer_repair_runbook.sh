@@ -92,6 +92,14 @@
 #   * void_post_kickoff_recs.sh has run (>= 22 recs carry its 'void: written
 #     after kickoff (was ...)' label) and fix_unplayed_soccer_rows.sh has run
 #     (its 4 rows are 'cancelled');
+#   * no repair tool's --apply is still running in the api container
+#     (repoint_team_matches, merge_soccer_teams, repair_football_data_kickoffs,
+#     repair_stranded_recs, repair_fixture_orphans,
+#     backfill_soccer_regulation_scores, regrade_predictions,
+#     backfill_season_labels): `docker compose exec -T` does not forward an
+#     interrupt, so an apply cut short on the host runs on in the container,
+#     and a re-run would race it. It lists them; `docker compose top api`
+#     shows when they have ended;
 #   * neither retrain_models (Sun 04:00 UTC) nor retrain_halftime_dc (the 1st,
 #     05:30 UTC) has a run in flight. Both fit on the soccer corpus this
 #     sequence rewrites, so each one that is unpaused is drained and paused
@@ -278,6 +286,24 @@ if [ "$unplayed" != "4" ]; then
   exit 1
 fi
 log "void_post_kickoff_recs has run ($relabelled relabelled) and fix_unplayed_soccer_rows has run (4/4 cancelled)"
+
+# An apply a run cut short may still be running in the api container: docker exec does not forward an interrupt.
+REPAIR_TOOLS="repoint_team_matches merge_soccer_teams repair_football_data_kickoffs repair_stranded_recs repair_fixture_orphans backfill_soccer_regulation_scores regrade_predictions backfill_season_labels"
+# shellcheck disable=SC2086  # $REPAIR_TOOLS is a word list
+running=$(af_applies_running $REPAIR_TOOLS)
+case $? in
+  0)
+    log "REFUSED: a repair apply is still running in the api container (an earlier run was cut short during it; docker exec does not forward an interrupt):"
+    echo "$running" | sed 's/^/  /'
+    log "  wait until it has ended (docker compose top api), then re-run the runbook with the same arguments — nothing changed"
+    exit 1
+    ;;
+  1) log "no repair tool's --apply is running in the api container" ;;
+  *)
+    log "REFUSED: could not read the api container's processes to rule out an apply still running (is the api container up?) — nothing changed"
+    exit 1
+    ;;
+esac
 
 # shellcheck disable=SC2086  # $RETRAIN_DAGS is a word list
 if ! af_drain_and_pause 1 4 $RETRAIN_DAGS; then

@@ -1,7 +1,8 @@
 #!/bin/bash
-# Shared Airflow 3.3 helpers for scripts/ops wrappers (sourced, never run on
-# its own; not a step of any run order). The caller defines DC (the compose
-# command) and log().
+# Shared helpers for scripts/ops wrappers (sourced, never run on its own; not a
+# step of any run order): Airflow 3.3 pausing and the check for an apply still
+# running in the api container. The caller defines DC (the compose command)
+# and log().
 #
 # Airflow 3.3 never advances a PAUSED DAG's runs: the scheduler examines only
 # runs of unpaused DAGs (dagrun.py get_running_dag_runs_to_examine and the
@@ -13,14 +14,17 @@
 #
 #   af_drain_and_pause <attempts> <polls> <dag>...   0 when drained and paused
 #   af_resume                                        unpause what we paused
-#   af_resume_on_exit                                the same, for an EXIT trap
+#   af_resume_on_exit                                the same, then AF_EXIT_NOTE, for an EXIT trap
 #   af_keep_paused <why>                             leave ours paused, loudly
 #   af_dag_paused <dag>                              True / False / '' (unreadable)
 #   af_runs_in_flight <dag>...                       queued+running runs, or exit 1
+#   af_applies_running <tool>...                     an /app/scripts/<tool>.py --apply still running?
 # AF_PAUSED_BY_US lists the DAGs this run paused or adopted. A DAG that was
 # already paused is left as it is and never unpaused, unless a marker says a
 # wrapper paused it and never unpaused it (below). AF_POLL_SECONDS (default
-# 30) is the wait between polls.
+# 30) is the wait between polls. AF_EXIT_NOTE, when set, is written to the
+# ledger and the log by af_resume_on_exit (what an exit at that point leaves
+# behind, and what to run next).
 #
 # Pausing keeps its books BEFORE it acts: the DAG joins AF_PAUSED_BY_US and
 # gets its marker and a 'pausing' ledger line, then `dags pause` runs, then a
@@ -45,9 +49,15 @@
 # DAG still paused with its marker (the wrapper was killed outright, or the
 # unpause failed) is adopted by the next wrapper or runbook run that drains
 # it, and unpaused when that run ends.
+#
+# af_applies_running: `docker compose exec -T` does not forward an interrupt,
+# so an apply cut short on the host keeps running in the api container. The
+# api image has no ps or pgrep: the scan reads /proc/<pid>/cmdline (skipping
+# its own shell; the '[.]' keeps its own text from matching).
 
 trap '' PIPE
 AF_PAUSED_BY_US=""
+AF_EXIT_NOTE=""
 AF_POLL_SECONDS="${AF_POLL_SECONDS:-30}"
 AF_STATE_DIR="${AF_STATE_DIR:-${HOME:-/tmp}/.auspex_ops}"
 AF_LEDGER="$AF_STATE_DIR/airflow_pauses.log"
@@ -101,6 +111,7 @@ af_resume() {
 af_resume_on_exit() {
   trap '' INT TERM HUP
   af_resume
+  [ -z "$AF_EXIT_NOTE" ] || af_note "$AF_EXIT_NOTE"
 }
 
 # Leave the DAGs this run paused PAUSED (their markers stay, so the next run adopts them), loudly.
@@ -167,4 +178,14 @@ af_drain_and_pause() {
   done
   log "could not pause $* with no run in flight in $attempts attempts"
   return 1
+}
+
+# af_applies_running <tool>...: prints "pid <n>: <command line>" for every /app/scripts/<tool>.py process with
+# --apply running in the api container and returns 0; 1 when there is none; 2 when the scan did not run.
+af_applies_running() {
+  local pat="" t out
+  for t in "$@"; do pat="$pat${pat:+|}*/app/scripts/$t[.]py*--apply*"; done
+  out=$($DC exec -T api sh -c "for f in /proc/[0-9]*/cmdline; do p=\${f#/proc/}; p=\${p%/cmdline}; [ \"\$p\" = \"\$\$\" ] && continue; c=\$(tr '\\000' ' ' < \"\$f\" 2>/dev/null); case \"\$c\" in $pat) echo \"APPLY_RUNNING pid \$p: \$c\" ;; esac; done; echo PROC_SCAN_OK" </dev/null 2>/dev/null)
+  case "$out" in *PROC_SCAN_OK*) ;; *) return 2 ;; esac
+  echo "$out" | sed -n 's/^APPLY_RUNNING //p' | grep . || return 1
 }

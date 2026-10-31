@@ -29,15 +29,20 @@
 #      fetch_live_odds run has FINISHED after the merge (the runbook waits for
 #      one; the plan and MERGED_AT are in /app/backups/merge_soccer_teams_last_apply.env)
 #
+#   It REFUSES TO START while a merge_soccer_teams.py --apply is still running
+#   in the api container: a run cut short during its apply (Ctrl-C, a
+#   dropped session) leaves the apply running there — `docker compose exec -T`
+#   does not forward the interrupt — and a re-run would race it.
 #   0/5 already done? A read-only dry run first. When it plans all EXPECTED
 #       pairs as 'done', --check-after on that plan passes, --check-after
 #       --after-later-steps on the plan the last apply recorded passes, and
 #       that apply recorded STATUS=done (its grading and after-state passed),
 #       this exits 0 without a backup, a pause or a write (a re-run after
-#       success). When that apply did NOT finish (STATUS=grading or failed: its
-#       4/5 grading or 5/5 after-state failed after the merge committed), it
-#       FINISHES it instead: grades the rows that apply listed (GRADE_IDS),
-#       re-checks, records STATUS=done and exits 0 — or exits 1;
+#       success). When that apply did NOT finish (STATUS=applying: its run
+#       ended during the apply; grading or failed: its 4/5 grading or 5/5
+#       after-state failed after the merge committed), it FINISHES it instead:
+#       grades the rows that apply listed (GRADE_IDS), re-checks, records
+#       STATUS=done and exits 0 — or exits 1;
 #   1/5 verified backup (B2) — abort if it does not land;
 #       then DRAIN, then pause auspex_pipeline and fetch_live_odds: wait until
 #       neither has a run queued or running, pause the ones not already paused
@@ -57,11 +62,16 @@
 #       written) unless it plans exactly what the dry run showed; one
 #       transaction per pair, the gzip JSONL archive of every row it deletes
 #       or changes lands first (a twin holding a row written after the archive
-#       rolls its pair back); then the two DAGs are unpaused, and the plan file,
-#       MERGED_AT, the rows to grade and STATUS=grading go to
-#       /app/backups/merge_soccer_teams_last_apply.env (STATUS=done or failed
-#       once 4/5 and 5/5 have run; rows an unfinished earlier apply listed are
-#       graded again with this run's).
+#       rolls its pair back). BEFORE it, the plan file, MERGED_AT (taken then:
+#       both DAGs stay paused until the apply has ended, so the odds run step
+#       11 waits for still starts after it), the rows to grade and
+#       STATUS=applying go to /app/backups/merge_soccer_teams_last_apply.env
+#       (it aborts, nothing written, when that record cannot be written): a
+#       run that ends during the apply still leaves them. After it, the two
+#       DAGs are unpaused, STATUS=grading is recorded, and STATUS=done or
+#       failed once 4/5 and 5/5 have run; rows an unfinished earlier apply
+#       listed are graded again with this run's (a re-run after an apply cut
+#       short merges the rest and grades both runs' rows).
 #       The run FAILS (after steps 4-5) when the apply's WRITTEN line reports
 #       odds_spellings_unmatched_before > 0: an odds-feed spelling that did not
 #       find its club's fixture before the merge was not held to anything
@@ -128,6 +138,23 @@ check_recorded() {  # check_recorded <plan>: --check-after --after-later-steps o
 rows=$(grep -v '^#' "$MAP" | tail -n +2 | grep -c .)
 if [ "$rows" != "$EXPECTED" ]; then log "ABORT: $MAP has $rows pairs, this script expects $EXPECTED — nothing changed"; exit 1; fi
 
+# A run cut short during its apply leaves the apply running in the api container (docker exec does not forward the
+# interrupt): racing it would read, and finish, a half-applied merge.
+running=$(af_applies_running merge_soccer_teams)
+case $? in
+  0)
+    log "REFUSED: a merge_soccer_teams.py --apply is still running in the api container (an earlier run ended during its apply):"
+    echo "$running" | sed 's/^/  /'
+    log "  wait until it has ended (docker compose top api), then re-run this script: it merges what is left or finishes that apply — nothing changed"
+    exit 1
+    ;;
+  1) ;;
+  *)
+    log "REFUSED: could not read the api container's processes to rule out an apply still running (is the api container up?) — nothing changed"
+    exit 1
+    ;;
+esac
+
 log "0/5 already done? (read-only dry run)"
 PRE_PLAN=/app/backups/merge_soccer_teams_precheck_$TS.plan.json
 $DC exec -T api sh -c "$TOOL --out-csv /app/backups/merge_soccer_teams_precheck_$TS.csv --plan-out $PRE_PLAN > /tmp/merge_teams_pre.log 2>&1; echo \"tool exit \$?\""
@@ -139,8 +166,11 @@ if [ "$(plan_field "$pre" pairs_merge)" = "0" ] && [ "$(plan_field "$pre" pairs_
   rec_plan=$(rec_val PLAN); rec_at=$(rec_val MERGED_AT); rec_ids=$(rec_val GRADE_IDS); rec_status=$(rec_val STATUS)
   if [ -z "$rec_plan" ] || [ -z "$rec_at" ] || [ -z "$rec_status" ]; then
     log "FAILED: all $EXPECTED pairs read 'done' but no apply is recorded in $STATE_FILE (got '${REC:-nothing}') — nothing changed."
-    log "  If the last apply's log ended in DONE, record it (its plan file and MERGED_AT are in that log):"
-    log "    printf 'PLAN=%s\\nMERGED_AT=%s\\nGRADE_IDS=\\nSTATUS=done\\n' <plan> <MERGED_AT> | docker compose exec -T api sh -c 'cat > $STATE_FILE'"
+    log "  Record the apply that merged them as unfinished, so that this script FINISHES it (grades the rows its plan"
+    log "  lists under grade_after, then re-checks). Its plan file is its log's 'plan file' line, MERGED_AT its '3/5 apply' time:"
+    log "    plan=<plan file>; ids=\$(docker compose exec -T api python -c \"import json, sys; print(' '.join(json.load(open(sys.argv[1]))['grade_after']))\" \$plan)"
+    log "    printf 'PLAN=%s\\nMERGED_AT=%s\\nGRADE_IDS=%s\\nSTATUS=failed\\n' \$plan <MERGED_AT> \"\$ids\" | docker compose exec -T api sh -c 'cat > $STATE_FILE'"
+    log "  then re-run this script."
     exit 1
   fi
   if [ "$pre_rc" != "0" ]; then
@@ -158,8 +188,10 @@ if [ "$(plan_field "$pre" pairs_merge)" = "0" ] && [ "$(plan_field "$pre" pairs_
     log "all $EXPECTED pairs read 'done' but the after-state of the plan the last apply recorded ($rec_plan) fails (above) — FAILED: inspect; nothing changed"
     exit 1
   fi
-  # The merge committed, but that run's grading or after-state did not pass: finish it.
-  log "the last apply ($rec_at) recorded STATUS=$rec_status: finishing it — grading the $(echo $rec_ids | wc -w | tr -d ' ') row(s) it listed, then its after-state"
+  # The merge committed, but that run ended during its apply, or its grading or after-state did not pass: finish it.
+  why=""
+  [ "$rec_status" = "applying" ] && why=" (that run ended during its apply, which has ended since)"
+  log "the last apply ($rec_at) recorded STATUS=$rec_status$why: finishing it — grading the $(echo $rec_ids | wc -w | tr -d ' ') row(s) it listed, then its after-state"
   graded_ok=1
   grade_rows "$rec_ids" || { graded_ok=0; log "grading failed for a row (see above; /tmp/merge_teams_grade.log in the api container)"; }
   check_recorded "$rec_plan"
@@ -219,18 +251,24 @@ if [ -n "$(rec_val STATUS)" ] && [ "$(rec_val STATUS)" != "done" ] && [ -n "$(re
 fi
 
 apply_rc=0
+# Taken before the apply: both DAGs stay paused until it has ended, so the odds run step 11 waits for starts after it.
+MERGED_AT=$(date -u +%FT%TZ)
 if [ "$merge" = "0" ]; then
   log "3/5 apply: nothing to merge, all $EXPECTED pairs already done"
 else
-  log "3/5 apply ($merge pair(s), --expect-plan $PLAN)"
+  # Recorded BEFORE the apply: a run that ends during it still leaves the plan and the rows to grade for the next run.
+  write_state_file "$PLAN" "$MERGED_AT" "$grade_ids" applying \
+    || { log "ABORT at step 3: could not record the apply (STATUS=applying) in $STATE_FILE before it — nothing changed; re-run this script"; exit 1; }
+  log "3/5 apply ($merge pair(s), --expect-plan $PLAN; recorded STATUS=applying, MERGED_AT=$MERGED_AT)"
+  AF_EXIT_NOTE="ALERT: this run ended during its 3/5 apply ($STATE_FILE records STATUS=applying). The apply may still be running in the api container (docker exec does not forward an interrupt): check with 'docker compose top api'; once it has ended, re-run this script — it refuses while the apply runs, then merges what is left or finishes this apply (grades its rows)"
   $DC exec -T api sh -c "$TOOL --apply --expect-plan $PLAN --out-csv /app/backups/merge_soccer_teams_apply_$TS.csv > /tmp/merge_teams.log 2>&1; rc=\$?; grep -E 'REFUSED|ERROR|ROLLED BACK|Archived|Written:|WRITTEN|matches the expected|Traceback|Error:' /tmp/merge_teams.log | tail -60; exit \$rc"
   apply_rc=$?
+  AF_EXIT_NOTE=""
   if [ "$apply_rc" = "2" ]; then
-    log "ABORT at step 3: the apply refused before writing (its plan differs from the dry run's, or a refusal above) — nothing changed; re-run this script"; exit 1
+    log "ABORT at step 3: the apply refused before writing (its plan differs from the dry run's, or a refusal above) — nothing changed (the record stays STATUS=applying: its rows are graded with the next run's); re-run this script"; exit 1
   fi
   [ "$apply_rc" = "0" ] || log "step 3 exited $apply_rc: a pair rolled back or the tool failed (see above); each pair is its own transaction, so whatever committed stays — grading and checking the after-state"
 fi
-MERGED_AT=$(date -u +%FT%TZ)
 af_resume
 unmatched=""
 if [ "$merge" != "0" ]; then

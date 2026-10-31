@@ -19,6 +19,11 @@ bin first on PATH. Every docker call is logged to calls.log, one per line.
   a pause fails (no output, exit 1: a transient CLI/DB error).
   `details_delay_after_pause` {dag: seconds}: that read sleeps first (an
   interrupt then lands during it).
+* The api container's process scan (scripts/ops/_airflow_lib.sh
+  af_applies_running: `sh -c "for f in /proc/...; echo PROC_SCAN_OK"`) lists
+  each command line in airflow.json's `procs` that runs one of the scanned
+  tools with --apply; `proc_scan_fails` makes the scan exit 1 with no output.
+* `write_fails` [path] makes a container-file write to that path exit 1.
 * `compose cp <file> postgres:/tmp/<name>` copies the file to cp/<name> and
   cp/<n>_<name> (so a test can read every SQL a wrapper sent, in order).
 * Container files: `exec -T <svc> sh -c "cat > F.tmp && mv F.tmp F"` (or
@@ -114,11 +119,30 @@ def _file(fake: Path, service: str, path: str) -> Path:
     return fake / "files" / service / path.strip("/").replace("/", "__")
 
 
+def _proc_scan(fake: Path, joined: str) -> tuple[str, int]:
+    """The api container's /proc scan for running applies (see the module docstring)."""
+    st = json.loads((fake / "airflow.json").read_text())
+    if st.get("proc_scan_fails"):
+        return "", 1
+    tools = re.findall(r"\*/app/scripts/(\w+)\[\.\]py\*--apply\*", joined)
+    lines = [
+        f"APPLY_RUNNING pid {100 + i}: {c}"
+        for i, c in enumerate(st.get("procs", []))
+        if any(re.search(rf"/app/scripts/{t}\.py .*--apply", c) for t in tools)
+    ]
+    return "\n".join(lines + ["PROC_SCAN_OK"]), 0
+
+
 def _container_file(fake: Path, joined: str) -> int | None:
     """Handle a container-file call (see the module docstring); None when it is not one."""
     m = re.fullmatch(r"compose exec -T (\S+) sh -c cat > (\S+?)(?:\.tmp && mv \S+ (\S+))?", joined)
     if m:
-        f = _file(fake, m.group(1), m.group(3) or m.group(2))
+        path = m.group(3) or m.group(2)
+        st = json.loads((fake / "airflow.json").read_text())
+        if path in st.get("write_fails", []):
+            sys.stdin.read()
+            return 1
+        f = _file(fake, m.group(1), path)
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(sys.stdin.read())
         return 0
@@ -138,6 +162,11 @@ def main(argv: list[str]) -> int:
     joined = " ".join(argv)
     with (fake / "calls.log").open("a") as fh:
         fh.write(joined.replace("\n", "\\n") + "\n")
+    if is_scan(joined):
+        out, rc = _proc_scan(fake, joined)
+        if out:
+            print(out)
+        return rc
     handled = _container_file(fake, joined)
     if handled is not None:
         return handled
@@ -218,9 +247,17 @@ def set_rules(tmp_path: Path, rules: list[dict]) -> None:
     (tmp_path / "fake" / "rules.json").write_text(json.dumps(rules))
 
 
-def calls(tmp_path: Path) -> list[str]:
+def is_scan(call: str) -> bool:
+    """The api container's process scan: its pattern names every scanned tool with --apply, but it runs nothing."""
+    return call.startswith("compose exec -T api sh -c for f in /proc/") and "PROC_SCAN_OK" in call
+
+
+def calls(tmp_path: Path, scans: bool = False) -> list[str]:
+    """Every docker call, in order; the process scans only with scans=True (a test filtering for '--apply' means a
+    tool run)."""
     log = tmp_path / "fake" / "calls.log"
-    return log.read_text().splitlines() if log.exists() else []
+    out = log.read_text().splitlines() if log.exists() else []
+    return out if scans else [c for c in out if not is_scan(c)]
 
 
 def airflow_state(tmp_path: Path) -> dict:
