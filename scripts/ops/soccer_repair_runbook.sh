@@ -97,8 +97,8 @@ ONLY=""
 usage() { echo "usage: $0 [--from N | --only N]   (N = 1..11; see the header)"; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --from) FROM="${2:-}"; shift 2 ;;
-    --only) ONLY="${2:-}"; shift 2 ;;
+    --from) [ $# -ge 2 ] || { usage; exit 2; }; FROM="$2"; shift 2 ;;
+    --only) [ $# -ge 2 ] || { usage; exit 2; }; ONLY="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac

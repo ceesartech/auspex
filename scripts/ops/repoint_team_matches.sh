@@ -67,7 +67,7 @@ set -uo pipefail
 PASS=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --pass) PASS="${2:-}"; shift 2 ;;
+    --pass) [ $# -ge 2 ] || { echo "usage: $0 --pass 1|2"; exit 2; }; PASS="$2"; shift 2 ;;
     --pass=*) PASS="${1#--pass=}"; shift ;;
     *) echo "usage: $0 --pass 1|2"; exit 2 ;;
   esac

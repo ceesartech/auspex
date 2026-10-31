@@ -160,3 +160,25 @@ def test_a_failed_after_state_still_fails_loudly(tmp_path):
     assert rc == 1, out
     assert "FAILED at step 5" in out
     assert (fake_dir / "APPLIED").exists()
+
+
+def test_027_already_live_is_checked_and_exits_0_without_a_backup(tmp_path):
+    rc, out, fake_dir = _run(tmp_path, FAKE_LIVE_MD5=MD5_027)
+    assert rc == 0 and "ALREADY DONE" in out, out
+    calls = _calls(fake_dir)
+    assert "db_backup_daily" not in calls and not (fake_dir / "APPLIED").exists()
+    assert "m027_verify.sql" in calls and "m027_prove.sql" in calls  # steps 5 and 6 still run
+    assert "m027_dry.sql" not in calls
+
+
+@pytest.mark.parametrize(
+    "fake",
+    [
+        {"FAKE_AFTER_STATE": f"{MD5_027}|1|1|0"},
+        {"FAKE_PROOF": "m027 pre_pred=true post_pred=true pre_rec=won post_rec=won"},
+    ],
+)
+def test_027_already_live_but_failing_its_checks_fails(tmp_path, fake):
+    rc, out, fake_dir = _run(tmp_path, FAKE_LIVE_MD5=MD5_027, **fake)
+    assert rc == 1 and "FAILED at step" in out and "ALREADY DONE" not in out, out
+    assert "db_backup_daily" not in _calls(fake_dir)
