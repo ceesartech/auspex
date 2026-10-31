@@ -68,6 +68,9 @@ import psycopg2
 import requests
 from psycopg2.extras import RealDictCursor
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import team_identity  # noqa: E402
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("fetch_live_odds")
 
@@ -362,9 +365,15 @@ def find_match_id(cur, sport: str, home_team: str, away_team: str, commence_time
     """Locate the matching match row in `matches`, scoped to `sport`.
 
     The-odds-api uses team names that don't always match what's in our
-    `teams` table; try three strategies:
+    `teams` table; try three strategies, all within +-2 days:
       1. Exact normalized match on home + away.
-      2. Fuzzy match (SequenceMatcher >= 0.8) on each side, within ±2 days.
+      2. Aliases (teams.metadata.aliases, team_identity's resolver, the one
+         fetch_upcoming and promote_raw use): each side either names the
+         row's team exactly or is an alias of that team id. A merged club
+         keeps the history row's name ('Man City') and carries the odds/ESPN
+         spelling ('Manchester City') as an alias (scripts/merge_soccer_teams.py),
+         so without this tier its fixtures would hang on the fuzzy ratio.
+      3. Fuzzy match (SequenceMatcher >= 0.8) on each side.
     """
     home_norm = normalize_name(home_team)
     away_norm = normalize_name(away_team)
@@ -379,7 +388,8 @@ def find_match_id(cur, sport: str, home_team: str, away_team: str, commence_time
     # backfill run — historical games are 'finished' by definition.
     cur.execute(
         """
-        SELECT m.id::text AS id, ht.name AS home_name, at.name AS away_name, m.match_date
+        SELECT m.id::text AS id, ht.name AS home_name, at.name AS away_name, m.match_date,
+               m.home_team_id::text AS home_team_id, m.away_team_id::text AS away_team_id
         FROM matches m
         JOIN teams ht ON ht.id = m.home_team_id
         JOIN teams at ON at.id = m.away_team_id
@@ -398,7 +408,12 @@ def find_match_id(cur, sport: str, home_team: str, away_team: str, commence_time
         if normalize_name(c["home_name"]) == home_norm and normalize_name(c["away_name"]) == away_norm:
             return c["id"]
 
-    # 2. Fuzzy match.
+    # 2. Aliases.
+    alias_hit = _find_by_alias(cur, sport, home_team, away_team, commence_time, candidates)
+    if alias_hit:
+        return alias_hit
+
+    # 3. Fuzzy match.
     best = None
     best_score = 0.0
     for c in candidates:
@@ -411,6 +426,46 @@ def find_match_id(cur, sport: str, home_team: str, away_team: str, commence_time
     if best is not None and best_score >= 0.8:
         return best["id"]
     return None
+
+
+def _find_by_alias(
+    cur, sport: str, home_team: str, away_team: str, commence_time: datetime, candidates: list
+) -> str | None:
+    """find_match_id's alias tier: the candidate whose home and away teams
+    each match the odds spelling exactly or through team_identity's alias
+    index (an alias two teams claim resolves to neither, logged there). At
+    least one side must be an alias hit, else tier 1 would have matched.
+    Several hits (a fixture duplicated within the window) resolve to the
+    kickoff nearest the event's, logged as a warning."""
+    index = team_identity.load_alias_index(cur, sport)
+    if not index:
+        return None
+    home_alias = team_identity.resolve_alias(index, sport, home_team)
+    away_alias = team_identity.resolve_alias(index, sport, away_team)
+    if not (home_alias or away_alias):
+        return None
+
+    def side(name: str, team_id, raw: str, alias_id: str | None) -> bool:
+        return normalize_name(name) == normalize_name(raw) or (alias_id is not None and str(team_id) == alias_id)
+
+    hits = [
+        c
+        for c in candidates
+        if side(c["home_name"], c.get("home_team_id"), home_team, home_alias)
+        and side(c["away_name"], c.get("away_team_id"), away_team, away_alias)
+    ]
+    if not hits:
+        return None
+    if len(hits) > 1:
+        logger.warning(
+            "%s vs %s @ %s: %d fixtures match through aliases (%s) — using the nearest kickoff",
+            home_team,
+            away_team,
+            commence_time,
+            len(hits),
+            ", ".join(str(c["id"]) for c in hits),
+        )
+    return min(hits, key=lambda c: (abs(c["match_date"] - commence_time), str(c["id"])))["id"]
 
 
 # The row identity every statement in insert_odds_row matches on, and
