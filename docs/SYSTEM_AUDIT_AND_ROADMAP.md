@@ -228,6 +228,7 @@ memory; this section makes it repo-canonical.
 | Tennis market price as a model input (the-odds-api historical h2h, 2021-09..2026-10) | **PASSES the gate; does NOT beat the market** (2026-10-30) | `scripts/ab_tennis_market_odds.py` on the real frame (43,225 matches, 8,786 = 20.3% priced after the key fix + provider-anchored backfill; 13.6% before): with vs without market, all rows, holdout from 2026-04 **−0.0234 ± 0.0024** (n=6,484); walk-forward 2023 −0.0112 ± 0.0017, 2024 −0.0129 ± 0.0017, 2025 −0.0154 ± 0.0020, 2026 −0.0207 ± 0.0021. On PRICED rows the model with market is still worse than the de-vigged market itself: holdout +0.0152 ± 0.0031 (n=2,243), 2023..2026 +0.036 / +0.034 / +0.018 / +0.023 (accuracy 0.677 vs market 0.694) | Ships through the normal weekly retrain + promote gate (features recomputed). `("tennis","moneyline")` rec gate stays OFF: the model loses to the price it would bet against. Remaining unpriced matches are at tournaments the provider does not list (250s, Challengers); the next lever is serving the market where priced, through the §4.3 gate |
 | NHL probable starting goalie at serve time | **CLOSED — no gain** (2026-10-26) | `scripts/ab_nhl_projected_goalie.py`: "most starts in the last 7, rest the No. 1 on the 2nd night of a back-to-back" picks the real starter 65.7% (13,123 team-games; last-starter rule 47.0%). Paired ΔBrier on 1,300 held-out games vs default goalie features: ML −0.0009 ± 0.0011, regulation −0.0005 ± 0.0014, puck line −0.0024 ± 0.0018, total **+0.0012 ± 0.0007**; even the TRUE starter does no better. Shipped behind `NHL_GOALIE_MODE=actual_or_projected`, default off | A confirmed-starter feed (lines posted ~90 min pre-game) |
 | Soccer half-time Dixon-Coles refit (`dixon_coles_ht_soccer` on DIXON_COLES_CONFIG: per-league baselines, 20-match prior, decay, all data) | **SHIPPED** (2026-10-31, `bc41107`) | `scripts/ab_halftime_dixon_coles.py`, monthly walk-forward 2025-08..2026-10, n=8,144, fold-clustered SE, serve path incl. ht_ft through the served second-half artifact: HT 1x2 **−0.0160** vs the legacy artifact (cluster SE 0.0026, t-bound −0.0095), **−0.0130** vs a recency-matched per-league constant; frozen single fit −0.0138; every HT market and ht_ft (−0.0137) improve. The legacy pinned config DIVERGES on the full frame (13/13 folds, non-finite probabilities); the old trainer (oldest 80% only) was worse than served on the 2026 ESPN rows. ESPN era alone (n=2,702, 5 folds) −0.0089, 4/5 folds negative, not clear of noise on its own | Refit monthly if the frozen fit's lead decays — the harness measures it; the second-half and NHL Dixon-Coles artifacts are still ungated |
+| Soccer second-half Dixon-Coles refit (`dixon_coles_h2_soccer`, feeds ht_ft only) | **MEASURED — NOT SHIPPED** (2026-10-31) | `scripts/ab_second_half_dixon_coles.py`, 15 monthly folds 2025-08..2026-10, n=8,144, HT side = walk-forward refit of the gated HT config (not the prod HT file), pre-registered rule: refit AND refit_frozen must pass ship_strict on ht_ft. refit −0.0057 (cluster SE 0.0009, t-bound −0.0035) passes; refit_frozen −0.0046 fails the −0.005 gate → DO-NOT-SHIP. The pinned trainer config never converges (disqualified every fold). The served artifact ≈ an HT-state-conditional constant (+0.0003). ESPN era alone −0.0024 (noise) | Re-gate when H2 joins a monthly refit DAG (then `refit` is the deployable object) on a FRESH window — not by re-reading this one |
 
 ### 4.3 Validation methodology (house rules)
 
@@ -1503,6 +1504,43 @@ with the growth-rate driver (WAL) eliminated.
 > full-time score (`d7d8a9b7…`, `ff74d919…`). Not done: the HT trainer is still
 > run by hand (not in the weekly DAG); the second-half artifact (ht_ft's other
 > half) is still the pinned legacy fit.
+
+> **Update (2026-10-31, 04:30–06:30Z) — "fix anything that needs fixing": two
+> rounds of fixes, and what they surfaced.** Run as parallel isolated
+> implementers, each independently reviewed, merged by hand. **Shipped**
+> (deployed `a071d6a`): (1) HT retrain hardened and automated —
+> `promote_dc_model.py` (manifest-verified, cross-run level/row checks,
+> fail-closed on an unreadable production manifest, atomic swap, auto-restore
+> on failed verify) and a monthly `retrain_halftime_dc` DAG (05:30 on the 1st;
+> NEW DAGS START PAUSED — unpause once). (2) NHL grading: `double_chance` on the
+> regulation 3-way and `correct_score` 'other' credited; `regrade_predictions.py`
+> applied 05:08Z — 213 rows (double_chance 100% → 76.6%, correct_score 0% →
+> 51.0%); NHL double_chance / 'other' recs can no longer settle. (3) Settlement
+> never grades a rec written after kickoff (grader + stranded-rec repair void
+> it); `void_post_kickoff_recs.py` voids the 22 such recs settled 2026-09-04
+> (20 soccer net −228.25, 2 MMA −8.80) — **classifier-blocked, operator to run**.
+> (4) `fetch_upcoming`: refuses identity-drift forks loudly (exit 3), knockout
+> placeholder names dropped, operator-cancelled rows protected;
+> `auspex_pipeline` runs every `compute_features*` ALL_DONE so one refused
+> fixture pages without halting a sport. (5) football-data loader: blank-FT rows
+> are not finished matches; kickoffs parsed as Europe/London — and
+> `check_legacy_kickoffs` now BLOCKS `promote_raw` until the ~63.8k summer rows
+> stored 1h late are shifted (round 3 tool). (6) Second-half A/B: DO-NOT-SHIP
+> (§4 row). **Found (read-only investigations):** a soccer TEAM-IDENTITY SPLIT —
+> 320 teams created since 2026-05-27 under ESPN spellings with no history ("Man
+> City" 722 finished vs "Manchester City" 11); the full-time Dixon-Coles/Poisson
+> members know 0 of 481 such sides (9.2% of the 1x2 blend), match_stats features
+> are all-zero for them, 323 twin fixtures; 173 of the last 335 soccer recs were on
+> affected fixtures. 167 high-confidence merge pairs reviewed. football-data
+> kickoffs stored 1h late → 228 finished matches duplicated in training (68 with
+> the copy's own result leaking into its form features). 449 stale `scheduled`
+> soccer rows (203 pre-fix kickoff forks, 65 World Cup placeholders, 60
+> postponements, 45 never resulted, …) holding 15 pending recs. ESPN can report a
+> header score its own scoring plays contradict (Aalesund v HamKam 0-0 vs 2-2).
+> Extra-time cup ties store post-ET scores while books settle on 90 minutes. The
+> full-time Dixon-Coles/Poisson ensemble members were fitted only on data to
+> ~2021-10 (team coverage; a model change — gate it). Round 3 (code for all of
+> these + operator tools) is in progress.
 
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
