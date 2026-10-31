@@ -22,7 +22,9 @@ script exits 3.
 ESPN's STATUS_POSTPONED / STATUS_CANCELED / STATUS_ABANDONED are recorded on
 the EXISTING row ('postponed' / 'cancelled'), never inserted, from either
 mode (see _record_status_change); grade_completed_matches voids the recs of a
-match postponed more than 72 h.
+match postponed more than 72 h, or cancelled with a kickoff 72 h old. A cancel
+ESPN itself reported stays correctable (espn_cancelled); one recorded on
+purpose (an operator, a duplicate, a re-drawn slot) is final.
 """
 
 from __future__ import annotations
