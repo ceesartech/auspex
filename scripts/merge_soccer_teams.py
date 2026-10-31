@@ -2601,7 +2601,7 @@ def run_check_after(
     logger.info("AFTER %s", " ".join(f"{k}={v}" for k, v in out.items()))
     if after_later_steps and out.get("repoints_missing"):
         logger.info(
-            "repoints_missing=%d reported, not failed (--after-later-steps): later repairs deleted those re-pointed rows",
+            "repoints_missing=%d reported, not failed (--after-later-steps): later repairs deleted those rows",
             out["repoints_missing"],
         )
     if ok:
