@@ -408,6 +408,17 @@ class TestPromoteFlow:
         assert backups(root) == ["backup-dixon_coles_ht_soccer-20261101T053000Z"]
         assert "Nothing to promote" in caplog.text
 
+    def test_an_unreadable_production_manifest_refuses(self, tree, caplog):
+        # Fail closed: a corrupt manifest must not turn off the cross-run checks.
+        spec, root = tree
+        old_sha = write_production(spec)
+        (spec.production_dir / "manifest.json").write_text("{trunc")
+        write_staged(spec)
+        with caplog.at_level(logging.INFO, logger="promote_dc_model"):
+            assert run(spec, root) == 1
+        assert promoter.sha256_file(spec.production_dir / "model.bin") == old_sha
+        assert backups(root) == [] and "exists but is unreadable" in caplog.text
+
     def test_check_only_changes_nothing(self, tree):
         spec, root = tree
         old_sha = write_production(spec)

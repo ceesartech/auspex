@@ -50,14 +50,25 @@ with DAG(
     # already is per docker-compose.yml's airflow-scheduler service).
     DOCKER_EXEC = "docker compose -f /opt/auspex/docker-compose.yml exec -T api"
 
+    # ── Sport branches ─────────────────────────────────────────────
+    # fetch_upcoming_* exit 3 when they REFUSE to write a fixture whose
+    # identity drifted (fetch_upcoming.ForkRefused / same-team rows) — after
+    # committing everything else in the sweep. So every compute_features*
+    # runs ALL_DONE: one bad fixture pages (the fetch task fails) but never
+    # stops a whole sport's features, predictions and recommendations — the
+    # FC Juárez fork lasted 11 days. retries=0 on the fetch tasks: a refusal
+    # is deterministic and fetch_day already retries ESPN itself.
+
     # ── Soccer branch (the original pipeline) ──────────────────────
     fetch_upcoming = BashOperator(
         task_id="fetch_upcoming",
+        retries=0,
         bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport soccer --days 14",
     )
 
     compute_features = BashOperator(
         task_id="compute_features",
+        trigger_rule=TriggerRule.ALL_DONE,
         bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features.py --days 14",
     )
 
@@ -87,11 +98,13 @@ with DAG(
     # combined Telegram message.
     fetch_upcoming_nhl = BashOperator(
         task_id="fetch_upcoming_nhl",
+        retries=0,
         bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport nhl --days 14",
     )
 
     compute_features_nhl = BashOperator(
         task_id="compute_features_nhl",
+        trigger_rule=TriggerRule.ALL_DONE,
         bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_nhl.py --days 14",
     )
 
@@ -117,11 +130,13 @@ with DAG(
     # the training corpus is in place.
     fetch_upcoming_nba = BashOperator(
         task_id="fetch_upcoming_nba",
+        retries=0,
         bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport nba --days 14",
     )
 
     compute_features_nba = BashOperator(
         task_id="compute_features_nba",
+        trigger_rule=TriggerRule.ALL_DONE,
         bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_nba.py --days 14",
     )
 
@@ -151,11 +166,13 @@ with DAG(
     # scripts/generate_recommendations_nfl.py docstring).
     fetch_upcoming_nfl = BashOperator(
         task_id="fetch_upcoming_nfl",
+        retries=0,
         bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport nfl --days 14",
     )
 
     compute_features_nfl = BashOperator(
         task_id="compute_features_nfl",
+        trigger_rule=TriggerRule.ALL_DONE,
         bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_nfl.py --days 14",
     )
 
@@ -176,11 +193,13 @@ with DAG(
     # + set-betting land in v2 once linescore parsing is in place.
     fetch_upcoming_tennis = BashOperator(
         task_id="fetch_upcoming_tennis",
+        retries=0,
         bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport tennis --days 14",
     )
 
     compute_features_tennis = BashOperator(
         task_id="compute_features_tennis",
+        trigger_rule=TriggerRule.ALL_DONE,
         bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_tennis.py --days 14",
     )
 
@@ -202,11 +221,13 @@ with DAG(
     # deferred to v2 (separate models).
     fetch_upcoming_mma = BashOperator(
         task_id="fetch_upcoming_mma",
+        retries=0,
         bash_command=f"{DOCKER_EXEC} python /app/scripts/fetch_upcoming.py --sport mma --days 14",
     )
 
     compute_features_mma = BashOperator(
         task_id="compute_features_mma",
+        trigger_rule=TriggerRule.ALL_DONE,
         bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_mma.py --days 14",
     )
 

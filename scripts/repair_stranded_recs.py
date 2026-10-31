@@ -565,6 +565,7 @@ def plan_sport(
             rec["selection"],
             twin["home_score"],
             twin["away_score"],
+            sport=sport,  # NHL double_chance is the regulation 3-way: never settle it on the final score
         )
         if outcome is None:
             counts["ungradable_skipped"] += 1

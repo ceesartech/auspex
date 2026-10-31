@@ -1105,9 +1105,22 @@ def _reconcile_match_row(cur, cfg: SportConfig, espn_id, home_id, away_id, match
         return True
     if source == "espn" and not cfg.is_individual:
         owner = _match_teams(cur, match_id)
-        if owner is not None and (owner["home_team_id"], owner["away_team_id"]) != (home_id, away_id):
+        if owner is not None and _is_identity_drift(owner, home_id, away_id):
             raise ForkRefused(match_id, owner)
     return False
+
+
+def _is_identity_drift(owner: dict, home_id, away_id) -> bool:
+    """True when the row an ESPN id owns differs from the parse by DRIFT —
+    the two pairs share a team, or are the same pair swapped — which is our
+    team resolution moving under a fixed fixture (FC Juárez: Tijuana stayed,
+    the home side re-resolved). Both sides different is a knockout slot
+    being filled ("Semifinal 1 Winner" → a real club) or a re-used id: the
+    real fixture must still get its own row, so that is not refused."""
+    owner_pair = (owner["home_team_id"], owner["away_team_id"])
+    if owner_pair == (home_id, away_id):
+        return False
+    return bool({home_id, away_id} & set(owner_pair))
 
 
 def _log_refused_fork(

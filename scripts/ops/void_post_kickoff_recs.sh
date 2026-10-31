@@ -1,6 +1,6 @@
 #!/bin/bash
-# NOT YET APPROVED — run only on explicit operator approval (CLAUDE.md: data
-# repairs need a verified backup first, which step 1 takes).
+# Approved 2026-10-31 (operator: "fix anything that needs fixing"); data
+# repairs need a verified backup first, which step 1 takes.
 # Void the settled recommendations written at or after their fixture's real
 # kickoff: bets placed after kickoff are hindsight, never won/lost. Verified
 # read-only 2026-10-30 (the tool's own SELECT, --sport all):
@@ -28,7 +28,10 @@ log() { echo "[$(date -u +%FT%TZ)] $*"; }
 latest_dump() {
   $DC exec -T api python -c "import sys; sys.path.insert(0,'/app/scripts'); import b2_io; s=b2_io.s3_client(); o=max(b2_io._list(s,'postgres/'), key=lambda o:o['LastModified']); print(int(o['LastModified'].timestamp()), o['Key'])" 2>/dev/null | tail -1
 }
-TOOL="python /app/scripts/void_post_kickoff_recs.py --sport all"
+# Pinned to the reviewed set: any drift (more rows than the 22 reviewed) aborts
+# at the dry run, before anything is written.
+EXPECTED=22
+TOOL="python /app/scripts/void_post_kickoff_recs.py --sport all --max-rows $EXPECTED"
 
 log "1/4 backup"
 before=$(date -u +%s)
@@ -72,4 +75,9 @@ out=$($DC exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f 
 echo "$out"
 left=$(echo "$out" | awk '/post_kickoff_with_money/ {getline; getline; print $1}')
 relabelled=$(echo "$out" | awk '/relabelled/ {getline; getline; print $1}')
-if [ "$left" = "0" ]; then log "DONE: $relabelled rec(s) carry the post-kickoff void label; none still carries a verdict or money"; else log "FAILED: $left post-kickoff rec(s) still won/lost or carrying money — inspect"; exit 1; fi
+if [ "$left" = "0" ] && [ "$relabelled" = "$EXPECTED" ]; then
+  log "DONE: $relabelled rec(s) carry the post-kickoff void label; none still carries a verdict or money"
+else
+  log "FAILED: $left post-kickoff rec(s) still won/lost or carrying money, $relabelled relabelled (expected $EXPECTED) — inspect"
+  exit 1
+fi

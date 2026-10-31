@@ -709,6 +709,23 @@ class TestForkRefusal:
             assert fu._process_competition(cur, SOCCER, "league", _comp()) is False
         assert rec.inserts == [] and identity_stats["forks_refused"] == 1
 
+    def test_a_knockout_slot_filled_with_both_teams_new_is_not_refused(self, identity_stats):
+        # The id's row holds two DIFFERENT teams (a placeholder slot like
+        # "Semifinal 1 Winner" v "Semifinal 2 Winner"); the real fixture
+        # must still get its own row rather than being refused every tick.
+        cur = FakeCursor([_row("slot", KICKOFF - timedelta(hours=2), espn="401671789", home="ph-1", away="ph-2")])
+        with _RecordingPath() as rec:
+            fu._process_competition(cur, SOCCER, "league", _comp())
+        assert rec.inserts == ["scheduled"] and identity_stats["forks_refused"] == 0
+
+    def test_identity_drift_is_a_shared_team_or_a_swap(self):
+        owner = {"home_team_id": "a", "away_team_id": "b"}
+        assert fu._is_identity_drift(owner, "a2", "b")  # home re-resolved
+        assert fu._is_identity_drift(owner, "a", "b2")  # away re-resolved
+        assert fu._is_identity_drift(owner, "b", "a")  # swapped
+        assert not fu._is_identity_drift(owner, "c", "d")  # slot filled / different fixture
+        assert not fu._is_identity_drift(owner, "a", "b")  # same pair
+
     def test_a_slot_held_by_another_row_is_not_a_refusal(self, identity_stats):
         # Same pair, but a pre-fix twin sits at ESPN's time: the upsert lands
         # on that existing twin (no new row), unstamped, as before.

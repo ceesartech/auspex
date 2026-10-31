@@ -415,7 +415,16 @@ def promote(
     try:
         production_manifest = read_json(spec.production_dir / MANIFEST_FILE)
     except (OSError, ValueError) as e:
-        LOGGER.error("Production manifest is unreadable (%s) — ignoring it", e)
+        # Fail closed: a manifest that exists but cannot be read would skip the
+        # cross-run and newest-date checks — exactly the checks that catch a bad
+        # unattended refit. Only a MISSING manifest (a legacy artifact) skips them.
+        LOGGER.error(
+            "Production manifest %s exists but is unreadable (%s) — refusing to promote; repair or remove it "
+            "deliberately (a removed manifest means 'legacy' and skips the cross-run checks)",
+            spec.production_dir / MANIFEST_FILE,
+            e,
+        )
+        return 1
 
     decision = evaluate_promotion(
         spec,
