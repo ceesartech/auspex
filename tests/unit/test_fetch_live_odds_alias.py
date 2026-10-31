@@ -13,6 +13,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 
 
@@ -90,9 +92,81 @@ def test_an_alias_of_another_team_does_not_match():
     assert _find([other], {CITY: ["manchester city"]}) is None
 
 
-def test_an_alias_two_teams_claim_resolves_to_neither():
-    aliases = {**BOTH, UNITED: ["manchester city"]}
-    assert _find([WOLVES_V_CITY], aliases, home="Wolverhampton Wanderers", away="Manchester City") is None
+SPURS, SPURS_W = "t-spurs", "t-spurs-women"
+SPURS_V_WOLVES = _fixture("m4", "Spurs", SPURS, "Wolves", WOLVES)
+
+
+def test_an_alias_two_teams_claim_neither_resolves_nor_scores():
+    event = {"home": "Tottenham Hotspur", "away": "Wolverhampton Wanderers"}
+    mine = {SPURS: ["tottenham hotspur"], WOLVES: ["wolverhampton wanderers"]}
+    assert _find([SPURS_V_WOLVES], mine, **event) == "m4"
+    shared = {**mine, SPURS_W: ["Tottenham  Hotspur"]}
+    # the alias tier refuses the shared alias, and tier 3 scores 'spurs' (0.45) not the alias: 0.73 < 0.8
+    assert _find([SPURS_V_WOLVES], shared, **event) is None
+
+
+def test_two_aliases_one_odds_form_apart_are_shared(caplog):
+    aliases = flo.TeamAliases("soccer", {"st. louis city": {"a"}, "st louis city": {"b"}})
+    with caplog.at_level(logging.ERROR, logger="fetch_live_odds"):
+        assert aliases.resolve("St Louis City") is None and aliases.by_team == {}
+    assert "is claimed by 2 soccer teams (a, b)" in caplog.text
+
+
+# Prod's fetch_live_odds unmatched-event logs (2026-10): the odds feed's spelling, ESPN's spelling (the twin the
+# fixture carried before the merge, then the kept team's alias), the kept football-data name. Each matched its
+# fixture before the merge, and none did after it under efeee9d's alias tier (alias_form, no fuzzy alias).
+PROD_SPELLINGS = [
+    ("Brighton and Hove Albion", "Brighton & Hove Albion", "Brighton"),
+    ("Paris Saint Germain", "Paris Saint-Germain", "Paris SG"),
+    ("FC Twente Enschede", "FC Twente", "Twente"),
+    ("Kyoto Purple Sanga", "Kyoto Sanga", "Kyoto"),
+    ("Deportivo La Coruña", "Deportivo", "La Coruna"),
+    ("Real Racing Club de Santander", "Racing Santander", "Santander"),
+    ("Vitória SC", "Vitória de Guimaraes", "Guimaraes"),
+    ("Henan FC", "Henan", "Henan Songshan Longmen"),
+    ("Atlético Huracán", "Huracán", "Huracan"),
+    ("Belgrano de Cordoba", "Belgrano (Córdoba)", "Belgrano"),
+    ("Leuven", "OH Leuven", "Oud-Heverlee Leuven"),
+]
+
+
+@pytest.mark.parametrize("side", ["home", "away"])
+@pytest.mark.parametrize("odds, espn, kept", PROD_SPELLINGS)
+def test_the_odds_feeds_spelling_still_matches_once_the_club_is_merged(odds, espn, kept, side):
+    def fixture(name):
+        if side == "home":
+            return _fixture("m1", name, CITY, "Arsenal", ARSENAL)
+        return _fixture("m1", "Arsenal", ARSENAL, name, CITY)
+
+    event = {"home": odds, "away": "Arsenal"} if side == "home" else {"home": "Arsenal", "away": odds}
+    assert _find([fixture(espn)], {}, **event) == "m1"  # before: the fixture named the twin
+    merged = {CITY: [" ".join(espn.lower().split())]}  # the alias merge_soccer_teams stores
+    assert _find([fixture(kept)], merged, **event) == "m1"
+    assert _find([fixture(kept)], {}, **event) is None  # the alias is what carries it
+
+
+def test_the_alias_tier_folds_ampersands_dots_and_accents():
+    aliases = flo.TeamAliases("soccer", {"brighton & hove albion": {"b"}, "st. louis city sc": {"s"}})
+    assert aliases.resolve("Brighton and Hove Albion") == "b"
+    assert aliases.resolve("St Louis City SC") == "s"
+    assert aliases.resolve("Brighton") is None
+    # and on the incoming side: the feed's '&' and '.' meet aliases stored without them
+    plain = flo.TeamAliases("soccer", {"brighton and hove albion": {"b"}, "st louis city sc": {"s"}, "malaga": {"m"}})
+    assert plain.resolve("Brighton & Hove Albion") == "b" and plain.resolve("St. Louis City SC") == "s"
+    assert plain.resolve("Málaga") == "m"
+
+
+def test_tier_3_scores_a_side_against_its_aliases():
+    fixture = _fixture("m1", "Paris SG", CITY, "Arsenal", ARSENAL)
+    assert _find([fixture], {CITY: ["paris saint-germain"]}, home="Paris Saint Germain") == "m1"
+    assert _find([fixture], {CITY: ["olympique lyonnais"]}, home="Paris Saint Germain") is None
+
+
+def test_a_not_yet_merged_accent_twin_does_not_join_an_alias_hit():
+    # Juarez carries 'fc juarez'; a fixture of the 'FC Juárez' twin (merged by the next pair) must not tie with it
+    kept = _fixture("m1", "Juarez", CITY, "Club Tijuana", ARSENAL, T0 + timedelta(minutes=5))
+    twin = _fixture("m2", "FC Juárez", "t-twin", "Club Tijuana", ARSENAL)  # nearer the event's kickoff
+    assert _find([twin, kept], {CITY: ["fc juarez"]}, home="FC Juarez", away="Club Tijuana") == "m1"
 
 
 def test_the_exact_name_still_wins_and_skips_the_alias_query():

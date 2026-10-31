@@ -367,13 +367,20 @@ def find_match_id(cur, sport: str, home_team: str, away_team: str, commence_time
     The-odds-api uses team names that don't always match what's in our
     `teams` table; try three strategies, all within +-2 days:
       1. Exact normalized match on home + away.
-      2. Aliases (teams.metadata.aliases, team_identity's resolver, the one
-         fetch_upcoming and promote_raw use): each side either names the
-         row's team exactly or is an alias of that team id. A merged club
-         keeps the history row's name ('Man City') and carries the odds/ESPN
-         spelling ('Manchester City') as an alias (scripts/merge_soccer_teams.py),
-         so without this tier its fixtures would hang on the fuzzy ratio.
-      3. Fuzzy match (SequenceMatcher >= 0.8) on each side.
+      2. Aliases (teams.metadata.aliases through team_identity's
+         load_alias_index, the store fetch_upcoming and promote_raw read):
+         each side either names the row's team or is an alias of that team
+         id. A merged club keeps the history row's name ('Brighton') and
+         carries ESPN's spelling ('brighton & hove albion') as an alias
+         (scripts/merge_soccer_teams.py): before the merge the fixture
+         carried that spelling, and the odds feed's 'Brighton and Hove
+         Albion' met it through normalize_name. So names and aliases are
+         compared in odds_form (alias_form's case/space/accent fold plus
+         normalize_name's '.' and '&'), never more strictly than tier 1.
+      3. Fuzzy match (SequenceMatcher, average of both sides >= 0.8), each
+         side scored against the team's name AND its aliases, best of them:
+         'Paris Saint Germain' scored against ESPN's 'Paris Saint-Germain'
+         before the merge, and must still once the fixture reads 'Paris SG'.
     """
     home_norm = normalize_name(home_team)
     away_norm = normalize_name(away_team)
@@ -408,17 +415,20 @@ def find_match_id(cur, sport: str, home_team: str, away_team: str, commence_time
         if normalize_name(c["home_name"]) == home_norm and normalize_name(c["away_name"]) == away_norm:
             return c["id"]
 
+    aliases = TeamAliases.load(cur, sport)
+
     # 2. Aliases.
-    alias_hit = _find_by_alias(cur, sport, home_team, away_team, commence_time, candidates)
+    alias_hit = _find_by_alias(aliases, home_team, away_team, commence_time, candidates)
     if alias_hit:
         return alias_hit
 
-    # 3. Fuzzy match.
+    # 3. Fuzzy match, each side against the team's name and its aliases.
+    home_loose, away_loose = odds_form(home_team), odds_form(away_team)
     best = None
     best_score = 0.0
     for c in candidates:
-        h_score = SequenceMatcher(None, normalize_name(c["home_name"]), home_norm).ratio()
-        a_score = SequenceMatcher(None, normalize_name(c["away_name"]), away_norm).ratio()
+        h_score = aliases.side_score(c["home_name"], c.get("home_team_id"), home_norm, home_loose)
+        a_score = aliases.side_score(c["away_name"], c.get("away_team_id"), away_norm, away_loose)
         score = (h_score + a_score) / 2.0
         if score > best_score:
             best_score = score
@@ -428,20 +438,73 @@ def find_match_id(cur, sport: str, home_team: str, away_team: str, commence_time
     return None
 
 
+def odds_form(name: str) -> str:
+    """How tiers 2 and 3 compare a name with an alias: team_identity.alias_form
+    (case, whitespace, accents) then normalize_name ('.' dropped, '&' read as
+    'and'). Never stricter than tier 1, which matched the same strings before
+    a merge moved them into aliases."""
+    return normalize_name(team_identity.alias_form(name))
+
+
+class TeamAliases:
+    """One sport's aliases in odds_form, from team_identity.load_alias_index
+    (teams.metadata.aliases; a malformed value is ignored there, logged at
+    ERROR). A form two teams claim resolves to neither and scores for
+    neither, as team_identity.resolve_alias treats a shared alias."""
+
+    def __init__(self, sport: str, index: dict[str, set[str]]):
+        self.sport = sport
+        owners: dict[str, set[str]] = {}
+        for alias, ids in index.items():
+            owners.setdefault(normalize_name(alias), set()).update(str(i) for i in ids)
+        self.shared = {form: ids for form, ids in owners.items() if len(ids) > 1}
+        self.owner = {form: next(iter(ids)) for form, ids in owners.items() if len(ids) == 1}
+        self.by_team: dict[str, list[str]] = {}
+        for form, tid in sorted(self.owner.items()):
+            self.by_team.setdefault(tid, []).append(form)
+
+    @classmethod
+    def load(cls, cur, sport: str) -> "TeamAliases":
+        return cls(sport, team_identity.load_alias_index(cur, sport))
+
+    def resolve(self, name: str) -> str | None:
+        """The ONE team whose aliases hold `name` in odds_form, else None."""
+        form = odds_form(name)
+        if form in self.shared:
+            logger.error(
+                "Alias %r is claimed by %d %s teams (%s) — not resolving it; fix teams.metadata.aliases",
+                form,
+                len(self.shared[form]),
+                self.sport,
+                ", ".join(sorted(self.shared[form])),
+            )
+            return None
+        return self.owner.get(form)
+
+    def side_score(self, name: str, team_id, raw_norm: str, raw_loose: str) -> float:
+        """Tier 3's ratio for one side: the team's name as before, or its best
+        alias in odds_form against the odds spelling in odds_form."""
+        best = SequenceMatcher(None, normalize_name(name), raw_norm).ratio()
+        for form in self.by_team.get(str(team_id), ()):
+            best = max(best, SequenceMatcher(None, form, raw_loose).ratio())
+        return best
+
+
 def _find_by_alias(
-    cur, sport: str, home_team: str, away_team: str, commence_time: datetime, candidates: list
+    aliases: TeamAliases, home_team: str, away_team: str, commence_time: datetime, candidates: list
 ) -> str | None:
     """find_match_id's alias tier: the candidate whose home and away teams
-    each match the odds spelling exactly or through team_identity's alias
-    index (an alias two teams claim resolves to neither, logged there). At
-    least one side must be an alias hit, else tier 1 would have matched.
-    Several hits (a fixture duplicated within the window) resolve to the
-    kickoff nearest the event's, logged as a warning."""
-    index = team_identity.load_alias_index(cur, sport)
-    if not index:
+    each match the odds spelling by name (as tier 1 compares names) or
+    through an alias (in odds_form; a form two teams claim resolves to
+    neither). At least one side must be an alias hit. Names are not folded
+    further than tier 1 folds them: 'FC Juarez' resolving through an alias
+    must not also take a fixture of the not-yet-merged 'FC Juárez'. Several
+    hits (a fixture duplicated within the window) resolve to the kickoff
+    nearest the event's, logged as a warning."""
+    if not aliases.owner and not aliases.shared:
         return None
-    home_alias = team_identity.resolve_alias(index, sport, home_team)
-    away_alias = team_identity.resolve_alias(index, sport, away_team)
+    home_alias = aliases.resolve(home_team)
+    away_alias = aliases.resolve(away_team)
     if not (home_alias or away_alias):
         return None
 
