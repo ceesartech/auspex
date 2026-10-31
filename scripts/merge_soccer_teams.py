@@ -58,7 +58,10 @@ alone and is reported, the others go ahead)
    the kept row's (final) kickoff or from a FINISHED row whose kickoff it
    then adopts (no open recs): an ESPN id beside a different kickoff would
    let fetch_upcoming realign the row, and on a football-data row it would
-   stop repair_football_data_kickoffs from correcting it.
+   stop repair_football_data_kickoffs from correcting it. A kept
+   football-data row never adopts a kickoff outside the window promote_raw
+   searches for its own fixture: the pair is refused (promote_raw would
+   insert that fixture again beside it).
    Each dropped twin hands the kept row, before it is deleted:
      odds            the freshest pre-game price per current-price key
                      (book, market, selection, line, opening, live) the kept
@@ -66,7 +69,13 @@ alone and is reported, the others go ahead)
      odds_snapshots  captures before kickoff the kept row lacks;
      predictions     per (model, version, type) the latest one written (and
                      last updated) before kickoff, when the kept row has no
-                     prediction under that key (the unique key);
+                     prediction under that key (the unique key) and has
+                     kicked off: the move is an UPDATE, so
+                     trg_predictions_updated_at stamps updated_at = NOW()
+                     (the archive keeps the original), and on a fixture still
+                     to be played generate_recommendations, which takes the
+                     newest ensemble row by updated_at, would price recs off
+                     an older model version until the next precompute tick;
      match_stats     a team's stats row when the kept row has none for it.
    "Before kickoff" is before the EARLIEST kickoff in the cluster:
    football-data summer kickoffs sit an hour late, so the later time could
@@ -107,6 +116,12 @@ alone and is reported, the others go ahead)
    re-pointed fixture under the merged spelling. Deleting "manchester city"
    frees that name: if the resolvers missed it, the next 15-minute fetch
    would insert the team again (the Montreal lesson, audit §7 2026-10-26).
+   The odds feed spells clubs its own way ('Brighton and Hove Albion',
+   'Paris Saint Germain'), so every spelling of the club in
+   scripts/data/soccer_team_odds_spellings.csv (reviewed, from prod's
+   fetch_live_odds logs) is probed on the same fixture before the pair's
+   first write, while it still names the twin, and each one that found it
+   then must find it again before COMMIT.
    The dry run predicts the same outcome from the database (no other row
    holds the name exactly, no other row claims the alias, no third row holds
    the ESPN id, the seed agrees) and refuses the pair when it would fail.
@@ -115,7 +130,9 @@ SAFETY
 ------
 Every foreign key to teams and matches is read from pg_constraint first; a
 table the tool does not know refuses the whole run (it could cascade
-unarchived). The whole run is planned up front (pairs in map order, each
+unarchived), and a dropped twin holding a row the archive does not hold
+(written after it) rolls its pair back instead of cascading it away. The
+whole run is planned up front (pairs in map order, each
 planned on the state the earlier ones leave), and the write-once audit CSV
 of every row the run touches and a write-once plan file land BEFORE the
 first write, dry run included. --apply also writes a write-once gzip JSONL
@@ -134,13 +151,17 @@ dropped twin left, every re-point landed, no finished same-pair twin on the
 kept teams, every merged spelling resolving to its kept team (the deployed
 resolvers again), each ESPN id on its kept team only, no team re-minted
 under a merged spelling, no unsettled rec on a row that adopted a result
-with open recs. Re-run it after the next pipeline tick: a resolver miss
-shows up as a re-minted team.
+with open recs. Re-run it after the next fetch_live_odds run with
+--odds-since <when the merge committed>: a resolver miss shows up as a
+re-minted team, an odds miss as a merged club's fixture the feed was quoting
+in the hours before the merge and that run did not quote (odds_fixtures_stopped;
+odds_control_stopped counts the same for every other club, the base rate).
 
 Usage (inside the api container; dry run is the default):
     python /app/scripts/merge_soccer_teams.py --plan-out /app/backups/merge.plan.json
     python /app/scripts/merge_soccer_teams.py --apply --expect-plan /app/backups/merge.plan.json
     python /app/scripts/merge_soccer_teams.py --check-after /app/backups/merge.plan.json
+    python /app/scripts/merge_soccer_teams.py --check-after /app/backups/merge.plan.json --odds-since <UTC ISO>
     python /app/scripts/merge_soccer_teams.py --only <new_team_id>[,<new_team_id>...] --apply
 Afterwards: grade_completed_matches.py --match-id <id> for every kept row
 the plan lists under GRADE_AFTER (moved predictions on finished rows, and
@@ -179,6 +200,10 @@ logger = logging.getLogger("merge_soccer_teams")
 SCRIPTS_DIR = Path(__file__).resolve().parent
 MAP_PATH = SCRIPTS_DIR / "data" / "soccer_team_merge_map.csv"
 MAP_FIELDS = ("new_team_id", "old_team_id", "new_name", "old_name", "espn_team_id", "espn_league", "method", "evidence")
+# How the odds feed spells merged clubs (prod's fetch_live_odds logs, reviewed):
+# the in-transaction odds check probes each of them, not only ESPN's spelling.
+ODDS_SPELLINGS_PATH = SCRIPTS_DIR / "data" / "soccer_team_odds_spellings.csv"
+ODDS_SPELLING_FIELDS = ("new_team_id", "new_name", "odds_name", "evidence")
 SPORT = "soccer"
 TWIN_WINDOW = timedelta(hours=36)
 # promote_raw.EXISTING_MATCH_WINDOW / existing_match_window (the football-data
@@ -298,6 +323,7 @@ class PairPlan:
     new_team: dict = field(default_factory=dict)
     old_team: dict = field(default_factory=dict)
     team_patch: dict = field(default_factory=dict)  # aliases / merged_from / ESPN id move
+    odds_names: list[str] = field(default_factory=list)  # the odds feed's spellings of the club (not in the digest)
 
 
 @dataclass
@@ -448,6 +474,34 @@ def select_pairs(rows: list[MapRow], only: Optional[str]) -> list[MapRow]:
     if unknown:
         raise MapError(f"--only names team(s) that are not in the merge map: {unknown}")
     return [r for r in rows if r.new_team_id in set(wanted)]
+
+
+def load_odds_spellings(path: Path, rows: list[MapRow]) -> dict[str, list[str]]:
+    """{new_team_id: [the odds feed's spellings of that club]} from the
+    reviewed list ('#' lines are comments). Every row must name a pair of the
+    map by id and by its new_name, carry evidence, and appear once. Raises
+    MapError otherwise: an odds spelling nobody can place is not a probe."""
+    with path.open(newline="") as fh:
+        lines = [ln for ln in fh if ln.strip() and not ln.lstrip().startswith("#")]
+    reader = csv.DictReader(lines)
+    if tuple(reader.fieldnames or ()) != ODDS_SPELLING_FIELDS:
+        raise MapError(f"{path}: header {reader.fieldnames} != {list(ODDS_SPELLING_FIELDS)}")
+    by_id = {r.new_team_id: r for r in rows}
+    out: dict[str, list[str]] = {}
+    for r in reader:
+        nid = (r["new_team_id"] or "").strip()
+        pair = by_id.get(nid)
+        if pair is None:
+            raise MapError(f"{path}: {nid!r} ({r['new_name']}) is not a pair of the merge map")
+        if r["new_name"] != pair.new_name:
+            raise MapError(f"{path}: {nid} is {pair.new_name!r} in the merge map, not {r['new_name']!r}")
+        name = r["odds_name"] or ""
+        if not name.strip() or not (r["evidence"] or "").strip():
+            raise MapError(f"{path}: {pair.new_name} needs an odds_name and its evidence")
+        if name in out.get(nid, []):
+            raise MapError(f"{path}: {name!r} listed twice for {pair.new_name}")
+        out.setdefault(nid, []).append(name)
+    return out
 
 
 def seed_conflict(new_name: str, old_name: str, espn: str, seed: dict[str, Any]) -> Optional[str]:
@@ -751,7 +805,9 @@ def decide_cluster(cluster: list[dict], deps: dict[str, Deps]) -> dict:
     """Which row of a twin cluster survives and what it takes from the rest.
     Returns {'refuse': reason} or {'keep', 'drops', 'adopt_from', 'ht_from',
     'espn_from', 'kickoff', 'notes'}: 'kickoff' is the kept row's new
-    kickoff, or None when it stays. Pure."""
+    kickoff, or None when it stays. Every row promote_raw re-promotes must
+    stay where it searches: a dropped football-data twin's kept row, and a
+    kept football-data row itself. Pure."""
     span = cluster[-1]["match_date"] - cluster[0]["match_date"]
     if span > TWIN_WINDOW:
         return {"refuse": f"twin cluster spans {span} (> {TWIN_WINDOW}): more than one fixture?"}
@@ -817,6 +873,13 @@ def decide_cluster(cluster: list[dict], deps: dict[str, Deps]) -> dict:
             if cand["match_date"] == final:
                 espn_from = cand
             elif kickoff is None and not open_recs and _finished(cand):
+                if is_football_data_row(keep) and not promote_finds(cand["match_date"], keep["match_date"]):
+                    return {
+                        "refuse": f"the kept football-data row {keep['id']} at {keep['match_date']} would take the "
+                        f"ESPN kickoff {cand['match_date']} of {cand['id']}, outside the window promote_raw searches "
+                        f"for that fixture (corrected {corrected_kickoff(keep['match_date'])}): promote_raw would "
+                        f"insert it again beside the kept row"
+                    }
                 espn_from, kickoff = cand, cand["match_date"]
             else:
                 notes.append(
@@ -871,10 +934,19 @@ def _written(p: dict) -> datetime:
     return p.get("updated_at") or p["created_at"]
 
 
-def plan_moves(drop: Deps, keep: Deps, cutoff: datetime, keep_teams: set[str]) -> tuple[list, list, list, list]:
+def plan_moves(
+    drop: Deps, keep: Deps, cutoff: datetime, keep_teams: set[str], move_predictions: bool = True
+) -> tuple[list, list, list, list]:
     """Rows of a dropped twin that move to the kept row: (odds, snapshots,
     match_stats, predictions). Mutates `keep` so a later twin of the same
-    cluster sees them as already there. Pure apart from that."""
+    cluster sees them as already there. Pure apart from that.
+
+    `move_predictions` is False for a kept row whose kickoff is still ahead:
+    moving a prediction is an UPDATE, trg_predictions_updated_at stamps it
+    updated_at = NOW(), and generate_recommendations takes the newest
+    ensemble row per type by updated_at, so an older model version would
+    price recs until the next precompute tick. Such a row's predictions are
+    regenerated anyway; the twin's are archived and dropped."""
     held = {_price_key(o) for o in keep.odds}
     freshest: dict[tuple, dict] = {}
     for o in drop.odds:
@@ -905,7 +977,7 @@ def plan_moves(drop: Deps, keep: Deps, cutoff: datetime, keep_teams: set[str]) -
     )
     taken = {_pred_key(p) for p in keep.predictions}
     by_key: dict[tuple, list[dict]] = defaultdict(list)
-    for p in drop.predictions:
+    for p in drop.predictions if move_predictions else ():
         if _written(p) < cutoff:
             by_key[_pred_key(p)].append(p)
     # per key the latest write; on a tie the smallest id (repair_fixture_orphans' DISTINCT ON order)
@@ -1047,8 +1119,9 @@ def plan_pair(
         keep_teams = {oid if t == nid else t for t in (keep["home_team_id"], keep["away_team_id"])}
         keep_deps = scratch.setdefault(keep["id"], dataclasses.replace(deps.get(keep["id"], Deps())))
         took_predictions = False
+        started = final_kickoff <= now  # predictions never move onto a fixture still to be played (plan_moves)
         for d in verdict["drops"]:
-            odds, snaps, stats, preds = plan_moves(deps.get(d["id"], Deps()), keep_deps, cutoff, keep_teams)
+            odds, snaps, stats, preds = plan_moves(deps.get(d["id"], Deps()), keep_deps, cutoff, keep_teams, started)
             took_predictions = took_predictions or bool(preds)
             plan.drops.append(
                 Drop(
@@ -1206,8 +1279,11 @@ def plan_all(
     deps: dict[str, Deps],
     now: datetime,
     ctx: Ctx,
+    odds_names: Optional[dict[str, list[str]]] = None,
 ) -> list[PairPlan]:
-    """Plan every pair in map order on a private copy of the state."""
+    """Plan every pair in map order on a private copy of the state.
+    `odds_names` (load_odds_spellings) rides along on each merging plan for
+    the in-transaction odds check."""
     teams = {k: dict(v) for k, v in teams.items()}
     state = {k: dict(v) for k, v in matches.items()}
     deps = {k: dataclasses.replace(v) for k, v in deps.items()}  # plan_moves re-binds the lists, never edits them
@@ -1215,6 +1291,8 @@ def plan_all(
     plans = []
     for i, pair in enumerate(pairs, 1):
         plan = plan_pair(i, pair, teams, refs, state, deps, now, ctx)
+        if plan.action == "merge":
+            plan.odds_names = list((odds_names or {}).get(pair.new_team_id, ()))
         apply_to_state(plan, teams, state, ctx)
         plans.append(plan)
     return plans
@@ -1504,10 +1582,15 @@ def _delta(want: Any, got: Any) -> str:
     return f"{want!r} -> {got!r}"
 
 
-def write_archive(cur, path: Path, plans: list[PairPlan], children: tuple[str, ...]) -> int:
+Archived = dict[str, dict[str, set[str]]]  # dropped twin id -> child table -> archived row ids
+
+
+def write_archive(cur, path: Path, plans: list[PairPlan], children: tuple[str, ...]) -> tuple[int, Archived]:
     """gzip JSONL of every row the run deletes or changes, written before the
-    first write. Returns the record count. `children` are the tables whose
-    rows cascade with a dropped twin (Schema.match_children)."""
+    first write. Returns (record count, the child rows archived per dropped
+    twin): apply_pair refuses to delete a twin holding a row not in it.
+    `children` are the tables whose rows cascade with a dropped twin
+    (Schema.match_children)."""
     merges = [p for p in plans if p.action == "merge"]
     drop_ids = [d.match_id for p in merges for d in p.drops]
     keep_of = {d.match_id: d.keep_id for p in merges for d in p.drops}
@@ -1515,6 +1598,7 @@ def write_archive(cur, path: Path, plans: list[PairPlan], children: tuple[str, .
     team_ids = [t for p in merges for t in (p.pair.new_team_id, p.pair.old_team_id)]
     path.parent.mkdir(parents=True, exist_ok=True)
     n = 0
+    archived: Archived = {mid: {} for mid in drop_ids}
     with gzip.open(path, "xt") as fh:
 
         def emit(table: str, role: str, rows: Iterable[dict], **extra: Any) -> None:
@@ -1523,6 +1607,8 @@ def write_archive(cur, path: Path, plans: list[PairPlan], children: tuple[str, .
                 rec = {"table": table, "role": role, **extra, "row": {k: _jsonable_row(v) for k, v in r.items()}}
                 if table == "matches" and role == "dropped_twin":
                     rec["keep_id"] = keep_of.get(str(r["id"]))
+                if role == "dropped_twin_child":
+                    archived.setdefault(str(r["match_id"]), {}).setdefault(table, set()).add(str(r["id"]))
                 fh.write(json.dumps(rec) + "\n")
                 n += 1
 
@@ -1538,7 +1624,7 @@ def write_archive(cur, path: Path, plans: list[PairPlan], children: tuple[str, .
             for table in children:
                 cur.execute(f"SELECT * FROM {table} WHERE match_id = ANY(%s::uuid[])", (chunk,))
                 emit(table, "dropped_twin_child", cur.fetchall())
-    return n
+    return n, archived
 
 
 def _jsonable_row(v: Any) -> Any:
@@ -1812,6 +1898,15 @@ TEAM_RECORD_SQL = """
        AND COALESCE(external_ids->>'espn', '') = %(observed_espn)s
 """
 
+
+def twin_children_sql(schema: Schema) -> str:
+    """Every row hanging off one dropped twin (%(m)s), per child table. The
+    table names come from read_schema, i.e. from the MATCH_CHILDREN whitelist."""
+    return "\nUNION ALL\n".join(
+        f"SELECT '{t}' AS tbl, id::text AS id FROM {t} WHERE match_id = %(m)s::uuid" for t in schema.match_children
+    )
+
+
 REPOINTED_FIXTURE_SQL = """
     SELECT m.match_date, m.status, ht.name AS home_name, at.name AS away_name
       FROM matches m JOIN teams ht ON ht.id = m.home_team_id JOIN teams at ON at.id = m.away_team_id
@@ -1849,12 +1944,54 @@ def odds_probe(plan: PairPlan) -> Optional[dict]:
     return max(cands, key=lambda r: (r["observed"]["match_date"], r["match_id"]))
 
 
-def verify_resolution(cur, plan: PairPlan, resolvers: Resolvers) -> int:
+def probe_fixture(cur, plan: PairPlan) -> Optional[tuple[dict, dict]]:
+    """(the odds_probe re-point, its fixture as it reads now: kickoff, team
+    names), or None when the pair re-points no fixture the odds resolver sees."""
+    probe = odds_probe(plan)
+    if probe is None:
+        return None
+    cur.execute(REPOINTED_FIXTURE_SQL, (probe["match_id"],))
+    row = cur.fetchone()
+    if not row:
+        raise GuardError(f"re-pointed fixture {probe['match_id']} is gone")
+    return probe, dict(row)
+
+
+def odds_event(probe: dict, row: dict, spelling: str) -> tuple[str, str, datetime]:
+    """(home, away, kickoff) of an odds event for the probe fixture that names
+    the merged club `spelling` and the opponent as our row does."""
+    home = spelling if probe["side"] == "home" else row["home_name"]
+    away = spelling if probe["side"] == "away" else row["away_name"]
+    return home, away, row["match_date"]
+
+
+def odds_before(cur, plan: PairPlan, resolvers: Resolvers) -> dict[str, Optional[str]]:
+    """Before the pair's first write: the fixture fetch_live_odds.find_match_id
+    finds for each of the odds feed's spellings of the club (plan.odds_names)
+    on the probe fixture, which still names the twin. verify_resolution holds
+    the merge to it."""
+    if not plan.odds_names:
+        return {}
+    found = probe_fixture(cur, plan)
+    if found is None:
+        return {}
+    probe, row = found
+    out: dict[str, Optional[str]] = {}
+    for spelling in plan.odds_names:
+        got = resolvers.find_match_id(cur, *odds_event(probe, row, spelling))
+        out[spelling] = str(got) if got else None
+    return out
+
+
+def verify_resolution(cur, plan: PairPlan, resolvers: Resolvers, before: dict[str, Optional[str]]) -> Counter:
     """Inside the pair's transaction, after the team delete: the deployed
-    resolvers must resolve the merged spelling to the kept team, else
-    GuardError (the pair rolls back). Returns the number of checks run."""
+    resolvers must resolve the merged spelling to the kept team, and every
+    odds-feed spelling that found the probe fixture before the first write
+    (`before`, from odds_before) must still find it, else GuardError (the
+    pair rolls back). Returns the checks run."""
     pair, t = plan.pair, plan.team_patch
     league = plan.new_team.get("league_id")
+    done: Counter = Counter()
     checks = 0
     got = resolvers.find_team(cur, pair.new_name, league, None)
     checks += 1
@@ -1871,27 +2008,40 @@ def verify_resolution(cur, plan: PairPlan, resolvers: Resolvers) -> int:
                 f"fetch_upcoming.find_team({pair.new_name!r}, ESPN {t['espn']}) resolves to {got!r}, not the kept "
                 f"team {pair.old_team_id}"
             )
-    probe = odds_probe(plan)
-    if probe is not None:
-        cur.execute(REPOINTED_FIXTURE_SQL, (probe["match_id"],))
-        row = cur.fetchone()
-        if not row:
-            raise GuardError(f"re-pointed fixture {probe['match_id']} is gone")
-        home = pair.new_name if probe["side"] == "home" else row["home_name"]
-        away = pair.new_name if probe["side"] == "away" else row["away_name"]
-        got = resolvers.find_match_id(cur, home, away, row["match_date"])
+    found = probe_fixture(cur, plan)
+    if found is not None:
+        probe, row = found
+        home, away, when = odds_event(probe, row, pair.new_name)
+        got = resolvers.find_match_id(cur, home, away, when)
         checks += 1
         if str(got or "") != probe["match_id"]:
             raise GuardError(
-                f"fetch_live_odds.find_match_id({home!r}, {away!r}, {row['match_date']}) finds {got!r}, not the "
+                f"fetch_live_odds.find_match_id({home!r}, {away!r}, {when}) finds {got!r}, not the "
                 f"re-pointed fixture {probe['match_id']}: odds for the merged club would stop matching"
             )
-    return checks
+        keep_of = {d.match_id: d.keep_id for d in plan.drops}
+        for spelling in plan.odds_names:
+            prior = before.get(spelling)
+            if keep_of.get(prior or "", prior) != probe["match_id"]:
+                done["odds_spellings_unmatched_before"] += 1  # nothing to keep: it missed before the merge too
+                continue
+            home, away, when = odds_event(probe, row, spelling)
+            got = resolvers.find_match_id(cur, home, away, when)
+            done["odds_spelling_checks"] += 1
+            if str(got or "") != probe["match_id"]:
+                raise GuardError(
+                    f"fetch_live_odds.find_match_id({home!r}, {away!r}, {when}) — the odds feed's spelling — found "
+                    f"the fixture {probe['match_id']} before the merge and finds {got!r} after it: odds for the "
+                    f"merged club would stop matching"
+                )
+    done["resolver_checks"] += checks
+    return done
 
 
-def apply_pair(conn, plan: PairPlan, resolvers: Resolvers, schema: Schema) -> Counter:
+def apply_pair(conn, plan: PairPlan, resolvers: Resolvers, schema: Schema, archived: Archived) -> Counter:
     """Write one planned pair in one transaction; GuardError / psycopg2.Error
-    roll it back. Returns what it wrote."""
+    roll it back. Returns what it wrote. `archived` is write_archive's record
+    of the child rows it archived per dropped twin."""
     pair = plan.pair
     t = plan.team_patch
     done: Counter = Counter()
@@ -1910,6 +2060,7 @@ def apply_pair(conn, plan: PairPlan, resolvers: Resolvers, schema: Schema) -> Co
             touched = sorted({d.match_id for d in plan.drops} | {d.keep_id for d in plan.drops})
             if touched:
                 cur.execute(LOCK_ROWS_SQL, (touched,))
+            before = odds_before(cur, plan, resolvers)
             for d in plan.drops:
                 for sql, ids, label in (
                     (MOVE_ODDS_SQL, d.odds_ids, "odds"),
@@ -1926,6 +2077,19 @@ def apply_pair(conn, plan: PairPlan, resolvers: Resolvers, schema: Schema) -> Co
                             f"move {label} {d.match_id} -> {d.keep_id}",
                         )
                         done[f"moved_{label}"] += len(ids)
+                if schema.match_children:
+                    # The twin row is locked FOR UPDATE, so no child row can be added before COMMIT; one added
+                    # between the archive and the lock would cascade away unarchived.
+                    cur.execute(twin_children_sql(schema), {"m": d.match_id})
+                    kept = archived.get(d.match_id, {})
+                    extra = sorted(
+                        f"{r['tbl']}:{r['id']}" for r in cur.fetchall() if str(r["id"]) not in kept.get(r["tbl"], ())
+                    )
+                    if extra:
+                        raise GuardError(
+                            f"twin {d.match_id} holds {len(extra)} row(s) written after the archive, e.g. {extra[:3]}: "
+                            f"deleting it would lose them unarchived"
+                        )
                 _expect(cur, DROP_TWIN_SQL, {"id": d.match_id, **d.observed}, 1, f"drop twin {d.match_id}")
                 done["twins_dropped"] += 1
             for e in plan.enrich:
@@ -2016,7 +2180,7 @@ def apply_pair(conn, plan: PairPlan, resolvers: Resolvers, schema: Schema) -> Co
                 f"delete team {pair.new_name}",
             )
             done["teams_deleted"] += 1
-            done["resolver_checks"] += verify_resolution(cur, plan, resolvers)
+            done.update(verify_resolution(cur, plan, resolvers, before))
         conn.commit()
         return done
     except Exception:
@@ -2043,9 +2207,95 @@ UNSETTLED_RECS_SQL = """
 """
 
 
-def check_after(conn, doc: dict, resolvers: Resolvers) -> dict:
+# The first fetch_live_odds run after `since` (the merge) that quoted soccer:
+# the latest stamp on an upcoming soccer fixture's odds. Odds are reached
+# through matches (indexed match_id), never by scanning odds.
+ODDS_LAST_RUN_SQL = """
+    SELECT max(o.last_seen_at) AS last_run
+      FROM matches m
+      JOIN teams ht ON ht.id = m.home_team_id
+      JOIN odds o ON o.match_id = m.id
+     WHERE ht.sport = 'soccer'
+       AND m.match_date > %(since)s AND m.match_date <= %(since)s::timestamptz + interval '14 days'
+       AND o.last_seen_at >= %(since)s
+"""
+
+# Fixtures still to be played at that run whose odds the feed was quoting in
+# the hours before `since` and that got no quote since: the run did not tie
+# the feed's event to them any more. `merged` splits the merged clubs'
+# fixtures from the rest (the base rate of a book pulling a market).
+ODDS_STOPPED_SQL = """
+    SELECT m.id::text AS id, m.match_date, ht.name AS home, at.name AS away,
+           (m.home_team_id = ANY(%(teams)s::uuid[]) OR m.away_team_id = ANY(%(teams)s::uuid[])) AS merged
+      FROM matches m
+      JOIN teams ht ON ht.id = m.home_team_id
+      JOIN teams at ON at.id = m.away_team_id
+     WHERE ht.sport = 'soccer' AND m.status = 'scheduled'
+       AND m.match_date > %(last_run)s AND m.match_date <= %(since)s::timestamptz + interval '14 days'
+       AND EXISTS (SELECT 1 FROM odds o WHERE o.match_id = m.id
+                     AND o.last_seen_at >= %(since)s::timestamptz - %(lookback)s::interval
+                     AND o.last_seen_at < %(since)s)
+       AND NOT EXISTS (SELECT 1 FROM odds o WHERE o.match_id = m.id AND o.last_seen_at >= %(since)s)
+     ORDER BY m.match_date, m.id
+"""
+ODDS_LOOKBACK = timedelta(hours=6)  # fetch_live_odds runs every 90 min: the last four runs before the merge
+
+# Counts check_after reports that are not "must be 0".
+AFTER_INFO = ("pairs_recorded", "pairs_expected", "odds_control_stopped")
+
+
+def check_odds(cur, old_ids: list[str], since: datetime) -> dict:
+    """{odds_not_yet_observed, odds_fixtures_stopped, odds_control_stopped}
+    for the first fetch_live_odds run after `since`. Logs every stopped
+    fixture of a merged club."""
+    cur.execute(ODDS_LAST_RUN_SQL, {"since": since})
+    row = cur.fetchone()
+    last_run = row["last_run"] if row else None
+    if last_run is None:
+        logger.error(
+            "ODDS: no fetch_live_odds run has quoted a soccer fixture since %s — re-run this check later", since
+        )
+        return {"odds_not_yet_observed": 1, "odds_fixtures_stopped": 0, "odds_control_stopped": 0}
+    cur.execute(
+        ODDS_STOPPED_SQL,
+        {
+            "teams": old_ids,
+            "since": since,
+            "last_run": last_run,
+            "lookback": f"{int(ODDS_LOOKBACK.total_seconds())} seconds",
+        },
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    stopped = [r for r in rows if r["merged"]]
+    for r in stopped:
+        logger.error(
+            "ODDS STOPPED: %s %s v %s @ %s was quoted before %s and not by the run at %s",
+            r["id"],
+            r["home"],
+            r["away"],
+            r["match_date"],
+            since,
+            last_run,
+        )
+    logger.info(
+        "ODDS: last run %s; %d merged-club fixture(s) stopped, %d other(s)",
+        last_run,
+        len(stopped),
+        len(rows) - len(stopped),
+    )
+    return {
+        "odds_not_yet_observed": 0,
+        "odds_fixtures_stopped": len(stopped),
+        "odds_control_stopped": len(rows) - len(stopped),
+    }
+
+
+def check_after(conn, doc: dict, resolvers: Resolvers, odds_since: Optional[datetime] = None) -> dict:
     """The after-state a plan file implies, read-only: {check: count}. Every
-    count must be 0 except pairs_recorded, which must equal pairs_expected."""
+    count must be 0 except AFTER_INFO (pairs_recorded must equal
+    pairs_expected). With `odds_since` (when the merge committed), it also
+    checks that the first fetch_live_odds run after it still quoted every
+    merged club's fixture the feed was quoting before (check_odds)."""
     pairs = [p for p in doc["pairs"] if p["action"] in ("merge", "done")]
     new_ids = [p["new_team_id"] for p in pairs]
     old_ids = sorted({p["old_team_id"] for p in pairs})
@@ -2118,13 +2368,15 @@ def check_after(conn, doc: dict, resolvers: Resolvers) -> dict:
             out["unsettled_recs_on_adopted"] = int(cur.fetchone()["n"])
         else:
             out["unsettled_recs_on_adopted"] = 0
+        if odds_since is not None:
+            out.update(check_odds(cur, old_ids, odds_since))
     conn.rollback()
     return out
 
 
 def after_state_ok(out: dict) -> bool:
     return out.get("pairs_recorded") == out.get("pairs_expected") and all(
-        v == 0 for k, v in out.items() if k not in ("pairs_recorded", "pairs_expected")
+        v == 0 for k, v in out.items() if k not in AFTER_INFO
     )
 
 
@@ -2190,6 +2442,7 @@ def run(
     resolver_reason: Optional[str] = None,
     plan_out: Optional[Path] = None,
     expect_plan: Optional[dict] = None,
+    odds_names: Optional[dict[str, list[str]]] = None,
 ) -> int:
     if resolvers is None or resolver_reason:
         logger.error("REFUSED: %s — deploy the team-identity code first; nothing read or written", resolver_reason)
@@ -2214,7 +2467,7 @@ def run(
             return 2
         state = load_state(cur, pairs, schema, resolvers)
     conn.rollback()  # close the read snapshot
-    plans = plan_all(pairs, state.teams, state.refs, state.matches, state.deps, now, state.ctx)
+    plans = plan_all(pairs, state.teams, state.refs, state.matches, state.deps, now, state.ctx, odds_names)
     write_csv(out_csv, csv_rows(plans))
     doc = plan_document(plans, "apply" if apply_changes else "dry-run")
     plan_path = plan_out or out_csv.with_suffix(".plan.json")
@@ -2226,10 +2479,11 @@ def run(
     logger.info("PLAN_FILE %s", plan_path)
     # One fixed-format line for scripts/ops/merge_soccer_teams.sh to parse.
     logger.info(
-        "PLAN pairs_merge=%d pairs_done=%d pairs_refuse=%d digest=%s",
+        "PLAN pairs_merge=%d pairs_done=%d pairs_refuse=%d kickoffs_adopted=%d digest=%s",
         planned["pairs_merge"],
         planned["pairs_done"],
         planned["pairs_refuse"],
+        planned["kickoffs_adopted"],
         doc["digest"],
     )
     for mid in doc["grade_after"]:
@@ -2245,7 +2499,7 @@ def run(
         logger.info("DRY-RUN: nothing written; re-run with --apply to merge %d pair(s)", planned["pairs_merge"])
         return 1 if refused else 0
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        n = write_archive(cur, archive, plans, schema.match_children)
+        n, archived = write_archive(cur, archive, plans, schema.match_children)
     conn.rollback()
     logger.info("Archived %d row(s) to %s", n, archive)
     written: Counter = Counter()
@@ -2254,7 +2508,7 @@ def run(
         if p.action != "merge":
             continue
         try:
-            written.update(apply_pair(conn, p, resolvers, schema))
+            written.update(apply_pair(conn, p, resolvers, schema, archived))
             written["pairs_merged"] += 1
         except (GuardError, psycopg2.Error) as e:
             failed.append(p)
@@ -2277,7 +2531,13 @@ def run(
     return 0
 
 
-def run_check_after(conn, plan_path: Path, resolvers: Optional[Resolvers], resolver_reason: Optional[str]) -> int:
+def run_check_after(
+    conn,
+    plan_path: Path,
+    resolvers: Optional[Resolvers],
+    resolver_reason: Optional[str],
+    odds_since: Optional[datetime] = None,
+) -> int:
     if resolvers is None or resolver_reason:
         logger.error("REFUSED: %s", resolver_reason)
         return 2
@@ -2285,7 +2545,7 @@ def run_check_after(conn, plan_path: Path, resolvers: Optional[Resolvers], resol
     if doc.get("tool") != "merge_soccer_teams":
         logger.error("REFUSED: %s is not a merge_soccer_teams plan file", plan_path)
         return 2
-    out = check_after(conn, doc, resolvers)
+    out = check_after(conn, doc, resolvers, odds_since)
     ok = after_state_ok(out)
     logger.info("AFTER %s", " ".join(f"{k}={v}" for k, v in out.items()))
     if ok:
@@ -2293,6 +2553,12 @@ def run_check_after(conn, plan_path: Path, resolvers: Optional[Resolvers], resol
         return 0
     logger.error("AFTER-STATE FAILED: every count above must be 0 and pairs_recorded=pairs_expected")
     return 1
+
+
+def _utc_arg(s: str) -> datetime:
+    """An ISO timestamp; naive means UTC."""
+    t = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -2305,6 +2571,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--archive", type=Path, default=None, help="gzip JSONL archive written before --apply writes.")
     p.add_argument("--expect-plan", type=Path, default=None, help="--apply only if the plan equals this dry run's.")
     p.add_argument("--check-after", type=Path, default=None, help="Read-only: check the after-state of a plan file.")
+    p.add_argument(
+        "--odds-since",
+        type=_utc_arg,
+        default=None,
+        help="With --check-after: when the merge committed (ISO, UTC); also check the next fetch_live_odds run.",
+    )
+    p.add_argument("--odds-spellings", type=Path, default=ODDS_SPELLINGS_PATH, help=argparse.SUPPRESS)
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
 
@@ -2315,15 +2588,20 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("DATABASE_URL not set")
         return 2
     resolvers, reason = load_resolvers()
+    if args.odds_since and not args.check_after:
+        logger.error("REFUSED: --odds-since only goes with --check-after")
+        return 2
     if args.check_after:
         conn = psycopg2.connect(args.database_url)
         try:
-            return run_check_after(conn, args.check_after, resolvers, reason)
+            return run_check_after(conn, args.check_after, resolvers, reason, args.odds_since)
         finally:
             conn.close()
     try:
-        pairs = select_pairs(load_map(args.map), args.only)
-    except MapError as e:
+        full_map = load_map(args.map)
+        pairs = select_pairs(full_map, args.only)
+        odds_names = load_odds_spellings(args.odds_spellings, full_map)
+    except (MapError, OSError) as e:
         logger.error("REFUSED: %s", e)
         return 2
     if args.expect_plan and not args.apply:
@@ -2343,6 +2621,7 @@ def main(argv: list[str] | None = None) -> int:
             reason,
             plan_out=args.plan_out,
             expect_plan=expect,
+            odds_names=odds_names,
         )
     finally:
         conn.close()

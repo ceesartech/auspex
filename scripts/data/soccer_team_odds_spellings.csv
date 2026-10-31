@@ -1,0 +1,57 @@
+# How the odds feed (the-odds-api, via scripts/fetch_live_odds.py) spells soccer clubs the merge map folds
+# (scripts/data/soccer_team_merge_map.csv), for scripts/merge_soccer_teams.py: inside each pair's transaction
+# every spelling here that found the club's re-pointed fixture before the first write must still find it
+# before COMMIT, or the pair rolls back (odds for the club would silently stop matching).
+# Source: prod's fetch_live_odds unmatched-event log lines (read only, 2026-10). Each spelling was replayed
+# 2026-10-31 on a local copy of prod with the opponent named as our row names it: it found the twin's fixture
+# before the merge. Reviewed by hand: a spelling that names another club (the fuzzy tier pairs 'Manchester City'
+# with Coventry City's fixture when only one side is in question) is not listed. The twin's own spelling is
+# not listed either: the merged-spelling probe covers it.
+new_team_id,new_name,odds_name,evidence
+3f14be5e-e6af-454a-b89d-dc320a2eaeff,1. FC Union Berlin,Union Berlin,soccer_germany_bundesliga: 'SC Freiburg vs Union Berlin @ 2026-11-08T16:30:00Z'; found the twin's fixture before the merge (4 fixture(s))
+f45b065a-b228-4124-91fd-89f751b7a0ae,AFC Bournemouth,Bournemouth,soccer_epl: 'Bournemouth vs Leeds United @ 2026-10-31T15:00:00Z'; found the twin's fixture before the merge (5 fixture(s))
+72214c41-ef4c-4658-aa0b-b5ca5de49b6f,AJ Auxerre,Auxerre,soccer_france_ligue_one: 'Auxerre vs Le Mans FC @ 2026-10-25T16:15:00Z'; found the twin's fixture before the merge (4 fixture(s))
+7d24c425-30f2-427b-b825-8d49ac7058b5,Athletic Club,Athletic Bilbao,soccer_spain_la_liga: 'Athletic Bilbao vs Getafe @ 2026-10-25T13:00:00Z'; found the twin's fixture before the merge (4 fixture(s))
+fa4b9799-ad49-40b8-99e7-0fc965de38fa,Atlético de San Luis,Atlético San Luis,soccer_mexico_ligamx: 'Atlético San Luis vs Santos Laguna @ 2026-10-11T23:00:00Z'; found the twin's fixture before the merge (2 fixture(s))
+36e598b4-bae9-44c2-b6a8-8b360b6b5f67,Belgrano (Córdoba),Belgrano de Cordoba,soccer_argentina_primera_division: 'Aldosivi Mar del Plata vs Belgrano de Cordoba @ 2026-10-25T17:45:00Z'; found the twin's fixture before the merge (2 fixture(s))
+ab65454e-72d9-4750-b2a1-40da0e462bc9,Brighton & Hove Albion,Brighton and Hove Albion,soccer_epl: 'Brighton and Hove Albion vs Brentford @ 2026-11-08T14:00:00Z'; found the twin's fixture before the merge (5 fixture(s))
+083b1f15-79a1-4c22-a4a1-b087c778f4be,C.D. Nacional,Nacional,soccer_portugal_primeira_liga: 'Rio Ave FC vs Nacional @ 2026-10-11T14:30:00Z'; found the twin's fixture before the merge (1 fixture(s))
+f4647490-6614-44cc-a46b-4596d96e15da,Chicago Fire FC,Chicago Fire,soccer_usa_mls: 'Chicago Fire vs New York City FC @ 2026-10-10T18:30:00Z'; found the twin's fixture before the merge (1 fixture(s))
+37a7a72c-8d24-44c0-9585-e50cee7a46b3,Deportivo,Deportivo La Coruña,soccer_spain_la_liga: 'Deportivo La Coruña vs CA Osasuna @ 2026-11-02T20:00:00Z'; found the twin's fixture before the merge (4 fixture(s))
+38a10e28-a7ee-4295-bfe0-7390b20fa0bb,Djurgården,Djurgardens IF,soccer_sweden_allsvenskan: 'Hammarby IF vs Djurgardens IF @ 2026-10-11T12:00:00Z'; found the twin's fixture before the merge (1 fixture(s))
+ba35e3a4-f55c-4c49-918f-c34ac1661a23,Estudiantes de La Plata,Estudiantes,soccer_argentina_primera_division: 'Central Córdoba vs Estudiantes @ 2026-10-10T20:00:00Z'; found the twin's fixture before the merge (4 fixture(s))
+392b5041-6d6a-435f-8248-3051db0f48e4,FC Famalicao,Famalicão,soccer_portugal_primeira_liga: 'Famalicão vs Alverca @ 2026-10-12T19:15:00Z'; found the twin's fixture before the merge (2 fixture(s))
+e9a46c9f-521c-4c09-997c-8d9ece6aa87d,FC Groningen,Groningen,soccer_netherlands_eredivisie: 'AZ Alkmaar vs Groningen @ 2026-11-08T15:45:00Z'; found the twin's fixture before the merge (4 fixture(s))
+4830cb43-4c34-48c8-b102-59f4e722fde6,FC Porto,Porto,soccer_uefa_champs_league: 'Porto vs Napoli @ 2026-11-04T20:00:00Z'; found the twin's fixture before the merge (1 fixture(s))
+13b66452-f78f-4aea-8207-70e0f1fd97d6,FC Twente,FC Twente Enschede,soccer_netherlands_eredivisie: 'AZ Alkmaar vs FC Twente Enschede @ 2026-10-25T19:00:00Z'; found the twin's fixture before the merge (3 fixture(s))
+5d82cfe1-2a22-4150-b8c4-2fa09d0c42f9,Feyenoord Rotterdam,Feyenoord,soccer_netherlands_eredivisie: 'Feyenoord vs AZ Alkmaar @ 2026-10-10T16:45:00Z'; found the twin's fixture before the merge (6 fixture(s))
+9f187901-afcd-4976-b9cb-64824ff62e60,Gimnasia (Mendoza),Gimnasia Mendoza,soccer_argentina_primera_division: 'Estudiantes vs Gimnasia Mendoza @ 2026-10-05T22:00:00Z'; found the twin's fixture before the merge (1 fixture(s))
+e6c40a1a-9b18-44b0-ab37-a20d852f44cf,Hamburg SV,Hamburger SV,soccer_germany_bundesliga: 'Eintracht Frankfurt vs Hamburger SV @ 2026-11-01T16:30:00Z'; found the twin's fixture before the merge (2 fixture(s))
+e1a330e7-9198-41a2-9e1a-3be9f6cf3023,Henan,Henan FC,soccer_china_superleague: 'Henan FC vs Beijing FC @ 2026-10-24T07:30:00Z'; found the twin's fixture before the merge (3 fixture(s))
+eea76b03-7945-4704-ad7a-6a4b15da5cae,Huracán,Atlético Huracán,soccer_argentina_primera_division: 'Atlético Huracán vs Aldosivi Mar del Plata @ 2026-10-04T00:30:00Z'; found the twin's fixture before the merge (2 fixture(s))
+0be13624-4b38-4fd7-9bbc-abbb39166969,Instituto (Córdoba),Instituto de Córdoba,soccer_argentina_primera_division: 'Estudiantes vs Instituto de Córdoba @ 2026-10-30T22:00:00Z'; found the twin's fixture before the merge (1 fixture(s))
+7b4c7b45-dbc8-4a84-a232-accd135ac6d3,Istanbul Basaksehir,Basaksehir,soccer_turkey_super_league: 'Basaksehir vs Gazişehir Gaziantep @ 2026-10-18T15:59:00Z'; found the twin's fixture before the merge (3 fixture(s))
+a9dd19df-20ae-48a4-a198-dc4b3d5e4398,KAA Gent,Gent,soccer_belgium_first_div: 'SV Zulte-Waregem vs Gent @ 2026-10-10T18:45:00Z'; found the twin's fixture before the merge (1 fixture(s))
+db248d09-7453-46c3-a685-a2608c6ab2fc,KVC Westerlo,Westerlo,soccer_belgium_first_div: 'Westerlo vs Royal Antwerp @ 2026-10-11T16:30:00Z'; found the twin's fixture before the merge (2 fixture(s))
+bd62958d-7725-4d3e-a1e5-f38a86b9b117,Kyoto Sanga,Kyoto Purple Sanga,soccer_japan_j_league: 'Hiroshima Sanfrecce FC vs Kyoto Purple Sanga @ 2026-10-17T05:00:00Z'; found the twin's fixture before the merge (1 fixture(s))
+e27e5624-4a39-47a4-b7d0-5322e459fc68,LASK Linz,LASK,soccer_uefa_champs_league: 'LASK vs Liverpool @ 2026-10-14T16:45:00Z'; found the twin's fixture before the merge (3 fixture(s))
+60026c42-128e-40cd-a915-71dc55b8e5c3,Newell's Old Boys,Newells Old Boys,soccer_argentina_primera_division: 'Newells Old Boys vs Central Córdoba @ 2026-10-18T20:00:00Z'; found the twin's fixture before the merge (1 fixture(s))
+e2a08c8c-913f-438b-9fde-6e2c7a1d1ac7,OH Leuven,Leuven,soccer_belgium_first_div: 'Union Saint-Gilloise vs Leuven @ 2026-10-11T14:00:00Z'; found the twin's fixture before the merge (1 fixture(s))
+e8251bc5-8422-4363-a98d-3263a49c2d7a,Olympiacos,Olympiakos Piraeus,soccer_greece_super_league: 'AE Kifisia FC vs Olympiakos Piraeus @ 2026-10-31T17:00:00Z'; found the twin's fixture before the merge (6 fixture(s))
+58169498-ddf0-446e-8923-e81e6dc84e3a,Paris Saint-Germain,Paris Saint Germain,soccer_france_ligue_one: 'Paris Saint Germain vs Le Mans FC @ 2026-10-10T18:45:00Z'; found the twin's fixture before the merge (2 fixture(s))
+67bc6e06-352d-4c05-b5a0-1e76c4d91d02,PEC Zwolle,FC Zwolle,soccer_netherlands_eredivisie: 'FC Zwolle vs SC Cambuur @ 2026-10-11T12:30:00Z'; found the twin's fixture before the merge (1 fixture(s))
+3ce74b76-d342-41d1-a718-8c9aad0e36c3,Pumas UNAM,Pumas,soccer_mexico_ligamx: 'Atlante FC vs Pumas @ 2026-10-17T03:00:00Z'; found the twin's fixture before the merge (4 fixture(s))
+93a3750d-6887-473e-a086-d7a36a3661e3,Racing Santander,Real Racing Club de Santander,soccer_spain_la_liga: 'CA Osasuna vs Real Racing Club de Santander @ 2026-10-18T12:00:00Z'; found the twin's fixture before the merge (3 fixture(s))
+623bf563-e437-4720-9ac6-8cb8e35094af,RB Salzburg,Salzburg,soccer_uefa_europa_league: 'Salzburg vs AC Milan @ 2026-10-15T16:45:00Z'; found the twin's fixture before the merge (1 fixture(s))
+7084af78-bce4-4c4b-8e40-49a8c3fca920,Red Bull Bragantino,Bragantino-SP,soccer_brazil_campeonato: 'Atletico Mineiro vs Bragantino-SP @ 2026-10-03T21:30:00Z'; found the twin's fixture before the merge (1 fixture(s))
+d5189fc1-915d-4627-adf5-73b9296f744e,Royal Charleroi SC,Charleroi,soccer_belgium_first_div: 'Royal Antwerp vs Charleroi @ 2026-10-24T14:00:00Z'; found the twin's fixture before the merge (2 fixture(s))
+8e187f95-32ad-4742-a70e-84da0de38aaa,Sarmiento (Junín),Sarmiento de Junin,soccer_argentina_primera_division: 'Aldosivi Mar del Plata vs Sarmiento de Junin @ 2026-10-09T17:30:00Z'; found the twin's fixture before the merge (1 fixture(s))
+75df4e94-39bd-42b9-bec3-455a3bc5b6d2,Sporting CP,Sporting Lisbon,soccer_portugal_primeira_liga: 'Braga vs Sporting Lisbon @ 2026-10-09T19:15:00Z'; found the twin's fixture before the merge (3 fixture(s))
+d8fc14dd-ccda-401c-a5b3-026a73aec770,SV Elversberg,Elversberg,soccer_germany_bundesliga: 'Elversberg vs Augsburg @ 2026-10-17T13:30:00Z'; found the twin's fixture before the merge (3 fixture(s))
+0ff5cd5f-71dc-4bd4-bec9-f47c53adbed8,Talleres (Córdoba),Talleres,soccer_argentina_primera_division: 'Talleres vs Belgrano de Cordoba @ 2026-10-04T20:00:00Z'; found the twin's fixture before the merge (1 fixture(s))
+a6ba1273-9ea9-43c0-b522-5c78daa5408b,Tokyo Verdy 1969,Tokyo Verdy,soccer_japan_j_league: 'Tokyo Verdy vs Hiroshima Sanfrecce FC @ 2026-10-11T06:00:00Z'; found the twin's fixture before the merge (1 fixture(s))
+7e120cb9-f4d1-46cc-8fba-784f09cae513,Union St.-Gilloise,Union Saint-Gilloise,soccer_belgium_first_div: 'SK Beveren vs Union Saint-Gilloise @ 2026-10-31T19:45:00Z'; found the twin's fixture before the merge (2 fixture(s))
+0675c20d-2a58-49ed-b6ed-498d7de839e5,Unión (Santa Fe),Union Santa Fe,soccer_argentina_primera_division: 'Union Santa Fe vs Estudiantes @ 2026-10-26T22:00:00Z'; found the twin's fixture before the merge (1 fixture(s))
+00f25d55-a80c-41a5-afa9-35cd03f10111,Vitória de Guimaraes,Vitória SC,soccer_portugal_primeira_liga: 'Benfica vs Vitória SC @ 2026-10-11T17:00:00Z'; found the twin's fixture before the merge (2 fixture(s))
+4ecd85e8-c527-47fc-9562-71596a63e3f2,Vélez Sarsfield,Velez Sarsfield BA,soccer_argentina_primera_division: 'Central Córdoba vs Velez Sarsfield BA @ 2026-10-26T00:30:00Z'; found the twin's fixture before the merge (1 fixture(s))
+d6f49e34-4f23-4875-abbe-ab9d9edb9420,Zulte-Waregem,SV Zulte-Waregem,soccer_belgium_first_div: 'SV Zulte-Waregem vs Gent @ 2026-10-10T18:45:00Z'; found the twin's fixture before the merge (1 fixture(s))

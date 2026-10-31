@@ -159,6 +159,28 @@ class TestCommittedMap:
         assert positions == sorted(positions)
         assert "promote_raw stays blocked until" in wrapper
 
+    def test_wrapper_pauses_the_writers_and_always_unpauses_what_it_paused(self):
+        wrapper = (SCRIPTS_DIR / "ops" / "merge_soccer_teams.sh").read_text()
+        assert 'DAGS="auspex_pipeline fetch_live_odds"' in wrapper
+        assert "trap resume_dags EXIT" in wrapper and "trap 'exit 130' INT TERM HUP" in wrapper
+        assert "airflow dags pause -y" in wrapper and "airflow dags unpause -y" in wrapper
+        assert 'PAUSED_BY_US="$PAUSED_BY_US $d"' in wrapper  # only what it paused; an already paused DAG stays paused
+        backup, pause = wrapper.index('log "backup landed'), wrapper.index('log "pausing $DAGS')
+        dry, apply_, resume, grade = (
+            wrapper.index('log "2/5 dry run"'),
+            wrapper.index('log "3/5 apply'),
+            wrapper.index("MERGED_AT=$(date -u +%FT%TZ)\nresume_dags"),
+            wrapper.index('log "4/5 grade"'),
+        )
+        assert backup < pause < dry < apply_ < resume < grade
+
+    def test_wrapper_gates_on_the_reviewed_kickoff_moves_and_checks_the_odds_afterwards(self):
+        wrapper = (SCRIPTS_DIR / "ops" / "merge_soccer_teams.sh").read_text()
+        assert "EXPECTED_KICKOFFS_ADOPTED=0" in wrapper
+        assert 'if [ "$kickoffs" != "$EXPECTED_KICKOFFS_ADOPTED" ]; then' in wrapper
+        assert "kickoffs_adopted=[0-9]*" in wrapper
+        assert "--check-after $PLAN --odds-since $MERGED_AT" in wrapper
+
     def test_ids_lead_each_line_unquoted_for_the_wrapper(self):
         data = [ln for ln in ms.MAP_PATH.read_text().splitlines() if not ln.startswith("#")][1:]
         for ln in data:
@@ -224,6 +246,68 @@ class TestLoadMap:
         assert ms.select_pairs(rows, None) == rows
         with pytest.raises(ms.MapError, match="not in the merge map"):
             ms.select_pairs(rows, f"{NEW},{OPP}")
+
+
+# The odds feed's spellings of merged clubs (reviewed, from prod's fetch_live_odds logs).
+REVIEWED_ODDS_SPELLINGS = {
+    ("Brighton & Hove Albion", "Brighton and Hove Albion"),
+    ("Paris Saint-Germain", "Paris Saint Germain"),
+    ("FC Twente", "FC Twente Enschede"),
+    ("Kyoto Sanga", "Kyoto Purple Sanga"),
+    ("Deportivo", "Deportivo La Coruña"),
+    ("Racing Santander", "Real Racing Club de Santander"),
+    ("Vitória de Guimaraes", "Vitória SC"),
+    ("Henan", "Henan FC"),
+    ("Huracán", "Atlético Huracán"),
+    ("Belgrano (Córdoba)", "Belgrano de Cordoba"),
+    ("OH Leuven", "Leuven"),
+}
+
+
+def _write_spellings(tmp_path, rows, header="new_team_id,new_name,odds_name,evidence") -> Path:
+    path = tmp_path / "spellings.csv"
+    with path.open("w", newline="") as fh:
+        fh.write("# comment\n" + header + "\n")
+        w = csv.writer(fh)
+        for r in rows:
+            w.writerow(r)
+    return path
+
+
+class TestOddsSpellings:
+    rows = ms.load_map(ms.MAP_PATH)
+
+    def test_the_committed_list_loads_against_the_committed_map(self):
+        names = ms.load_odds_spellings(ms.ODDS_SPELLINGS_PATH, self.rows)
+        by_id = {r.new_team_id: r.new_name for r in self.rows}
+        got = {(by_id[nid], s) for nid, ss in names.items() for s in ss}
+        assert REVIEWED_ODDS_SPELLINGS <= got
+        for nid, ss in names.items():  # never the twin's own alias: the merged-spelling probe covers that one
+            assert all(ti.alias_form(s) != ti.alias_form(by_id[nid]) for s in ss), (by_id[nid], ss)
+
+    def test_a_valid_row(self, tmp_path):
+        path = _write_spellings(tmp_path, [[NEW, "BK Häcken", "Hacken FC", "log"], [NEW, "BK Häcken", "Häcken", "log"]])
+        assert ms.load_odds_spellings(path, [_pair()]) == {NEW: ["Hacken FC", "Häcken"]}
+
+    @pytest.mark.parametrize(
+        "row, match",
+        [
+            ([OLD, "BK Häcken", "Hacken FC", "log"], "not a pair of the merge map"),
+            ([NEW, "BK Hacken", "Hacken FC", "log"], "in the merge map, not"),
+            ([NEW, "BK Häcken", " ", "log"], "needs an odds_name"),
+            ([NEW, "BK Häcken", "Hacken FC", ""], "needs an odds_name and its evidence"),
+        ],
+    )
+    def test_a_row_nobody_can_place_refuses(self, tmp_path, row, match):
+        with pytest.raises(ms.MapError, match=match):
+            ms.load_odds_spellings(_write_spellings(tmp_path, [row]), [_pair()])
+
+    def test_a_duplicate_or_a_wrong_header_refuses(self, tmp_path):
+        row = [NEW, "BK Häcken", "Hacken FC", "log"]
+        with pytest.raises(ms.MapError, match="twice"):
+            ms.load_odds_spellings(_write_spellings(tmp_path, [row, row]), [_pair()])
+        with pytest.raises(ms.MapError, match="header"):
+            ms.load_odds_spellings(_write_spellings(tmp_path, [row], header="a,b,c,d"), [_pair()])
 
 
 class TestSeedConflict:
@@ -550,6 +634,15 @@ class TestDecideCluster:
         fd = _m("f", OLD, OPP, _utc("2026-07-06 18:00"))  # corrects to 17:00Z: the kept row is 4.5 h off
         assert "promote_raw would insert" in ms.decide_cluster([keep, fd], {})["refuse"]
 
+    def test_a_football_data_keep_never_takes_an_espn_kickoff_promote_raw_would_miss(self):
+        fd_holder = _m("k", OLD, OPP, _utc("2026-07-05 13:00"))  # promote_raw searches 09:00-15:00Z on 07-05
+        espn = _espn_row("e", NEW, OPP, _utc("2026-07-06 06:00"))
+        v = ms.decide_cluster([fd_holder, espn], {"k": _deps(holds_recs=True)})
+        assert "outside the window promote_raw searches" in v["refuse"]
+        near = _espn_row("e", NEW, OPP, _utc("2026-07-05 14:30"))
+        v = ms.decide_cluster([fd_holder, near], {"k": _deps(holds_recs=True)})
+        assert v["espn_from"]["id"] == "e" and v["kickoff"] == near["match_date"]
+
     def test_kept_row_takes_a_missing_half_time(self):
         keep = _m("k", NEW, OPP, espn="1")
         v = ms.decide_cluster([keep, _m("d", OLD, OPP, ht=(0, 3))], {})
@@ -643,6 +736,11 @@ class TestPlanMoves:
         _, _, _, preds = ms.plan_moves(drop, _deps(), T0, {OLD})
         assert [p["id"] for p in preds] == ["p1"]
 
+    def test_predictions_stay_put_when_the_kept_row_is_still_to_be_played(self):
+        drop = _deps(predictions=[_pred("p1", T0 - timedelta(days=1))], odds=[_odds("o1", T0 - timedelta(hours=1))])
+        odds, _, _, preds = ms.plan_moves(drop, _deps(), T0, {OLD}, move_predictions=False)
+        assert preds == [] and [o["id"] for o in odds] == ["o1"]
+
     def test_a_second_twin_sees_what_the_first_moved(self):
         keep = _deps()
         ms.plan_moves(
@@ -713,6 +811,17 @@ class TestPlanPair:
         assert e.sets["match_date"] == played["match_date"] and e.observed["match_date"] == T0
         (r,) = p.repoints
         assert r["match_id"] == "h" and r["observed"]["match_date"] == played["match_date"]
+
+    def test_no_prediction_moves_onto_an_upcoming_fixture(self):
+        # trg_predictions_updated_at would stamp the moved row updated_at = NOW() and generate_recommendations
+        # takes the newest ensemble row by updated_at: an older model version would price recs until the next tick
+        ahead = NOW + timedelta(days=5)
+        keep = _espn_row("k", NEW, OPP, ahead, status="scheduled")
+        stale = _m("s", OLD, OPP, ahead - timedelta(hours=1), status="scheduled")
+        deps = {"s": _deps(predictions=[_pred("p1", NOW - timedelta(days=1))])}
+        (p,) = _plan([keep, stale], deps=deps)
+        assert [d.match_id for d in p.drops] == ["s"] and p.drops[0].prediction_ids == []
+        assert not any(e.takes_predictions for e in p.enrich) and ms.summarize([p])["predictions_moved"] == 0
 
     def test_moved_predictions_onto_a_finished_row_are_listed_for_grading(self):
         keep = _espn_row("k", NEW, OPP, T0)
@@ -911,6 +1020,8 @@ class _Cursor:
             self._rows = [dict(c.refs)]
         elif sql == ms.TWINS_AFTER_SQL:
             self._rows = list(c.twins)
+        elif sql == ms.twin_children_sql(SCHEMA):
+            self._rows = [{"tbl": t, "id": i} for t, i in c.children.get(params["m"], [])]
         elif sql == ms.REPOINTED_FIXTURE_SQL:
             self._rows = [
                 {
@@ -933,8 +1044,11 @@ class _Cursor:
 
 
 class _Conn:
-    def __init__(self, plan, rowcount=None, new_matches=None, teams=None, refs=None, twins=(), on_write=None):
+    def __init__(
+        self, plan, rowcount=None, new_matches=None, teams=None, refs=None, twins=(), on_write=None, children=None
+    ):
         self.log: list = []
+        self.children = children or {}  # twin id -> [(table, row id)] it holds at delete time
         self.teams = teams if teams is not None else [plan.new_team, plan.old_team]
         self.new_matches = new_matches if new_matches is not None else plan.new_match_ids
         self.refs = refs or {"matches": 0, "match_stats": 0, "players": 0}
@@ -955,12 +1069,16 @@ class _Conn:
     def writes(self):
         return [s for s, _ in self.log if s.lstrip().startswith(("UPDATE", "DELETE"))]
 
+    def team_deleted(self):
+        return any(s == ms.team_delete_sql(SCHEMA) for s, _ in self.log)
+
 
 class _Resolvers:
     """Stand-ins for the deployed resolvers, logging into the connection."""
 
-    def __init__(self, conn, team=OLD, team_espn=OLD, match="c", stamp=True):
+    def __init__(self, conn, team=OLD, team_espn=OLD, match="c", stamp=True, odds=None):
         self.conn, self.team, self.team_espn, self.match, self.stamp = conn, team, team_espn, match, stamp
+        self.odds = odds or {}  # odds-feed spelling -> (fixture found before the team delete, after it)
 
     def build(self):
         def find_team(cur, name, league, espn):
@@ -969,6 +1087,9 @@ class _Resolvers:
 
         def find_match_id(cur, home, away, when):
             self.conn.log.append((f"find_match_id {home} v {away}", None))
+            for spelling, (before, after) in self.odds.items():
+                if spelling in (home, away):
+                    return after if self.conn.team_deleted() else before
             return self.match
 
         def stamp_espn_id(cur, team_id, espn, label=""):
@@ -995,9 +1116,9 @@ def _merge_plan(twin_espn=""):
     return p
 
 
-def _apply(p, conn=None, **kw):
+def _apply(p, conn=None, archived=None, **kw):
     conn = conn or _Conn(p)
-    return conn, ms.apply_pair(conn, p, _Resolvers(conn, **kw).build(), SCHEMA)
+    return conn, ms.apply_pair(conn, p, _Resolvers(conn, **kw).build(), SCHEMA, archived or {})
 
 
 class TestApplyPair:
@@ -1108,6 +1229,67 @@ class TestApplyPair:
         assert "match_date = %(o_match_date)s" in ms.ENRICH_SQL
 
 
+class TestOddsSpellingChecks:
+    """Every odds-feed spelling that found the probe fixture before the pair's
+    first write must still find it before COMMIT."""
+
+    SPELLING = "Hacken FC"
+
+    def _plan(self):
+        p = _merge_plan()
+        p.odds_names = [self.SPELLING]
+        return p
+
+    def test_a_spelling_that_found_the_fixture_must_still_find_it(self):
+        p = self._plan()
+        conn, done = _apply(p, odds={self.SPELLING: ("c", "c")})
+        assert conn.committed == 1 and done["odds_spelling_checks"] == 1 and done["resolver_checks"] == 3
+        probes = [i for i, (s, _) in enumerate(conn.log) if s == "find_match_id Djurgarden v Hacken FC"]
+        first_write = next(i for i, (s, _) in enumerate(conn.log) if s in conn.writes())
+        assert len(probes) == 2 and probes[0] < first_write < probes[1]  # once before the first write, once after
+
+    def test_one_that_stops_finding_it_rolls_the_pair_back(self):
+        p = self._plan()
+        conn = _Conn(p)
+        with pytest.raises(ms.GuardError, match="the odds feed's spelling"):
+            _apply(p, conn, odds={self.SPELLING: ("c", None)})
+        assert conn.committed == 0 and conn.rolled_back == 1
+
+    def test_one_that_missed_before_is_not_held_to_anything(self):
+        p = self._plan()
+        conn, done = _apply(p, odds={self.SPELLING: (None, None)})
+        assert conn.committed == 1 and done["odds_spellings_unmatched_before"] == 1 and not done["odds_spelling_checks"]
+
+    def test_a_hit_on_a_dropped_twin_counts_as_its_kept_row(self):
+        p = self._plan()
+        p.repoints = [r for r in p.repoints if r["match_id"] == "a"]  # the probe is 'a', which keeps twin 'b'
+        conn, done = _apply(p, match="a", odds={self.SPELLING: ("b", "a")})
+        assert conn.committed == 1 and done["odds_spelling_checks"] == 1
+        conn = _Conn(p)
+        with pytest.raises(ms.GuardError, match="found the fixture a before the merge"):
+            _apply(p, conn, match="a", odds={self.SPELLING: ("b", "b")})
+
+
+class TestArchivedChildren:
+    def test_a_row_written_on_a_twin_after_the_archive_rolls_the_pair_back(self):
+        p = _merge_plan()
+        conn = _Conn(p, children={"b": [("odds", "o1"), ("odds", "o9")]})
+        with pytest.raises(ms.GuardError, match="written after the archive.*odds:o9"):
+            _apply(p, conn, archived={"b": {"odds": {"o1"}}})
+        assert ms.DROP_TWIN_SQL not in conn.writes() and conn.committed == 0 and conn.rolled_back == 1
+
+    def test_rows_all_in_the_archive_let_the_twin_go(self):
+        p = _merge_plan()
+        conn = _Conn(p, children={"b": [("odds", "o1"), ("predictions", "p7")]})
+        _, done = _apply(p, conn, archived={"b": {"odds": {"o1"}, "predictions": {"p7"}}})
+        assert done["twins_dropped"] == 1 and conn.committed == 1
+
+    def test_the_children_query_covers_every_child_table_the_schema_has(self):
+        sql = ms.twin_children_sql(SCHEMA)
+        for t in SCHEMA.match_children:
+            assert f"FROM {t} WHERE match_id = %(m)s::uuid" in sql
+
+
 def test_sql_guards_reference_observed_values():
     assert "home_team_id = %(new)s::uuid" in ms.REPOINT_SQL["home"]
     assert "match_date = %(match_date)s" in ms.REPOINT_SQL["away"]
@@ -1178,6 +1360,13 @@ class _RunConn:
                 for table, rows in conn.children.items():
                     if s.startswith(f"SELECT * FROM {table} WHERE match_id"):
                         return [r for r in rows if r["match_id"] in self.params[0]]
+                if s == ms.twin_children_sql(SCHEMA):
+                    return [
+                        {"tbl": t, "id": r["id"]}
+                        for t, rows in conn.children.items()
+                        for r in rows
+                        if r["match_id"] == self.params["m"]
+                    ]
                 return []
 
             def fetchone(self):
@@ -1285,6 +1474,25 @@ class TestRun:
             ms.run(conn, True, [_pair()], tmp_path / "a.csv", archive, _run_resolvers())
         assert conn.writes == []
 
+    def test_the_plan_line_carries_kickoffs_adopted(self, tmp_path, caplog):
+        with caplog.at_level("INFO", logger="merge_soccer_teams"):
+            ms.run(self._conn(), False, [_pair()], tmp_path / "a.csv", tmp_path / "a.gz", _run_resolvers())
+        assert "PLAN pairs_merge=1 pairs_done=0 pairs_refuse=0 kickoffs_adopted=0 digest=" in caplog.text
+
+    def test_the_odds_spellings_reach_the_in_transaction_check(self, tmp_path):
+        conn, archive = self._twin_run(tmp_path)
+        asked = []
+
+        def find_match_id(cur, home, away, when):
+            asked.append((home, away))
+            return "a"
+
+        resolvers = ms.Resolvers(
+            ti.alias_form, lambda c, s: {}, lambda: {}, lambda *a, **k: True, lambda *a: OLD, find_match_id
+        )
+        rc = ms.run(conn, True, [_pair()], tmp_path / "a.csv", archive, resolvers, odds_names={NEW: ["Hacken FC"]})
+        assert rc == 0 and asked.count(("Hacken FC", "Djurgarden")) == 2  # before the first write and after
+
     def test_apply_refuses_a_plan_other_than_the_dry_runs(self, tmp_path):
         conn, archive = self._twin_run(tmp_path)
         ms.run(conn, False, [_pair()], tmp_path / "d.csv", archive, _run_resolvers())
@@ -1320,8 +1528,10 @@ class TestRun:
 class _AfterConn:
     """Answers check_after's reads from an in-memory database."""
 
-    def __init__(self, teams, matches, recs=()):
+    def __init__(self, teams, matches, recs=(), odds_last_run=None, odds_stopped=()):
         self.teams, self.matches, self.recs = teams, matches, list(recs)
+        self.odds_last_run, self.odds_stopped = odds_last_run, list(odds_stopped)
+        self.odds_params: list = []
 
     def cursor(self, cursor_factory=None):
         conn = self
@@ -1351,6 +1561,9 @@ class _AfterConn:
                     return {"n": sum(1 for m in conn.matches if {m["home_team_id"], m["away_team_id"]} & ids)}
                 if s == ms.UNSETTLED_RECS_SQL:
                     return {"n": sum(1 for r in conn.recs if r["match_id"] in self._ids() and r["open"])}
+                if s == ms.ODDS_LAST_RUN_SQL:
+                    conn.odds_params.append(self.params)
+                    return {"last_run": conn.odds_last_run}
                 raise AssertionError(s)
 
             def fetchall(self):
@@ -1365,6 +1578,12 @@ class _AfterConn:
                     ]
                 if s == ms.FINISHED_TWINS_SQL:
                     return []
+                if s == ms.ODDS_STOPPED_SQL:
+                    conn.odds_params.append(self.params)
+                    return [
+                        dict(r, merged=bool({r["home_id"], r["away_id"]} & set(self.params["teams"])))
+                        for r in conn.odds_stopped
+                    ]
                 if s == ms.ALL_SOCCER_TEAMS_SQL:
                     return [
                         {"id": t["id"], "normalized_name": t["normalized_name"], "espn": _team_espn(t)}
@@ -1444,3 +1663,75 @@ class TestCheckAfter:
         conn = _AfterConn(_merged_teams(), [_m("a", OLD, OPP)], recs=[{"match_id": "a", "open": True}])
         out = ms.check_after(conn, _after_doc(), self._resolvers(team=THIRD))
         assert out["resolver_misses"] == 2 and out["unsettled_recs_on_adopted"] == 1 and not ms.after_state_ok(out)
+
+
+class TestOddsAfterTheMerge:
+    SINCE = NOW
+    RUN = NOW + timedelta(minutes=95)
+
+    def _out(self, **kw):
+        conn = _AfterConn(_merged_teams(), [_m("a", OLD, OPP)], recs=[{"match_id": "a", "open": False}], **kw)
+        return conn, ms.check_after(conn, _after_doc(), _run_resolvers(), odds_since=self.SINCE)
+
+    @staticmethod
+    def _fixture(home, away):
+        return {
+            "id": "f1",
+            "match_date": NOW + timedelta(days=2),
+            "home": "x",
+            "away": "y",
+            "home_id": home,
+            "away_id": away,
+        }
+
+    def test_without_odds_since_there_is_no_odds_check(self):
+        conn = _AfterConn(_merged_teams(), [_m("a", OLD, OPP)], recs=[{"match_id": "a", "open": False}])
+        out = ms.check_after(conn, _after_doc(), _run_resolvers())
+        assert not any(k.startswith("odds_") for k in out) and conn.odds_params == []
+
+    def test_every_merged_clubs_fixture_still_quoted_passes(self):
+        conn, out = self._out(odds_last_run=self.RUN, odds_stopped=[self._fixture(OPP, THIRD)])
+        assert ms.after_state_ok(out), out
+        assert out["odds_fixtures_stopped"] == 0 and out["odds_control_stopped"] == 1
+        assert conn.odds_params[1]["teams"] == [OLD] and conn.odds_params[1]["last_run"] == self.RUN
+
+    def test_a_merged_clubs_fixture_the_feed_stopped_quoting_fails(self):
+        _, out = self._out(odds_last_run=self.RUN, odds_stopped=[self._fixture(OPP, OLD)])
+        assert out["odds_fixtures_stopped"] == 1 and not ms.after_state_ok(out)
+
+    def test_no_odds_run_since_the_merge_is_not_a_pass(self):
+        _, out = self._out(odds_last_run=None)
+        assert out["odds_not_yet_observed"] == 1 and not ms.after_state_ok(out)
+
+    def test_the_sql_reads_odds_through_upcoming_fixtures_only(self):
+        for sql in (ms.ODDS_LAST_RUN_SQL, ms.ODDS_STOPPED_SQL):
+            assert "JOIN odds o ON o.match_id = m.id" in sql or "WHERE o.match_id = m.id" in sql
+        assert "m.match_date > %(last_run)s" in ms.ODDS_STOPPED_SQL
+        assert "o.last_seen_at < %(since)s" in ms.ODDS_STOPPED_SQL
+        assert "NOT EXISTS (SELECT 1 FROM odds o WHERE o.match_id = m.id AND o.last_seen_at >= %(since)s)" in (
+            ms.ODDS_STOPPED_SQL
+        )
+
+
+class TestMain:
+    def test_main_hands_the_committed_odds_spellings_to_the_run(self, tmp_path, monkeypatch):
+        asked = []
+        resolvers = _run_resolvers()
+        monkeypatch.setattr(ms, "load_resolvers", lambda: (resolvers, None))
+        monkeypatch.setattr(ms.psycopg2, "connect", lambda url: type("C", (), {"close": lambda self: None})())
+        monkeypatch.setattr(ms, "run", lambda c, *a, **kw: asked.append(kw.get("odds_names")) or 0)
+        spellings = _write_spellings(tmp_path, [[NEW, "BK Häcken", "Hacken FC", "log"]])
+        mapfile = _write_map(tmp_path, [_row(new_name="BK Häcken", old_name="Hacken")])
+        rc = ms.main(["--database-url", "x", "--map", str(mapfile), "--odds-spellings", str(spellings)])
+        assert rc == 0 and asked == [{NEW: ["Hacken FC"]}]
+
+    def test_odds_since_needs_check_after(self):
+        assert ms.main(["--database-url", "postgresql://nowhere/x", "--odds-since", "2026-10-31T10:00:00Z"]) == 2
+
+    def test_a_missing_odds_spellings_file_refuses_before_connecting(self, tmp_path):
+        rc = ms.main(["--database-url", "postgresql://nowhere/x", "--odds-spellings", str(tmp_path / "none.csv")])
+        assert rc == 2
+
+    def test_odds_since_reads_as_utc(self):
+        assert ms._utc_arg("2026-10-31T10:00:00Z") == datetime(2026, 10, 31, 10, tzinfo=timezone.utc)
+        assert ms._utc_arg("2026-10-31T10:00:00") == datetime(2026, 10, 31, 10, tzinfo=timezone.utc)
