@@ -467,7 +467,11 @@ def test_an_interrupt_during_the_apply_leaves_its_record_and_the_re_run_waits_fo
     assert rc == 0 and "STATUS=applying (that run ended during its apply" in out and "COMPLETED" in out, out
     (grade,) = [c for c in calls if "grade_completed_matches.py --match-id" in c]
     assert KEPT in grade and not [c for c in calls if "db_backup_daily" in c or "dags pause" in c or "--apply" in c]
-    assert _recorded(tmp_path)["STATUS"] == "done" and _recorded(tmp_path)["MERGED_AT"] == rec["MERGED_AT"]
+    # The interrupted run unpaused the DAGs while its apply went on, so an odds run may have started mid-apply:
+    # MERGED_AT moves to the time the re-run found the apply ended, and step 11 waits for an odds run after that.
+    done = _recorded(tmp_path)
+    assert done["STATUS"] == "done" and done["MERGED_AT"] >= rec["MERGED_AT"]
+    assert f"MERGED_AT recorded as {done['MERGED_AT']}" in out
 
 
 def test_the_applying_record_precedes_the_apply_and_merged_at_is_kept_to_the_end(tmp_path):
@@ -517,8 +521,10 @@ def test_an_own_marker_left_by_a_failed_unpause_in_the_retry_is_adopted_not_refu
     airflow["unpause_fails"] = ["auspex_pipeline"]
     rc, out, calls, _ = _run(tmp_path, airflow=airflow)
     assert "2/5 dry run" in out and "held by a run that is still going" not in out, out
-    assert "auspex_pipeline is still paused by this run" in out and [c for c in calls if "--apply --expect-plan" in c]
-    assert out.count("ALERT: auspex_pipeline is STILL PAUSED") == 2  # the retry's unpause, then the exit's
+    assert [c for c in calls if "--apply --expect-plan" in c]  # the DAG stayed on this run's list: no refusal
+    # the retry's unpause, the one after the apply, then the exit's: it never unpauses, so the run is not DONE
+    assert out.count("ALERT: auspex_pipeline is STILL PAUSED") == 3
+    assert rc == 1 and "FAILED: the merge itself is through" in out and "DONE: 171/171" not in out
 
 
 def _live(name):
@@ -585,3 +591,53 @@ def test_a_marker_whose_run_is_gone_is_adopted(tmp_path):
     rc, out = fd.run(WRAPPER, env)
     assert rc == 0 and "adopted" in out and not fd.airflow_state(tmp_path)["dags"]["fetch_live_odds"]["paused"], out
     assert _markers(tmp_path) == []
+
+
+def test_dags_left_paused_by_a_run_killed_outright_during_its_apply_are_unpaused_by_the_re_run(tmp_path):
+    """kill -9 (or OOM, a host crash) during the apply: no EXIT trap, both DAGs stay paused with their markers, and
+    the orphaned apply finishes every pair. The re-run's step 0 finishes the 'applying' record — and before that
+    unpauses what the dead run left paused, so COMPLETED never leaves the pipeline paused."""
+    rules = _rules()
+    next(r for r in rules if r["match"] == r"--apply --expect-plan")["delay"] = 60
+    env = _install(tmp_path, rules)
+    proc = subprocess.Popen(
+        ["bash", "-c", f'bash "{WRAPPER}" 2>&1 | tee "{tmp_path / "out.log"}" >/dev/null'],
+        env={**os.environ, **env},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    assert _wait_for(lambda: any("--apply --expect-plan" in c for c in fd.calls(tmp_path)))
+    os.killpg(proc.pid, signal.SIGKILL)
+    proc.wait()
+    dags = fd.airflow_state(tmp_path)["dags"]
+    assert dags["auspex_pipeline"]["paused"] and dags["fetch_live_odds"]["paused"]
+
+    fd.set_rules(tmp_path, _rules(pre=ALL_DONE))
+    rc, out = fd.run(WRAPPER, _env(tmp_path))
+    dags = fd.airflow_state(tmp_path)["dags"]
+    assert rc == 0 and "COMPLETED" in out, out
+    assert not dags["auspex_pipeline"]["paused"] and not dags["fetch_live_odds"]["paused"]
+    assert "was left paused by an earlier run that is gone" in _ledger(tmp_path)
+    assert not list((tmp_path / "afstate").glob("paused_*"))
+
+
+def test_an_unpause_that_does_not_take_after_the_apply_fails_the_run_and_the_re_run_releases_it(tmp_path):
+    """A transient `dags unpause` failure after the apply: the ALERT alone was easy to miss under 'DONE' (and the
+    runbook went on to ALL STEPS DONE with the pipeline paused). Now the run ends FAILED, so the runbook stops at
+    step 3, and the re-run — ALREADY DONE — first unpauses the DAG the earlier run left paused."""
+    airflow = _airflow()
+    airflow["unpause_fails"] = ["auspex_pipeline"]
+    rc, out, _, _ = _run(tmp_path, airflow=airflow)
+    assert rc == 1 and "FAILED: the merge itself is through" in out and "DONE: 171/171" not in out, out
+    assert fd.airflow_state(tmp_path)["dags"]["auspex_pipeline"]["paused"]
+
+    path = tmp_path / "fake" / "airflow.json"
+    state = json.loads(path.read_text())
+    state["unpause_fails"] = []
+    path.write_text(json.dumps(state))
+    fd.set_rules(tmp_path, _rules(pre=ALL_DONE))
+    rc, out = fd.run(WRAPPER, _env(tmp_path))
+    assert rc == 0 and "ALREADY DONE" in out, out
+    assert not fd.airflow_state(tmp_path)["dags"]["auspex_pipeline"]["paused"]
+    assert not list((tmp_path / "afstate").glob("paused_*"))

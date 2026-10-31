@@ -160,6 +160,10 @@ case $? in
     exit 1
     ;;
 esac
+# A DAG an earlier run left paused (killed outright, or an unpause that did not take) is unpaused before anything else:
+# every exit below, ALREADY DONE and COMPLETED included, then leaves nothing paused.
+# shellcheck disable=SC2086  # $DAGS is a word list
+af_release_orphans $DAGS || { log "ABORT: a DAG an earlier run paused is held by a live run or could not be unpaused (above) — nothing changed"; exit 1; }
 
 log "0/5 already done? (read-only dry run)"
 PRE_PLAN=/app/backups/merge_soccer_teams_precheck_$TS.plan.json
@@ -203,6 +207,13 @@ if [ "$(plan_field "$pre" pairs_merge)" = "0" ] && [ "$(plan_field "$pre" pairs_
   check_recorded "$rec_plan"
   rec_rc=$?
   if [ "$graded_ok" = "1" ] && [ "$rec_rc" = "0" ]; then
+    # A run that ended during its apply unpaused the DAGs while the apply went on, so an odds run may have started
+    # mid-apply: record the time the apply is known to have ended (the check above found none running) instead, so
+    # step 11 waits for an odds run that started after the merge really finished.
+    if [ "$rec_status" = "applying" ]; then
+      rec_at=$(date -u +%FT%TZ)
+      log "MERGED_AT recorded as $rec_at (the apply had ended by then; the odds run step 11 waits for starts after it)"
+    fi
     write_state_file "$rec_plan" "$rec_at" "" done || { log "FAILED: could not record STATUS=done in $STATE_FILE"; exit 1; }
     log "COMPLETED: the last apply's rows are graded and its after-state holds (STATUS=done recorded); all $EXPECTED pairs merged"
     exit 0
@@ -258,6 +269,8 @@ fi
 
 apply_rc=0
 # Taken before the apply: both DAGs stay paused until it has ended, so the odds run step 11 waits for starts after it.
+# (A run that ends DURING the apply unpauses them while the apply may go on; step 0 then records the time it finds
+# that apply ended.)
 MERGED_AT=$(date -u +%FT%TZ)
 if [ "$merge" = "0" ]; then
   log "3/5 apply: nothing to merge, all $EXPECTED pairs already done"
@@ -275,7 +288,8 @@ else
   fi
   [ "$apply_rc" = "0" ] || log "step 3 exited $apply_rc: a pair rolled back or the tool failed (see above); each pair is its own transaction, so whatever committed stays — grading and checking the after-state"
 fi
-af_resume
+resume_ok=1
+af_resume || resume_ok=0
 unmatched=""
 if [ "$merge" != "0" ]; then
   written=$($DC exec -T api sh -c "grep -o 'WRITTEN .*' /tmp/merge_teams.log | tail -1")
@@ -310,6 +324,13 @@ if [ -n "$unmatched" ] && [ "$unmatched" != "0" ]; then
   log "  club's fixture before the merge, so the in-transaction odds check skipped them (the WARNING lines name each club"
   log "  and spelling: grep 'did not find the probe fixture' /tmp/merge_teams.log in the api container). The merge is"
   log "  committed (after-state rc=$after_rc); inspect those spellings, then re-run this script (it exits 0 once all pairs are done)."
+  exit 1
+fi
+if [ "$resume_ok" != "1" ]; then
+  log "FAILED: the merge itself is through (apply rc=$apply_rc graded_ok=$graded_ok after-state rc=$after_rc), but$AF_PAUSED_BY_US"
+  log "  did not unpause (ALERT above; this run's exit tries once more and logs the result to $AF_LEDGER)."
+  log "  Unpause it with the ALERT's command if it is still paused, then re-run this script: it unpauses what is left and"
+  log "  reports ALREADY DONE or finishes this apply."
   exit 1
 fi
 if [ "$after_rc" = "0" ] && [ "$graded_ok" = "1" ] && [ "$apply_rc" = "0" ]; then

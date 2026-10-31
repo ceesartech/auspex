@@ -175,12 +175,17 @@ class TestCommittedMap:
             wrapper.index("MERGED_AT=$(date -u +%FT%TZ)"),
             wrapper.index('write_state_file "$PLAN" "$MERGED_AT" "$grade_ids" applying'),
             wrapper.index("$TOOL --apply --expect-plan $PLAN"),
-            wrapper.index("\nfi\naf_resume\n"),
+            wrapper.index("\nfi\nresume_ok=1\naf_resume || resume_ok=0\n"),
             wrapper.index('log "4/5 grade"'),
         )
         # MERGED_AT and the 'applying' record come before the apply: a run that ends during it still leaves them.
         assert backup < pause < dry < merged_at < record < apply_ < resume < grade
         assert wrapper.count("MERGED_AT=$(date") == 1
+        # What a run that is gone left paused is released before step 0, so no exit (ALREADY DONE included) leaves it
+        # paused; and no DONE is printed while a DAG this run paused is still paused.
+        release, step0 = wrapper.index("af_release_orphans $DAGS ||"), wrapper.index('log "0/5 already done?')
+        assert wrapper.index("af_lock merge_soccer_teams") < release < step0
+        assert wrapper.index('if [ "$resume_ok" != "1" ]; then') < wrapper.index('log "DONE: $EXPECTED/$EXPECTED')
 
     def test_wrapper_gates_on_the_reviewed_kickoff_moves_and_checks_the_odds_afterwards(self):
         wrapper = (SCRIPTS_DIR / "ops" / "merge_soccer_teams.sh").read_text()

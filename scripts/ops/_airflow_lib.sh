@@ -13,8 +13,9 @@
 # re-checks 0; a run that slipped in between makes it unpause and try again.
 #
 #   af_drain_and_pause <attempts> <polls> <dag>...   0 when drained and paused
-#   af_resume                                        unpause what we paused
+#   af_resume                                        unpause what we paused; 1 when one stays paused
 #   af_resume_on_exit                                the same, AF_EXIT_NOTE, then af_unlock: an EXIT trap
+#   af_release_orphans <dag>...                      unpause what a run that is gone left paused
 #   af_keep_paused <why> [<when to unpause>]         leave ours paused, loudly
 #   af_dag_paused <dag>                              True / False / '' (unreadable)
 #   af_runs_in_flight <dag>...                       queued+running runs, or exit 1
@@ -123,8 +124,10 @@ af_runs_in_flight() {
   echo "$n"
 }
 
+# A DAG whose unpause did not take stays on the list (the exit path tries it again) with its marker, and af_resume
+# returns 1: a caller reports no success while it is still paused.
 af_resume() {
-  local d
+  local d left=""
   # Unpause all of them first: nothing below may stand between a DAG and its unpause.
   for d in $AF_PAUSED_BY_US; do
     $DC exec -T airflow-scheduler airflow dags unpause -y "$d" </dev/null >/dev/null 2>&1
@@ -134,19 +137,48 @@ af_resume() {
       rm -f "$AF_STATE_DIR/paused_$d" 2>/dev/null
       af_note "unpaused $d"
     else
+      left="$left $d"
       af_note "ALERT: $d is STILL PAUSED (or unreadable) — unpause it now: $(af_unpause_cmd "$d")"
     fi
   done
-  AF_PAUSED_BY_US=""
+  AF_PAUSED_BY_US="$left"
+  [ -z "$left" ]
 }
 
 # For an EXIT trap: a second Ctrl-C (or the HUP of a dropped session) must not cut the unpausing short. The run lock
 # goes last, so no other run starts while this one still unpauses.
 af_resume_on_exit() {
   trap '' INT TERM HUP
-  af_resume
+  af_resume || true
   [ -z "$AF_EXIT_NOTE" ] || af_note "$AF_EXIT_NOTE"
   af_unlock
+}
+
+# af_release_orphans <dag>...: for a wrapper that pauses <dag>s itself, at its start (after its lock). A DAG still
+# paused under a marker whose run is gone (killed outright, or its unpause failed) is unpaused now, so no exit of this
+# run — an ALREADY DONE one included — leaves it paused. 0 when none is left paused; 1, loudly, when a marker's run is
+# still going, a DAG cannot be read, or an unpause does not take (the ALERT names the command).
+af_release_orphans() {
+  local d marker holder st
+  for d in "$@"; do
+    marker="$AF_STATE_DIR/paused_$d"
+    [ -f "$marker" ] || continue
+    holder=$(af_marker_holder "$marker")
+    if [ -n "$holder" ] && af_live_other "${holder%% *}" "${holder#* }"; then
+      af_note "$d is held by a run that is still going (${holder#* } pid ${holder%% *}; its marker $marker) — this run does not start: wait for that run to end, then re-run"
+      return 1
+    fi
+    st=$(af_dag_paused "$d")
+    case "$st" in
+      True)
+        case " $AF_PAUSED_BY_US " in *" $d "*) ;; *) AF_PAUSED_BY_US="$AF_PAUSED_BY_US $d" ;; esac
+        af_note "$d was left paused by an earlier run that is gone ($(cat "$marker" 2>/dev/null)) — unpausing it now"
+        ;;
+      False) rm -f "$marker" 2>/dev/null ;;  # stale: someone unpaused it since
+      *) log "cannot read whether $d is paused"; return 1 ;;
+    esac
+  done
+  [ -z "${AF_PAUSED_BY_US// /}" ] || af_resume
 }
 
 # Leave the DAGs this run paused PAUSED (their markers stay, so the next run adopts them), loudly:
