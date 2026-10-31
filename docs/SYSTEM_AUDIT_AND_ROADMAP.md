@@ -227,8 +227,9 @@ memory; this section makes it repo-canonical.
 | Soccer derived markets anchored to the market over/under 2.5 | **SHIPPED** (2026-10-26, `d2ccd32`) | `scripts/ab_soccer_ou_anchor.py`, monthly walk-forward 2019-07..2026-10, n=40,279, month-clustered SE, anchored − 1x2-only reconcile: over 2.5 **−0.00543 ± 0.00053** (team-aware base; −0.0088 identity-blind), better in all 8 years; over 1.5 −0.0032, over 3.5 −0.0047, BTTS −0.0037, correct score −0.0008, DC/DNB/AH±0.5 exactly 0. Live served-path check (n=966): over 2.5 −0.0061 ± 0.0041, no market worse than z 0.76. One cell degrades on the identity-blind base only (home win-to-nil +0.00074 ± 0.00024) and improves live; accepted | `("soccer","over_under")` rec gate stays OFF — a Brier win is not an ROI win. BTTS anchoring needs a BTTS feed |
 | Tennis market price as a model input (the-odds-api historical h2h, 2021-09..2026-10) | **PASSES the gate; does NOT beat the market** (2026-10-30) | `scripts/ab_tennis_market_odds.py` on the real frame (43,225 matches, 8,786 = 20.3% priced after the key fix + provider-anchored backfill; 13.6% before): with vs without market, all rows, holdout from 2026-04 **−0.0234 ± 0.0024** (n=6,484); walk-forward 2023 −0.0112 ± 0.0017, 2024 −0.0129 ± 0.0017, 2025 −0.0154 ± 0.0020, 2026 −0.0207 ± 0.0021. On PRICED rows the model with market is still worse than the de-vigged market itself: holdout +0.0152 ± 0.0031 (n=2,243), 2023..2026 +0.036 / +0.034 / +0.018 / +0.023 (accuracy 0.677 vs market 0.694) | Ships through the normal weekly retrain + promote gate (features recomputed). `("tennis","moneyline")` rec gate stays OFF: the model loses to the price it would bet against. Remaining unpriced matches are at tournaments the provider does not list (250s, Challengers); the next lever is serving the market where priced, through the §4.3 gate |
 | NHL probable starting goalie at serve time | **CLOSED — no gain** (2026-10-26) | `scripts/ab_nhl_projected_goalie.py`: "most starts in the last 7, rest the No. 1 on the 2nd night of a back-to-back" picks the real starter 65.7% (13,123 team-games; last-starter rule 47.0%). Paired ΔBrier on 1,300 held-out games vs default goalie features: ML −0.0009 ± 0.0011, regulation −0.0005 ± 0.0014, puck line −0.0024 ± 0.0018, total **+0.0012 ± 0.0007**; even the TRUE starter does no better. Shipped behind `NHL_GOALIE_MODE=actual_or_projected`, default off | A confirmed-starter feed (lines posted ~90 min pre-game) |
-| Soccer half-time Dixon-Coles refit (`dixon_coles_ht_soccer` on DIXON_COLES_CONFIG: per-league baselines, 20-match prior, decay, all data) | **SHIPPED** (2026-10-31, `bc41107`) | `scripts/ab_halftime_dixon_coles.py`, monthly walk-forward 2025-08..2026-10, n=8,144, fold-clustered SE, serve path incl. ht_ft through the served second-half artifact: HT 1x2 **−0.0160** vs the legacy artifact (cluster SE 0.0026, t-bound −0.0095), **−0.0130** vs a recency-matched per-league constant; frozen single fit −0.0138; every HT market and ht_ft (−0.0137) improve. The legacy pinned config DIVERGES on the full frame (13/13 folds, non-finite probabilities); the old trainer (oldest 80% only) was worse than served on the 2026 ESPN rows. ESPN era alone (n=2,702, 5 folds) −0.0089, 4/5 folds negative, not clear of noise on its own | Refit monthly if the frozen fit's lead decays — the harness measures it; the second-half and NHL Dixon-Coles artifacts are still ungated |
+| Soccer half-time Dixon-Coles refit (`dixon_coles_ht_soccer` on DIXON_COLES_CONFIG: per-league baselines, 20-match prior, decay, all data) | **SHIPPED** (2026-10-31, `bc41107`) | `scripts/ab_halftime_dixon_coles.py`, monthly walk-forward 2025-08..2026-10, n=8,144, fold-clustered SE, serve path incl. ht_ft through the served second-half artifact: HT 1x2 **−0.0160** vs the legacy artifact (cluster SE 0.0026, t-bound −0.0095), **−0.0130** vs a recency-matched per-league constant; frozen single fit −0.0138; every HT market and ht_ft (−0.0137) improve. The legacy pinned config DIVERGES on the full frame (13/13 folds, non-finite probabilities); the old trainer (oldest 80% only) was worse than served on the 2026 ESPN rows. ESPN era alone (n=2,702, 5 folds) −0.0089, 4/5 folds negative, not clear of noise on its own | Refit monthly if the frozen fit's lead decays — the harness measures it (DAG `retrain_halftime_dc`, 05:30 on the 1st). The second-half and NHL Dixon-Coles artifacts were gated the same day: both DO-NOT-SHIP (rows below) |
 | Soccer second-half Dixon-Coles refit (`dixon_coles_h2_soccer`, feeds ht_ft only) | **MEASURED — NOT SHIPPED** (2026-10-31) | `scripts/ab_second_half_dixon_coles.py`, 15 monthly folds 2025-08..2026-10, n=8,144, HT side = walk-forward refit of the gated HT config (not the prod HT file), pre-registered rule: refit AND refit_frozen must pass ship_strict on ht_ft. refit −0.0057 (cluster SE 0.0009, t-bound −0.0035) passes; refit_frozen −0.0046 fails the −0.005 gate → DO-NOT-SHIP. The pinned trainer config never converges (disqualified every fold). The served artifact ≈ an HT-state-conditional constant (+0.0003). ESPN era alone −0.0024 (noise) | Re-gate when H2 joins a monthly refit DAG (then `refit` is the deployable object) on a FRESH window — not by re-reading this one |
+| NHL Dixon-Coles refit (`dixon_coles_nhl`: pinned / DIXON_COLES_CONFIG refit / one frozen fit, vs the served 2026-06 file) | **MEASURED — NOT SHIPPED** (2026-10-31) | `scripts/ab_nhl_dixon_coles.py`, rule amended after a 3-fold smoke and BEFORE the full run (A1: correct score scored as a proper 121-cell grid Brier; A2: a blocking unit regresses only when its 95% lower bound is > 0; A3: decide on folds out of sample for served only — served's fit ends 2025-04-04). Full run on prod: 15 folds 2024-10..2026-10, n=3,001; decision window 8 folds 2025-10..2026-10, **n=1,603**. refit_frozen over 5.5 **−0.0017** vs served (cluster SE 0.0007, t-bound +0.00004) fails the −0.005 gate, and over 4.5 is significantly WORSE (+0.0026, lower bound +0.0016) → DO-NOT-SHIP; refit −0.0019, pinned −0.0017 fail too. The smoke's 665 rows are 41% of the decision window; on the 5 folds it never saw (2025-10..2026-02, n=938) refit_frozen reads −0.0022 (fold SE 0.0010) — same verdict. Served is level-inflated (P(over 5.5) 0.611 vs 0.574 realised; every refit fixes the level, 0.580) but the gain is small. **Finding:** every Dixon-Coles arm (rho forced to 0) under-predicts REGULATION TIES — served 15.4% vs 24.6% realised — so a per-season constant beats served on regulation 1x2 by −0.023, double chance −0.007..−0.008, total goals −0.020, correct-score grid −0.009. Those DC markets are display-only (NHL recs use the ensemble's moneyline / puck line / total) | Not by re-reading this window. Next NHL DC lever is the regulation-tie mass (a draw-inflated or overtime-aware scoreline model), measured on a fresh window; until then consider serving the constant, or hiding, the DC regulation 1x2 / double chance |
 
 ### 4.3 Validation methodology (house rules)
 
@@ -1541,6 +1542,63 @@ with the growth-rate driver (WAL) eliminated.
 > full-time Dixon-Coles/Poisson ensemble members were fitted only on data to
 > ~2021-10 (team coverage; a model change — gate it). Round 3 (code for all of
 > these + operator tools) is in progress.
+
+> **Update (2026-10-31, 06:30–15:30Z) — rounds 3–6 of the fix pass: the soccer
+> repair is code-complete and rehearsed; the NHL gate says DO-NOT-SHIP.** The
+> operator ran the round-2 tools at 06:17Z (22 post-kickoff recs relabelled,
+> book net +237.05; 4 unplayed rows cancelled) and unpaused
+> `retrain_halftime_dc`. Rounds 3–6 ran as fixers on one integrated branch, each
+> round independently and adversarially reviewed (with mutants, real-process
+> tests and read-only prod probes) until no blocker or major finding remained.
+> **Shipped in code with this deploy:** (1) migration 027: the outcome trigger
+> never settles a rec written after kickoff; accuracy excludes the
+> 'void: written after kickoff' label; a grader canary for stuck post-kickoff
+> pending recs. (2) The second-half and NHL Dixon-Coles trainers fit every row,
+> refuse unsound fits and write only to `staging-h2` / `staging-nhl`; the
+> promoter's REGISTRY is `{"ht"}`. (3) Team identity (`scripts/team_identity.py`,
+> `fetch_upcoming`): ESPN team id → seed CSV → exact / alias / accent fold →
+> club name within a country → the old in-league ratio as the LAST tier. A
+> namesake with a different ESPN id gets its own row, and every identity counter
+> fails the run. A comparison over 612 teams: 0 regressions, 4 corrections
+> (Santos → Santos Laguna, Guadalajara → Chivas, new rows for Liverpool and
+> Nacional of Montevideo). `fetch_live_odds` resolves aliases. (4) Results path:
+> a header score that its own scoring plays contradict is refused; AET/PENS
+> ties are graded on 90-minute scores; postponed/cancelled fixtures void their
+> recs after 72h; one soccer season scheme (`scripts/soccer_seasons.py`);
+> `regrade_predictions.py --match-id(s)`; the fixtures upsert keeps a deliberate
+> cancel. Toluca v San Luis 1-1 is correct (football-data agrees; ESPN's extra
+> plays are duplicates). (5) Data tools, each dry-run by default with an audit
+> CSV and guarded writes, and each behind a wrapper (verified B2 backup, a dry
+> run pinned to rehearsed ceilings, the apply pinned to the dry run's exact
+> counts, an exact after-state, and a read-only ALREADY DONE re-run):
+> `repoint_team_matches` (two passes), `merge_soccer_teams` (171 pairs),
+> `repair_football_data_kickoffs`, `repair_stranded_recs` (soccer),
+> `cleanup_soccer_orphans`, `backfill_soccer_regulation_scores` + re-grade, and
+> `backfill_season_labels`. (6) `scripts/ops/soccer_repair_runbook.sh` runs the
+> 11 steps in order, stops at the first failure (`--from N` / `--only N`), drains
+> and pauses `retrain_models` and `retrain_halftime_dc` and restores them only
+> once step 10 has rebuilt features after the last corpus change, and keeps a
+> pause ledger in `~/.auspex_ops` that the next run picks up. Rehearsed twice end
+> to end on read-only prod exports (11:08Z, 13:02Z), including a backup that
+> never lands, a merge whose grading fails, and a full re-run that only reads.
+> Rehearsed counts: repoint pass 1 33 / 0 / 6; merge 2,469 sides re-pointed,
+> 308 twin fixtures folded, 171 team rows deleted, 47 odds spellings kept;
+> football-data repair 68 dedupe merges + 4 alias merges + 26 folds, 63,532
+> kickoffs shifted by 1h; repoint pass 2 6 / 32 / 1; stranded recs 7 voided,
+> 5 with no twin; orphan cleanup 94 / 19 / 65 / 6 (stale `scheduled` rows
+> 288 → 104); 15 AET/PENS rows stamped and 138 predictions re-graded; season
+> labels 62,156 + 1,603; features rebuilt; the odds check stops 0 fixtures.
+> **Operator (NOT YET APPROVED):** in tmux, right after the deploy:
+> `bash /opt/auspex/scripts/ops/soccer_repair_runbook.sh 2>&1 | tee -a ~/soccer_repair_runbook.log`.
+> Start promptly: two Liga MX fixtures on 2026-11-01 (01:07Z, 23:00Z) are refused
+> until step 1 runs. **NHL Dixon-Coles gate:** DO-NOT-SHIP (§4 row); its
+> display-only regulation 1x2 / double chance lose to a constant because every
+> DC arm under-predicts regulation ties (15.4% vs 24.6%). **Open after the
+> runbook:** a gated A/B for the stale full-time Dixon-Coles/Poisson ensemble
+> members (fitted to ~2021-10), now that identities and kickoffs are repaired;
+> a `promote_raw` run after repoint pass 2, to rewrite 4 archived match_stats; MMA
+> orphan cleanup (21 pending recs on stale fights); mojibake team names; Scottish
+> teams mapped under La Liga.
 
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
