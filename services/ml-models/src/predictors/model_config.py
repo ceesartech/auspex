@@ -221,9 +221,10 @@ POISSON_CONFIG = ModelConfig(
 # NOTE: there is deliberately no "home_advantage" key here, so
 # PoissonMatchPredictor.__init__ falls back to its hard-coded 0.25. With
 # per_league_baselines on, the fitted home/away baselines make that a
-# fallback-only value for soccer. It stays LIVE in the pinned copy — which is
-# how a SOCCER constant still reaches the NHL Dixon-Coles against
-# league_avg_goals ~3.10. That is the deferred NHL defect, tracked separately.
+# fallback-only value for soccer. It stays LIVE in the pinned copy, so the NHL
+# Dixon-Coles fits home = league_avg_goals (~3.10) + 0.25 goals, away = ~3.10.
+# That happens to roughly match NHL's observed home edge, so it is NOT the NHL
+# defect; the defects that do reach served NHL markets are listed further down.
 DIXON_COLES_CONFIG = ModelConfig(
     name="dixon_coles",
     model_type=ModelType.DIXON_COLES,
@@ -284,11 +285,23 @@ DIXON_COLES_CONFIG = ModelConfig(
 # trainers are pinned back to the pre-refit values until each is separately
 # measured and gated (the half-time one was, above).
 #
-# What this deliberately does NOT do: fix the deferred NHL defect. That artifact
-# carries max_goals=6 and home_advantage=0.25 against league_avg_goals ~3.10,
-# truncating ~3.4% of per-side mass and feeding 8 live NHL markets. It is real,
-# it is tracked separately, and raising max_goals here would ship an unmeasured
-# NHL refit under cover of a soccer change.
+# What this deliberately does NOT do: refit the NHL artifact. Its max_goals=6
+# never reaches a served market (precompute_predictions_nhl builds every NHL
+# matrix at market_derivation.MAX_GOALS_DERIVE=10 from lambdas_for_match), and
+# its home_advantage=0.25 roughly matches NHL's observed home edge (+0.10 to
+# +0.33 goals/game by season, 2020-26). The defects that DO reach its 8 served
+# markets (as corrected 2026-10-31):
+#   * level inflation: it was fitted before the scale-gauge correction below,
+#     so its lambdas carry that positive level bias until it is retrained;
+#   * a stale fit: no 2025-26 data, so 'Utah Mammoth' is an unknown team and
+#     serves attack = defense = 1.0;
+#   * rho forced to 0 by train_hockey_dixon_coles.py: final scores are never
+#     0-0 or 1-1, so the rho NLL runs away (~1e27 observed) instead of fitting;
+#   * a regulation-tie deficit: fitted on FINAL scores (OT/SO included), its
+#     draw cells — what regulation_1x2 and double_chance price — held 15.5% on
+#     average vs a 23.4% observed regulation-tie rate over the 286 graded
+#     matches to 2026-10-31.
+# Each needs its own NHL measurement; none ships under cover of a soccer change.
 #
 # What it CANNOT pin: the scale-gauge correction in PoissonMatchPredictor.train
 # (normalise attack only). That is a correctness fix to a shared fitting routine,

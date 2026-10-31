@@ -17,8 +17,9 @@ Dispatch table — what each prediction_type means and how it grades:
   btts              ensemble (soccer)              both scores > 0
   over_under        ensemble (soccer derived)      home_score + away_score vs <line>
   double_chance     ensemble (soccer derived)      1X / 12 / X2 from match result
+  double_chance     dixon_coles_nhl                1X / 12 / X2 from metadata.regulation_winner
   draw_no_bet       ensemble (soccer derived)      home/away (push on draw)
-  correct_score     ensemble (soccer derived)      exact <h>-<a> string match
+  correct_score     soccer / NHL derived           exact <h>-<a>; 'other' = none of the pick's keys
   asian_handicap    ensemble (soccer derived)      '{home_line}_{side}' vs margin
   puck_line         dixon_coles_nhl                same keys + math as asian_handicap
   regulation_1x2    dixon_coles_nhl                metadata.regulation_winner (tie→draw)
@@ -42,11 +43,20 @@ Markets not in the dispatch table (player_prop, lottery) are NOT
 graded — they pass through with actual_outcome=None. The derived
 markets were added 2026-10-30: until then ~92k soccer + 1.4k NHL
 derived predictions sat is_correct NULL on every grading run.
+
+NHL Dixon-Coles markets are graded on the FINAL score (incl. OT/SO),
+which is what the model is fitted on — except the two that price the
+REGULATION 3-way (regulation_1x2, double_chance), graded from
+metadata.regulation_winner. Grading double_chance on the final score
+(never a draw in the NHL) credited every '12' pick: 286/286 to
+2026-10-31. correct_score stays on the final score, so its tie keys
+('2-2', '3-3', ...) can never win — 3 of 382 picks to date were '2-2'.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -76,6 +86,12 @@ NFL_TOTAL_MODEL_NAME = "ensemble_nfl_tot"
 
 def is_nhl_regulation(model_name: str) -> bool:
     return model_name == NHL_REGULATION_MODEL_NAME
+
+
+def is_nhl_model(model_name: Optional[str]) -> bool:
+    """Any NHL registry name (ensemble_nhl_*, dixon_coles_nhl). Only
+    dixon_coles_nhl writes the derived markets this disambiguates."""
+    return "nhl" in (model_name or "")
 
 
 def is_nba_spread(model_name: str) -> bool:
@@ -151,6 +167,20 @@ def nhl_regulation_outcome(metadata: dict) -> Optional[str]:
     return "tie" if winner == "draw" else winner
 
 
+def nhl_regulation_3way(metadata: dict) -> Optional[str]:
+    """The regulation result in dixon_coles_nhl's home/DRAW/away labels
+    (ensemble_nhl_reg says 'tie'). None when regulation_winner is absent
+    or not a known label — the row stays ungraded rather than guessed."""
+    winner = nhl_regulation_outcome(metadata or {})
+    if winner is None:
+        return None
+    label = "draw" if winner == "tie" else winner
+    if label not in ("home", "draw", "away"):
+        logger.warning("unknown regulation_winner %r; regulation market left ungraded", winner)
+        return None
+    return label
+
+
 def nhl_moneyline_outcome(home_score: int, away_score: int) -> Optional[str]:
     """NHL moneyline — final score (incl. OT/SO). Returns None if the
     scores tied (shouldn't happen in NHL after OT/SO regular season
@@ -212,6 +242,10 @@ def btts_outcome(home_score: int, away_score: int) -> str:
 # The old single-label convention ('1X' for home-or-draw, 'X2' for away)
 # mis-graded every '12' pick and every 'X2'-pick-on-a-draw, deflating
 # accuracy to 48% and firing a false ECE-0.28 monitor alarm.
+#
+# dixon_coles_nhl prices double_chance over the REGULATION 3-way (its X
+# is "tied after regulation"), so its base result comes from
+# metadata.regulation_winner, not the final score — see actual_outcome.
 DOUBLE_CHANCE_COVERS = {
     "1X": {"home", "draw"},
     "12": {"home", "away"},
@@ -239,8 +273,40 @@ def draw_no_bet_outcome(home_score: int, away_score: int) -> str:
 def correct_score_outcome(home_score: int, away_score: int) -> str:
     """Exact-score: '<home>-<away>' string (no zero-padding). The
     correct_score market in the derivation engine emits keys like
-    '2-1' so the equality test is straightforward."""
+    '2-1' so the equality test is straightforward — for a scoreline
+    pick. An 'other' pick is graded in grade_prediction() against the
+    prediction's own key set."""
     return f"{home_score}-{away_score}"
+
+
+# The derivation's correct_score is the top-12 scorelines of THAT
+# match's matrix plus an 'other' bucket for everything else, so what
+# 'other' covers differs per prediction. Graded by string equality, an
+# 'other' pick could never win: dixon_coles_nhl picks 'other' on 376 of
+# 382 matches and 146 of 281 graded such rows should have been credited.
+CORRECT_SCORE_OTHER = "other"
+_SCORELINE_KEY = re.compile(r"^\d+-\d+$")
+
+
+def correct_score_listed_keys(probabilities: Optional[dict]) -> frozenset:
+    """The scorelines a correct_score prediction priced individually —
+    its probabilities keys shaped '<h>-<a>' (so never 'other')."""
+    if not isinstance(probabilities, dict):
+        return frozenset()
+    return frozenset(k for k in probabilities if isinstance(k, str) and _SCORELINE_KEY.match(k))
+
+
+def grade_correct_score_other(actual: str, probabilities: Optional[dict]) -> Optional[bool]:
+    """An 'other' pick wins iff the final scoreline is NOT one the same
+    prediction listed. NULL without that key set: what 'other' excluded
+    is unknown, and guessing is how the 0/281 got written."""
+    listed = correct_score_listed_keys(probabilities)
+    if not listed:
+        logger.warning("correct_score 'other' pick without its scoreline keys; left ungraded")
+        return None
+    if not _SCORELINE_KEY.match(actual or ""):
+        return None
+    return actual not in listed
 
 
 # ── Derived markets (market_derivation.py, soccer + NHL) ────────────
@@ -313,7 +379,7 @@ def odd_even_outcome(home_score: int, away_score: int) -> str:
 def total_goals_outcome(model_name: str, home_score: int, away_score: int) -> str:
     """Exact total as the derivation keys it: '0'..'5' then '6+' for
     soccer, '0'..'7' then '8+' for the NHL Dixon-Coles markets."""
-    cap = TOTAL_GOALS_CAP_NHL if "nhl" in (model_name or "") else TOTAL_GOALS_CAP_SOCCER
+    cap = TOTAL_GOALS_CAP_NHL if is_nhl_model(model_name) else TOTAL_GOALS_CAP_SOCCER
     total = home_score + away_score
     return f"{cap}+" if total >= cap else str(total)
 
@@ -416,8 +482,11 @@ def actual_outcome(
     if prediction_type == "regulation_1x2":
         # dixon_coles_nhl labels the regulation 3-way home/DRAW/away,
         # unlike ensemble_nhl_reg's home/tie/away.
-        winner = nhl_regulation_outcome(metadata or {})
-        return "draw" if winner == "tie" else winner
+        return nhl_regulation_3way(metadata or {})
+    if prediction_type == "double_chance" and is_nhl_model(model_name):
+        # Priced over the same regulation 3-way; the final score is never
+        # a draw in the NHL, which made every '12' pick a winner.
+        return nhl_regulation_3way(metadata or {})
 
     # The remaining markets all need both score columns populated.
     if home_score is None or away_score is None:
@@ -512,6 +581,7 @@ def grade_prediction(
     predicted: Optional[str],
     actual: Optional[str],
     prediction_type: Optional[str] = None,
+    probabilities: Optional[dict] = None,
 ) -> Optional[bool]:
     """Final correctness verdict. NULL on ungradable outcomes (pushes
     or actual=None) so the predictions.is_correct column distinguishes
@@ -520,7 +590,11 @@ def grade_prediction(
     double_chance grades by coverage-set membership (a '12' pick wins on
     a home OR away result); everything else is label equality. An
     unknown double_chance selection grades NULL, not False — it means
-    the stored pick is malformed, which is 'we don't know'."""
+    the stored pick is malformed, which is 'we don't know'.
+
+    `probabilities` (the prediction's own JSON) is read only for a
+    correct_score 'other' pick, which wins iff the actual scoreline is
+    not one of its listed keys (grade_correct_score_other)."""
     if actual is None or is_push(actual):
         return None
     if predicted is None:
@@ -538,6 +612,8 @@ def grade_prediction(
         if covers is None:
             return None
         return actual in covers
+    if prediction_type == "correct_score" and predicted == CORRECT_SCORE_OTHER:
+        return grade_correct_score_other(actual, probabilities)
     return predicted == actual
 
 

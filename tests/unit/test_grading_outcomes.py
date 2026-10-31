@@ -958,3 +958,101 @@ class TestHalftimeMarketGrading:
         # the retired metadata keys are not a source any more
         assert go.halftime_scores({"metadata": {"halftime_home_score": 1, "halftime_away_score": 0}}) is None
         assert go.halftime_scores(None) is None
+
+
+class TestNhlDoubleChanceGradesOnRegulation:
+    """dixon_coles_nhl prices double_chance over the REGULATION 3-way (its X
+    is 'tied after regulation'). Graded on the final score, which is never a
+    draw in the NHL, every '12' pick won: 286/286 to 2026-10-31."""
+
+    NHL = "dixon_coles_nhl"
+
+    def _dc(self, pick, h, a, regulation_winner):
+        md = {} if regulation_winner is None else {"regulation_winner": regulation_winner}
+        actual = _actual("double_chance", pick, h, a, model_name=self.NHL, metadata=md)
+        return actual, go.grade_prediction(pick, actual, prediction_type="double_chance")
+
+    def test_regulation_tie_is_a_draw_even_when_ot_decided_it(self):
+        # 4-3 final after OT: the final score says 'home', regulation says draw.
+        assert self._dc("12", 4, 3, "tie") == ("draw", False)
+        assert self._dc("1X", 4, 3, "tie") == ("draw", True)
+        assert self._dc("X2", 4, 3, "tie") == ("draw", True)
+
+    def test_legacy_draw_label_reads_the_same(self):
+        assert self._dc("12", 2, 3, "draw") == ("draw", False)
+
+    def test_regulation_winner_decides(self):
+        assert self._dc("12", 4, 2, "home") == ("home", True)
+        assert self._dc("1X", 4, 2, "home") == ("home", True)
+        assert self._dc("X2", 4, 2, "home") == ("home", False)
+        assert self._dc("X2", 1, 3, "away") == ("away", True)
+
+    def test_missing_or_unknown_regulation_winner_is_ungraded(self):
+        assert self._dc("12", 4, 3, None) == (None, None)
+        assert self._dc("12", 4, 3, "overtime") == (None, None)
+
+    def test_soccer_double_chance_is_unchanged(self):
+        # Soccer grades the final score; a stray regulation_winner is ignored.
+        md = {"regulation_winner": "home"}
+        for (h, a), base in {(1, 1): "draw", (2, 0): "home", (0, 1): "away"}.items():
+            assert _actual("double_chance", "12", h, a, metadata=md) == base
+        assert go.grade_prediction("12", "draw", prediction_type="double_chance") is False
+        assert go.grade_prediction("1X", "draw", prediction_type="double_chance") is True
+
+    def test_is_nhl_model(self):
+        assert go.is_nhl_model("dixon_coles_nhl") and go.is_nhl_model("ensemble_nhl_ml")
+        assert not go.is_nhl_model("ensemble") and not go.is_nhl_model(None)
+
+
+class TestCorrectScoreOther:
+    """'other' covers every scoreline the SAME prediction did not list, so
+    it is graded against that prediction's own keys — string equality never
+    credited it (0/281 dixon_coles_nhl rows, 146 of them winners)."""
+
+    NHL_KEYS = {
+        "2-2": 0.052,
+        "3-2": 0.055,
+        "2-3": 0.047,
+        "3-3": 0.049,
+        "2-1": 0.039,
+        "3-1": 0.041,
+        "4-2": 0.043,
+        "1-2": 0.033,
+        "2-4": 0.032,
+        "3-4": 0.033,
+        "4-1": 0.032,
+        "4-3": 0.039,
+        "other": 0.505,
+    }
+
+    def _grade(self, pick, h, a, probs, model_name="dixon_coles_nhl"):
+        actual = _actual("correct_score", pick, h, a, model_name=model_name)
+        return actual, go.grade_prediction(pick, actual, prediction_type="correct_score", probabilities=probs)
+
+    def test_other_credited_when_the_score_was_not_listed(self):
+        assert self._grade("other", 5, 2, self.NHL_KEYS) == ("5-2", True)
+        assert self._grade("other", 0, 1, self.NHL_KEYS) == ("0-1", True)
+
+    def test_other_not_credited_when_the_score_was_listed(self):
+        assert self._grade("other", 4, 3, self.NHL_KEYS) == ("4-3", False)
+
+    def test_other_without_its_key_set_is_ungraded(self):
+        assert self._grade("other", 5, 2, None) == ("5-2", None)
+        assert self._grade("other", 5, 2, {"other": 1.0}) == ("5-2", None)
+        assert self._grade("other", 5, 2, "not-a-dict") == ("5-2", None)
+
+    def test_scoreline_picks_still_grade_by_equality(self):
+        assert self._grade("3-2", 3, 2, self.NHL_KEYS) == ("3-2", True)
+        assert self._grade("3-2", 4, 3, self.NHL_KEYS) == ("4-3", False)
+        assert self._grade("3-2", 3, 2, None) == ("3-2", True)
+
+    def test_nhl_tie_keys_can_never_win_on_the_final_score(self):
+        # Graded on the FINAL score (OT/SO included), which is never tied.
+        assert self._grade("2-2", 3, 2, self.NHL_KEYS) == ("3-2", False)
+
+    def test_soccer_is_unchanged_and_other_is_correct_for_it_too(self):
+        keys = {"1-1": 0.12, "1-0": 0.11, "0-0": 0.09, "2-1": 0.08, "other": 0.6}
+        assert self._grade("1-1", 1, 1, keys, model_name="ensemble") == ("1-1", True)
+        assert self._grade("1-0", 2, 2, keys, model_name="ensemble") == ("2-2", False)
+        assert self._grade("other", 2, 2, keys, model_name="ensemble") == ("2-2", True)
+        assert self._grade("other", 0, 0, keys, model_name="ensemble") == ("0-0", False)

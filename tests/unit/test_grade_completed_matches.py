@@ -55,15 +55,18 @@ class FakeCursor:
             for p in self.predictions.values():
                 if p["match_id"] != match_id or p.get("is_correct") is not None:
                     continue
-                rows.append(
-                    {
-                        "prediction_id": p["id"],
-                        "prediction_type": p["prediction_type"],
-                        "model_name": p["model_name"],
-                        "predicted_outcome": p["predicted_outcome"],
-                        "after_kickoff": p.get("after_kickoff", False),
-                    }
-                )
+                row = {
+                    "prediction_id": p["id"],
+                    "prediction_type": p["prediction_type"],
+                    "model_name": p["model_name"],
+                    "predicted_outcome": p["predicted_outcome"],
+                    "after_kickoff": p.get("after_kickoff", False),
+                }
+                # Only when the query selects it, so dropping the column
+                # from list_ungraded_predictions fails the 'other' tests.
+                if "p.probabilities" in sql_norm:
+                    row["probabilities"] = p.get("probabilities")
+                rows.append(row)
             self._last = ("preds", rows)
             return
         if sql_norm.startswith("UPDATE predictions"):
@@ -118,7 +121,9 @@ class FakeCursor:
         return None
 
 
-def _pred(pid, match_id, ptype, model_name, predicted_outcome, is_correct=None, actual_outcome=None):
+def _pred(
+    pid, match_id, ptype, model_name, predicted_outcome, is_correct=None, actual_outcome=None, probabilities=None
+):
     return {
         "id": pid,
         "match_id": match_id,
@@ -127,6 +132,7 @@ def _pred(pid, match_id, ptype, model_name, predicted_outcome, is_correct=None, 
         "predicted_outcome": predicted_outcome,
         "is_correct": is_correct,
         "actual_outcome": actual_outcome,
+        "probabilities": probabilities,
     }
 
 
@@ -272,6 +278,61 @@ class TestGradeMatchNhl:
         gcm.grade_match(cur, match)
         assert cur.predictions["p1"]["actual_outcome"] == "no_cover"
         assert cur.predictions["p1"]["is_correct"] is False
+
+    def test_dixon_coles_double_chance_grades_on_regulation(self):
+        # 4-3 in OT: the final score has a winner, regulation was tied —
+        # the '12' pick (regulation 3-way) lost.
+        match = {"match_id": "m1", "home_score": 4, "away_score": 3, "metadata": {"regulation_winner": "tie"}}
+        cur = FakeCursor([_pred("p1", "m1", "double_chance", "dixon_coles_nhl", "12")], [])
+
+        gcm.grade_match(cur, match)
+
+        assert cur.predictions["p1"]["actual_outcome"] == "draw"
+        assert cur.predictions["p1"]["is_correct"] is False
+
+    def test_dixon_coles_correct_score_other_reads_the_prediction_keys(self):
+        match = {"match_id": "m1", "home_score": 5, "away_score": 2, "metadata": {}}
+        probs = {"3-2": 0.055, "2-2": 0.052, "4-3": 0.039, "other": 0.854}
+        preds = [
+            _pred("p1", "m1", "correct_score", "dixon_coles_nhl", "other", probabilities=probs),
+            _pred("p2", "m1", "correct_score", "dixon_coles_nhl", "3-2", probabilities=probs),
+        ]
+        cur = FakeCursor(preds, [])
+
+        gcm.grade_match(cur, match)
+
+        assert cur.predictions["p1"]["actual_outcome"] == "5-2"
+        assert cur.predictions["p1"]["is_correct"] is True
+        assert cur.predictions["p2"]["is_correct"] is False
+
+
+class TestComputePredictionGrade:
+    """The one verdict path shared by grade_match and regrade_predictions."""
+
+    MATCH = {"match_id": "m1", "home_score": 2, "away_score": 1, "metadata": {}}
+
+    def _pred(self, ptype, model_name, pick, **extra):
+        return {"prediction_type": ptype, "model_name": model_name, "predicted_outcome": pick, **extra}
+
+    def test_graded_row(self):
+        assert gcm.compute_prediction_grade(self._pred("btts", "ensemble", "yes"), self.MATCH, {}) == (
+            None,
+            "yes",
+            True,
+        )
+
+    def test_push_grades_with_a_null_verdict(self):
+        got = gcm.compute_prediction_grade(self._pred("over_under", "ensemble", "over_3"), self.MATCH, {})
+        assert got == (None, "push_3", None)
+
+    def test_skip_reasons(self):
+        late = self._pred("btts", "ensemble", "yes", after_kickoff=True)
+        assert gcm.compute_prediction_grade(late, self.MATCH, {})[0] == gcm.SKIP_AFTER_KICKOFF
+        phantom = self._pred("total", "ensemble_nfl_tot", "over")
+        ctx = {"features": {"closing_total_line": 45.0}, "has_total_odds": False}
+        assert gcm.compute_prediction_grade(phantom, self.MATCH, ctx)[0] == gcm.SKIP_PHANTOM_LINE
+        unknown = self._pred("player_prop", "ensemble", "over_0.5")
+        assert gcm.compute_prediction_grade(unknown, self.MATCH, {}) == (gcm.SKIP_UNGRADABLE, None, None)
 
 
 # ── Edge cases ───────────────────────────────────────────────────────

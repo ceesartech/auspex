@@ -23,7 +23,9 @@ the match has at least one non-live odds row in that market.
 Idempotent: rows already graded (is_correct IS NOT NULL) are left
 alone, so re-running on the same window is a cheap no-op except for
 matches that were freshly graded or whose predictions/recs landed
-after the previous run.
+after the previous run. That also means a grading FIX never reaches a
+row graded under the old code: scripts/regrade_predictions.py re-runs
+compute_prediction_grade over already-graded rows for that.
 
 The existing DB trigger calculate_match_outcome (migration 003)
 covers soccer match_result / over_under / btts at the moment
@@ -130,11 +132,15 @@ def list_ungraded_predictions(cur, match_id: str) -> list[dict]:
     `after_kickoff` flags rows written after the match started: hindsight,
     not a prediction. 467 such rows (written 2026-06-02/03 for 2023-25 NFL,
     NBA and tennis matches) sat ungraded only because they were older than
-    the --days window; a wide run would have folded them into accuracy."""
+    the --days window; a wide run would have folded them into accuracy.
+
+    `probabilities` is needed to grade a correct_score 'other' pick, which
+    covers whatever that prediction did not list."""
     cur.execute(
         """
         SELECT p.id::text AS prediction_id,
                p.prediction_type, p.model_name, p.predicted_outcome,
+               p.probabilities,
                (p.created_at > m.match_date) AS after_kickoff
         FROM predictions p
         JOIN matches m ON m.id = p.match_id
@@ -348,6 +354,63 @@ def profit_loss_for(
 
 # ── Orchestration ─────────────────────────────────────────────────────
 
+# compute_prediction_grade's skip reasons. The first two are also the
+# `stats` keys grade_match accumulates ('<reason>_skips').
+SKIP_AFTER_KICKOFF = "after_kickoff"
+SKIP_PHANTOM_LINE = "phantom_line"
+SKIP_UNGRADABLE = "ungradable"
+
+
+def compute_prediction_grade(pred: dict, match: dict, ctx: dict) -> tuple[Optional[str], Optional[str], Optional[bool]]:
+    """(skip_reason, actual_outcome, is_correct) for one prediction under
+    the CURRENT grading code. skip_reason is None when the row grades
+    (is_correct may still be None — a push); otherwise one of the SKIP_*
+    reasons and the row must be left as it is.
+
+    `pred` carries prediction_type, model_name, predicted_outcome and,
+    when available, probabilities + after_kickoff. `match` is a matches
+    row (scores, metadata, half_time_*). `ctx` is
+    fetch_match_grading_context's dict. Shared by grade_match (ungraded
+    rows) and scripts/regrade_predictions.py (already-graded rows), so the
+    two can never disagree about a verdict."""
+    # Written after kickoff: never graded (see list_ungraded_predictions).
+    if pred.get("after_kickoff"):
+        return SKIP_AFTER_KICKOFF, None, None
+
+    # PHANTOM-LINE GUARD. A line-dependent prediction is only
+    # gradable if a real book priced that market: otherwise the
+    # closing_spread_home / closing_total_line sitting in
+    # features_cache is a NEUTRAL_DEFAULT the feature builder
+    # invented, and grading against it manufactures a verdict out
+    # of nothing. Leave is_correct NULL — neither correct nor
+    # incorrect — and move on. (A None probe means the cursor
+    # didn't return the column at all; fetch_match_grading_context
+    # has already warned about that, and we grade as before.)
+    if is_line_dependent(pred["prediction_type"], pred["model_name"]):
+        market_has_odds = {"spread": ctx.get("has_spread_odds"), "total": ctx.get("has_total_odds")}
+        if market_has_odds.get(pred["prediction_type"]) is False:
+            return SKIP_PHANTOM_LINE, None, None
+
+    actual = actual_outcome(
+        prediction_type=pred["prediction_type"],
+        model_name=pred["model_name"],
+        predicted_outcome=pred["predicted_outcome"],
+        home_score=match["home_score"],
+        away_score=match["away_score"],
+        metadata=match["metadata"],
+        features=ctx.get("features"),
+        halftime=halftime_scores(match),
+    )
+    if actual is None:
+        return SKIP_UNGRADABLE, None, None
+    correct = grade_prediction(
+        pred["predicted_outcome"],
+        actual,
+        prediction_type=pred["prediction_type"],
+        probabilities=pred.get("probabilities"),
+    )
+    return None, actual, correct
+
 
 def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
     """Grade every ungraded prediction + settle every open
@@ -364,50 +427,14 @@ def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
     # and the odds probes say whether that line was ever real. Fetched
     # once per match instead of per-prediction.
     ctx = fetch_match_grading_context(cur, match["match_id"])
-    features = ctx["features"]
-    market_has_odds = {
-        "spread": ctx["has_spread_odds"],
-        "total": ctx["has_total_odds"],
-    }
 
     for pred in list_ungraded_predictions(cur, match["match_id"]):
-        # Written after kickoff: never graded (see list_ungraded_predictions).
-        if pred.get("after_kickoff"):
+        skip, actual, correct = compute_prediction_grade(pred, match, ctx)
+        if skip is not None:
             counts["predictions_skipped"] += 1
-            if stats is not None:
-                stats["after_kickoff_skips"] = stats.get("after_kickoff_skips", 0) + 1
+            if stats is not None and skip in (SKIP_AFTER_KICKOFF, SKIP_PHANTOM_LINE):
+                stats[f"{skip}_skips"] = stats.get(f"{skip}_skips", 0) + 1
             continue
-
-        # PHANTOM-LINE GUARD. A line-dependent prediction is only
-        # gradable if a real book priced that market: otherwise the
-        # closing_spread_home / closing_total_line sitting in
-        # features_cache is a NEUTRAL_DEFAULT the feature builder
-        # invented, and grading against it manufactures a verdict out
-        # of nothing. Leave is_correct NULL — neither correct nor
-        # incorrect — and move on. (A None probe means the cursor
-        # didn't return the column at all; fetch_match_grading_context
-        # has already warned about that, and we grade as before.)
-        if is_line_dependent(pred["prediction_type"], pred["model_name"]):
-            if market_has_odds.get(pred["prediction_type"]) is False:
-                counts["predictions_skipped"] += 1
-                if stats is not None:
-                    stats["phantom_line_skips"] = stats.get("phantom_line_skips", 0) + 1
-                continue
-
-        actual = actual_outcome(
-            prediction_type=pred["prediction_type"],
-            model_name=pred["model_name"],
-            predicted_outcome=pred["predicted_outcome"],
-            home_score=match["home_score"],
-            away_score=match["away_score"],
-            metadata=match["metadata"],
-            features=features,
-            halftime=halftime_scores(match),
-        )
-        if actual is None:
-            counts["predictions_skipped"] += 1
-            continue
-        correct = grade_prediction(pred["predicted_outcome"], actual, prediction_type=pred["prediction_type"])
         update_prediction(cur, pred["prediction_id"], actual, correct)
         counts["predictions_graded"] += 1
 
