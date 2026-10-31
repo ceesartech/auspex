@@ -13,14 +13,22 @@ team_id, and where both sources wrote the same summer games the corpus holds
 the same match twice (prod 2026-10-31, read only: 1,953 matches on the 171
 twin teams). Investigation: audit §7, 2026-10-31 "team identity".
 
-RUN ORDER (2026-10-31; scripts/ops/merge_soccer_teams.sh runs this step):
-  1. deploy the team-identity code (ESPN team ids, aliases, seed);
-  2. scripts/ops/repoint_team_matches.sh (moves Santos Laguna's and Chivas'
-     Liga MX rows off the wrong rows and stamps the seeded ids);
-  3. THIS (scripts/ops/merge_soccer_teams.sh);
-  4. scripts/ops/repair_football_data_kickoffs.sh (promote_raw stays blocked
-     until it has run);
-  5. scripts/ops/cleanup_soccer_orphans.sh.
+RUN ORDER (2026-10-31; deploy the team-identity code first, then
+scripts/ops/soccer_repair_runbook.sh runs each step through its own wrapper;
+this tool is step 3, through scripts/ops/merge_soccer_teams.sh, and step 11):
+  1. scripts/ops/repoint_team_matches.sh --pass 1
+  2. scripts/ops/migrate_027_outcome_trigger.sh
+  3. scripts/ops/merge_soccer_teams.sh
+  4. scripts/ops/repair_football_data_kickoffs.sh
+  5. scripts/ops/repoint_team_matches.sh --pass 2
+  6. scripts/ops/repair_stranded_recs_soccer.sh
+  7. scripts/ops/cleanup_soccer_orphans.sh
+  8. scripts/ops/backfill_soccer_regulation_scores.sh (+ the re-grade it prints)
+  9. scripts/ops/backfill_season_labels.sh
+ 10. compute_features.py --backfill-finished soccer
+ 11. merge_soccer_teams.py --check-after <plan> --odds-since <MERGED_AT> --after-later-steps
+Step 1 moves Santos Laguna's and Chivas' Liga MX rows off the wrong rows and
+stamps the seeded ids; promote_raw stays blocked until step 4 has run.
 
 THE MAP
 -------

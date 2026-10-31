@@ -21,7 +21,7 @@
 #      a fixture under its own team rows (keeps the ESPN row, deletes ~171
 #      football-data rows; promote_raw then writes those fixtures onto the
 #      surviving ESPN row, never beside it).
-#   4. this script. --dedupe alias-merges the 4 copies step 1 refused for:
+#   4. THIS script. --dedupe alias-merges the 4 copies step 1 refused for:
 #      each into its ESPN row, still on the wrong club, which the reviewed map
 #      (scripts/data/repoint_team_matches.csv) moves onto the copy's pair.
 #   5. scripts/ops/repoint_team_matches.sh --pass 2 (never a bare --apply):
@@ -39,8 +39,8 @@
 #      (AFTER: the 26 stale rows step 4 folds are finished by then and leave
 #      its set; the 2 stale Liga MX rows sit beside their ESPN rows once step
 #      5 has run); 8. backfill_soccer_regulation_scores.sh (+ re-grade);
-#      9. backfill_season_labels.sh; 10. compute_features --backfill-finished
-#      soccer; 11. the merge's odds check.
+#      9. backfill_season_labels.sh;
+#      10. compute_features --backfill-finished soccer; 11. the merge's odds check.
 # If step 1 moves every side (football-data twins allowed), step 4 plans those
 # 4 copies as ordinary merges (72 merges, 0 alias merges) and step 5 has
 # nothing to do. If the team merge (step 3) has NOT run, its alias pairs are

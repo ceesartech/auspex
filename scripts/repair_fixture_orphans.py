@@ -117,15 +117,27 @@ no longer matches is reported (list_mismatch on the PLAN line): the dry run
 exits 1 and --apply refuses before any write. A listed row already marked
 by an earlier run counts as done.
 
-RUN ORDER (soccer)
+RUN ORDER (soccer; scripts/ops/soccer_repair_runbook.sh runs it, each step
+through its own wrapper)
 ------------------
-1. merge_soccer_teams (team merge): forks under an ESPN-spelling team row
-   become same-id rows, and it folds the twin clusters that creates;
-2. repair_football_data_kickoffs: folds the 1 h-late football-data copies
-   into the stale rows at their corrected kickoff, then shifts the rest;
-3. repair_stranded_recs --sport soccer: settles and re-points the pending
-   recs on orphans that have a twin (--apply here refuses until it has);
-4. this tool (scripts/ops/cleanup_soccer_orphans.sh).
+  1. scripts/ops/repoint_team_matches.sh --pass 1
+  2. scripts/ops/migrate_027_outcome_trigger.sh
+  3. scripts/ops/merge_soccer_teams.sh
+  4. scripts/ops/repair_football_data_kickoffs.sh
+  5. scripts/ops/repoint_team_matches.sh --pass 2
+  6. scripts/ops/repair_stranded_recs_soccer.sh
+  7. scripts/ops/cleanup_soccer_orphans.sh
+  8. scripts/ops/backfill_soccer_regulation_scores.sh (+ the re-grade it prints)
+  9. scripts/ops/backfill_season_labels.sh
+ 10. compute_features.py --backfill-finished soccer
+ 11. merge_soccer_teams.py --check-after <plan> --odds-since <MERGED_AT> --after-later-steps
+Step 3 turns forks under an ESPN-spelling team row into same-id rows and
+folds the twin clusters that creates; step 4 folds the 1 h-late
+football-data copies into the stale rows at their corrected kickoff, then
+shifts the rest; step 5 moves the last Liga MX rows (run after this tool, it
+would find two of them merged away); step 6 settles and re-points the
+pending recs on orphans that have a twin (--apply here refuses until it
+has); step 7 is this tool (scripts/ops/cleanup_soccer_orphans.sh).
 
 PLACEHOLDERS (--delete-placeholders)
 ------------------------------------
