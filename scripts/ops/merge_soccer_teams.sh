@@ -29,18 +29,26 @@
 #      fetch_live_odds run has FINISHED after the merge (the runbook waits for
 #      one; the plan and MERGED_AT are in /app/backups/merge_soccer_teams_last_apply.env)
 #
-#   0/5 already done? A read-only dry run first: when it plans all EXPECTED
-#       pairs as 'done' and --check-after on that plan passes, this exits 0
-#       without a backup, a pause or a write (a re-run after success);
+#   0/5 already done? A read-only dry run first. When it plans all EXPECTED
+#       pairs as 'done', --check-after on that plan passes, --check-after
+#       --after-later-steps on the plan the last apply recorded passes, and
+#       that apply recorded STATUS=done (its grading and after-state passed),
+#       this exits 0 without a backup, a pause or a write (a re-run after
+#       success). When that apply did NOT finish (STATUS=grading or failed: its
+#       4/5 grading or 5/5 after-state failed after the merge committed), it
+#       FINISHES it instead: grades the rows that apply listed (GRADE_IDS),
+#       re-checks, records STATUS=done and exits 0 — or exits 1;
 #   1/5 verified backup (B2) — abort if it does not land;
 #       then DRAIN, then pause auspex_pipeline and fetch_live_odds: wait until
 #       neither has a run queued or running, pause the ones not already paused
-#       (a trap unpauses them on every exit), and re-check 0 runs in flight; a
-#       run that slipped in between makes it unpause and try again (5 attempts,
-#       each waiting up to 20 min). Airflow 3.3 never advances a paused DAG's
-#       runs, so pausing first could leave a run 'running' for good. No
-#       fixture, rec or price then lands on a twin between the dry run and the
-#       apply;
+#       (a trap unpauses them on every exit, Ctrl-C and a dropped SSH session
+#       included: scripts/ops/_airflow_lib.sh; every pause and unpause is also
+#       logged to ~/.auspex_ops/airflow_pauses.log), and re-check 0 runs in
+#       flight; a run that slipped in between makes it unpause and try again
+#       (5 attempts, each waiting up to 20 min). Airflow 3.3 never advances a
+#       paused DAG's runs, so pausing first could leave a run 'running' for
+#       good. No fixture, rec or price then lands on a twin between the dry
+#       run and the apply;
 #   2/5 dry run (write-once CSV + plan file) — abort unless it exits 0 with all
 #       EXPECTED pairs planned as merge or done, none refused, and exactly
 #       EXPECTED_KICKOFFS_ADOPTED kept rows moving their kickoff (0 when this
@@ -49,8 +57,11 @@
 #       written) unless it plans exactly what the dry run showed; one
 #       transaction per pair, the gzip JSONL archive of every row it deletes
 #       or changes lands first (a twin holding a row written after the archive
-#       rolls its pair back); then the two DAGs are unpaused, and the plan file
-#       and MERGED_AT go to /app/backups/merge_soccer_teams_last_apply.env.
+#       rolls its pair back); then the two DAGs are unpaused, and the plan file,
+#       MERGED_AT, the rows to grade and STATUS=grading go to
+#       /app/backups/merge_soccer_teams_last_apply.env (STATUS=done or failed
+#       once 4/5 and 5/5 have run; rows an unfinished earlier apply listed are
+#       graded again with this run's).
 #       The run FAILS (after steps 4-5) when the apply's WRITTEN line reports
 #       odds_spellings_unmatched_before > 0: an odds-feed spelling that did not
 #       find its club's fixture before the merge was not held to anything
@@ -70,8 +81,9 @@
 # quoting before the merge must still be quoted. The runbook's step 11 does
 # exactly that.
 # Re-runnable: a merged pair plans as 'done' and is not written again; all
-# 171 done exits 0 at step 0. A pair that rolled back (its team gained a
-# fixture between plan and write, say) is merged by running this again.
+# 171 done exits 0 at step 0 (after finishing an apply whose grading or
+# after-state failed). A pair that rolled back (its team gained a fixture
+# between plan and write, say) is merged by running this again.
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/merge_soccer_teams.sh 2>&1 | tee -a ~/merge_soccer_teams.log
 # (AUSPEX_DIR and AF_POLL_SECONDS exist for tests and rehearsals.)
@@ -86,7 +98,7 @@ STATE_FILE=/app/backups/merge_soccer_teams_last_apply.env
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
 # shellcheck source=scripts/ops/_airflow_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_airflow_lib.sh" || { log "ABORT: cannot load _airflow_lib.sh — nothing changed"; exit 1; }
-trap af_resume EXIT
+trap af_resume_on_exit EXIT
 trap 'exit 130' INT TERM HUP
 latest_dump() {
   $DC exec -T api python -c "import sys; sys.path.insert(0,'/app/scripts'); import b2_io; s=b2_io.s3_client(); o=max(b2_io._list(s,'postgres/'), key=lambda o:o['LastModified']); print(int(o['LastModified'].timestamp()), o['Key'])" 2>/dev/null | tail -1
@@ -96,6 +108,20 @@ TS=$(date -u +%Y%m%dT%H%M%SZ)
 PLAN=/app/backups/merge_soccer_teams_dryrun_$TS.plan.json
 plan_field() {  # plan_field <PLAN line> <key>: the count, or nothing
   echo "$1" | sed -n "s/.*$2=\([0-9]*\).*/\1/p"
+}
+# The last apply's record, in the api container: PLAN, MERGED_AT, GRADE_IDS, STATUS.
+read_state_file() { REC=$($DC exec -T api sh -c "cat $STATE_FILE 2>/dev/null" </dev/null); }
+rec_val() { echo "$REC" | sed -n "s/^$1=//p" | tail -1; }
+write_state_file() {  # write_state_file <plan> <merged_at> <grade ids> <status>
+  printf 'PLAN=%s\nMERGED_AT=%s\nGRADE_IDS=%s\nSTATUS=%s\n' "$1" "$2" "$3" "$4" \
+    | $DC exec -T api sh -c "cat > $STATE_FILE.tmp && mv $STATE_FILE.tmp $STATE_FILE"
+}
+grade_rows() {  # grade_rows <ids>: grade_completed_matches --match-id for each; 1 when one failed
+  [ -n "${1// /}" ] || return 0
+  $DC exec -T api sh -c "rc=0; : > /tmp/merge_teams_grade.log; for mid in $1; do python /app/scripts/grade_completed_matches.py --match-id \$mid >> /tmp/merge_teams_grade.log 2>&1 || { rc=1; echo \"grading \$mid failed\"; }; done; grep -c 'Done\.' /tmp/merge_teams_grade.log; exit \$rc" </dev/null
+}
+check_recorded() {  # check_recorded <plan>: --check-after --after-later-steps on the plan an apply recorded
+  $DC exec -T api sh -c "$TOOL --check-after $1 --after-later-steps > /tmp/merge_teams_rec_after.log 2>&1; rc=\$?; grep -E 'AFTER|REFUSED|ERROR|repoints_missing' /tmp/merge_teams_rec_after.log | tail -10; exit \$rc" </dev/null
 }
 
 # The map's data rows: '#' lines are comments, the first other line the header.
@@ -108,12 +134,42 @@ $DC exec -T api sh -c "$TOOL --out-csv /app/backups/merge_soccer_teams_precheck_
 pre=$($DC exec -T api sh -c "grep -o 'PLAN pairs_merge=[0-9]* pairs_done=[0-9]* pairs_refuse=[0-9]* kickoffs_adopted=[0-9]*' /tmp/merge_teams_pre.log | tail -1")
 if [ "$(plan_field "$pre" pairs_merge)" = "0" ] && [ "$(plan_field "$pre" pairs_done)" = "$EXPECTED" ] && [ "$(plan_field "$pre" pairs_refuse)" = "0" ]; then
   $DC exec -T api sh -c "$TOOL --check-after $PRE_PLAN > /tmp/merge_teams_pre_after.log 2>&1; rc=\$?; grep -E 'AFTER|REFUSED|ERROR' /tmp/merge_teams_pre_after.log | tail -10; exit \$rc"
-  if [ $? -eq 0 ]; then
-    log "ALREADY DONE: all $EXPECTED pairs merged and the after-state holds — nothing to do (no backup, no pause)"
-    $DC exec -T api sh -c "cat $STATE_FILE 2>/dev/null" | sed 's/^/  last apply: /'
+  pre_rc=$?
+  read_state_file
+  rec_plan=$(rec_val PLAN); rec_at=$(rec_val MERGED_AT); rec_ids=$(rec_val GRADE_IDS); rec_status=$(rec_val STATUS)
+  if [ -z "$rec_plan" ] || [ -z "$rec_at" ] || [ -z "$rec_status" ]; then
+    log "FAILED: all $EXPECTED pairs read 'done' but no apply is recorded in $STATE_FILE (got '${REC:-nothing}') — nothing changed."
+    log "  If the last apply's log ended in DONE, record it (its plan file and MERGED_AT are in that log):"
+    log "    printf 'PLAN=%s\\nMERGED_AT=%s\\nGRADE_IDS=\\nSTATUS=done\\n' <plan> <MERGED_AT> | docker compose exec -T api sh -c 'cat > $STATE_FILE'"
+    exit 1
+  fi
+  check_recorded "$rec_plan"
+  rec_rc=$?
+  if [ "$pre_rc" != "0" ]; then
+    log "all $EXPECTED pairs read 'done' but the after-state check failed (above) — FAILED: inspect; nothing changed"
+    exit 1
+  fi
+  if [ "$rec_status" = "done" ]; then
+    if [ "$rec_rc" = "0" ]; then
+      log "ALREADY DONE: all $EXPECTED pairs merged and the after-state holds — nothing to do (no backup, no pause)"
+      echo "$REC" | sed 's/^/  last apply: /'
+      exit 0
+    fi
+    log "all $EXPECTED pairs read 'done' but the after-state of the plan the last apply recorded ($rec_plan) fails (above) — FAILED: inspect; nothing changed"
+    exit 1
+  fi
+  # The merge committed, but that run's grading or after-state did not pass: finish it.
+  log "the last apply ($rec_at) recorded STATUS=$rec_status: finishing it — grading the $(echo $rec_ids | wc -w | tr -d ' ') row(s) it listed, then its after-state"
+  graded_ok=1
+  grade_rows "$rec_ids" || { graded_ok=0; log "grading failed for a row (see above; /tmp/merge_teams_grade.log in the api container)"; }
+  check_recorded "$rec_plan"
+  rec_rc=$?
+  if [ "$graded_ok" = "1" ] && [ "$rec_rc" = "0" ]; then
+    write_state_file "$rec_plan" "$rec_at" "" done || { log "FAILED: could not record STATUS=done in $STATE_FILE"; exit 1; }
+    log "COMPLETED: the last apply's rows are graded and its after-state holds (STATUS=done recorded); all $EXPECTED pairs merged"
     exit 0
   fi
-  log "all $EXPECTED pairs read 'done' but the after-state check failed (above) — FAILED: inspect; nothing changed"
+  log "FAILED: finishing the last apply: graded_ok=$graded_ok after-state rc=$rec_rc — inspect /tmp/merge_teams_grade.log and /tmp/merge_teams_rec_after.log in the api container, then re-run"
   exit 1
 fi
 log "not done yet (pre-plan '${pre:-unreadable}') — continuing"
@@ -155,6 +211,13 @@ fi
 grade_ids=$($DC exec -T api sh -c "grep -o 'GRADE_AFTER [0-9a-f-]*' /tmp/merge_teams_dry.log | awk '{print \$2}' | sort -u" | tr '\n' ' ')
 log "plan: $merge to merge, $done_ already done; $(echo $grade_ids | wc -w | tr -d " ") kept row(s) to grade after; plan file $PLAN"
 
+# An earlier apply that never recorded STATUS=done leaves rows to grade: this run grades them too.
+read_state_file
+if [ -n "$(rec_val STATUS)" ] && [ "$(rec_val STATUS)" != "done" ] && [ -n "$(rec_val GRADE_IDS)" ]; then
+  log "the last apply ($(rec_val MERGED_AT)) recorded STATUS=$(rec_val STATUS): its rows are graded again with this run's"
+  grade_ids=$(echo "$grade_ids $(rec_val GRADE_IDS)" | tr ' ' '\n' | grep . | sort -u | tr '\n' ' ')
+fi
+
 apply_rc=0
 if [ "$merge" = "0" ]; then
   log "3/5 apply: nothing to merge, all $EXPECTED pairs already done"
@@ -174,8 +237,8 @@ if [ "$merge" != "0" ]; then
   written=$($DC exec -T api sh -c "grep -o 'WRITTEN .*' /tmp/merge_teams.log | tail -1")
   unmatched=$(plan_field "$written" odds_spellings_unmatched_before)
   log "apply: ${written:-no WRITTEN line}"
-  # The pointer the runbook's odds check (step 11) reads; rewritten only by a run that applied.
-  $DC exec -T api sh -c "printf 'PLAN=%s\nMERGED_AT=%s\n' $PLAN $MERGED_AT > $STATE_FILE" \
+  # The pointer the runbook's odds check (step 11) and step 0 read; rewritten only by a run that applied.
+  write_state_file "$PLAN" "$MERGED_AT" "$grade_ids" grading \
     || log "WARNING: could not write $STATE_FILE — step 11 needs PLAN=$PLAN MERGED_AT=$MERGED_AT"
 fi
 
@@ -187,14 +250,17 @@ log "4/5 grade"
 # by selection, voids post-kickoff rows and fills P&L. These rows are weeks
 # old, outside its --days window, so name them.
 graded_ok=1
-if [ -n "${grade_ids// /}" ]; then
-  $DC exec -T api sh -c "rc=0; : > /tmp/merge_teams_grade.log; for mid in $grade_ids; do python /app/scripts/grade_completed_matches.py --match-id \$mid >> /tmp/merge_teams_grade.log 2>&1 || { rc=1; echo \"grading \$mid failed\"; }; done; grep -c 'Done\.' /tmp/merge_teams_grade.log; exit \$rc" \
-    || { graded_ok=0; log "grading failed for a row (see above; /tmp/merge_teams_grade.log in the api container)"; }
-fi
+grade_rows "$grade_ids" || { graded_ok=0; log "grading failed for a row (see above; /tmp/merge_teams_grade.log in the api container)"; }
 
 log "5/5 after-state (from the dry run's plan file)"
 $DC exec -T api sh -c "$TOOL --check-after $PLAN > /tmp/merge_teams_after.log 2>&1; rc=\$?; grep -E 'AFTER|REFUSED|ERROR' /tmp/merge_teams_after.log | tail -10; exit \$rc"
 after_rc=$?
+if [ "$merge" != "0" ]; then
+  status=failed
+  [ "$after_rc" = "0" ] && [ "$graded_ok" = "1" ] && [ "$apply_rc" = "0" ] && status=done
+  write_state_file "$PLAN" "$MERGED_AT" "$grade_ids" "$status" \
+    || log "WARNING: could not record STATUS=$status in $STATE_FILE (a re-run then finishes this apply again)"
+fi
 if [ -n "$unmatched" ] && [ "$unmatched" != "0" ]; then
   log "FAILED: the apply reports odds_spellings_unmatched_before=$unmatched — that many odds-feed spellings did not find their"
   log "  club's fixture before the merge, so the in-transaction odds check skipped them (the WARNING lines name each club"
@@ -215,6 +281,6 @@ if [ "$after_rc" = "0" ] && [ "$graded_ok" = "1" ] && [ "$apply_rc" = "0" ]; the
   log "       docker compose exec -T api python /app/scripts/compute_features.py --backfill-finished soccer"
   log "  promote_raw stays blocked until scripts/ops/repair_football_data_kickoffs.sh (runbook step 4) has run."
 else
-  log "FAILED: apply rc=$apply_rc graded_ok=$graded_ok after-state rc=$after_rc — inspect /tmp/merge_teams.log and /tmp/merge_teams_after.log in the api container; re-running this script merges the rest"
+  log "FAILED: apply rc=$apply_rc graded_ok=$graded_ok after-state rc=$after_rc — inspect /tmp/merge_teams.log and /tmp/merge_teams_after.log in the api container; re-running this script merges the rest, or (all pairs merged) finishes this apply: grades its rows and re-checks"
   exit 1
 fi

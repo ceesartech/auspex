@@ -14,12 +14,17 @@ bin first on PATH. Every docker call is logged to calls.log, one per line.
   {dag: n} queues a new run on that DAG's n-th pause (the run that slips in
   between a drain and a pause). `trigger db_backup_daily` lands a fake dump
   (see b2) unless `backup_fails` is set.
+  `unpause_fails` [dag] makes `dags unpause` leave that DAG paused.
 * `compose cp <file> postgres:/tmp/<name>` copies the file to cp/<name> and
   cp/<n>_<name> (so a test can read every SQL a wrapper sent, in order).
+* Container files: `exec -T <svc> sh -c "cat > F.tmp && mv F.tmp F"` (or
+  `cat > F`) stores stdin as <svc>:F, `exec -T <svc> sh -c "cat F 2>/dev/null"`
+  prints a stored file (and falls through to the rules when there is none),
+  `sh -c "rm -f F"` removes it. put_file / get_file reach them from a test.
 * Everything else is matched against the rules in order: {"match": regex
   over the joined argv, "out": stdout, "rc": exit code, "times": n (optional:
-  the rule then retires)}. A call no rule matches exits 99 and is logged as
-  UNMATCHED.
+  the rule then retires), "delay": seconds to sleep first (optional)}. A call
+  no rule matches exits 99 and is logged as UNMATCHED.
 * The B2 probe (`api python -c ... b2_io ...`) prints the last landed dump.
 """
 
@@ -78,6 +83,9 @@ def _airflow(state_path: Path, cmd: str, fake: Path) -> tuple[str, int]:
         if st.get("slip_in", {}).get(name) == d["pauses"]:
             d["runs"].append({"run_id": f"slipped_{d['pauses']}", "state": "queued", "ticks": 1})
     elif verb == "unpause":
+        if name in st.get("unpause_fails", []):
+            state_path.write_text(json.dumps(st))
+            return out, 1
         d["paused"] = False
         for r in st.get("on_unpause", {}).get(name, []):
             d["runs"].append(dict(r, start_date=_now_iso()))
@@ -90,11 +98,37 @@ def _airflow(state_path: Path, cmd: str, fake: Path) -> tuple[str, int]:
     return out, rc
 
 
+def _file(fake: Path, service: str, path: str) -> Path:
+    return fake / "files" / service / path.strip("/").replace("/", "__")
+
+
+def _container_file(fake: Path, joined: str) -> int | None:
+    """Handle a container-file call (see the module docstring); None when it is not one."""
+    m = re.fullmatch(r"compose exec -T (\S+) sh -c cat > (\S+?)(?:\.tmp && mv \S+ (\S+))?", joined)
+    if m:
+        f = _file(fake, m.group(1), m.group(3) or m.group(2))
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(sys.stdin.read())
+        return 0
+    m = re.fullmatch(r"compose exec -T (\S+) sh -c cat (\S+) 2>/dev/null", joined)
+    if m and _file(fake, m.group(1), m.group(2)).exists():
+        sys.stdout.write(_file(fake, m.group(1), m.group(2)).read_text())
+        return 0
+    m = re.fullmatch(r"compose exec -T (\S+) sh -c rm -f (\S+)", joined)
+    if m:
+        _file(fake, m.group(1), m.group(2)).unlink(missing_ok=True)
+        return 0
+    return None
+
+
 def main(argv: list[str]) -> int:
     fake = Path(os.environ["FAKE_DIR"])
     joined = " ".join(argv)
     with (fake / "calls.log").open("a") as fh:
         fh.write(joined.replace("\n", "\\n") + "\n")
+    handled = _container_file(fake, joined)
+    if handled is not None:
+        return handled
     if len(argv) >= 4 and argv[1] == "cp" and argv[3].startswith("postgres:"):
         (fake / "cp").mkdir(exist_ok=True)
         name = Path(argv[3].split(":", 1)[1]).name
@@ -119,6 +153,8 @@ def main(argv: list[str]) -> int:
             if "times" in rule:
                 rule["times"] -= 1
                 rules_path.write_text(json.dumps(rules))
+            if rule.get("delay"):
+                time.sleep(float(rule["delay"]))
             if rule.get("out"):
                 print(rule["out"])
             return int(rule.get("rc", 0))
@@ -149,6 +185,7 @@ def install(tmp_path: Path, rules: list[dict], airflow: dict | None = None) -> d
         "AUSPEX_DIR": str(tmp_path / "auspex"),
         "TMPDIR": str(tmp_path / "tmp"),
         "AF_POLL_SECONDS": "0",
+        "AF_STATE_DIR": str(tmp_path / "afstate"),
     }
 
 
@@ -164,6 +201,11 @@ def run(script: Path, env: dict, *args: str, cwd: Path | None = None, timeout: i
     return proc.returncode, proc.stdout + proc.stderr
 
 
+def set_rules(tmp_path: Path, rules: list[dict]) -> None:
+    """New rules for the next run (the Airflow model and container files carry over)."""
+    (tmp_path / "fake" / "rules.json").write_text(json.dumps(rules))
+
+
 def calls(tmp_path: Path) -> list[str]:
     log = tmp_path / "fake" / "calls.log"
     return log.read_text().splitlines() if log.exists() else []
@@ -171,6 +213,17 @@ def calls(tmp_path: Path) -> list[str]:
 
 def airflow_state(tmp_path: Path) -> dict:
     return json.loads((tmp_path / "fake" / "airflow.json").read_text())
+
+
+def put_file(tmp_path: Path, service: str, path: str, text: str) -> None:
+    f = _file(tmp_path / "fake", service, path)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(text)
+
+
+def get_file(tmp_path: Path, service: str, path: str) -> str | None:
+    f = _file(tmp_path / "fake", service, path)
+    return f.read_text() if f.exists() else None
 
 
 if __name__ == "__main__":

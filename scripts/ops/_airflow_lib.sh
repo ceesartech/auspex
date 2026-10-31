@@ -13,19 +13,51 @@
 #
 #   af_drain_and_pause <attempts> <polls> <dag>...   0 when drained and paused
 #   af_resume                                        unpause what we paused
+#   af_resume_on_exit                                the same, for an EXIT trap
+#   af_keep_paused <why>                             leave ours paused, loudly
 #   af_dag_paused <dag>                              True / False / '' (unreadable)
 #   af_runs_in_flight <dag>...                       queued+running runs, or exit 1
-# AF_PAUSED_BY_US lists the DAGs af_drain_and_pause paused (a DAG that was
-# already paused is left as it is and never unpaused). AF_POLL_SECONDS
-# (default 30) is the wait between polls.
+# AF_PAUSED_BY_US lists the DAGs this run paused or adopted. A DAG that was
+# already paused is left as it is and never unpaused, unless a marker says a
+# wrapper paused it and never unpaused it (below). AF_POLL_SECONDS (default
+# 30) is the wait between polls.
+#
+# Surviving a dead terminal (Ctrl-C or an SSH drop while the output goes
+# through `| tee`): the terminal signals the whole process group, tee dies,
+# and every later write to the pipe would kill the shell by SIGPIPE — in the
+# middle of its unpausing. So SIGPIPE is ignored, af_resume unpauses every
+# DAG before it verifies or logs anything, the exit path ignores a second
+# INT/TERM/HUP while it unpauses, and its lines are written from a subshell
+# (af_say): a builtin echo that fails on a dead pipe leaves its text in the
+# shell's stdout buffer (bash before 4.3 never purges it), and that text then
+# leaks into the next redirection or $(...) — a DAG's 'False' would read as
+# something else and the ledger would fill with stale lines. Every pause,
+# unpause and ALERT is also appended to $AF_STATE_DIR/airflow_pauses.log
+# (default ~/.auspex_ops), and each DAG we pause gets a marker
+# $AF_STATE_DIR/paused_<dag>, removed only once it reads unpaused again: a
+# DAG still paused with its marker (the wrapper was killed outright, or the
+# unpause failed) is adopted by the next wrapper or runbook run that drains
+# it, and unpaused when that run ends.
 
+trap '' PIPE
 AF_PAUSED_BY_US=""
 AF_POLL_SECONDS="${AF_POLL_SECONDS:-30}"
+AF_STATE_DIR="${AF_STATE_DIR:-${HOME:-/tmp}/.auspex_ops}"
+AF_LEDGER="$AF_STATE_DIR/airflow_pauses.log"
+
+# log() from a subshell: a write that fails on a dead terminal never dirties this shell's stdout buffer.
+af_say() { ( log "$*" ) 2>/dev/null; }
+
+# A line for the ledger (written first: it survives a dead terminal) and the log.
+af_note() {
+  { mkdir -p "$AF_STATE_DIR" && echo "[$(date -u +%FT%TZ)] $(basename "$0"): $*" >> "$AF_LEDGER"; } 2>/dev/null
+  af_say "$*"
+}
 
 # Airflow 3.3 CLI: dag_id positional, -o json; structlog lines are filtered
 # out by keeping the last line that starts with '['.
 af_dag_paused() {
-  $DC exec -T airflow-scheduler sh -c "airflow dags details $1 -o json 2>/dev/null | grep '^\\[' | tail -1" \
+  $DC exec -T airflow-scheduler sh -c "airflow dags details $1 -o json 2>/dev/null | grep '^\\[' | tail -1" </dev/null \
     | grep -o '"is_paused": "[A-Za-z]*"' | head -1 | sed 's/.*: "\(.*\)"/\1/'
 }
 
@@ -33,7 +65,7 @@ af_runs_in_flight() {
   local n=0 c d s
   for d in "$@"; do
     for s in queued running; do
-      c=$($DC exec -T airflow-scheduler sh -c "airflow dags list-runs $d --state $s -o json 2>/dev/null | grep '^\\[' | tail -1")
+      c=$($DC exec -T airflow-scheduler sh -c "airflow dags list-runs $d --state $s -o json 2>/dev/null | grep '^\\[' | tail -1" </dev/null)
       [ -n "$c" ] || return 1
       n=$((n + $(echo "$c" | grep -o '"run_id"' | wc -l)))
     done
@@ -43,19 +75,38 @@ af_runs_in_flight() {
 
 af_resume() {
   local d
+  # Unpause all of them first: nothing below may stand between a DAG and its unpause.
   for d in $AF_PAUSED_BY_US; do
-    $DC exec -T airflow-scheduler airflow dags unpause -y "$d" >/dev/null 2>&1
+    $DC exec -T airflow-scheduler airflow dags unpause -y "$d" </dev/null >/dev/null 2>&1
+  done
+  for d in $AF_PAUSED_BY_US; do
     if [ "$(af_dag_paused "$d")" = "False" ]; then
-      log "unpaused $d"
+      rm -f "$AF_STATE_DIR/paused_$d" 2>/dev/null
+      af_note "unpaused $d"
     else
-      log "ALERT: $d is STILL PAUSED — unpause it now: docker compose exec -T airflow-scheduler airflow dags unpause -y $d"
+      af_note "ALERT: $d is STILL PAUSED — unpause it now: docker compose exec -T airflow-scheduler airflow dags unpause -y $d"
     fi
   done
   AF_PAUSED_BY_US=""
 }
 
+# For an EXIT trap: a second Ctrl-C (or the HUP of a dropped session) must not cut the unpausing short.
+af_resume_on_exit() {
+  trap '' INT TERM HUP
+  af_resume
+}
+
+# Leave the DAGs this run paused PAUSED (their markers stay, so the next run adopts them), loudly.
+af_keep_paused() {
+  local d
+  for d in $AF_PAUSED_BY_US; do
+    af_note "ALERT: $d stays PAUSED — $1. Unpause by hand: docker compose exec -T airflow-scheduler airflow dags unpause -y $d"
+  done
+  AF_PAUSED_BY_US=""
+}
+
 af_drain_and_pause() {
-  local attempts="$1" polls="$2" attempt i n st d already
+  local attempts="$1" polls="$2" attempt i n st d already marker
   shift 2
   for attempt in $(seq 1 "$attempts"); do
     n=""
@@ -72,13 +123,27 @@ af_drain_and_pause() {
     fi
     for d in "$@"; do
       st=$(af_dag_paused "$d")
+      marker="$AF_STATE_DIR/paused_$d"
       if [ "$st" = "True" ]; then
-        case " $AF_PAUSED_BY_US " in *" $d "*) ;; *) log "$d is already paused — left as it is" ;; esac
+        case " $AF_PAUSED_BY_US " in
+          *" $d "*) ;;
+          *)
+            if [ -f "$marker" ]; then
+              AF_PAUSED_BY_US="$AF_PAUSED_BY_US $d"
+              af_note "$d is paused by an earlier wrapper run that never unpaused it ($(cat "$marker" 2>/dev/null)) — adopted: this run unpauses it when it ends"
+            else
+              log "$d is already paused — left as it is"
+            fi
+            ;;
+        esac
       elif [ "$st" = "False" ]; then
-        $DC exec -T airflow-scheduler airflow dags pause -y "$d" >/dev/null 2>&1
+        [ -f "$marker" ] && rm -f "$marker" 2>/dev/null  # stale: someone unpaused it since
+        $DC exec -T airflow-scheduler airflow dags pause -y "$d" </dev/null >/dev/null 2>&1
         if [ "$(af_dag_paused "$d")" != "True" ]; then log "could not pause $d"; return 1; fi
         AF_PAUSED_BY_US="$AF_PAUSED_BY_US $d"
-        log "paused $d"
+        { mkdir -p "$AF_STATE_DIR" && echo "paused by $(basename "$0") pid $$ at $(date -u +%FT%TZ)" > "$marker"; } 2>/dev/null \
+          || log "WARNING: could not write $marker (a run killed outright would leave $d paused unannounced)"
+        af_note "paused $d"
       else
         log "cannot read whether $d is paused"
         return 1
