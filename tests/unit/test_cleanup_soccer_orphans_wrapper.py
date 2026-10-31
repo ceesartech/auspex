@@ -1,6 +1,8 @@
 """scripts/ops/cleanup_soccer_orphans.sh, run for real through a canned
 `docker` (no database, no containers): every tool run and both state queries
-share one --as-of instant, and a failed step 5 or 6 exits 2, never DONE."""
+share one --as-of instant, a failed step 5 or 6 exits 2, never DONE, and its
+apply CSV stays on the pending list until a re-run (or --followups-only) has
+run steps 5-6 for it — a re-run never says ALREADY DONE over them."""
 
 from __future__ import annotations
 
@@ -21,6 +23,10 @@ FAKE_DOCKER = r"""#!/bin/bash
 echo "$*" >> "$FAKE_DIR/calls.log"
 args="$*"
 case "$args" in
+  *"sh -c cat /app/backups/cleanup_soccer_orphans_followups_pending.txt 2>/dev/null")
+    [ -f "$FAKE_DIR/pending" ] && cat "$FAKE_DIR/pending"; exit 0 ;;
+  *"sh -c cat > /app/backups/cleanup_soccer_orphans_followups_pending.txt.tmp && mv "*)
+    cat > "$FAKE_DIR/pending"; exit 0 ;;
   "compose exec -T airflow-scheduler"*) exit 0 ;;
   *"import b2_io"*) echo "$(( $(date +%s) + 60 )) postgres/fake.dump"; exit 0 ;;
   "compose cp "*)
@@ -56,16 +62,20 @@ BEFORE = "100|2|500|0"  # stale | orphan_of | recs on past fixtures | postponed 
 AFTER = "93|3|500|1"  # 100 - 3 - 1 - 2 - 1, 2 + 1, unchanged, 0 + 1
 
 
-def _run(tmp_path: Path, **env: str) -> tuple[int, str, list[str]]:
+def _run(tmp_path: Path, *args: str, **env: str) -> tuple[int, str, list[str]]:
+    """Runs the wrapper; a second call on the same tmp_path keeps the fake's
+    files (the pending list) and appends to its call log."""
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     (bin_dir / "docker").write_text(FAKE_DOCKER)
     (bin_dir / "sleep").write_text("#!/bin/bash\nexit 0\n")
     for f in bin_dir.iterdir():
         f.chmod(0o755)
     fake = tmp_path / "fake"
-    fake.mkdir()
-    (tmp_path / "auspex").mkdir()
+    fake.mkdir(exist_ok=True)
+    (tmp_path / "auspex").mkdir(exist_ok=True)
+    calls_log = fake / "calls.log"
+    before = len(calls_log.read_text().splitlines()) if calls_log.exists() else 0
     full_env = {
         **os.environ,
         "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
@@ -78,10 +88,9 @@ def _run(tmp_path: Path, **env: str) -> tuple[int, str, list[str]]:
         **env,
     }
     proc = subprocess.run(
-        ["bash", str(WRAPPER)], env=full_env, capture_output=True, text=True, timeout=60, cwd=tmp_path
+        ["bash", str(WRAPPER), *args], env=full_env, capture_output=True, text=True, timeout=60, cwd=tmp_path
     )
-    calls_log = fake / "calls.log"
-    calls = calls_log.read_text().splitlines() if calls_log.exists() else []
+    calls = calls_log.read_text().splitlines()[before:] if calls_log.exists() else []
     return proc.returncode, proc.stdout + proc.stderr, calls
 
 
@@ -146,6 +155,78 @@ def test_a_failed_step_5_or_6_exits_2_and_never_says_done(tmp_path, failing):
     assert rc == 2, out
     assert "DONE" not in out
     assert "the cleanup is verified" in out and "steps 5/6 need a manual re-run" in out
+    assert "cleanup_soccer_orphans.sh --followups-only" in out
+
+
+def _pending(tmp_path: Path) -> list[str]:
+    f = tmp_path / "fake" / "pending"
+    return [line for line in f.read_text().splitlines() if line] if f.exists() else []
+
+
+def _followups(calls: list[str]) -> list[str]:
+    return [c for c in calls if "compute_features.py" in c or c.endswith(" api python -")]
+
+
+@pytest.mark.parametrize("failing", ["FAIL_FEATURES", "FAIL_GRADE"])
+def test_a_re_run_after_incomplete_runs_the_pending_follow_ups_not_already_done(tmp_path, failing):
+    """The cleanup applied and verified, then step 5 or 6 failed (exit 2). The
+    re-run plans nothing: it must run steps 5-6 for that apply's twins, not
+    print ALREADY DONE over them (no other step grades those predictions)."""
+    rc, out, _ = _run(tmp_path, **{failing: "1"})
+    assert rc == 2, out
+    (apply_csv,) = _pending(tmp_path)
+    assert re.fullmatch(r"/app/backups/fixture_orphans_soccer_apply_\d{8}T\d{6}Z\.csv", apply_csv)
+
+    rc, out, calls = _run(tmp_path, PRE_PLAN=ZERO_PLAN)
+    assert rc == 0 and "FOLLOW-UPS DONE" in out and "ALREADY DONE" not in out, out
+    (twins,) = [c for c in calls if "python -c import csv" in c]
+    assert apply_csv in twins
+    assert len(_followups(calls)) == 2
+    assert not [c for c in calls if "import b2_io" in c or "db_backup_daily" in c or "--apply" in c]
+    assert _pending(tmp_path) == []
+
+    rc, out, calls = _run(tmp_path, PRE_PLAN=ZERO_PLAN)
+    assert rc == 0 and "ALREADY DONE" in out and not _followups(calls), out
+
+
+def test_a_re_run_whose_follow_ups_fail_again_stays_incomplete_and_pending(tmp_path):
+    _run(tmp_path, FAIL_GRADE="1")
+    rc, out, _ = _run(tmp_path, PRE_PLAN=ZERO_PLAN, FAIL_GRADE="1")
+    assert rc == 2 and "INCOMPLETE" in out and len(_pending(tmp_path)) == 1, out
+
+
+def test_a_failed_after_state_keeps_the_follow_ups_pending(tmp_path):
+    rc, out, calls = _run(tmp_path, AFTER_STATE="92|3|500|1")
+    assert rc == 1 and "FAILED after-state" in out and not _followups(calls), out
+    assert len(_pending(tmp_path)) == 1
+    rc, out, calls = _run(tmp_path, PRE_PLAN=ZERO_PLAN)
+    assert rc == 0 and "FOLLOW-UPS DONE" in out and len(_followups(calls)) == 2, out
+
+
+def test_an_earlier_apply_still_pending_is_followed_up_with_this_runs(tmp_path):
+    (tmp_path / "fake").mkdir()
+    (tmp_path / "fake" / "pending").write_text("/app/backups/fixture_orphans_soccer_apply_20261030T000000Z.csv\n")
+    rc, out, calls = _run(tmp_path)
+    assert rc == 0 and "DONE." in out, out
+    (twins,) = [c for c in calls if "python -c import csv" in c]
+    assert "fixture_orphans_soccer_apply_20261030T000000Z.csv" in twins
+    assert re.search(r"fixture_orphans_soccer_apply_2026\d{4}T\d{6}Z\.csv", twins.replace("20261030T000000Z", ""))
+    assert _pending(tmp_path) == []
+
+
+def test_followups_only_runs_steps_5_and_6_alone(tmp_path):
+    rc, out, calls = _run(tmp_path, "--followups-only")
+    assert rc == 0 and "nothing pending" in out and not _followups(calls), out
+    (tmp_path / "fake" / "pending").write_text("/app/backups/fixture_orphans_soccer_apply_20261031T120000Z.csv\n")
+    rc, out, calls = _run(tmp_path, "--followups-only")
+    assert rc == 0 and "FOLLOW-UPS DONE" in out and len(_followups(calls)) == 2, out
+    assert not [c for c in calls if "repair_fixture_orphans.py" in c or "import b2_io" in c]
+    assert _pending(tmp_path) == []
+
+
+def test_an_unknown_argument_exits_2(tmp_path):
+    rc, out, calls = _run(tmp_path, "--bogus")
+    assert rc == 2 and "usage" in out and calls == []
 
 
 def test_a_wrong_after_state_exits_1(tmp_path):

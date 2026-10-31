@@ -69,7 +69,8 @@
 #   0. already done? A read-only dry run first (as of now): when it plans no
 #      merge, placeholder, postponement or no-twin delete, no list mismatch
 #      and nothing blocked, this exits 0 without a backup (a re-run after
-#      success);
+#      success) — unless an earlier apply's follow-ups are still pending
+#      (below): then it runs steps 5-6 for them only, and exits 0 or 2;
 #   1. verified backup (B2) — abort if it does not land;
 #   2. START = now (one instant for every run and state query below:
 #      --as-of START); before-state + dry run (write-once audit CSV) — abort
@@ -87,8 +88,18 @@
 #   5. recompute features for the twins that received prices;
 #   6. grade the predictions moved onto those twins (predictions only — no rec
 #      is written by any step of this script).
+# Follow-ups pending: right after an apply that merged rows commits, its
+# write-once apply CSV is added to
+# /app/backups/cleanup_soccer_orphans_followups_pending.txt (api container),
+# and the list is emptied only once steps 5-6 succeeded. Steps 5-6 take their
+# twins from every CSV on the list, so a run that ended INCOMPLETE (exit 2)
+# or failed its after-state (exit 1) never loses them: a re-run of this
+# script, or
+#   bash /opt/auspex/scripts/ops/cleanup_soccer_orphans.sh --followups-only
+# (steps 5-6 for the listed CSVs, nothing else; no backup: they only refresh
+# derived data), runs them.
 # Exit: 0 all done (or already done); 1 aborted or the after-state failed; 2 the cleanup is
-# verified (steps 1-4) but step 5 or 6 failed — re-run those by hand.
+# verified (steps 1-4) but step 5 or 6 failed — re-run with --followups-only.
 # Each tool step writes its output to a log file and exits with the tool's own
 # status; a pipe through tail would report tail's 0.
 # Re-runnable: merged rows are gone, cancelled/postponed rows leave the
@@ -102,6 +113,12 @@
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/cleanup_soccer_orphans.sh 2>&1 | tee -a ~/cleanup_soccer_orphans.log
 set -uo pipefail
+FOLLOWUPS_ONLY=""
+case "${1:-}" in
+  "") ;;
+  --followups-only) FOLLOWUPS_ONLY=1 ;;
+  *) echo "usage: $0 [--followups-only]   (see the header)"; exit 2 ;;
+esac
 cd "${AUSPEX_DIR:-/opt/auspex}" || exit 1
 DC="docker compose"
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
@@ -132,14 +149,105 @@ cleanup() {
 }
 trap cleanup EXIT
 
+PENDING=/app/backups/cleanup_soccer_orphans_followups_pending.txt
+pending_csvs() { $DC exec -T api sh -c "cat $PENDING 2>/dev/null" </dev/null | grep -E '^/app/backups/[^ ]+\.csv$' | sort -u; }
+write_pending() {  # stdin: the apply CSVs whose follow-ups are pending (empty: none)
+  $DC exec -T api sh -c "cat > $PENDING.tmp && mv $PENDING.tmp $PENDING"
+}
+# Steps 5-6 for the twins of every given apply CSV; sets followup_failed. The list is emptied only on success.
+run_followups() {
+  local twins rc
+  followup_failed=""
+  log "5/6 recompute features for the twins that received prices (from $*)"
+  # The twins come from the write-once apply CSVs.
+  TWINS_PY="import csv, sys; print(','.join(sorted({r['twin_id'] for f in sys.argv[1:] for r in csv.DictReader(open(f)) if r['action'] in ('merge_delete', 'merge_cancel')})))"
+  twins=$($DC exec -T api python -c "$TWINS_PY" "$@" </dev/null)
+  rc=$?
+  if [ "$rc" -ne 0 ] || ! [[ "$twins" =~ ^[0-9a-f,-]+$ ]]; then
+    log "ERROR step 5: could not read the twins from $* (exit $rc) — steps 5-6 not run"
+    followup_failed="steps 5-6 (no twin list)"
+    return
+  fi
+  log "$(echo "$twins" | tr ',' '\n' | grep -c .) twins"
+  $DC exec -T api python /app/scripts/compute_features.py --match-ids "$twins" </dev/null > /tmp/rfo_soccer_features.log 2>&1
+  rc=$?
+  tail -3 /tmp/rfo_soccer_features.log
+  if [ "$rc" -ne 0 ]; then
+    log "ERROR step 5 exit $rc: features not recomputed (full log /tmp/rfo_soccer_features.log)"
+    followup_failed="step 5"
+  fi
+
+  log "6/6 grade the predictions moved onto those twins"
+  $DC exec -T -e TWINS="$twins" api python - > /tmp/rfo_soccer_grade.log 2>&1 <<'PY'
+import os, sys
+sys.path.insert(0, "/app/scripts")
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import grade_completed_matches as g
+
+# Predictions only (grade_match's own prediction loop): recs on the twins
+# stay the regular grader's business. Re-runnable: only ungraded rows.
+twins = [t for t in os.environ["TWINS"].split(",") if t]
+graded = skipped = 0
+with psycopg2.connect(os.environ["DATABASE_URL"]) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+    for mid in twins:
+        for m in g.list_finished_matches(cur, 0, mid):
+            ctx = g.fetch_match_grading_context(cur, mid)
+            for pred in g.list_ungraded_predictions(cur, mid):
+                skip, actual, correct = g.compute_prediction_grade(pred, m, ctx)
+                if skip is not None:
+                    skipped += 1
+                    continue
+                g.update_prediction(cur, pred["prediction_id"], actual, correct)
+                graded += 1
+    conn.commit()
+print(f"graded {graded} predictions on {len(twins)} soccer twins ({skipped} skipped: after kickoff / ungradable)")
+PY
+  rc=$?
+  tail -3 /tmp/rfo_soccer_grade.log
+  if [ "$rc" -ne 0 ]; then
+    log "ERROR step 6 exit $rc: grading failed (full log /tmp/rfo_soccer_grade.log)"
+    followup_failed="${followup_failed:+$followup_failed and }step 6"
+  fi
+  if [ -z "$followup_failed" ]; then
+    write_pending < /dev/null \
+      || log "WARNING: could not empty $PENDING (a re-run then repeats steps 5-6, which is harmless)"
+  fi
+}
+incomplete() {  # incomplete <what>: exit 2
+  log "INCOMPLETE (exit 2): the cleanup is verified, but $followup_failed failed — $1. Re-run steps 5-6 only (the"
+  log "  apply CSVs stay listed in $PENDING until they succeed):"
+  log "    bash /opt/auspex/scripts/ops/cleanup_soccer_orphans.sh --followups-only"
+  exit 2
+}
+followups_for_pending() {  # steps 5-6 for the pending list ($csvs), then exit 0 or 2
+  # shellcheck disable=SC2086  # $csvs is a word list
+  run_followups $csvs
+  [ -z "$followup_failed" ] || incomplete "steps 5/6 for $csvs"
+  log "FOLLOW-UPS DONE: features and grading for $csvs"
+  exit 0
+}
+
+if [ -n "$FOLLOWUPS_ONLY" ]; then
+  csvs=$(pending_csvs | tr '\n' ' ')
+  if [ -z "${csvs// /}" ]; then log "--followups-only: nothing pending in $PENDING — nothing to do"; exit 0; fi
+  log "--followups-only: steps 5-6 for $csvs"
+  followups_for_pending
+fi
+
 log "0/6 already done? (read-only dry run)"
 PRE_AT=$(date -u +%FT%TZ)
 $DC exec -T api sh -c "$TOOL --as-of $PRE_AT --out-csv /app/backups/fixture_orphans_soccer_precheck_$(date -u +%Y%m%dT%H%M%SZ).csv > /tmp/rfo_soccer_pre.log 2>&1; echo \"tool exit \$?\""
 pre=$($DC exec -T api sh -c "grep -o 'PLAN .*' /tmp/rfo_soccer_pre.log | tail -1")
 pre_counts="$(plan_num "$pre" merge_delete) $(plan_num "$pre" merge_cancel) $(plan_num "$pre" delete_placeholder) $(plan_num "$pre" delete_no_twin) $(plan_num "$pre" mark_postponed) $(plan_num "$pre" list_mismatch) $(plan_num "$pre" blocked_pending_recs)"
 if [ "$pre_counts" = "0 0 0 0 0 0 0" ]; then
-  log "ALREADY DONE: $pre — nothing to merge, delete or mark (no backup)"
-  exit 0
+  csvs=$(pending_csvs | tr '\n' ' ')
+  if [ -z "${csvs// /}" ]; then
+    log "ALREADY DONE: $pre — nothing to merge, delete or mark, no follow-up pending (no backup)"
+    exit 0
+  fi
+  log "the cleanup is done ($pre) but the follow-ups of $csvs are pending (a run ended INCOMPLETE or failed its after-state): steps 5-6 only"
+  followups_for_pending
 fi
 log "not done yet (pre-plan '${pre:-unreadable}') — continuing"
 
@@ -217,6 +325,11 @@ if [ "$rc" -ne 0 ]; then
   log "ABORT at step 3 (see above; full log /tmp/rfo_soccer_apply.log in the api container): if it refused or raised before 'archived', nothing changed; otherwise the committed batches stand and the archive holds every planned row — inspect before re-running"
   exit 1
 fi
+if [ $((md + mc)) -gt 0 ]; then
+  listed=$({ pending_csvs; echo "$APPLY_CSV"; } | sort -u)  # read in full before the write
+  echo "$listed" | write_pending \
+    || log "WARNING: could not list $APPLY_CSV in $PENDING — if steps 5-6 fail below, run them by hand for it"
+fi
 
 log "4/6 after-state (as of $START)"
 state=$(psql_file "$STATE_SQL" -At | tr -d '[:space:]')
@@ -236,64 +349,16 @@ log "after-state OK"
 # Steps 5-6 only refresh derived data; a failure there leaves the verified
 # cleanup standing but must not look like success: exit 2, never DONE.
 followup_failed=""
-if [ $((md + mc)) -eq 0 ]; then
+csvs=$(pending_csvs | tr '\n' ' ')
+if [ $((md + mc)) -gt 0 ]; then  # this run's CSV even when it could not be listed
+  case " $csvs " in *" $APPLY_CSV "*) ;; *) csvs="$csvs $APPLY_CSV" ;; esac
+fi
+if [ -z "${csvs// /}" ]; then
   log "5/6 + 6/6 skipped: nothing was merged, no twin received prices"
 else
-  log "5/6 recompute features for the twins that received prices"
-  # The twins come from this run's write-once apply CSV.
-  TWINS_PY="import csv, sys; print(','.join(sorted({r['twin_id'] for r in csv.DictReader(open(sys.argv[1])) if r['action'] in ('merge_delete', 'merge_cancel')})))"
-  twins=$($DC exec -T api python -c "$TWINS_PY" "$APPLY_CSV")
-  rc=$?
-  if [ "$rc" -ne 0 ] || ! [[ "$twins" =~ ^[0-9a-f,-]+$ ]]; then
-    log "ERROR step 5: could not read the twins from $APPLY_CSV (exit $rc) — steps 5-6 not run"
-    followup_failed="steps 5-6 (no twin list)"
-  else
-    log "$(echo "$twins" | tr ',' '\n' | wc -l) twins"
-    $DC exec -T api python /app/scripts/compute_features.py --match-ids "$twins" > /tmp/rfo_soccer_features.log 2>&1
-    rc=$?
-    tail -3 /tmp/rfo_soccer_features.log
-    if [ "$rc" -ne 0 ]; then
-      log "ERROR step 5 exit $rc: features not recomputed (full log /tmp/rfo_soccer_features.log)"
-      followup_failed="step 5"
-    fi
-
-    log "6/6 grade the predictions moved onto those twins"
-    $DC exec -T -e TWINS="$twins" api python - > /tmp/rfo_soccer_grade.log 2>&1 <<'PY'
-import os, sys
-sys.path.insert(0, "/app/scripts")
-import psycopg2
-from psycopg2.extras import RealDictCursor
-import grade_completed_matches as g
-
-# Predictions only (grade_match's own prediction loop): recs on the twins
-# stay the regular grader's business.
-twins = [t for t in os.environ["TWINS"].split(",") if t]
-graded = skipped = 0
-with psycopg2.connect(os.environ["DATABASE_URL"]) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-    for mid in twins:
-        for m in g.list_finished_matches(cur, 0, mid):
-            ctx = g.fetch_match_grading_context(cur, mid)
-            for pred in g.list_ungraded_predictions(cur, mid):
-                skip, actual, correct = g.compute_prediction_grade(pred, m, ctx)
-                if skip is not None:
-                    skipped += 1
-                    continue
-                g.update_prediction(cur, pred["prediction_id"], actual, correct)
-                graded += 1
-    conn.commit()
-print(f"graded {graded} predictions on {len(twins)} soccer twins ({skipped} skipped: after kickoff / ungradable)")
-PY
-    rc=$?
-    tail -3 /tmp/rfo_soccer_grade.log
-    if [ "$rc" -ne 0 ]; then
-      log "ERROR step 6 exit $rc: grading failed (full log /tmp/rfo_soccer_grade.log)"
-      followup_failed="${followup_failed:+$followup_failed and }step 6"
-    fi
-  fi
+  # shellcheck disable=SC2086  # this run's apply CSV and any earlier one still pending
+  run_followups $csvs
 fi
 
-if [ -n "$followup_failed" ]; then
-  log "INCOMPLETE (exit 2): the cleanup is verified (steps 1-4), but $followup_failed failed — steps 5/6 need a manual re-run (see the ERROR lines above)"
-  exit 2
-fi
+[ -z "$followup_failed" ] || incomplete "steps 5/6 need a manual re-run (see the ERROR lines above)"
 log "DONE. Next (separate approval): the never_resulted rows — see the results backfill command in this script's header."
