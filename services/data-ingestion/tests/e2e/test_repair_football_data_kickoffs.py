@@ -249,9 +249,19 @@ def test_merge_fold_shift_check_then_promote_inserts_nothing(engine, seeded, tmp
         assert rfk.run_check(conn) == 1  # legacy rows and a duplicate
 
         # The pending rec on the held stale row's prediction keeps that copy where it is (pinned refusal).
+        # The folded row's 'void' rec has no profit_loss: an unpinned fold refuses before any write.
         pin = {"merge": 1, "fold": 1, "refuse": 1}
         counts = rfk.run(
-            conn, "dedupe", True, out_csv=str(tmp_path / "d.csv"), archive_dir=str(tmp_path), expect_plan=pin
+            conn, "dedupe", True, out_csv=str(tmp_path / "d0.csv"), archive_dir=str(tmp_path), expect_plan=pin
+        )
+        assert counts["unsettled_unpinned"] == 1 and not counts["copies_deleted"] and not counts["folded"]
+        counts = rfk.run(
+            conn,
+            "dedupe",
+            True,
+            out_csv=str(tmp_path / "d.csv"),
+            archive_dir=str(tmp_path),
+            expect_plan={**pin, "fold_unsettled_recs": 1},
         )
         assert (counts["copies_deleted"], counts["folded"], counts["match_stats_moved"], counts["plan_mismatch"]) == (
             2,
@@ -306,7 +316,11 @@ def test_merge_fold_shift_check_then_promote_inserts_nothing(engine, seeded, tmp
     with engine.begin() as c:
         c.execute(text("UPDATE betting_recommendations SET status = 'void' WHERE status = 'pending'"))
     with psycopg2.connect(DSN) as conn:
-        counts = rfk.run(conn, "dedupe", True, out_csv=str(tmp_path / "d2.csv"), archive_dir=str(tmp_path / "b"))
+        # its rec is 'void' without a profit_loss now: the fold needs that pinned too
+        pin2 = {"merge": 0, "alias_merge": 0, "fold": 1, "refuse": 0, "fold_unsettled_recs": 1}
+        counts = rfk.run(
+            conn, "dedupe", True, out_csv=str(tmp_path / "d2.csv"), archive_dir=str(tmp_path / "b"), expect_plan=pin2
+        )
         assert (counts["folded"], counts["refused"]) == (1, 0)
         assert rfk.run_check(conn) == 0
 
