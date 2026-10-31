@@ -17,6 +17,10 @@ picks up the closing line — that's the line-as-feature contract the
 NBA and NFL models depend on. NHL fixed lines (puck_line -1.5,
 total 5.5) are tested without any features_cache row.
 
+Migration 027 makes the trigger skip predictions written after kickoff
+and recs written at or after it (TestPostKickoffRows), so seeded
+predictions default to an hour before kickoff.
+
 These are integration tests — they need a real Postgres with all
 migrations applied. They're auto-marked `integration` by
 conftest.pytest_collection_modifyitems and run via:
@@ -99,7 +103,13 @@ def _seed_match(conn, *, sport: str, metadata: dict | None = None) -> dict:
             "md": json.dumps(metadata or {}),
         },
     )
-    return {"match_id": match_id, "league_id": league_id, "home_id": home_id, "away_id": away_id}
+    return {
+        "match_id": match_id,
+        "league_id": league_id,
+        "home_id": home_id,
+        "away_id": away_id,
+        "kickoff": match_dt,
+    }
 
 
 def _seed_prediction(
@@ -111,16 +121,24 @@ def _seed_prediction(
     predicted_outcome: str,
     model_version: str = "v1.0",
     probabilities: dict | None = None,
+    created_at: datetime | None = None,
 ) -> str:
-    """Insert one pending prediction row. Returns the prediction ID."""
+    """Insert one pending prediction row. Returns the prediction ID.
+
+    Written an hour before the match's kickoff unless `created_at` says
+    otherwise: since migration 027 the trigger never grades a prediction
+    written after kickoff, and _seed_match puts kickoff 4h in the past, so
+    a NOW() default would be one."""
     pred_id = str(uuid.uuid4())
     conn.execute(
         text(
             """
             INSERT INTO predictions
                 (id, match_id, model_name, model_version, prediction_type,
-                 predicted_outcome, confidence, probabilities)
-            VALUES (:id, :mid, :mn, :mv, :pt, :po, :conf, CAST(:pr AS jsonb))
+                 predicted_outcome, confidence, probabilities, created_at)
+            VALUES (:id, :mid, :mn, :mv, :pt, :po, :conf, CAST(:pr AS jsonb),
+                    COALESCE(CAST(:ca AS timestamptz),
+                             (SELECT m.match_date - INTERVAL '1 hour' FROM matches m WHERE m.id = :mid)))
             """
         ),
         {
@@ -132,9 +150,40 @@ def _seed_prediction(
             "po": predicted_outcome,
             "conf": 0.65,
             "pr": json.dumps(probabilities or {predicted_outcome: 0.65}),
+            "ca": created_at,
         },
     )
     return pred_id
+
+
+def _seed_rec(conn, *, match_id: str, prediction_id: str, selection: str, created_at: datetime | None) -> str:
+    """Insert one pending recommendation written at `created_at` (None
+    stores NULL). Returns the rec ID."""
+    rec_id = str(uuid.uuid4())
+    conn.execute(
+        text(
+            """
+            INSERT INTO betting_recommendations
+                (id, prediction_id, match_id, bet_type, selection,
+                 odds_at_recommendation, bookmaker, recommended_stake, status, created_at)
+            VALUES (:id, :pid, :mid, 'match_result', :sel, 2.0, 'test', 10, 'pending', :ca)
+            """
+        ),
+        {"id": rec_id, "pid": prediction_id, "mid": match_id, "sel": selection, "ca": created_at},
+    )
+    return rec_id
+
+
+def _read_rec(conn, rec_id: str) -> dict:
+    row = (
+        conn.execute(
+            text("SELECT status, actual_result, settled_at FROM betting_recommendations WHERE id = :id"),
+            {"id": rec_id},
+        )
+        .mappings()
+        .one()
+    )
+    return dict(row)
 
 
 def _seed_features(conn, *, match_id: str, feature_set: str, features: dict):
@@ -655,3 +704,88 @@ class TestIdempotency:
         # No re-grade — actual_outcome stays NULL because trigger
         # didn't fire on the score-only UPDATE.
         assert row["actual_outcome"] is None
+
+
+# ── Rows written after kickoff (migration 027) ───────────────────────
+
+
+class TestPostKickoffRows:
+    """Since migration 027 the trigger leaves hindsight alone, by the
+    Python grader's rules (scripts/grade_completed_matches.py): a
+    prediction written after kickoff stays ungraded; a rec written at or
+    after kickoff stays pending, for the grader to void."""
+
+    def test_prediction_written_after_kickoff_stays_ungraded(self, trigger_tables, engine):
+        with engine.begin() as conn:
+            ids = _seed_match(conn, sport="soccer")
+            after = _seed_prediction(
+                conn,
+                match_id=ids["match_id"],
+                model_name="ensemble_soccer_match_result",
+                prediction_type="match_result",
+                predicted_outcome="home",
+                created_at=ids["kickoff"] + timedelta(minutes=1),
+            )
+            at = _seed_prediction(
+                conn,
+                match_id=ids["match_id"],
+                model_name="ensemble_soccer_match_result",
+                model_version="v1.1",
+                prediction_type="match_result",
+                predicted_outcome="home",
+                created_at=ids["kickoff"],
+            )
+            _finish_match(conn, match_id=ids["match_id"], home_score=2, away_score=1)
+            after_row = _read_prediction(conn, after)
+            at_row = _read_prediction(conn, at)
+        assert after_row["actual_outcome"] is None
+        assert after_row["is_correct"] is None
+        # Written exactly AT kickoff is not after it (the grader's `>`): graded.
+        assert at_row["is_correct"] is True
+
+    def test_rec_written_at_or_after_kickoff_stays_pending(self, trigger_tables, engine):
+        with engine.begin() as conn:
+            ids = _seed_match(conn, sport="soccer")
+            pred = _seed_prediction(
+                conn,
+                match_id=ids["match_id"],
+                model_name="ensemble_soccer_match_result",
+                prediction_type="match_result",
+                predicted_outcome="home",
+            )
+            # All three on the same pre-kickoff prediction, which the trigger
+            # does grade: only the rec's own created_at holds two of them back.
+            recs = {
+                when: _seed_rec(
+                    conn, match_id=ids["match_id"], prediction_id=pred, selection="home", created_at=created_at
+                )
+                for when, created_at in (
+                    ("before", ids["kickoff"] - timedelta(minutes=30)),
+                    ("at", ids["kickoff"]),
+                    ("after", ids["kickoff"] + timedelta(minutes=5)),
+                )
+            }
+            _finish_match(conn, match_id=ids["match_id"], home_score=2, away_score=1)
+            pred_row = _read_prediction(conn, pred)
+            rows = {when: _read_rec(conn, rec_id) for when, rec_id in recs.items()}
+        assert pred_row["is_correct"] is True
+        assert rows["before"]["status"] == "won"
+        assert rows["before"]["settled_at"] is not None
+        for when in ("at", "after"):
+            assert rows[when] == {"status": "pending", "actual_result": None, "settled_at": None}, when
+
+    def test_rec_with_no_created_at_still_settles(self, trigger_tables, engine):
+        # A NULL created_at is not "after kickoff" in the grader either.
+        with engine.begin() as conn:
+            ids = _seed_match(conn, sport="soccer")
+            pred = _seed_prediction(
+                conn,
+                match_id=ids["match_id"],
+                model_name="ensemble_soccer_match_result",
+                prediction_type="match_result",
+                predicted_outcome="home",
+            )
+            rec = _seed_rec(conn, match_id=ids["match_id"], prediction_id=pred, selection="home", created_at=None)
+            _finish_match(conn, match_id=ids["match_id"], home_score=0, away_score=1)
+            row = _read_rec(conn, rec)
+        assert row["status"] == "lost"

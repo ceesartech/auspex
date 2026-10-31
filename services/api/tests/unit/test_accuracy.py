@@ -191,3 +191,46 @@ class TestAccuracySummaryRoute:
 
         for call in mock_db.execute.call_args_list:
             assert call.args[1]["market"] == "moneyline"
+
+    @pytest.mark.asyncio
+    async def test_recs_voided_for_post_kickoff_are_out_of_the_book(self, mock_db, mock_settings):
+        """A rec voided because it was written at or after kickoff is
+        hindsight, not a bet. It must drop out in the outer WHERE — so out of
+        settled, void AND total_staked (its stake would dilute ROI) — matched
+        on the grader's label prefix, while every other void (a push) stays.
+        The SQL itself was checked against a scratch Postgres: 2 hindsight
+        voids + 2 pushes beside 4 won/lost bets read settled=6, void=2,
+        staked=60 (was settled=9, void=5, staked=90)."""
+        from routes.accuracy import POST_KICKOFF_VOID_PREFIX, accuracy_summary
+
+        captured = {}
+
+        def side_effect(query, params=None):
+            q = str(query)
+            result = MagicMock()
+            result.fetchall.return_value = []
+            result.fetchone.return_value = _rec_row(
+                settled=4, won=2, lost=1, void=1, total_staked=80.0, total_profit_loss=10.0
+            )
+            if "betting_recommendations" in q:
+                captured["sql"], captured["params"] = q, params
+            return result
+
+        mock_db.execute.side_effect = side_effect
+
+        resp = await accuracy_summary(sport="soccer", market=None, days=30, db=mock_db, user={"user_id": "owner"})
+
+        assert POST_KICKOFF_VOID_PREFIX == "void: written after kickoff"
+        assert captured["params"]["post_kickoff_void"] == POST_KICKOFF_VOID_PREFIX
+        sql = " ".join(captured["sql"].split())
+        outer = sql.split("FROM betting_recommendations br", 1)[1]
+        assert (
+            "AND NOT (br.status = 'void' AND COALESCE(starts_with(br.actual_result, :post_kickoff_void), FALSE))"
+            in outer
+        )
+        # Other voids are untouched: the aggregates still count every 'void'.
+        assert "COUNT(*) FILTER (WHERE br.status = 'void') AS void" in sql
+        assert "FILTER (WHERE br.status IN ('won','lost','void')), 0) AS total_staked" in sql
+        # The route reports what the filtered SQL returns.
+        assert (resp.recs.settled, resp.recs.void, resp.recs.total_staked) == (4, 1, 80.0)
+        assert resp.recs.roi_pct == pytest.approx(12.5)

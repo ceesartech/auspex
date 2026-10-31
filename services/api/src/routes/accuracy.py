@@ -27,6 +27,13 @@ from sqlalchemy.orm import Session
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# actual_result of a rec voided because it was written at or after kickoff
+# starts with this: scripts/grade_completed_matches.POST_KICKOFF_VOID_RESULT,
+# which the API image cannot import (tests/unit/test_schema_invariants.py
+# keeps the two equal). void_post_kickoff_recs.py appends " (was <status>
+# <pl>)", so it is matched as a prefix.
+POST_KICKOFF_VOID_PREFIX = "void: written after kickoff"
+
 
 # ── Response models ─────────────────────────────────────────────────
 
@@ -51,10 +58,10 @@ class MarketAccuracy(BaseModel):
 class RecsPnL(BaseModel):
     """Settled betting_recommendations P/L summary for the window."""
 
-    settled: int  # recs with status in ('won','lost','void')
+    settled: int  # recs with status in ('won','lost','void'), post-kickoff voids excluded
     won: int
     lost: int
-    void: int
+    void: int  # pushes etc. — never a rec voided for being written after kickoff
     total_staked: float  # sum of recommended_stake on settled recs
     total_profit_loss: float  # sum of profit_loss
     roi_pct: float  # 100 × total_profit_loss / total_staked
@@ -188,6 +195,13 @@ async def accuracy_summary(
 
     # Recommendations P/L. Same sport/market scoping so a sport-only
     # view doesn't include the other sport's settled bets.
+    #
+    # A rec voided because it was written at or after kickoff is hindsight,
+    # not a bet: it is left out of the book entirely — not settled, not a
+    # void, its stake not in total_staked (where it would dilute ROI; its
+    # P&L is 0 either way). Every other void stays: a push is a real bet
+    # that returned its stake. COALESCE: starts_with(NULL, ...) is NULL, and
+    # NOT (TRUE AND NULL) would drop a void with no actual_result.
     rec_row: Dict[str, Any] = (
         db.execute(
             text(
@@ -209,9 +223,11 @@ async def accuracy_summary(
               AND m.match_date >= NOW() - (:days || ' days')::interval
               AND (:sport IS NULL OR l.sport = :sport)
               AND (:market IS NULL OR p.prediction_type = :market)
+              AND NOT (br.status = 'void'
+                       AND COALESCE(starts_with(br.actual_result, :post_kickoff_void), FALSE))
             """
             ),
-            {"days": days, "sport": sport, "market": market},
+            {"days": days, "sport": sport, "market": market, "post_kickoff_void": POST_KICKOFF_VOID_PREFIX},
         )
         .fetchone()
         ._asdict()
