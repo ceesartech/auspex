@@ -1401,7 +1401,7 @@ with the growth-rate driver (WAL) eliminated.
 > class map gained `regulation_1x2` (3) and `puck_line` (2-way multi-line).
 
 > **Update (2026-10-31, 00:47–00:54Z) — tennis orphan cleanup ran; it deleted
-> 45 settled recs, which are recoverable.** `scripts/ops/cleanup_tennis_orphans.sh`
+> 45 settled recs; restored the same night.** `scripts/ops/cleanup_tennis_orphans.sh`
 > (operator-run; the 23:12Z attempt had aborted at step 2 before any write —
 > CWD-relative CSV default, fixed `3ab4fb6`). Backup
 > `betting_system-2026-10-31T004703Z.dump` landed first. Step 2 settled the
@@ -1432,8 +1432,12 @@ with the growth-rate driver (WAL) eliminated.
 > written pre-kickoff; max |Δp| vs the deleted ones 0.047, median 0.002).
 > Every row is refused unless the twin's score and a fresh grade of the rec's
 > own selection reproduce the CSV. Dry run: 45 planned, 0 refused (16W/29L,
-> net +218.76 — the CSV's figure exactly). Until it is applied, the recs P&L
-> widget is missing those 45 (it inner-joins predictions). Open: the CASCADE
+> net +218.76 — the CSV's figure exactly). **Applied 01:07:56Z** (audit CSV
+> `restored_recs_2026-10-31T010756Z.csv`): 45 inserted; all 80 recs of the
+> repair now match its plan (status, P&L to the cent — `profit_loss` is
+> numeric(10,2) — and match_id), each has its prediction, and the recs P&L
+> widget's query sees all 50 settled at net +61.96; a re-run finds nothing to
+> restore. Open: the CASCADE
 > itself — any prediction delete silently deletes recs; `ON DELETE RESTRICT`
 > (a migration, needs approval) would make this class fail loudly.
 
