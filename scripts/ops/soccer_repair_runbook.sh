@@ -100,7 +100,12 @@
 # They are unpaused when the runbook exits ONLY if the corpus is consistent:
 # no corpus step (1, 3, 4, 5, 7) failed or was cut short in this run, and the
 # state file records step 10's feature recompute after the last corpus change
-# (or no corpus change at all). Otherwise — a failed or interrupted corpus
+# (or no corpus change at all). A corpus change is a corpus step's 'changed'
+# record or its 'failed' one: a corpus step that fails or is cut short is
+# recorded 'failed' (it may have committed part of its change — the repoint
+# passes and the fd repair commit their apply before their after-state), so a
+# later run that reads that step ALREADY DONE does not clear it; only step
+# 10's next completion does. Otherwise — a failed or interrupted corpus
 # step, or a run that leaves step 10 still to do — they STAY PAUSED and the
 # runbook prints an ALERT with the unpause commands: unpaused, either would
 # start its missed run at once and train on a half-repaired corpus with stale
@@ -135,9 +140,10 @@
 #   ... --only N     run step N alone
 # State: RUNBOOK_STATE (default ~/.soccer_repair_runbook.state) records each
 # step's completion, in order ("changed", "already_done", or "checked" for
-# step 11); step 10's skip and the retrain unpause read it (a missing file
-# means step 10 runs; a record that cannot be written keeps the retrain DAGs
-# paused at the end).
+# step 11), and each corpus step that failed or was cut short ("failed");
+# step 10's skip and the retrain unpause read it (a missing file means step
+# 10 runs; a record that cannot be written keeps the retrain DAGs paused at
+# the end).
 # Read-only check on prod 2026-10-31 ~12:10Z (VM HEAD a071d6a, not deployed):
 # the preflight reads 22 relabelled / 4 cancelled, 39 Liga MX sides sit on
 # santos/guadalajara, calculate_match_outcome is 011's.
@@ -178,11 +184,11 @@ STATE_WRITE_FAILED=""
 # The steps that change the training corpus or its features (step 10 recomputes the features after them).
 CORPUS_STEPS=" 1 3 4 5 7 "
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/soccer_runbook.XXXXXX") || { log "ABORT: mktemp failed"; exit 1; }
-# The state file's last record among step 10's completions and the corpus steps' 'changed' ones
+# The state file's last record among step 10's completions and the corpus steps' 'changed' and 'failed' ones
 # (records are appended in order): 10, a corpus step, or nothing.
 last_corpus_record() {
   [ -r "$STATE_FILE" ] || return 0
-  sed -nE 's/^step=(10) result=[a-z_]+ .*/\1/p; s/^step=(1|3|4|5|7) result=changed .*/\1/p' "$STATE_FILE" | tail -1
+  sed -nE 's/^step=(10) result=[a-z_]+ .*/\1/p; s/^step=(1|3|4|5|7) result=(changed|failed) .*/\1/p' "$STATE_FILE" | tail -1
 }
 # 0 when step 10 recomputed the features after the last corpus change.
 step10_done_already() { [ "$(last_corpus_record)" = "10" ]; }
@@ -198,6 +204,21 @@ corpus_consistent() {
 finish() {
   local rc=$?
   trap '' INT TERM HUP
+  # A corpus step that failed or was cut short may have committed part of its change (the repoint passes and the fd
+  # repair commit their apply, then check the after-state): recorded 'failed', only a later step 10 clears it — a
+  # re-run that reads that step ALREADY DONE writes no 'changed' record.
+  if [ -n "$CURRENT_STEP" ]; then
+    case "$CORPUS_STEPS" in
+      *" $CURRENT_STEP "*)
+        if echo "step=$CURRENT_STEP result=failed at=$(date -u +%s) head=${head:-unknown}" >> "$STATE_FILE" 2>/dev/null; then
+          af_say "step $CURRENT_STEP failed or was cut short (exit $rc): recorded in $STATE_FILE — step 10 runs again before the retrain DAGs are unpaused"
+        else
+          STATE_WRITE_FAILED=1
+          af_note "WARNING: could not record step $CURRENT_STEP's failure in $STATE_FILE — after the fix, run steps $CURRENT_STEP-10 (--from $CURRENT_STEP) before any retrain; do not rely on step 10's skip"
+        fi
+        ;;
+    esac
+  fi
   if [ -n "${AF_PAUSED_BY_US// /}" ]; then
     if corpus_consistent; then
       af_resume

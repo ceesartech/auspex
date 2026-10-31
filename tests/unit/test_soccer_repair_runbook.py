@@ -10,7 +10,9 @@ prior repairs, a retrain in flight), the re-grade gate, step 10's skip and
 step 11's wait. The real wrappers ran end to end through a docker shim
 against a replica of prod (scripts/ops/soccer_repair_runbook.sh header).
 A retrain DAG whose pause read-back fails or is interrupted still ends
-unpaused."""
+unpaused.
+A corpus step that failed or was cut short is recorded 'failed', so a later
+ALREADY DONE re-run of it does not clear it."""
 
 from __future__ import annotations
 
@@ -227,6 +229,7 @@ def test_a_failing_corpus_step_stops_keeps_the_retrains_paused_and_from_n_restor
     assert _paused(af) == {"retrain_models": True, "retrain_halftime_dc": True}
     assert "ALERT: retrain_models stays PAUSED" in out and "ALERT: retrain_halftime_dc stays PAUSED" in out
     assert "airflow dags unpause -y retrain_models" in out
+    assert "step=4 result=failed" in (tmp_path / "state").read_text()
     assert "stays PAUSED" in (tmp_path / "afstate" / "airflow_pauses.log").read_text()
     assert _markers(tmp_path) == ["paused_retrain_halftime_dc", "paused_retrain_models"]
 
@@ -318,6 +321,8 @@ def test_ctrl_c_through_a_dead_tee_decides_the_retrains_and_says_so_in_the_ledge
         assert _wait_for(lambda: ledger.exists() and word in ledger.read_text()), ledger.read_text()
         assert _wait_for(lambda: _paused(fd.airflow_state(tmp_path)) == {d: kept for d in RETRAIN})
         assert _markers(tmp_path) == (["paused_retrain_halftime_dc", "paused_retrain_models"] if kept else [])
+        state = (tmp_path / "state").read_text() if (tmp_path / "state").exists() else ""
+        assert ("step=3 result=failed" in state) == kept, state
     finally:
         if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -463,3 +468,42 @@ def test_ctrl_c_during_the_read_right_after_pausing_a_retrain_dag_ends_with_it_u
     finally:
         if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGKILL)
+
+
+# --- a corpus step that failed, then reads ALREADY DONE --------------------------------------------------------------
+
+
+def test_a_failed_corpus_step_is_not_forgotten_by_a_re_run_that_reads_it_already_done(tmp_path):
+    """Step 1's apply committed, then its after-state failed (exit 1). Re-run alone, the wrapper re-plans and prints
+    ALREADY DONE — no 'changed' record. Before, the committed change was then forgotten: no corpus record followed
+    the last step-10 one, so --only 1 unpaused both retrain DAGs with no feature recompute and said ALL STEPS DONE.
+    Now the failure is recorded 'failed' and counts as a corpus change until step 10 runs."""
+    (tmp_path / "state").write_text("step=10 result=changed at=1 head=x\n")  # an earlier, complete repair
+    rc, out, _, _, af = _run(tmp_path, FAIL_REPOINT_TEAM_MATCHES="1")
+    assert rc == 1 and _paused(af) == {"retrain_models": True, "retrain_halftime_dc": True}, out
+    assert "step=1 result=failed" in (tmp_path / "state").read_text()
+
+    rc, out = fd.run(RUNBOOK_IN(tmp_path), {**_env(tmp_path), "ALREADY_REPOINT_TEAM_MATCHES": "1"}, "--only", "1")
+    assert rc == 0 and "STEP 1/11 DONE (already_done)" in out, out
+    assert "the repair is not complete" in out and "ALERT: retrain_models stays PAUSED" in out
+    assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": True, "retrain_halftime_dc": True}
+
+    calls_before = len(fd.calls(tmp_path))
+    rc, out = fd.run(RUNBOOK_IN(tmp_path), _env(tmp_path), "--only", "10")
+    assert rc == 0 and "not complete" not in out, out
+    assert [c for c in fd.calls(tmp_path)[calls_before:] if "compute_features.py --backfill-finished soccer" in c]
+    assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": False, "retrain_halftime_dc": False}
+
+    # A full re-run of the finished sequence still only reads: step 10's record is the last corpus record.
+    calls_before = len(fd.calls(tmp_path))
+    env = {**_env(tmp_path), **{f"ALREADY_{w[:-3].upper()}": "1" for w in WRAPPERS}, "REGRADE_CHANGES": "0"}
+    rc, out = fd.run(RUNBOOK_IN(tmp_path), env)
+    assert rc == 0 and "not complete" not in out, out
+    assert not [c for c in fd.calls(tmp_path)[calls_before:] if "compute_features" in c or "--apply" in c]
+
+
+def test_a_failure_outside_the_corpus_steps_is_not_recorded(tmp_path):
+    rc, out, _, _, _ = _run(tmp_path, "--only", "2", FAIL_MIGRATE_027_OUTCOME_TRIGGER="1")
+    assert rc == 1, out
+    state = tmp_path / "state"
+    assert not state.exists() or "result=failed" not in state.read_text()
