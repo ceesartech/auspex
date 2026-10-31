@@ -55,11 +55,14 @@
 #    per-step feature commands steps 1, 3 and 7 print). Skipped as already
 #    done when it completed after every data-changing step's last change
 #    (this runbook's state file, below).
-# 11 merge_soccer_teams.py --check-after <plan> --odds-since <MERGED_AT>
+# 11 merge_soccer_teams.py --check-after <plan> --odds-since <MERGED_AT> --after-later-steps
 #    Read-only. Waits (up to ODDS_WAIT_POLLS x AF_POLL_SECONDS, 2 h) for a
 #    fetch_live_odds run that started after the merge and finished; then
-#    teams_reminted, resolver_misses and odds_fixtures_stopped must be 0. The
-#    plan and MERGED_AT come from /app/backups/merge_soccer_teams_last_apply.env.
+#    teams_reminted, resolver_misses, odds_not_yet_observed and
+#    odds_fixtures_stopped must be 0 (and the merge's other after-state counts:
+#    only repoints_missing is reported, not failed — steps 4 and 7 delete some
+#    re-pointed rows on purpose; 17 on the rehearsal). The plan and MERGED_AT
+#    come from /app/backups/merge_soccer_teams_last_apply.env.
 #
 # Before step 1 (read-only) it REFUSES TO START unless:
 #   * the VM HEAD contains this runbook's own commit (the file being run is
@@ -269,7 +272,7 @@ step11() {
   done
   if [ -z "$found" ]; then log "no fetch_live_odds run has finished since $merged_at after $ODDS_WAIT_POLLS polls — re-run with --from 11 later"; return 1; fi
   log "fetch_live_odds run started $found finished; checking odds and resolution since $merged_at"
-  $DC exec -T api sh -c "python /app/scripts/merge_soccer_teams.py --check-after $plan --odds-since $merged_at > /tmp/runbook_odds_after.log 2>&1; rc=\$?; grep -E 'AFTER|REFUSED|ERROR|stopped' /tmp/runbook_odds_after.log | tail -15; exit \$rc"
+  $DC exec -T api sh -c "python /app/scripts/merge_soccer_teams.py --check-after $plan --odds-since $merged_at --after-later-steps > /tmp/runbook_odds_after.log 2>&1; rc=\$?; grep -E 'AFTER|REFUSED|ERROR|stopped|repoints_missing|Traceback' /tmp/runbook_odds_after.log | tail -15; exit \$rc"
 }
 
 run_step 1 "repoint_team_matches --pass 1" bash "$OPS/repoint_team_matches.sh" --pass 1

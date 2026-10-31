@@ -156,12 +156,17 @@ with open recs. Re-run it after the next fetch_live_odds run with
 re-minted team, an odds miss as a merged club's fixture the feed was quoting
 in the hours before the merge and that run did not quote (odds_fixtures_stopped;
 odds_control_stopped counts the same for every other club, the base rate).
+The runbook runs that odds check last (step 11), after
+repair_football_data_kickoffs and cleanup_soccer_orphans have deleted some
+re-pointed rows on purpose: --after-later-steps reports repoints_missing
+instead of failing on it; every other count must still be 0.
 
 Usage (inside the api container; dry run is the default):
     python /app/scripts/merge_soccer_teams.py --plan-out /app/backups/merge.plan.json
     python /app/scripts/merge_soccer_teams.py --apply --expect-plan /app/backups/merge.plan.json
     python /app/scripts/merge_soccer_teams.py --check-after /app/backups/merge.plan.json
     python /app/scripts/merge_soccer_teams.py --check-after /app/backups/merge.plan.json --odds-since <UTC ISO>
+    python /app/scripts/merge_soccer_teams.py --check-after <plan> --odds-since <UTC ISO> --after-later-steps
     python /app/scripts/merge_soccer_teams.py --only <new_team_id>[,<new_team_id>...] --apply
 Afterwards: grade_completed_matches.py --match-id <id> for every kept row
 the plan lists under GRADE_AFTER (moved predictions on finished rows, and
@@ -2268,6 +2273,10 @@ ODDS_LOOKBACK = timedelta(hours=6)  # fetch_live_odds runs every 90 min: the las
 
 # Counts check_after reports that are not "must be 0".
 AFTER_INFO = ("pairs_recorded", "pairs_expected", "odds_control_stopped")
+# Also reported only, with --after-later-steps: the runbook's odds check (step 11) runs after
+# repair_football_data_kickoffs and cleanup_soccer_orphans, which delete some re-pointed rows on
+# purpose (football-data copies, stale orphans). Every other count still holds after them.
+AFTER_LATER_STEPS_INFO = ("repoints_missing",)
 
 
 def check_odds(cur, old_ids: list[str], since: datetime) -> dict:
@@ -2400,9 +2409,10 @@ def check_after(conn, doc: dict, resolvers: Resolvers, odds_since: Optional[date
     return out
 
 
-def after_state_ok(out: dict) -> bool:
+def after_state_ok(out: dict, after_later_steps: bool = False) -> bool:
+    info = AFTER_INFO + (AFTER_LATER_STEPS_INFO if after_later_steps else ())
     return out.get("pairs_recorded") == out.get("pairs_expected") and all(
-        v == 0 for k, v in out.items() if k not in AFTER_INFO
+        v == 0 for k, v in out.items() if k not in info
     )
 
 
@@ -2569,6 +2579,7 @@ def run_check_after(
     resolvers: Optional[Resolvers],
     resolver_reason: Optional[str],
     odds_since: Optional[datetime] = None,
+    after_later_steps: bool = False,
 ) -> int:
     if resolvers is None or resolver_reason:
         logger.error("REFUSED: %s", resolver_reason)
@@ -2578,12 +2589,20 @@ def run_check_after(
         logger.error("REFUSED: %s is not a merge_soccer_teams plan file", plan_path)
         return 2
     out = check_after(conn, doc, resolvers, odds_since)
-    ok = after_state_ok(out)
+    ok = after_state_ok(out, after_later_steps)
     logger.info("AFTER %s", " ".join(f"{k}={v}" for k, v in out.items()))
+    if after_later_steps and out.get("repoints_missing"):
+        logger.info(
+            "repoints_missing=%d reported, not failed (--after-later-steps): later repairs deleted those re-pointed rows",
+            out["repoints_missing"],
+        )
     if ok:
         logger.info("AFTER-STATE OK: %d/%d pairs merged and resolving", out["pairs_recorded"], out["pairs_expected"])
         return 0
-    logger.error("AFTER-STATE FAILED: every count above must be 0 and pairs_recorded=pairs_expected")
+    logger.error(
+        "AFTER-STATE FAILED: every count above must be 0%s and pairs_recorded=pairs_expected",
+        " (but repoints_missing)" if after_later_steps else "",
+    )
     return 1
 
 
@@ -2609,6 +2628,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="With --check-after: when the merge committed (ISO, UTC); also check the next fetch_live_odds run.",
     )
+    p.add_argument(
+        "--after-later-steps",
+        action="store_true",
+        help="With --check-after: the run order's later repairs have run since the merge (they delete some "
+        "re-pointed rows on purpose): repoints_missing is reported, not failed.",
+    )
     p.add_argument("--odds-spellings", type=Path, default=ODDS_SPELLINGS_PATH, help=argparse.SUPPRESS)
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
@@ -2620,13 +2645,13 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("DATABASE_URL not set")
         return 2
     resolvers, reason = load_resolvers()
-    if args.odds_since and not args.check_after:
-        logger.error("REFUSED: --odds-since only goes with --check-after")
+    if (args.odds_since or args.after_later_steps) and not args.check_after:
+        logger.error("REFUSED: --odds-since and --after-later-steps only go with --check-after")
         return 2
     if args.check_after:
         conn = psycopg2.connect(args.database_url)
         try:
-            return run_check_after(conn, args.check_after, resolvers, reason, args.odds_since)
+            return run_check_after(conn, args.check_after, resolvers, reason, args.odds_since, args.after_later_steps)
         finally:
             conn.close()
     try:

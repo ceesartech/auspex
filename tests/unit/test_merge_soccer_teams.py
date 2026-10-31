@@ -160,16 +160,19 @@ class TestCommittedMap:
         assert "promote_raw stays blocked until" in wrapper
 
     def test_wrapper_pauses_the_writers_and_always_unpauses_what_it_paused(self):
+        """The behaviour (drain first, Airflow 3.3's frozen paused runs) is run for real in
+        tests/unit/test_merge_soccer_teams_wrapper.py; this pins the shape."""
         wrapper = (SCRIPTS_DIR / "ops" / "merge_soccer_teams.sh").read_text()
+        lib = (SCRIPTS_DIR / "ops" / "_airflow_lib.sh").read_text()
         assert 'DAGS="auspex_pipeline fetch_live_odds"' in wrapper
-        assert "trap resume_dags EXIT" in wrapper and "trap 'exit 130' INT TERM HUP" in wrapper
-        assert "airflow dags pause -y" in wrapper and "airflow dags unpause -y" in wrapper
-        assert 'PAUSED_BY_US="$PAUSED_BY_US $d"' in wrapper  # only what it paused; an already paused DAG stays paused
-        backup, pause = wrapper.index('log "backup landed'), wrapper.index('log "pausing $DAGS')
+        assert "trap af_resume EXIT" in wrapper and "trap 'exit 130' INT TERM HUP" in wrapper
+        assert "airflow dags pause -y" in lib and "airflow dags unpause -y" in lib
+        assert 'AF_PAUSED_BY_US="$AF_PAUSED_BY_US $d"' in lib  # only what it paused; an already paused DAG stays paused
+        backup, pause = wrapper.index('log "backup landed'), wrapper.index("af_drain_and_pause 5 40 $DAGS")
         dry, apply_, resume, grade = (
             wrapper.index('log "2/5 dry run"'),
             wrapper.index('log "3/5 apply'),
-            wrapper.index("MERGED_AT=$(date -u +%FT%TZ)\nresume_dags"),
+            wrapper.index("MERGED_AT=$(date -u +%FT%TZ)\naf_resume"),
             wrapper.index('log "4/5 grade"'),
         )
         assert backup < pause < dry < apply_ < resume < grade
@@ -1697,6 +1700,18 @@ class TestCheckAfter:
         assert not ms.after_state_ok(out)
         assert out[key] == (0 if key == "pairs_recorded" else out[key]) and (key == "pairs_recorded" or out[key] > 0)
 
+    def test_after_later_steps_reports_rows_later_repairs_deleted_and_holds_the_rest(self):
+        """Runbook step 11 runs after the fd repair and the orphan cleanup, which
+        delete some re-pointed rows on purpose: repoints_missing is reported then,
+        every other count still fails."""
+        teams = _merged_teams()
+        out = ms.check_after(_AfterConn(teams, []), _after_doc(), self._resolvers())  # 'a' was deleted later
+        assert out["repoints_missing"] == 1
+        assert not ms.after_state_ok(out) and ms.after_state_ok(out, after_later_steps=True)
+        teams.append(_team(THIRD, "BK Hacken"))  # a re-minted team still fails
+        out = ms.check_after(_AfterConn(teams, []), _after_doc(), self._resolvers())
+        assert not ms.after_state_ok(out, after_later_steps=True)
+
     def test_a_resolver_miss_and_an_unsettled_rec_fail(self):
         conn = _AfterConn(_merged_teams(), [_m("a", OLD, OPP)], recs=[{"match_id": "a", "open": True}])
         out = ms.check_after(conn, _after_doc(), self._resolvers(team=THIRD))
@@ -1765,6 +1780,7 @@ class TestMain:
 
     def test_odds_since_needs_check_after(self):
         assert ms.main(["--database-url", "postgresql://nowhere/x", "--odds-since", "2026-10-31T10:00:00Z"]) == 2
+        assert ms.main(["--database-url", "postgresql://nowhere/x", "--after-later-steps"]) == 2
 
     def test_a_missing_odds_spellings_file_refuses_before_connecting(self, tmp_path):
         rc = ms.main(["--database-url", "postgresql://nowhere/x", "--odds-spellings", str(tmp_path / "none.csv")])
