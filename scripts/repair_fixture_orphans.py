@@ -45,11 +45,13 @@ An orphan that still holds ANY betting_recommendations or betting_history
 row is never deleted (run repair_stranded_recs.py first; it re-points
 settled recs onto the twin) — it is counted as `kept_has_recs`. Nor is one
 holding a PREDICTION a rec references: re-pointing moves the rec's match_id
-but not its prediction_id, and betting_recommendations.prediction_id is ON
-DELETE CASCADE, so deleting that orphan deletes the rec with it. The
-2026-10-31 tennis run lost 45 settled recs exactly that way (restored by
-restore_cascaded_recs.py); the twin usually already holds the same
-(model, version, type), so the rec's prediction is never the one moved.
+but not its prediction_id. Until migration 025 betting_recommendations.
+prediction_id was ON DELETE CASCADE, so deleting that orphan deleted the rec
+with it — the 2026-10-31 tennis run lost 45 settled recs exactly that way
+(restored by restore_cascaded_recs.py); the twin usually already holds the
+same (model, version, type), so the rec's prediction is never the one moved.
+Since 025 (NO ACTION) the DELETE would fail instead; the guard keeps the
+batch from aborting.
 
 Every row the run moves or deletes is written to --archive (gzip JSONL,
 write-once) BEFORE the first write, so the run is reversible offline.
@@ -180,7 +182,7 @@ DELETE_ORPHANS_SQL = """
        AND m.status IN ('scheduled', 'cancelled')
        AND NOT EXISTS (SELECT 1 FROM betting_recommendations r WHERE r.match_id = m.id)
        AND NOT EXISTS (SELECT 1 FROM betting_history h WHERE h.match_id = m.id)
-       -- prediction_id cascades: a rec whose prediction lives here dies with the row
+       -- a rec whose prediction lives here: CASCADE deleted it before 025, NO ACTION fails
        AND NOT EXISTS (SELECT 1 FROM betting_recommendations r
                          JOIN predictions p ON p.id = r.prediction_id
                         WHERE p.match_id = m.id)

@@ -5,8 +5,8 @@ WHAT HAPPENED
 repair_stranded_recs.py settles a stranded rec and re-points its match_id
 onto the finished twin, but its prediction_id still names a prediction on
 the orphan row. repair_fixture_orphans.py then deleted the orphan, and
-betting_recommendations.prediction_id is ON DELETE CASCADE: the prediction
-went, and the rec with it. Prod 2026-10-31 00:49Z, tennis: 45 of the 50
+betting_recommendations.prediction_id was ON DELETE CASCADE (NO ACTION since
+migration 025): the prediction went, and the rec with it. Prod 2026-10-31 00:49Z, tennis: 45 of the 50
 settled recs were deleted that way (the 5 survivors had their prediction
 moved; the 30 voided recs kept their orphan). The orphan tool now refuses
 to delete such a row; this puts the 45 back.

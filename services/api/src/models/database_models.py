@@ -230,7 +230,8 @@ class BettingRecommendation(Base):
     __tablename__ = "betting_recommendations"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    prediction_id = Column(UUID(as_uuid=True), ForeignKey("predictions.id", ondelete="CASCADE"))
+    # NO ACTION since migration 025: a prediction delete that would strand a rec fails
+    prediction_id = Column(UUID(as_uuid=True), ForeignKey("predictions.id", ondelete="NO ACTION"))
     match_id = Column(UUID(as_uuid=True), ForeignKey("matches.id", ondelete="CASCADE"))
     bet_type = Column(String(50), nullable=False)
     selection = Column(String(100), nullable=False)
