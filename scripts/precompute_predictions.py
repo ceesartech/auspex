@@ -301,27 +301,30 @@ def compute_feature_medians(database_url: str) -> dict[str, float]:
 
 def _load_dixon_coles_artifact(path_str: str, label: str):
     """Shared helper used by HT + 2H loaders. Returns the fitted
-    DixonColesPredictor, or None when the artifact is missing.
-    Logging matches the previous _load_halftime_dixon_coles shape
-    so behaviour around missing artifacts is unchanged.
+    DixonColesPredictor, or None when the artifact is missing or
+    unloadable. The FT pipeline keeps running either way, but every
+    path that disables the HT / HT-FT markets logs at ERROR: both
+    artifacts are deployed, so a missing one is an incident, not a
+    configuration choice (scripts/promote_dc_model.py also loads
+    staged artifacts through this helper before promoting them).
     """
     from pathlib import Path
 
     path = Path(path_str)
     if not path.exists():
-        logger.info("%s Dixon-Coles artifact not found at %s; %s markets disabled.", label, path, label)
+        logger.error("%s Dixon-Coles artifact not found at %s; %s markets disabled.", label, path, label)
         return None
     try:
         from predictors.model_config import DIXON_COLES_CONFIG  # type: ignore
         from predictors.poisson_models import DixonColesPredictor  # type: ignore
     except Exception as e:
-        logger.warning("%s model imports failed; %s markets disabled: %s", label, label, e)
+        logger.error("%s model imports failed; %s markets disabled: %s", label, label, e)
         return None
     model = DixonColesPredictor(DIXON_COLES_CONFIG)
     try:
         model.load(str(path))
     except Exception as e:
-        logger.warning("%s model load failed at %s: %s", label, path, e)
+        logger.error("%s model load failed at %s; %s markets disabled: %s", label, path, label, e)
         return None
     return model
 
@@ -404,6 +407,11 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
     market_rows = 0
     ou_anchored = 0
     ou_unanchored = 0
+    # Per-match HT and HT/FT derivation failures are logged one by one as
+    # warnings; these counters turn them into ONE end-of-run error so a
+    # systematic failure (every match, every tick) cannot hide in the noise.
+    ht_attempted = ht_failed = 0
+    htft_attempted = htft_failed = 0
     alerts: list[Alert] = []
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -552,6 +560,7 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                 # matrix. Best-effort: failure leaves FT predictions intact.
                 ht_P = None  # captured for the HT/FT joint block below
                 if ht_derive_ready and ht_dc_model is not None:
+                    ht_attempted += 1
                     try:
                         ht_h_lam, ht_a_lam = ht_dc_model.lambdas_for_match(
                             m["home_team"],
@@ -572,6 +581,7 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                             model_version,
                         )
                     except Exception as e:
+                        ht_failed += 1
                         logger.warning("HT market derivation failed for %s: %s", m["match_id"], e)
                         ht_P = None
 
@@ -582,6 +592,7 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                 # failure (incl. ht_P unavailable from the block above
                 # or 2H model missing) leaves the other markets intact.
                 if htft_derive_ready and ht_P is not None:
+                    htft_attempted += 1
                     try:
                         h2_h_lam, h2_a_lam = second_half_dc_model.lambdas_for_match(
                             m["home_team"],
@@ -602,6 +613,7 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                             model_version,
                         )
                     except Exception as e:
+                        htft_failed += 1
                         logger.warning(
                             "HT/FT joint derivation failed for %s: %s",
                             m["match_id"],
@@ -631,6 +643,15 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
         len(alerts),
         queue_depth,
     )
+    if ht_failed or htft_failed:
+        logger.error(
+            "Half-time derivation failures this run: HT markets failed on %d of %d matches, "
+            "HT/FT on %d of %d (per-match warnings above carry the exceptions)",
+            ht_failed,
+            ht_attempted,
+            htft_failed,
+            htft_attempted,
+        )
     return {
         "predicted": predicted,
         "market_rows": market_rows,
