@@ -19,15 +19,28 @@ only way from there into production:
        * no coverage regression: teams >= 98% of production's and leagues >=
          production's - 1 (skipped against a legacy production artifact, which
          has no per-league baselines), data no older than production's;
+       * the same data as production's fit, give or take a month: observed
+         mean total goals within 5% of production's manifest, and at least
+         99% of its rows (skipped against a legacy, manifest-less production)
+         — the trainer's level canary only compares a fit with its own frame,
+         so a wrong or truncated frame passes it;
      then loads the staged file through the serve path's own loader helper and
      derives the HT 1x2 for one fixture;
   2. backs up production (model.bin + manifest.json if any) to
      /app/models/backup-<name>-<UTC stamp>/, sha256 verified;
   3. promotes atomically: copy to *.new in the production dir, sha256 checked,
-     then os.replace — model.bin and manifest.json;
+     then os.replace — model.bin and manifest.json. Any failure removes the
+     *.new files; a failure after model.bin was replaced says production is
+     half-promoted;
   4. verifies: production sha256 == staged, and the serve loader
      (precompute_predictions._load_halftime_dixon_coles) loads it and a fixture
-     yields a valid HT 1x2. Prints an atomic rollback command.
+     yields a valid HT 1x2. With --rollback-on-verify-failure (the DAG passes
+     it) a failed verification restores the backup atomically, verifies the
+     restore, and still exits 1.
+
+The atomic rollback command is built before production is touched. It is the
+last line of a successful run, and the LAST stderr line of every failure from
+step 3 on (when production is untouched, running it is harmless).
 
 precompute_predictions.py reads the file on every run, so the next 15-min
 pipeline tick serves it — no restart.
@@ -35,6 +48,7 @@ pipeline tick serves it — no restart.
 Run in the api container (scripts/ops/promote_ht_model.sh wraps this on the host):
     docker compose exec -T api python /app/scripts/promote_dc_model.py --model ht --check-only
     docker compose exec -T api python /app/scripts/promote_dc_model.py --model ht
+    docker compose exec -T api python /app/scripts/promote_dc_model.py --model ht --rollback-on-verify-failure
 """
 
 from __future__ import annotations
@@ -50,7 +64,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeGuard
 
 LOGGER = logging.getLogger("promote_dc_model")
 
@@ -67,6 +81,17 @@ MANIFEST_FILE = "manifest.json"
 # source), not more.
 MIN_TEAM_RATIO = 0.98
 MAX_LEAGUE_DROP = 1
+
+# Cross-run data sanity against a production artifact that has a manifest.
+# The trainer's level canary (train_halftime_dixon_coles.fit_refusal) only
+# compares a fit with its OWN frame, so a frame that is wrong as a whole — a
+# truncated pull, full-time goals routed into the half-time columns — fits
+# "level-true" and passes it. A monthly refit adds about a month to a frame of
+# ~100k matches: its row count only grows (1% of slack absorbs a cleanup such
+# as scripts/fix_unplayed_soccer_rows.py) and its observed mean half-time
+# total goals moves by well under 1%; 5% is a different frame, not a month.
+MAX_LEVEL_SHIFT = 0.05
+MIN_ROW_RATIO = 0.99
 
 
 @dataclass(frozen=True)
@@ -115,8 +140,12 @@ class Decision:
         return [c for c in self.checks if not c.ok]
 
 
-def _finite(value: Any) -> bool:
+def _finite(value: Any) -> TypeGuard[float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _positive_int(value: Any) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 def _short(sha: Optional[str]) -> str:
@@ -149,6 +178,9 @@ def evaluate_promotion(
     Pure: no I/O. `*_payload` is the parsed model.bin JSON, `*_sha` its
     sha256; production_* are None when there is no production artifact (or
     no manifest — every artifact written before 2026-10-31 is manifest-less).
+    A production manifest that exists but lacks a usable n_rows or
+    observed_mean_total_goals refuses: the trainer always writes both, so
+    one without them was not written by it.
     """
     checks: List[Check] = []
 
@@ -225,6 +257,30 @@ def evaluate_promotion(
             "trained on data no older than production's",
             s_ts is not None and p_ts is not None and s_ts >= p_ts,
             f"newest match {staged_newest!r} vs production {prod_newest!r}",
+        )
+
+    # 5. The same data as production's fit, give or take a month.
+    if production_manifest is not None:
+        s_obs = staged_manifest.get("observed_mean_total_goals")
+        p_obs = production_manifest.get("observed_mean_total_goals")
+        shift = s_obs / p_obs - 1.0 if _finite(s_obs) and _finite(p_obs) and p_obs > 0 else None
+        check(
+            f"observed mean total goals within {MAX_LEVEL_SHIFT:.0%} of production's",
+            shift is not None and abs(shift) <= MAX_LEVEL_SHIFT,
+            f"{s_obs!r} vs production {p_obs!r}" + (f" ({100 * shift:+.2f}%)" if shift is not None else ""),
+        )
+        s_rows = staged_manifest.get("n_rows")
+        p_rows = production_manifest.get("n_rows")
+        check(
+            f"rows >= {MIN_ROW_RATIO:.0%} of production's",
+            _positive_int(s_rows) and _positive_int(p_rows) and s_rows >= MIN_ROW_RATIO * p_rows,
+            f"{s_rows!r} vs production {p_rows!r}",
+        )
+    else:
+        check(
+            "observed level / rows vs production",
+            True,
+            "skipped: no readable production manifest (a legacy artifact has none)",
         )
     return Decision("promote" if all(c.ok for c in checks) else "refuse", tuple(checks))
 
@@ -321,12 +377,15 @@ def promote(
     load_production: Callable[[], Any],
     models_root: Path = MODELS_ROOT,
     stamp: Optional[str] = None,
+    rollback_on_verify_failure: bool = False,
 ) -> int:
     """Check, back up, promote, verify. Returns the process exit code.
 
     load_staged(path) / load_production() are the serve path's loaders
     (injected so the flow is testable without /app); everything else is
-    files under spec's dirs and models_root."""
+    files under spec's dirs and models_root. With rollback_on_verify_failure
+    a promoted artifact that fails verification is replaced by the backup
+    (restore_backup) before exiting 1."""
     staged_model = spec.staging_dir / MODEL_FILE
     production_model = spec.production_dir / MODEL_FILE
     LOGGER.info("1/4 check the staged %s artifact at %s", spec.name, staged_model)
@@ -430,51 +489,197 @@ def promote(
     else:
         LOGGER.warning("2/4 no production artifact at %s — first promotion, nothing to back up", production_model)
 
-    LOGGER.info("3/4 promote")
-    spec.production_dir.mkdir(parents=True, exist_ok=True)
-    pending = [
-        (spec.staging_dir / MODEL_FILE, spec.production_dir / (MODEL_FILE + ".new"), spec.production_dir / MODEL_FILE),
-        (
-            spec.staging_dir / MANIFEST_FILE,
-            spec.production_dir / (MANIFEST_FILE + ".new"),
-            spec.production_dir / MANIFEST_FILE,
-        ),
-    ]
-    for src, tmp, _ in pending:
-        _copy_durable(src, tmp)
-    # The staging file is re-hashed AS COPIED: a trainer run that rewrote
-    # staging after the checks above must not slip an unchecked file through.
-    copied_sha = sha256_file(pending[0][1])
-    copied_manifest = read_json(pending[1][1]) or {}
-    if copied_sha != staged_sha or copied_manifest.get("model_sha256") != staged_sha:
-        for _, tmp, _ in pending:
-            tmp.unlink(missing_ok=True)
-        LOGGER.error(
-            "Staging changed while promoting (checked %s, copied %s) — production untouched, refusing",
-            _short(staged_sha),
-            _short(copied_sha),
-        )
-        return 1
-    for _, tmp, dst in pending:
-        os.replace(tmp, dst)
-
+    # Built BEFORE anything in production is touched: every failure from here
+    # on ends with it as the last stderr line.
     rollback = rollback_command(spec, backup_dir, backup_has_manifest)
-    LOGGER.info("4/4 verify")
-    promoted_sha = sha256_file(production_model)
-    if promoted_sha != staged_sha:
-        LOGGER.error("Production sha256 %s != staged %s. Roll back with: %s", promoted_sha, staged_sha, rollback)
-        return 1
     try:
-        err, desc = serve_smoke(load_production(), spec)
-    except Exception as e:  # noqa: BLE001 — verification failure, logged with the rollback
-        err, desc = f"{type(e).__name__}: {e}", ""
-    if err:
-        LOGGER.error("The serve loader cannot serve the promoted artifact: %s. Roll back with: %s", err, rollback)
-        return 1
-    LOGGER.info("  serve loader ok: %s", desc)
+        code = _swap_and_verify(
+            spec,
+            staged_sha=staged_sha,
+            production_sha=production_sha,
+            backup_dir=backup_dir,
+            backup_has_manifest=backup_has_manifest,
+            load_production=load_production,
+            rollback_on_verify_failure=rollback_on_verify_failure,
+        )
+    except Exception:  # noqa: BLE001 — anything unforeseen still ends with the rollback command
+        LOGGER.exception("Unexpected failure while promoting %s — production state unknown", spec.name)
+        code = 1
+    if code != 0:
+        LOGGER.error("Rollback: %s", rollback)
+        return code
     LOGGER.info("DONE — promoted %s %s (run %s)", spec.name, _short(staged_sha), staged_manifest.get("run_id"))
     LOGGER.info("Rollback: %s", rollback)
     return 0
+
+
+def _unlink_new(paths: List[Path]) -> None:
+    for tmp in paths:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError as e:
+            LOGGER.error("Could not remove %s (%s) — remove it by hand", tmp, e)
+
+
+def _swap_into_production(spec: DCModelSpec, staged_sha: str) -> bool:
+    """Step 3: copy the staged model.bin + manifest.json beside production as
+    *.new, re-hash the copy, then os.replace each into place. False on any
+    failure, after removing the *.new files and logging whether production is
+    untouched or half-promoted (model.bin replaced, manifest.json not)."""
+    pending = [
+        (spec.staging_dir / name, spec.production_dir / (name + ".new"), spec.production_dir / name)
+        for name in (MODEL_FILE, MANIFEST_FILE)
+    ]
+    replaced: List[str] = []
+    try:
+        spec.production_dir.mkdir(parents=True, exist_ok=True)
+        for src, tmp, _ in pending:
+            _copy_durable(src, tmp)
+        # The staging file is re-hashed AS COPIED: a trainer run that rewrote
+        # staging after the checks above must not slip an unchecked file through.
+        copied_sha = sha256_file(pending[0][1])
+        copied_manifest = read_json(pending[1][1]) or {}
+        if copied_sha != staged_sha or copied_manifest.get("model_sha256") != staged_sha:
+            raise RuntimeError(
+                f"staging changed while promoting (checked {_short(staged_sha)}, copied {_short(copied_sha)}, "
+                f"copied manifest says {_short(copied_manifest.get('model_sha256'))})"
+            )
+        for _, tmp, dst in pending:
+            os.replace(tmp, dst)
+            replaced.append(dst.name)
+    except Exception as e:  # noqa: BLE001 — cleaned up and reported; the caller exits non-zero
+        _unlink_new([tmp for _, tmp, _ in pending])
+        if replaced:
+            LOGGER.error(
+                "Promotion failed after %s was replaced (%s: %s) — production is HALF-PROMOTED: its %s is the "
+                "staged file but %s is not the staged manifest; roll back with the command below",
+                " and ".join(replaced),
+                type(e).__name__,
+                e,
+                MODEL_FILE,
+                MANIFEST_FILE,
+            )
+        else:
+            LOGGER.error(
+                "Promotion failed before production was touched (%s: %s) — production untouched, refusing",
+                type(e).__name__,
+                e,
+            )
+        return False
+    return True
+
+
+def _verify_production(spec: DCModelSpec, staged_sha: str, load_production: Callable[[], Any]) -> Optional[str]:
+    """Step 4: None when production is the staged file and the serve loader
+    serves it, else what is wrong."""
+    try:
+        promoted_sha = sha256_file(spec.production_dir / MODEL_FILE)
+    except OSError as e:
+        return f"cannot hash production {MODEL_FILE}: {e}"
+    if promoted_sha != staged_sha:
+        return f"production sha256 {_short(promoted_sha)} != staged {_short(staged_sha)}"
+    try:
+        err, desc = serve_smoke(load_production(), spec)
+    except Exception as e:  # noqa: BLE001 — a verification failure, reported by the caller
+        err, desc = f"{type(e).__name__}: {e}", ""
+    if err:
+        return f"the serve loader cannot serve the promoted artifact: {err}"
+    LOGGER.info("  serve loader ok: %s", desc)
+    return None
+
+
+def restore_backup(
+    spec: DCModelSpec, backup_dir: Optional[Path], backup_has_manifest: bool, production_sha: Optional[str]
+) -> Optional[str]:
+    """Put back what production held before this promotion — the in-process
+    twin of rollback_command: copy beside as *.new, then os.replace (never a
+    copy over the live file). None once the restore is verified (production's
+    files byte-identical to the backup's, or absent after a first promotion),
+    else why it is not."""
+    prod_model, prod_manifest = spec.production_dir / MODEL_FILE, spec.production_dir / MANIFEST_FILE
+    pending: List[Path] = []
+    try:
+        if backup_dir is None:
+            # First promotion: production held nothing.
+            prod_model.unlink(missing_ok=True)
+            prod_manifest.unlink(missing_ok=True)
+        else:
+            names = [MODEL_FILE] + ([MANIFEST_FILE] if backup_has_manifest else [])
+            for name in names:
+                tmp = spec.production_dir / (name + ".new")
+                pending.append(tmp)
+                _copy_durable(backup_dir / name, tmp)
+                os.replace(tmp, spec.production_dir / name)
+            if not backup_has_manifest:
+                # A legacy production file had no manifest; the promoted one
+                # would describe a model that is no longer served.
+                prod_manifest.unlink(missing_ok=True)
+    except Exception as e:  # noqa: BLE001 — reported by the caller
+        _unlink_new(pending)
+        return f"{type(e).__name__}: {e}"
+
+    try:
+        if backup_dir is None:
+            left = [p.name for p in (prod_model, prod_manifest) if p.exists()]
+            return f"still present after the restore: {', '.join(left)}" if left else None
+        restored_sha = sha256_file(prod_model)
+        if restored_sha != production_sha:
+            return f"{MODEL_FILE} sha256 {_short(restored_sha)} != pre-promotion {_short(production_sha)}"
+        if backup_has_manifest:
+            if sha256_file(prod_manifest) != sha256_file(backup_dir / MANIFEST_FILE):
+                return f"{MANIFEST_FILE} differs from the backup's"
+        elif prod_manifest.exists():
+            return f"a {MANIFEST_FILE} remains beside the restored legacy {MODEL_FILE}"
+    except OSError as e:
+        return f"cannot verify the restore: {e}"
+    return None
+
+
+def _swap_and_verify(
+    spec: DCModelSpec,
+    *,
+    staged_sha: str,
+    production_sha: Optional[str],
+    backup_dir: Optional[Path],
+    backup_has_manifest: bool,
+    load_production: Callable[[], Any],
+    rollback_on_verify_failure: bool,
+) -> int:
+    """Steps 3 and 4. Returns the exit code; promote() prints the rollback
+    command after any failure."""
+    LOGGER.info("3/4 promote")
+    if not _swap_into_production(spec, staged_sha):
+        return 1
+
+    LOGGER.info("4/4 verify")
+    err = _verify_production(spec, staged_sha, load_production)
+    if err is None:
+        return 0
+    LOGGER.error("Verification FAILED: %s", err)
+    if not rollback_on_verify_failure:
+        LOGGER.error(
+            "Production now holds the promoted artifact, which did not verify — roll back with the command below "
+            "(--rollback-on-verify-failure restores automatically)"
+        )
+        return 1
+    what = f"the backup in {backup_dir}" if backup_dir is not None else "nothing (this was the first promotion)"
+    LOGGER.error("--rollback-on-verify-failure: restoring production to %s", what)
+    restore_err = restore_backup(spec, backup_dir, backup_has_manifest, production_sha)
+    if restore_err:
+        LOGGER.error(
+            "Automatic restore FAILED (%s) — production may still hold the unverified artifact; "
+            "roll back by hand with the command below",
+            restore_err,
+        )
+    else:
+        LOGGER.error(
+            "Production restored to %s and verified (%s sha256 %s) — the promotion is undone; "
+            "the command below is already applied",
+            what,
+            MODEL_FILE,
+            _short(production_sha),
+        )
+    return 1
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -485,6 +690,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--expect-run-id",
         default=None,
         help="Refuse unless the staged manifest's run_id is this (the DAG passes its own run id).",
+    )
+    parser.add_argument(
+        "--rollback-on-verify-failure",
+        action="store_true",
+        help="If the promoted artifact fails post-promote verification, restore the backup atomically, verify the "
+        "restore, and exit 1 (the DAG passes this). Without it production keeps the unverified file and the "
+        "rollback command is printed.",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
@@ -503,6 +715,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         expect_run_id=args.expect_run_id,
         load_staged=lambda path: pp._load_dixon_coles_artifact(str(path), f"staged {args.model}"),
         load_production=getattr(pp, spec.serve_loader),
+        rollback_on_verify_failure=args.rollback_on_verify_failure,
     )
 
 

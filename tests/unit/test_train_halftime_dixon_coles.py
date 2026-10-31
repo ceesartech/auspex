@@ -239,20 +239,58 @@ class TestWriteArtifact:
 
 class TestOutputDirGuard:
     @pytest.mark.parametrize(
-        "path, refused",
+        "path, refused_under",
         [
-            ("/app/models/staging", True),
-            ("/app/models/staging/dixon_coles_ht_soccer/1.0.0", True),
-            ("/app/models/staging/../staging/x", True),
-            ("/app/models/staging-ht/dixon_coles_ht_soccer/1.0.0", False),
-            ("/app/models/production/dixon_coles_ht_soccer/1.0.0", False),
+            ("/app/models/staging", "/app/models/staging"),
+            ("/app/models/staging/", "/app/models/staging"),
+            ("/app/models/staging/dixon_coles_ht_soccer/1.0.0", "/app/models/staging"),
+            ("/app/models/staging/../staging/x", "/app/models/staging"),
+            ("/app/models/staging-ht/../staging/x", "/app/models/staging"),
+            ("/app/models/production", "/app/models/production"),
+            ("/app/models/production/dixon_coles_ht_soccer/1.0.0", "/app/models/production"),
+            ("/app/models/staging-ht/../production/dixon_coles_ht_soccer/1.0.0", "/app/models/production"),
+            ("/app/models/staging-ht/dixon_coles_ht_soccer/1.0.0", None),
+            ("/app/models/staging-ht", None),
+            ("/app/models/production-old/x", None),
+            ("/app/models/production/../staging-ht/x", None),
+            ("/tmp/ht-diagnostic", None),
         ],
     )
-    def test_never_writes_into_the_auto_promoted_staging_tree(self, path, refused):
-        assert trainer.writes_into_auto_promoted_staging(Path(path)) is refused
+    def test_never_writes_into_staging_or_production(self, path, refused_under):
+        refusal = trainer.output_dir_refusal(Path(path))
+        if refused_under is None:
+            assert refusal is None
+        else:
+            assert refusal and f") is under {refused_under}: " in refusal
 
-    def test_default_output_dir_is_outside_it(self):
-        assert not trainer.writes_into_auto_promoted_staging(trainer.DEFAULT_OUTPUT_DIR)
+    def test_a_symlink_into_a_forbidden_tree_is_refused(self, tmp_path, monkeypatch):
+        staging, production = tmp_path / "models" / "staging", tmp_path / "models" / "production"
+        staging.mkdir(parents=True)
+        production.mkdir(parents=True)
+        monkeypatch.setattr(
+            trainer, "FORBIDDEN_OUTPUT_ROOTS", ((staging, "auto-promoted"), (production, "promoter only"))
+        )
+        (tmp_path / "innocent").symlink_to(staging)
+        (tmp_path / "models" / "staging-ht").symlink_to(production)
+        refusal = trainer.output_dir_refusal(tmp_path / "innocent" / "dixon_coles_ht_soccer")
+        assert refusal and "auto-promoted" in refusal
+        refusal = trainer.output_dir_refusal(tmp_path / "models" / "staging-ht" / "x")
+        assert refusal and "promoter only" in refusal
+        assert trainer.output_dir_refusal(tmp_path / "elsewhere") is None
 
-    def test_main_refuses_before_touching_the_db(self):
-        assert trainer.main(["--database-url", "postgresql://unused", "--output-dir", "/app/models/staging/x"]) == 1
+    def test_a_symlinked_forbidden_root_is_resolved_too(self, tmp_path, monkeypatch):
+        # /app/models/staging itself a symlink: a path naming its target is refused.
+        real = tmp_path / "disk" / "staging"
+        real.mkdir(parents=True)
+        (tmp_path / "staging").symlink_to(real)
+        monkeypatch.setattr(trainer, "FORBIDDEN_OUTPUT_ROOTS", ((tmp_path / "staging", "auto-promoted"),))
+        assert "auto-promoted" in trainer.output_dir_refusal(real / "x")
+
+    def test_default_output_dir_is_allowed(self):
+        assert trainer.output_dir_refusal(trainer.DEFAULT_OUTPUT_DIR) is None
+
+    @pytest.mark.parametrize("out", ["/app/models/staging/x", "/app/models/production/dixon_coles_ht_soccer/1.0.0"])
+    def test_main_refuses_before_touching_the_db(self, out, caplog):
+        with caplog.at_level("ERROR", logger="train_halftime_dixon_coles"):
+            assert trainer.main(["--database-url", "postgresql://unused", "--output-dir", out]) == 1
+        assert "Refusing --output-dir" in caplog.text

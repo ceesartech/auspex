@@ -153,6 +153,27 @@ def test_failures_end_the_run_with_one_error(serve_path, caplog):
     assert "HT markets failed on 1 of 3 matches, HT/FT on 1 of 2" in rec[0].getMessage()
 
 
+def test_failed_ht_derivation_imports_are_an_error_counted_in_the_summary(serve_path, caplog, monkeypatch):
+    # The HT model loads, but market_derivation lacks the HT entry points
+    # (a partial deploy): the FT import still succeeds, the HT one does not.
+    stub = types.ModuleType("predictors.market_derivation")
+    stub.derive_from_lambdas = lambda *a, **k: {}
+    stub.valid_ou_anchor = lambda p: False
+    monkeypatch.setitem(sys.modules, "predictors.market_derivation", stub)
+    serve_path()
+    with caplog.at_level(logging.INFO, logger="precompute_predictions"):
+        out = precompute.run("postgresql://unused", days=7, notify_threshold=0.99, notify=False)
+    assert out["predicted"] == 3 and out["market_rows"] == 0  # FT kept going; no HT rows
+    startup = [r for r in caplog.records if r.getMessage().startswith("HT derivation imports failed")]
+    assert len(startup) == 1 and startup[0].levelno == logging.ERROR
+    assert "ImportError" in startup[0].getMessage() and "HT and HT/FT markets disabled" in startup[0].getMessage()
+    rec = summaries(caplog)
+    assert len(rec) == 1 and rec[0].levelno == logging.ERROR
+    msg = rec[0].getMessage()
+    assert "HT markets failed on 3 of 3 matches, HT/FT on 0 of 0" in msg
+    assert "the HT derivation imports failed (ImportError" in msg and "no match got HT or HT/FT markets" in msg
+
+
 def test_a_clean_run_logs_no_summary(serve_path, caplog):
     serve_path()
     with caplog.at_level(logging.INFO, logger="precompute_predictions"):

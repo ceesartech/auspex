@@ -22,9 +22,11 @@ Architecture:
     artifact and promotes; `scripts/precompute_predictions.py` loads
     /app/models/production/dixon_coles_ht_soccer/1.0.0/model.bin on its
     next run and writes one row per HT market_type per match.
-  * The retrain_halftime_dc DAG runs both, monthly. NEVER point --output-dir
-    at /app/models/staging: the weekly retrain_models DAG's swap_production
-    promotes everything in that directory, with none of these checks.
+  * The retrain_halftime_dc DAG runs both, monthly. --output-dir refuses
+    /app/models/staging (the weekly retrain_models DAG's swap_production
+    promotes everything in it, with none of these checks) and
+    /app/models/production (only the promoter writes there, after a backup)
+    — and anything that resolves under either, symlinks and `..` included.
 
 Until 2026-10-31 this script fitted the OLDEST 80% only (the newest 20% was
 a validation slice, so no recent match ever reached the fit), used the
@@ -54,6 +56,19 @@ MODEL_NAME = "dixon_coles_ht_soccer"
 DEFAULT_OUTPUT_DIR = Path("/app/models/staging-ht/dixon_coles_ht_soccer/1.0.0")
 MODEL_FILE = "model.bin"
 MANIFEST_FILE = "manifest.json"
+
+# Trees --output-dir must never resolve into, and why (output_dir_refusal).
+FORBIDDEN_OUTPUT_ROOTS: Tuple[Tuple[Path, str], ...] = (
+    (
+        Path("/app/models/staging"),
+        "retrain_models' swap_production promotes everything under it every Sunday, with none of the "
+        "half-time checks",
+    ),
+    (
+        Path("/app/models/production"),
+        "production is written only by scripts/promote_dc_model.py, after its checks and a backup",
+    ),
+)
 
 # Post-fit refusal bounds (fit_refusal). The level canary: at the MLE fixed
 # point the weighted fitted mean total goals equals the observed one (the
@@ -238,11 +253,24 @@ def default_run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def writes_into_auto_promoted_staging(output_dir: Path) -> bool:
-    """True for /app/models/staging or anything under it (not staging-ht):
-    retrain_models' swap_production copies that tree into production
-    unchecked every Sunday."""
-    return Path(os.path.abspath(output_dir)).parts[:4] == ("/", "app", "models", "staging")
+def _is_within(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def output_dir_refusal(output_dir: Path) -> Optional[str]:
+    """Why the trainer must not write into output_dir, or None when it may.
+
+    Refuses /app/models/staging and /app/models/production and anything under
+    either (staging-ht is a sibling, not under staging). The directory is
+    compared both as written (normalised) and through os.path.realpath — as
+    is each root — so neither `..` nor a symlink into those trees gets past.
+    """
+    written, resolved = os.path.abspath(output_dir), os.path.realpath(output_dir)
+    for root, why in FORBIDDEN_OUTPUT_ROOTS:
+        roots = (os.path.abspath(root), os.path.realpath(root))
+        if any(_is_within(path, r) for path in (written, resolved) for r in roots):
+            return f"{output_dir} (resolves to {resolved}) is under {root}: {why}"
+    return None
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -253,7 +281,8 @@ def main(argv: Optional[list] = None) -> int:
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
         help="Where to write model.bin + manifest.json (default: staging-ht; promote with "
-        "scripts/ops/promote_ht_model.sh). Never /app/models/staging — the weekly retrain auto-promotes it.",
+        "scripts/ops/promote_ht_model.sh). Refused under /app/models/staging (the weekly retrain auto-promotes "
+        "it) or /app/models/production (only the promoter writes there), after resolving symlinks.",
     )
     parser.add_argument(
         "--run-id",
@@ -284,12 +313,9 @@ def main(argv: Optional[list] = None) -> int:
     if not 0.0 <= args.holdout_fraction < 1.0:
         LOGGER.error("--holdout-fraction must be in [0, 1)")
         return 1
-    if writes_into_auto_promoted_staging(args.output_dir):
-        LOGGER.error(
-            "Refusing --output-dir %s: retrain_models' swap_production promotes everything under "
-            "/app/models/staging with none of the half-time checks",
-            args.output_dir,
-        )
+    refusal = output_dir_refusal(args.output_dir)
+    if refusal:
+        LOGGER.error("Refusing --output-dir: %s", refusal)
         return 1
     run_id = args.run_id or default_run_id()
 

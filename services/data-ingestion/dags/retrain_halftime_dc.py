@@ -19,11 +19,15 @@ Flow (default ALL_SUCCESS trigger rules, so a refused fit never reaches promote)
      notify_failure) an unconverged, level-biased, runaway-rho or unservable
      fit; otherwise writes model.bin + manifest.json — carrying this run id
      and the deployed git sha — to staging-ht atomically.
-  2. promote_ht: scripts/promote_dc_model.py --model ht --expect-run-id <same>.
-     Refuses a staged manifest from any other run, does nothing when the
-     staged file already is production, otherwise checks, backs up, promotes
-     atomically and verifies through the serve loader. precompute_predictions
-     serves it on the next 15-min tick; no api restart.
+  2. promote_ht: scripts/promote_dc_model.py --model ht --expect-run-id <same>
+     --rollback-on-verify-failure. Refuses a staged manifest from any other
+     run, does nothing when the staged file already is production, otherwise
+     checks, backs up, promotes atomically and verifies through the serve
+     loader; a promotion that fails verification is restored from the backup
+     (verified) before the task fails, so an unattended run never leaves an
+     unverified artifact serving. Every failure's last log line is the
+     rollback command. precompute_predictions serves it on the next 15-min
+     tick; no api restart.
 
 New DAGs start PAUSED here (core.dags_are_paused_at_creation=True), so after
 the first deploy unpause it once:
@@ -95,15 +99,17 @@ with DAG(
 
     promote_ht = BashOperator(
         task_id="promote_ht",
-        # No retry: a promotion whose post-promote verification failed has
-        # already put the staged file in production, so a retry would see
-        # staged == production, log "nothing to promote" and exit 0 — turning
-        # a real failure green. The task log carries the rollback command.
+        # No retry. A promotion that failed verification has been restored
+        # from the backup (--rollback-on-verify-failure), so a retry would
+        # only repeat it; and if the restore itself failed, production holds
+        # the staged file and a retry would see staged == production, log
+        # "nothing to promote" and exit 0 — turning a real failure green. The
+        # task log ends with the rollback command.
         retries=0,
         execution_timeout=timedelta(minutes=12),
         bash_command=(
             f"{DOCKER_EXEC} timeout 10m python /app/scripts/promote_dc_model.py --model ht "
-            "--expect-run-id '" + RUN_ID_TMPL + "'"
+            "--expect-run-id '" + RUN_ID_TMPL + "' --rollback-on-verify-failure"
         ),
     )
 

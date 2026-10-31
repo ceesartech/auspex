@@ -375,6 +375,10 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
     # arithmetic.
     ht_dc_model = _load_halftime_dixon_coles()
     second_half_dc_model = _load_second_half_dixon_coles()
+    # Set when the HT model loaded but its derivation code did not: every
+    # match then loses its HT (and HT/FT) markets, so each one is counted as
+    # an HT failure in the end-of-run summary below, not skipped silently.
+    ht_import_error: str | None = None
     if ht_dc_model is not None:
         try:
             from predictors.market_derivation import (  # type: ignore
@@ -386,7 +390,10 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
 
             ht_derive_ready = True
         except Exception as ht_e:
-            logger.warning("HT derivation imports failed; skipping HT markets: %s", ht_e)
+            ht_import_error = f"{type(ht_e).__name__}: {ht_e}"
+            logger.error(
+                "HT derivation imports failed; HT and HT/FT markets disabled for this run: %s", ht_import_error
+            )
             ht_derive_ready = False
             derive_soccer_htft_markets = None
     else:
@@ -559,7 +566,10 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
                 # Halftime markets — separate model, separate scoreline
                 # matrix. Best-effort: failure leaves FT predictions intact.
                 ht_P = None  # captured for the HT/FT joint block below
-                if ht_derive_ready and ht_dc_model is not None:
+                if ht_import_error is not None:
+                    ht_attempted += 1
+                    ht_failed += 1
+                elif ht_derive_ready and ht_dc_model is not None:
                     ht_attempted += 1
                     try:
                         ht_h_lam, ht_a_lam = ht_dc_model.lambdas_for_match(
@@ -645,12 +655,16 @@ def run(database_url: str, days: int, notify_threshold: float, notify: bool) -> 
     )
     if ht_failed or htft_failed:
         logger.error(
-            "Half-time derivation failures this run: HT markets failed on %d of %d matches, "
-            "HT/FT on %d of %d (per-match warnings above carry the exceptions)",
+            "Half-time derivation failures this run: HT markets failed on %d of %d matches, HT/FT on %d of %d (%s)",
             ht_failed,
             ht_attempted,
             htft_failed,
             htft_attempted,
+            (
+                f"the HT derivation imports failed ({ht_import_error}): no match got HT or HT/FT markets"
+                if ht_import_error is not None
+                else "per-match warnings above carry the exceptions"
+            ),
         )
     return {
         "predicted": predicted,

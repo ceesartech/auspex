@@ -4,9 +4,10 @@ Airflow is not installed in the test environment, so the three names the DAG
 imports (airflow.sdk.DAG, BashOperator, alerting.notify_failure) are stubbed
 and the file is executed as the dag-processor would. What this pins: the
 monthly schedule, one run at a time, train >> promote under the default
-ALL_SUCCESS rule (a refused fit never reaches promote), and both tasks
+ALL_SUCCESS rule (a refused fit never reaches promote), both tasks
 rendering the SAME run id — which is what lets promote refuse a staged
-manifest written by any other run."""
+manifest written by any other run — and the unattended promote restoring
+the backup when its post-promote verification fails."""
 
 from __future__ import annotations
 
@@ -100,6 +101,8 @@ def test_both_tasks_carry_the_same_run_id(dag_module):
     train, promote = t["train_ht"].bash_command, t["promote_ht"].bash_command
     assert "timeout 45m python /app/scripts/train_halftime_dixon_coles.py --run-id '" + tmpl + "'" in train
     assert "python /app/scripts/promote_dc_model.py --model ht --expect-run-id '" + tmpl + "'" in promote
+    # Unattended: a promotion that fails verification is undone, not left serving.
+    assert promote.rstrip().endswith(" --rollback-on-verify-failure")
     assert train.count("{{") == promote.count("{{") == 1
     # The api container gets the deployed commit for the manifest.
     assert '-e GIT_SHA="$GIT_SHA" api ' in train
@@ -108,6 +111,17 @@ def test_both_tasks_carry_the_same_run_id(dag_module):
     )
     # Nothing here may write where retrain_models' swap auto-promotes from.
     assert "/app/models/staging" not in train + promote
+
+
+def test_the_scripts_accept_every_flag_the_dag_passes(dag_module):
+    # An unknown flag is an argparse exit 2 at 05:30 on the 1st; catch it here.
+    scripts = DAG_FILE.parents[3] / "scripts"
+    for task in tasks(dag_module).values():
+        cmd = task.bash_command
+        script = cmd.split("python /app/scripts/")[1].split()[0]
+        source = (scripts / script).read_text()
+        for flag in {tok for tok in cmd.split() if tok.startswith("--")}:
+            assert f'"{flag}"' in source, (task.task_id, flag)
 
 
 def test_rendered_commands_are_valid_bash(dag_module):
