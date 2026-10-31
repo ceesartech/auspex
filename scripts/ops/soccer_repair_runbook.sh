@@ -120,7 +120,10 @@
 # recorded 'failed' (it may have committed part of its change — the repoint
 # passes and the fd repair commit their apply before their after-state), so a
 # later run that reads that step ALREADY DONE does not clear it; only step
-# 10's next completion does. Otherwise — a failed or interrupted corpus
+# 10's next completion does. Each corpus step is also recorded 'started'
+# before it runs, so a run killed outright during one (kill -9, a host
+# crash: no trap, no 'failed') still leaves the change on record; a
+# read-only re-run closes its own 'started'. Otherwise — a failed or interrupted corpus
 # step, or a run that leaves step 10 still to do — they STAY PAUSED and the
 # runbook prints an ALERT: unpause them only after step 10 has run (re-run
 # with --from N, or --only 10, which unpauses them itself once step 10
@@ -158,7 +161,8 @@
 #   ... --only N     run step N alone
 # State: RUNBOOK_STATE (default ~/.soccer_repair_runbook.state) records each
 # step's completion, in order ("changed", "already_done", or "checked" for
-# step 11), and each corpus step that failed or was cut short ("failed");
+# step 11), each corpus step's start ("started") and each corpus step that
+# failed or was cut short ("failed");
 # step 10's skip and the retrain unpause read it (a missing file means step
 # 10 runs; a record that cannot be written keeps the retrain DAGs paused at
 # the end).

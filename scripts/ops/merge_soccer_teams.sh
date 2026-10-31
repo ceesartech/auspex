@@ -95,7 +95,9 @@
 # exactly that.
 # Re-runnable: a merged pair plans as 'done' and is not written again; all
 # 171 done exits 0 at step 0 (after finishing an apply whose grading or
-# after-state failed, or whose run ended during it). A pair that rolled back
+# after-state failed, or whose run ended during it). Every run first unpauses
+# a DAG an earlier run left paused (killed outright, or an unpause that did
+# not take — that run ended FAILED, not DONE). A pair that rolled back
 # (its team gained a fixture between plan and write, say) is merged by
 # running this again.
 # Run on the VM host:
