@@ -862,6 +862,34 @@ class TestExitCode:
     def test_an_espn_team_id_conflict_exits_3(self, monkeypatch, identity_stats):
         assert self._main(monkeypatch, refuse="team_conflicts") == 3
 
+    def test_the_counters_are_the_six_the_merged_branches_count(self):
+        # Fixture identity and the results path (forks, same team, score, status) plus team identity.
+        assert set(fu.IDENTITY_STATS) == set(NO_REFUSALS)
+
+    def test_the_pipeline_dag_comment_names_every_counter(self):
+        # The DAG explains why fetch_upcoming_* exit 3; a counter it does not name is a page nobody can read.
+        dag = (Path(__file__).resolve().parents[2] / "services/data-ingestion/dags/auspex_pipeline.py").read_text()
+        assert "fetch_upcoming.IDENTITY_STATS" in dag
+        assert [key for key in fu.IDENTITY_STATS if key not in dag] == []
+
+    @pytest.mark.parametrize("key", sorted(NO_REFUSALS))
+    @pytest.mark.parametrize("results", [False, True], ids=["fixtures", "results"])
+    def test_every_counter_fails_the_run_and_is_named_in_the_error(
+        self, monkeypatch, identity_stats, caplog, key, results
+    ):
+        assert self._main(monkeypatch, refuse=key, results=results) == fu.IDENTITY_EXIT_CODE
+        error = [r.getMessage() for r in caplog.records if r.levelname == "ERROR" and "sweep REFUSED" in r.getMessage()]
+        assert len(error) == 1
+        fragment = {
+            "forks_refused": "1 would have forked",
+            "same_team": "1 resolved both sides to one team",
+            "score_mismatch": "1 carried a header score",
+            "status_refused": "1 status change(s)",
+            "team_namesakes": "1 club(s) were inserted",
+            "team_conflicts": "1 ESPN team id conflict(s)",
+        }[key]
+        assert fragment in error[0]
+
 
 class TestSampleTimes:
     """A tennis sweep found 192 competitions for one placeholder pair; dumping

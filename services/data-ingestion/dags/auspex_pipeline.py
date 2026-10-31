@@ -51,18 +51,23 @@ with DAG(
     DOCKER_EXEC = "docker compose -f /opt/auspex/docker-compose.yml exec -T api"
 
     # ── Sport branches ─────────────────────────────────────────────
-    # fetch_upcoming_* exit 3 when they REFUSE a write that would corrupt a
-    # fixture (fetch_upcoming.IDENTITY_STATS) — an ESPN id whose team pair
-    # drifted (ForkRefused), both sides resolving to one team, a soccer
-    # header score its own scoring plays contradict (score_mismatch), or a
-    # postponement / cancellation whose ESPN id names a row that drifted
-    # (status_refused) — after committing everything else in the sweep. A
-    # placeholder slot, a filled knockout slot or a re-drawn tennis/MMA slot
-    # is skipped or resolved by teams, never refused. So every compute_features*
-    # runs ALL_DONE: one bad fixture pages (the fetch task fails) but never
-    # stops a whole sport's features, predictions and recommendations — the
-    # FC Juárez fork lasted 11 days. retries=0 on the fetch tasks: a refusal
-    # is deterministic and fetch_day already retries ESPN itself.
+    # fetch_upcoming_* exit 3 (fetch_upcoming.IDENTITY_STATS) when they
+    # REFUSE a write that would corrupt a fixture — an ESPN id whose team
+    # pair drifted (ForkRefused, forks_refused), both sides resolving to one
+    # team (same_team), a soccer header score its own scoring plays
+    # contradict (score_mismatch), or a postponement / cancellation whose
+    # ESPN id names a row that drifted (status_refused) — or when team
+    # identity needs a person: a club inserted as its own row because
+    # another ESPN team holds its name (team_namesakes; written, counted
+    # once), or an ESPN team id conflict (team_conflicts; that competition is
+    # skipped). Either way only after committing everything else in the
+    # sweep. A placeholder slot, a filled knockout slot or a re-drawn
+    # tennis/MMA slot is skipped or resolved by teams, never refused. So
+    # every compute_features* runs ALL_DONE: one bad fixture pages (the
+    # fetch task fails) but never stops a whole sport's features,
+    # predictions and recommendations — the FC Juárez fork lasted 11 days.
+    # retries=0 on the fetch tasks: a refusal is deterministic and
+    # fetch_day already retries ESPN itself.
 
     # ── Soccer branch (the original pipeline) ──────────────────────
     fetch_upcoming = BashOperator(
@@ -341,7 +346,8 @@ with DAG(
     # chained with &&, so one bad ESPN NBA response skipped NFL/tennis/MMA
     # results too). fetch_upcoming itself now retries a bad response; it
     # exits 1 when EVERY request for a sport failed (an outage) and 3 when it
-    # refused a result or status write (see the sport-branch comment above).
+    # refused a result or status write or met a team-identity problem (see
+    # the sport-branch comment above).
     fetch_results = BashOperator(
         task_id="fetch_results",
         bash_command="rc=0; "
