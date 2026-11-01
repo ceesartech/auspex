@@ -210,8 +210,56 @@ THE RUNS (fixed with the rule)
   re-derived: 1x2-only rows to 1.1e-16, the 43 anchored rows to 4.9e-7 — the
   stored anchor is rounded to 6 dp). No delta of that run was read.
 
-RESULT
-  Not yet run: this is the pre-registration commit.
+RESULT (2026-11-01; local replica of the 06:44Z read-only prod export, the
+pre-runbook corpus; served = the 2026-11-01 weekly-retrain artifact, sha256
+02141a6a..., 951 teams, fit ending 2021-10-23): DO-NOT-SHIP.
+  n = 25,604 matches, 31 monthly folds 2024-04..2026-10 (the 1x2 incumbent's
+  unseen rows from 2024-04-07); excluded 4 without features, 12 unservable, 3
+  unseen inside the seen span. No fit refused, no arm disqualified, all 32
+  fits converged. Fidelity: derive_from_lambdas vs readout 7.8e-16, the two
+  loaders identical, invariant units 1.7e-15, anchor hit 1.0e-10, live check
+  370/370 (1x2-only to 1.1e-16; anchored to 4.9e-7, the 6-dp stored anchor).
+  PRIMARY over_2.5 as served, refit - served:
+    live   -0.00375 +/- 0.00037, fold-clustered -0.00358 +/- 0.00044,
+           t(30) upper bound -0.00269: real, but short of -0.005
+    proxy  -0.00204 +/- 0.00028, clustered -0.00214 +/- 0.00037, t-bound -0.00139
+    none   -0.00378, clustered -0.00361 +/- 0.00042 (the members stream's
+           unanchored -0.0039, reproduced on the new artifact)
+  No blocking unit regresses in any regime or run. In the live regime every
+  shaped unit improves with its t upper bound below zero except odd_even
+  (-0.00001, bound +0.00014): BTTS -0.00255, over_3.5 -0.00361, total_goals
+  -0.00276, correct_score_grid -0.00148, AH +-0.75..+-2 -0.0002..-0.0021
+  (3-way); in the proxy regime ah_1 (-0.00032, bound +0.00004) and odd_even
+  are the two not clear of zero.
+  Only 504 eval rows (2%) carry a live-rule anchor, all from 2026-07 (196 and
+  301 in 2026-09 / 2026-10: 25% and 32% of those months); there the primary
+  delta is exactly 0, so live today the deployable effect is smaller still.
+  refit_frozen -0.00202 (clustered -0.00174 +/- 0.00033): a one-off refit loses
+  half its lead over the 31 months (frozen - refit +0.00174, clustered
+  +0.00184 +/- 0.00038), so the deployable object would be the monthly refit.
+  Context: served is no better than a per-league constant on over_2.5
+  (-0.00043, clustered -0.00024 +/- 0.00044) and WORSE on BTTS (+0.00131, t
+  lower bound +0.00072); refit beats the recency-matched constant on both
+  (-0.00326 / -0.00060). After the 1x2-only reconcile both arms under-predict
+  over_2.5 (served 0.490, refit 0.499, realised 0.524).
+  Corpus caveat, --simulate-merge-map (171 pairs, 1,588 rows re-pointed, 171
+  twin rows folded, n = 25,434): live -0.00391 (clustered -0.00374 +/- 0.00043,
+  t-bound -0.00286), proxy -0.00219, no regression. The merge moves the primary
+  0.00016 TOWARD the gate, an order of magnitude short of the 0.0011 a flip
+  would need; the unsimulated steps (kickoff shift, ~98-row dedupe, feature
+  rebuild) change the shared target or rows every arm scores alike.
+  Anchor replay vs production: for the 166 finished eval matches whose stored
+  over_under row carries metadata.reconcile (the two previous incumbents,
+  2026-10-26..31), production anchored 44 and the replay 47 (41 both, 3
+  production only, 6 replay only); on the 41 the replayed anchor equals the
+  stored one to the 6-dp rounding on 24 and differs by up to 0.087 on the
+  rest. The replay reads the CLOSING prices (the odds row is refreshed in
+  place), while production's last tick can come well before kickoff, so
+  "the last tick is <= 15 min before kickoff" in the design does not always
+  hold. That timing only touches the 504 anchored rows (2%), where the
+  primary delta is 0 whichever value anchors them; scoring all 504 unanchored
+  gives -0.00378 (the none regime). It cannot move the verdict.
+  Every number above recomputes from the run's per_match.csv.gz / scores.npz.
 
 Read-only: SELECTs, plus temp files for the save/load round-trip. Usage (api container):
     python /app/scripts/ab_soccer_ft_dixon_coles.py --end 2026-10-31 \\
