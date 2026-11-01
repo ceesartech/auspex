@@ -134,6 +134,66 @@ from utils.training_data import (
 logger = logging.getLogger(__name__)
 
 
+# ── Fits that are allowed to end unconverged ──────────────────────────
+# A Poisson-family fit that stops at max_iterations is logged as an ERROR by
+# _train_model, except where an entry here documents the condition as measured
+# and accepted. Those log a WARNING: still loud in every run log and recorded
+# in the artifact (fit_diagnostics), but nothing pages on it, because the
+# condition is known and its fix was measured and did not pass the gate.
+# An entry accepts ONLY the mechanism it documents. The same model failing to
+# converge for any other reason (no 2-cycle, a single component, a different
+# gauge) is still an ERROR.
+ACCEPTED_NONCONVERGENCE: Dict[str, Dict[str, str]] = {
+    "poisson_soccer_match_result": {
+        "mechanism": (
+            "a 2-cycle across disconnected leagues: the soccer train split has one connected component per "
+            "country, and the global attack normalisation fixes only one of their scales"
+        ),
+        "doc": "docs/SYSTEM_AUDIT_AND_ROADMAP.md §4, 'Soccer Poisson member: converged fit'",
+    },
+}
+
+
+def report_fit_convergence(name: str, result: Any) -> Optional[str]:
+    """Log how one Poisson-family fit ended, from the fit_diagnostics its
+    train() returns. Returns "converged", "accepted" (a documented condition,
+    WARNING), "unexpected" (ERROR) or None for a model that reports none."""
+    diag = result.get("fit_diagnostics") if isinstance(result, dict) else None
+    if not isinstance(diag, dict):
+        return None
+    if diag.get("converged"):
+        return "converged"
+    summary = (
+        f"stopped at {diag.get('iterations_run')} of {diag.get('max_iterations')} iterations, "
+        f"max parameter change {diag.get('final_max_change')} > tol {diag.get('tolerance')}, "
+        f"change over two iterations {diag.get('final_two_step_change')}, "
+        f"{diag.get('connected_components')} connected component(s), gauge={diag.get('gauge')}"
+    )
+    entry = ACCEPTED_NONCONVERGENCE.get(name)
+    documented = (
+        entry is not None
+        and bool(diag.get("period_two_oscillation"))
+        and int(diag.get("connected_components") or 0) > 1
+        and diag.get("gauge") == "global"
+    )
+    if entry is not None and documented:
+        logger.warning(
+            "%s did not converge (%s). Documented and accepted: %s. See %s.",
+            name,
+            summary,
+            entry["mechanism"],
+            entry["doc"],
+        )
+        return "accepted"
+    logger.error(
+        "%s did not converge (%s). This is NOT a documented condition: its parameters are not an optimum, "
+        "so investigate before this artifact serves.",
+        name,
+        summary,
+    )
+    return "unexpected"
+
+
 # ── Sport bundles ─────────────────────────────────────────────────────
 # Each bundle wires up the four sport-specific pieces of a training run:
 #   * how to load the frame (different SQL queries / target columns)
@@ -592,6 +652,9 @@ class TrainingOrchestrator:
         try:
             model = model_class(config)
             result = model.train(train_df, val_df=val_df, features=features, target=target)
+            convergence = report_fit_convergence(name, result)
+            if convergence is not None:
+                result["convergence"] = convergence  # rides into training_report.json
 
             self.trained_models[name] = model
             self.results[name] = result
@@ -613,13 +676,19 @@ class TrainingOrchestrator:
                 except Exception as e:
                     logger.warning(f"Calibration failed for {name}: {e}")
 
-            # Register model
+            # Register model. The fit diagnostics (converged, iterations run,
+            # final changes) ride into registry_index.json as metadata, next
+            # to the copy the artifact itself carries.
             metrics = result.get("validation_metrics", {})
+            metadata = None
+            if convergence is not None:
+                metadata = {"fit_diagnostics": result["fit_diagnostics"], "convergence": convergence}
             self.registry.register_model(
                 model=model,
                 name=name,
                 version=config.version,
                 metrics=metrics,
+                metadata=metadata,
             )
 
             duration = time.time() - start

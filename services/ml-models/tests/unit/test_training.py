@@ -182,6 +182,92 @@ class TestPerLeagueBaselineGuard:
         assert set(model.league_baselines) >= {"L1", "L2"}
 
 
+def _diag(converged=False, oscillating=True, components=27, gauge="global"):
+    return {
+        "fit_diagnostics": {
+            "converged": converged,
+            "iterations_run": 30 if converged else 1000,
+            "max_iterations": 1000,
+            "tolerance": 1e-6,
+            "final_max_change": 5e-7 if converged else 0.32,
+            "final_two_step_change": 4e-6,
+            "period_two_oscillation": oscillating,
+            "connected_components": components,
+            "gauge": gauge,
+        }
+    }
+
+
+class TestFitConvergenceReporting:
+    """A Poisson-family fit that stops unconverged is loud: ERROR, unless it is
+    the documented soccer-Poisson 2-cycle, which logs a WARNING (no page) and
+    is still recorded in the artifact and the registry."""
+
+    def _report(self, name, result, caplog):
+        from training.train_all_models import report_fit_convergence
+
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="training.train_all_models"):
+            status = report_fit_convergence(name, result)
+        levels = [r.levelname for r in caplog.records if r.name == "training.train_all_models"]
+        return status, levels, " ".join(r.getMessage() for r in caplog.records)
+
+    def test_the_documented_soccer_poisson_cycle_is_a_warning(self, caplog):
+        status, levels, text = self._report("poisson_soccer_match_result", _diag(), caplog)
+        assert status == "accepted" and levels == ["WARNING"]
+        assert "SYSTEM_AUDIT_AND_ROADMAP.md" in text and "1000 of 1000" in text and "27 connected" in text
+
+    def test_any_other_mechanism_on_the_same_model_is_an_error(self, caplog):
+        for diag in (_diag(oscillating=False), _diag(components=1), _diag(gauge="per_component")):
+            status, levels, text = self._report("poisson_soccer_match_result", diag, caplog)
+            assert status == "unexpected" and levels == ["ERROR"], diag
+            assert "NOT a documented condition" in text
+
+    def test_another_model_failing_to_converge_is_an_error(self, caplog):
+        status, levels, _ = self._report("dixon_coles_soccer_match_result", _diag(), caplog)
+        assert status == "unexpected" and levels == ["ERROR"]
+
+    def test_a_converged_fit_and_a_model_without_diagnostics_are_quiet(self, caplog):
+        assert self._report("poisson_soccer_match_result", _diag(converged=True), caplog)[:2] == ("converged", [])
+        assert self._report("xgboost_soccer_match_result", {"validation_metrics": {}}, caplog)[:2] == (None, [])
+        assert self._report("x", None, caplog)[:2] == (None, [])
+
+    def test_the_orchestrator_records_the_diagnostics_in_the_registry(self, tmp_path, caplog):
+        import json
+
+        from training.train_all_models import TrainingOrchestrator
+
+        rng = np.random.default_rng(1)
+        n = 400
+        # Two leagues that never meet: the soccer member's 2-cycle in miniature.
+        frame = pd.DataFrame(
+            {
+                "match_date": pd.date_range("2024-01-01", periods=n, freq="D"),
+                "home_team": [f"{'A' if i % 2 else 'B'}{i % 5}" for i in range(n)],
+                "away_team": [f"{'A' if i % 2 else 'B'}{(i + 2) % 5}" for i in range(n)],
+                "home_score": np.where(np.arange(n) % 2, rng.poisson(0.9, n), rng.poisson(2.2, n)).astype(float),
+                "away_score": np.where(np.arange(n) % 2, rng.poisson(0.7, n), rng.poisson(1.8, n)).astype(float),
+            }
+        )
+        frame["match_outcome"] = np.where(
+            frame["home_score"] > frame["away_score"], 0, np.where(frame["home_score"] == frame["away_score"], 1, 2)
+        )
+        orch = TrainingOrchestrator(registry_dir=str(tmp_path / "registry"), run_cv=False, calibrate=False)
+        with caplog.at_level("WARNING"):
+            orch.train_all(frame, frame, features=[], target="match_outcome", model_types=["poisson"])
+
+        result = orch.results["poisson_soccer_match_result"]
+        assert result["convergence"] == "accepted"
+        assert result["fit_diagnostics"]["connected_components"] == 2
+        index = json.loads((tmp_path / "registry" / "registry_index.json").read_text())
+        meta = index["poisson_soccer_match_result"][-1]["metadata"]
+        assert meta["convergence"] == "accepted" and meta["fit_diagnostics"]["converged"] is False
+        artifact = json.loads(
+            (tmp_path / "registry" / "poisson_soccer_match_result" / "1.0.0" / "model.bin").read_text()
+        )
+        assert artifact["fit_diagnostics"]["period_two_oscillation"] is True
+
+
 class TestTemperatureCalibration:
     """Temperature scaling (the ensemble self-gate's method since 2026-10-25)."""
 
