@@ -52,6 +52,14 @@ status finished, both scores present, nearest kickoff within
                fought June bouts sat here without a twin. Backfill such days
                first (scripts/backfill_results.py;
                scripts/ops/repair_stranded_recs_mma.sh runs it before this).
+               Likewise a bout stored under a fighter's second spelling, or
+               the other way round, has no twin HERE (same team ids, same
+               order) though it was fought: 9 such UFC bouts on 2026-11-01.
+               Merge the fighter rows first (scripts/merge_mma_fighters.py
+               through scripts/ops/merge_mma_fighters.sh, which folds them);
+               the MMA run order is repair_stranded_recs_mma.sh (A),
+               merge_mma_fighters.sh, repair_stranded_recs_mma.sh
+               --retire-stale-rows (this tool).
                soccer: LEFT ALONE and reported by class (see below).
   ambiguous   -> left alone, counted.
   soccer twin that is a football-data copy -> LEFT ALONE, whether or not
