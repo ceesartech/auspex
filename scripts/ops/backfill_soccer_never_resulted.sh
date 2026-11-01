@@ -23,7 +23,11 @@
 # Queretaro v Monterrey 2026-09-05 (not on ESPN's mex.1 scoreboard that
 # weekend), Rayo Vallecano v Athletic Club 2026-10-10 (not on ESPN's
 # scoreboard that weekend: re-dated) and Atromitos v AEK 2026-10-17 (ESPN:
-# postponed).
+# postponed). Rehearsed again on a 05:15Z export (ESPN fetched ~05:19Z), the
+# reviewed list in place: the same 42 never_resulted rows after steps 1-11;
+# PLAN candidates=38 heal=38 done=0 refuse=0 predictions_graded=3173
+# predictions_regraded=0 recs_changed=0 teams_stamped=3 espn_failed=0; after:
+# 3 never_resulted rows (the fork has a finished twin now), 0 new.
 # The never_resulted class grows: a fixture whose result never arrives joins
 # it 96 h after kickoff (e.g. a Liga MX fixture the results path refuses as
 # identity drift until runbook step 1 has run, once the sweep's 3-day

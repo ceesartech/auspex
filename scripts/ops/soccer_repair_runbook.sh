@@ -98,7 +98,12 @@
 # (every count above reproduced), then this one --from 12 on its state file;
 # a full re-run of that (all fifteen ALREADY DONE / checked, no backup, row
 # fingerprint unchanged); and this one from step 1 on a fresh copy (the same
-# counts in all fifteen steps):
+# counts in all fifteen steps). All of it again on a 05:15Z export (ESPN
+# fetched ~05:19Z) with step 12 on the reviewed list and its re-run's own
+# ceilings: the same counts, plus --from 12 refused (no pause, no backup) on
+# a state file without step 11, and a never_resulted row outside the list
+# (Guadalajara v Atlante, its kickoff moved 6 days back on the replica)
+# listed and left alone while step 12 went through:
 # 12 scripts/ops/backfill_soccer_never_resulted.sh, then
 #    scripts/ops/cleanup_soccer_orphans.sh --after-never-resulted
 #    The cleanup's never_resulted rows (42): ESPN's result recorded, through

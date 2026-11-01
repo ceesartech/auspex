@@ -122,8 +122,10 @@
 # --after-never-resulted: that re-run's own reviewed set, in place of the
 # ceilings below: merges <= 1 (Coquimbo Unido v O'Higgins 2026-06-15, the one
 # fork of a healed row: merge_cancel, it holds void recs — the rehearsal's
-# re-run merged exactly it), no placeholder deleted, no postponement marked
-# (step 7 did those). Anything more aborts at step 2, nothing changed.
+# re-run merged exactly it, moving 59 odds and 140 predictions onto its twin
+# and grading 142 there, on the 02:42Z and the 05:15Z export alike), no
+# placeholder deleted, no postponement marked (step 7 did those). Anything
+# more aborts at step 2, nothing changed.
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/cleanup_soccer_orphans.sh 2>&1 | tee -a ~/cleanup_soccer_orphans.log
 set -uo pipefail

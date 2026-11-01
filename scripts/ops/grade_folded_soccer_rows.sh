@@ -20,7 +20,7 @@
 # rows, 504 predictions graded (asian_handicap, clean_sheet, correct_score,
 # double_chance, draw_no_bet, odd_even, result_btts, result_over_under,
 # team_total, total_goals, win_to_nil and winning_margin, 42 each), 0
-# re-graded, 0 recs changed.
+# re-graded, 0 recs changed. The same on a 05:15Z export.
 #   0. already done? A read-only dry run of the folded rows: nothing graded,
 #      re-graded or changed exits 0 without a backup (a failed dry run aborts
 #      here, before a backup);

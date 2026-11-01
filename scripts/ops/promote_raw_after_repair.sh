@@ -31,7 +31,12 @@
 # league and team rows the pipeline's soccer sweeps rewrite every 15 min nor
 # fails on them. A serialization error can only come from another session
 # changing a row this run changes, meanwhile: exit 1, nothing written —
-# re-run (the runbook: --from 13).
+# re-run (the runbook: --from 13). Checked on the replica of a 05:15Z export
+# (the same plan): a whole checked dry run beside 55 rounds of the
+# pipeline's ensure_league on all 41 football-data leagues, a team stamp
+# and a match_stats touch (3 s lock timeout each) — none waited, promote
+# exited 0; promote_raw as it was before (e6fc14a) failed with a
+# serialization error in its first seconds.
 #   0. already done? A read-only checked dry run: every PLAN key 0 exits 0
 #      without a backup; any non-zero exit aborts here, before a backup (1: a
 #      legacy kickoff left, step 4 has not run, or a refusal; 3: a raw row
