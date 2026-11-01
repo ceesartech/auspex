@@ -228,15 +228,22 @@ its readout and its decision rule were committed before its first run).
   optimal bound above caps any change to these members near -0.0006.
   RESULT (2026-11-01 evening; read-only export of prod at 21:22Z, runbook not
   started; incumbent = the 2026-11-01 04:06Z artifacts, whose Poisson member
-  the rebuilt split reproduced to 0.0 after 10 boundary assignments):
-  DO-NOT-SHIP on both counts.
+  the rebuilt split reproduced to 0.0; how many boundary assignments that
+  took depends on the database's row order: 10 here, 14 on a second replica):
+  DO-NOT-SHIP, because the gate is not met.
     n = 25,604 matches (2024-04-07 .. 2026-10-31, 31 monthly folds), served
     1x2 Brier 0.60173.
     poisson_converged - served  +0.0000077 ± 0.0000089, clustered
                                 +0.0000105 ± 0.0000096, t-bound +0.0000301.
                                 Null, and nowhere near -0.005.
-    Blocking unit: identity_split_fixtures regresses (+0.000090 per match,
-    clustered lower bound +0.000022 > 0, n=1,582).
+    Blocking units: under the pre-registered bound, identity_split_fixtures
+    (n=1,582) regresses only marginally and not robustly: its clustered delta
+    +0.000074 has a z lower bound of +0.000022, but that SE comes from 4 folds
+    (and is smaller than the per-match SE), and both the per-match bound
+    (delta +0.000090, lower -0.0000016) and the t(3) clustered bound
+    (-0.000011) include zero. The decision does not rest on it. Later arms
+    should pre-register the t(n_folds-1) quantile for clustered unit bounds;
+    unit_regression() now reports all three.
     The arm moves the served 1x2 by mean L1 0.0013 (max |dp| 0.0040).
     Standalone the converged member is slightly WORSE than the 2-cycle one
     (Brier 0.63380 vs 0.63329): converging fixes the fit, not the forecast.
@@ -767,10 +774,46 @@ def unit_lower_95(pair: Dict[str, Any]) -> Optional[float]:
     return None
 
 
+def unit_regression(unit: str, pair: Dict[str, Any]) -> Dict[str, Any]:
+    """One unit's A2 reading: the pre-registered bound (unit_lower_95) with
+    the delta that bound is built on, plus two bounds that say how much to
+    trust it. A fold-clustered SE from a handful of folds is itself noisy, so
+    a clustered z bound can sit above zero while the per-match bound and the
+    t(n_folds-1) clustered bound both include it; `robust` is True only when
+    every bound that exists is above zero. The decision uses lower_95 alone,
+    as pre-registered; the other two are reported, never decided on."""
+    n_folds = int(pair.get("n_folds") or 0)
+    clustered = n_folds >= 2 and _finite(pair.get("delta_cluster")) and _finite(pair.get("se_cluster"))
+    per_match = None
+    if _finite(pair.get("delta")) and _finite(pair.get("se")):
+        per_match = float(pair["delta"]) - UNIT_Z * float(pair["se"])
+    cluster_t = None
+    if clustered:
+        from scipy.stats import t as student_t
+
+        cluster_t = float(pair["delta_cluster"]) - float(student_t.ppf(0.975, n_folds - 1)) * float(pair["se_cluster"])
+    lower = unit_lower_95(pair)
+    bounds = [b for b in (lower, per_match, cluster_t) if b is not None]
+    return {
+        "unit": unit,
+        "n": pair.get("n"),
+        "n_folds": n_folds,
+        "basis": f"fold-clustered over {n_folds} folds, z={UNIT_Z}" if clustered else f"per match, z={UNIT_Z}",
+        "delta_used": pair.get("delta_cluster") if clustered else pair.get("delta"),
+        "lower_95": lower,
+        "delta_per_match": pair.get("delta"),
+        "lower_95_per_match": per_match,
+        "lower_95_cluster_t": cluster_t,
+        "robust": bool(bounds) and all(b > 0 for b in bounds),
+    }
+
+
 def convergence_decision(report: Dict[str, Any], arm: str = CONVERGED) -> Dict[str, Any]:
     """The pre-registered decision for the converged-Poisson arm (docstring):
     SHIP only when verdict() is ship_strict AND no blocking unit (stratum)
-    regresses, a unit regressing only when its 95% lower bound is above zero."""
+    regresses, a unit regressing only when its 95% lower bound is above zero.
+    Each regressing unit also says whether that reading is robust
+    (unit_regression)."""
     v = report["verdicts_vs_served"][arm]
     regressed = []
     for unit, block in report["strata"].items():
@@ -779,7 +822,7 @@ def convergence_decision(report: Dict[str, Any], arm: str = CONVERGED) -> Dict[s
             continue
         lower = unit_lower_95(pair)
         if lower is not None and lower > 0:
-            regressed.append({"unit": unit, "delta": pair.get("delta"), "lower_95": lower, "n": pair.get("n")})
+            regressed.append(unit_regression(unit, pair))
     ship = bool(v["ship_strict"]) and not regressed
     if ship:
         line = f"SHIP: {v['line']}; no blocking unit regresses"
@@ -788,9 +831,22 @@ def convergence_decision(report: Dict[str, Any], arm: str = CONVERGED) -> Dict[s
         if not v["ship_strict"]:
             reasons.append(f"the gate is not met ({v['line']})")
         if regressed:
-            reasons.append("blocking unit(s) regress: " + ", ".join(r["unit"] for r in regressed))
+            reasons.append(
+                "blocking unit(s) regress under the pre-registered bound: "
+                + ", ".join(_unit_text(r) for r in regressed)
+            )
         line = "DO-NOT-SHIP: " + "; ".join(reasons)
     return {"arm": arm, "ship": ship, "ship_strict": bool(v["ship_strict"]), "units_regressed": regressed, "line": line}
+
+
+def _unit_text(r: Dict[str, Any]) -> str:
+    text = f"{r['unit']} (delta {_f(r['delta_used'], '+.6f')}, lower {_f(r['lower_95'], '+.6f')}, {r['basis']}"
+    if not r["robust"]:
+        text += (
+            f"; NOT robust: per-match lower {_f(r['lower_95_per_match'], '+.6f')}, "
+            f"t({max(r['n_folds'] - 1, 0)}) clustered lower {_f(r['lower_95_cluster_t'], '+.6f')}"
+        )
+    return text + ")"
 
 
 # ── Model plumbing (needs ml-models + api on the path) ───────────────

@@ -765,6 +765,36 @@ class TestConvergenceDecision:
         assert d["ship"] is False and [u["unit"] for u in d["units_regressed"]] == ["identity_split_fixtures"]
         assert "blocking unit" in d["line"]
 
+    def test_a_regressing_unit_quotes_the_delta_its_bound_is_built_on_and_how_robust_it_is(self):
+        """The 2026-11-01 identity-split reading: a clustered z bound over 4
+        folds just above zero, the per-match and t(3) bounds below it."""
+        pair = {
+            "n": 1582,
+            "delta": 8.998e-05,
+            "se": 4.673e-05,
+            "delta_cluster": 7.417e-05,
+            "se_cluster": 2.664e-05,
+            "n_folds": 4,
+        }
+        main = self._pair(-0.0001, 0.00005, 0.0001)
+        d = ab.convergence_decision(self._report(main, {"identity_split_fixtures": pair}))
+        (u,) = d["units_regressed"]
+        assert u["delta_used"] == pair["delta_cluster"] and u["delta_per_match"] == pair["delta"]
+        assert u["lower_95"] == pytest.approx(7.417e-05 - 1.96 * 2.664e-05)
+        assert u["lower_95_per_match"] == pytest.approx(8.998e-05 - 1.96 * 4.673e-05) and u["lower_95_per_match"] < 0
+        assert u["lower_95_cluster_t"] == pytest.approx(7.417e-05 - 3.182446 * 2.664e-05, rel=1e-5)
+        assert u["lower_95_cluster_t"] < 0
+        assert u["robust"] is False and u["basis"] == "fold-clustered over 4 folds, z=1.96"
+        assert "identity_split_fixtures (delta +0.000074, lower +0.000022" in d["line"]
+        assert "NOT robust: per-match lower -0.000002, t(3) clustered lower -0.000011" in d["line"]
+
+    def test_a_regression_every_bound_agrees_on_is_robust(self):
+        u = ab.unit_regression("espn_era_2026_06_on", self._pair(0.004, 0.0005, 0.001))
+        assert u["robust"] is True and u["lower_95"] > 0 and u["lower_95_cluster_t"] > 0
+        one_fold = ab.unit_regression("x", self._pair(0.004, 0.0005, None, n_folds=1))
+        assert one_fold["basis"] == "per match, z=1.96" and one_fold["lower_95_cluster_t"] is None
+        assert one_fold["delta_used"] == 0.004 and one_fold["robust"] is True
+
     def test_a_null_result_does_not_ship(self):
         main = self._pair(-0.0001, 0.00005, 0.0001)
         d = ab.convergence_decision(self._report(main, {"espn_era_2026_06_on": main}))
