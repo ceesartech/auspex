@@ -202,6 +202,12 @@ class FakeDB:
             return [
                 {"id": t["id"], "normalized_name": t["normalized_name"]} for t in self.teams if t["sport"] == "soccer"
             ]
+        if q.startswith("SELECT id, normalized_name, league_id FROM teams WHERE sport = 'soccer'"):
+            return [
+                {"id": t["id"], "normalized_name": t["normalized_name"], "league_id": t["league_id"]}
+                for t in self.teams
+                if t["sport"] == "soccer"
+            ]
         raise AssertionError(f"unexpected SQL: {q}")
 
     def fetchone(self):
@@ -554,7 +560,25 @@ class TestUpsertTeams:
         ids = pr.upsert_teams(db, {"Man City", "Arsenal"}, {"Man City": EPL, "Arsenal": EPL})
         assert ids["man city"] == "mci"
         assert ids["arsenal"] == "ars"
-        assert inserted == [("Arsenal", "arsenal")]  # the league refresh for an exact name, nothing minted
+        assert inserted == [("Arsenal", "arsenal")]  # an exact name with no league: its league filled, nothing minted
+
+    def test_an_existing_team_keeps_its_league_and_is_not_sent(self, inserted):
+        """football-data filed five Scottish Championship rows as SP1: the raw first-seen league must not move an
+        existing club (Dunfermline under La Liga on every run), and an unchanged row is neither rewritten nor locked."""
+        db = FakeDB([team("dun", "Dunfermline", league_id="sc1")])
+        assert pr.upsert_teams(db, {"Dunfermline"}, {"Dunfermline": LIGA}) == {"dunfermline": "dun"}
+        assert inserted == [] and db._row("dun")["league_id"] == "sc1"
+
+    def test_a_missing_league_is_filled_and_the_conflict_branch_keeps_an_existing_one(self, monkeypatch):
+        sent: list[str] = []
+        monkeypatch.setattr(pr, "execute_values", lambda cur, sql, rows: sent.append(" ".join(sql.split())))
+        pr.upsert_teams(FakeDB([team("ars", "Arsenal")]), {"Arsenal"}, {"Arsenal": EPL})
+        assert sent == [
+            "INSERT INTO teams (name, normalized_name, league_id, sport) VALUES %s "
+            "ON CONFLICT (normalized_name, sport) DO UPDATE "
+            "SET league_id = COALESCE(teams.league_id, EXCLUDED.league_id) "
+            "WHERE teams.league_id IS NULL AND EXCLUDED.league_id IS NOT NULL"
+        ]
 
     def test_an_accented_row_absorbs_the_unaccented_raw_name(self, inserted):
         db = FakeDB([team("ala", "Alavés")])

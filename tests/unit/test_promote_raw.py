@@ -1203,3 +1203,91 @@ class TestCheckedMode:
         monkeypatch.setattr(pr, "promote_checked", refuse)
         assert pr.main(["--database-url", "x", "--dry-run", "--out-csv", "d.csv"]) == 1
         assert "Refusing to promote — nothing written" in caplog.text
+
+
+# ── a re-run sends only what changes: unchanged leagues, teams and match_stats are neither rewritten nor locked ──
+
+
+class _LeagueCursor:
+    """The leagues table as upsert_leagues reads it; execute_values is captured by the test."""
+
+    def __init__(self, leagues):
+        self.leagues = leagues  # [(name, country, code)]
+        self._rows: list[dict] = []
+
+    def execute(self, sql, params=None):
+        q = " ".join(sql.split())
+        if q == " ".join(pr.LEAGUE_CODES_SQL.split()):
+            self._rows = [{"name": n, "country": c, "code": code} for n, c, code in self.leagues]
+        elif q.startswith("SELECT id, external_ids->>'football_data' AS code FROM leagues"):
+            self._rows = [{"id": f"lg-{code}", "code": code} for _n, _c, code in self.leagues if code]
+        else:
+            raise AssertionError(f"unexpected SQL: {q}")
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class TestUpsertLeagues:
+    @pytest.fixture
+    def sent(self, monkeypatch):
+        rows: list[tuple] = []
+
+        def fake_execute_values(cur, sql, argslist):
+            assert "WHERE leagues.external_ids IS DISTINCT FROM" in " ".join(sql.split())
+            for name, country, sport, ext in argslist:
+                rows.append((name, country, ext.adapted))
+                cur.leagues.append((name, country, ext.adapted["football_data"]))
+
+        monkeypatch.setattr(pr, "execute_values", fake_execute_values)
+        return rows
+
+    def test_a_league_that_already_carries_its_code_is_not_sent(self, sent):
+        cur = _LeagueCursor([("Premier League", "England", "E0"), ("Premiership", "Scotland", "SC0")])
+        assert pr.upsert_leagues(cur, {"E0", "SC0"}) == {"E0": "lg-E0", "SC0": "lg-SC0"}
+        assert sent == []
+
+    def test_a_missing_league_or_code_is_sent_and_mapped(self, sent):
+        cur = _LeagueCursor([("Premier League", "England", None), ("Premiership", "Scotland", "SC0")])
+        ids = pr.upsert_leagues(cur, {"E0", "E1", "SC0"})
+        assert sent == [
+            ("Premier League", "England", {"football_data": "E0"}),
+            ("Championship", "England", {"football_data": "E1"}),
+        ]
+        assert ids["E0"] == "lg-E0" and ids["E1"] == "lg-E1" and ids["SC0"] == "lg-SC0"
+
+    def test_unknown_codes_only_is_empty_without_a_query(self, sent):
+        assert pr.upsert_leagues(_LeagueCursor([]), {"ZZ9"}) == {} and sent == []
+
+
+class TestInsertMatchStatsSql:
+    """The statement is checked against Postgres in the 2026-11-01 rehearsal; here its two guards are pinned."""
+
+    SQL = " ".join(pr.INSERT_MATCH_STATS_SQL.split())
+    COLS = "shots, {p}shots_on_target, {p}corners, {p}fouls, {p}yellow_cards, {p}red_cards"
+
+    def test_an_equal_row_is_not_inserted_so_it_never_conflicts(self):
+        cols = self.COLS.format(p="s.")
+        vals = self.COLS.format(p="v.")
+        assert "WHERE NOT EXISTS ( SELECT 1 FROM match_stats s WHERE s.match_id = v.match_id" in self.SQL
+        assert f"AND (s.{cols}) IS NOT DISTINCT FROM (v.{vals}) )" in self.SQL
+
+    def test_the_conflict_branch_updates_only_a_differing_row(self):
+        old = self.COLS.format(p="match_stats.")
+        new = self.COLS.format(p="EXCLUDED.")
+        assert "ON CONFLICT (match_id, team_id) DO UPDATE SET shots = EXCLUDED.shots," in self.SQL
+        assert self.SQL.endswith(f"WHERE (match_stats.{old}) IS DISTINCT FROM (EXCLUDED.{new})")
+
+    def test_it_passes_the_eight_values_once(self):
+        seen = []
+
+        class _Cur:
+            def execute(self, sql, params):
+                seen.append((sql, params))
+
+        pr.insert_match_stats(
+            _Cur(), "m", "t", shots=1, shots_on_target=2, corners=3, fouls=4, yellow_cards=5, red_cards=None
+        )
+        ((sql, params),) = seen
+        assert sql is pr.INSERT_MATCH_STATS_SQL and params == ("m", "t", 1, 2, 3, 4, 5, None)
+        assert sql.count("%s") == 8

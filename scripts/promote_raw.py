@@ -49,7 +49,18 @@ load_football_data.parse_csv).
 A re-run writes only what changes: a matches row whose status, scores and
 half-time already equal football-data's is not updated (until 2026-11-01
 every run rewrote all ~168k of them, and their match_stats and teams rows,
-for nothing), and neither is an equal match_stats, team or league row.
+for nothing), and an equal match_stats row, a league that already carries
+its football-data code and a team that already exists are not even sent to
+the database, so a run neither rewrites nor locks them (an INSERT ... ON
+CONFLICT DO UPDATE locks the row it conflicts with even when its WHERE
+skips the update, and under REPEATABLE READ it fails on a row another
+session changed after the snapshot: the pipeline's ensure_league rewrites
+the football-data league rows on every soccer sweep). An existing team
+keeps its league: only a missing one is filled (as fetch_upcoming's
+INSERT_TEAM_SQL does). The league a raw name is first seen under in one
+run is arbitrary (an unordered scan), and five Scottish Championship rows
+football-data filed as SP1 would otherwise re-file their clubs under La
+Liga on every run.
 
 CHECKED MODE (--dry-run, or --apply --expect-plan): the whole run is one
 REPEATABLE READ transaction, and what it changed is read back before the
@@ -450,11 +461,17 @@ def screen_raw_rows(rows: list[dict]) -> tuple[list[dict], list[tuple[str, dict]
     return keep, refused
 
 
+# The soccer leagues as they stand, with the football-data code each carries (NULL: none).
+LEAGUE_CODES_SQL = "SELECT name, country, external_ids->>'football_data' AS code FROM leagues WHERE sport = 'soccer'"
+
+
 def upsert_leagues(cur, codes: set[str]) -> dict[str, str]:
-    """Insert leagues for each code; return {code: league_id}. promote()
-    passes LEAGUE_MAP codes only (screen_raw_rows refuses the rest)."""
+    """Insert leagues for each code; return {code: league_id}. promote_rows()
+    passes LEAGUE_MAP codes only (screen_raw_rows refuses the rest). A league
+    that already carries its code is not sent (see the module docstring: not
+    rewritten, not locked)."""
     rows = []
-    for code in codes:
+    for code in sorted(codes):
         if code not in LEAGUE_MAP:
             logger.error("unknown league code %s — no league for it", code)
             continue
@@ -463,17 +480,21 @@ def upsert_leagues(cur, codes: set[str]) -> dict[str, str]:
     if not rows:
         return {}
 
-    execute_values(
-        cur,
-        """
-        INSERT INTO leagues (name, country, sport, external_ids)
-        VALUES %s
-        ON CONFLICT (name, country, sport) DO UPDATE
-            SET external_ids = leagues.external_ids || EXCLUDED.external_ids
-            WHERE leagues.external_ids IS DISTINCT FROM leagues.external_ids || EXCLUDED.external_ids
-        """,
-        [(name, country, sport, Json({"football_data": code})) for name, country, sport, code in rows],
-    )
+    cur.execute(LEAGUE_CODES_SQL)
+    have = {(r["name"], r["country"]): r["code"] for r in cur.fetchall()}
+    missing = [r for r in rows if have.get((r[0], r[1])) != r[3]]
+    if missing:
+        execute_values(
+            cur,
+            """
+            INSERT INTO leagues (name, country, sport, external_ids)
+            VALUES %s
+            ON CONFLICT (name, country, sport) DO UPDATE
+                SET external_ids = leagues.external_ids || EXCLUDED.external_ids
+                WHERE leagues.external_ids IS DISTINCT FROM leagues.external_ids || EXCLUDED.external_ids
+            """,
+            [(name, country, sport, Json({"football_data": code})) for name, country, sport, code in missing],
+        )
     cur.execute(
         "SELECT id, external_ids->>'football_data' AS code " "FROM leagues WHERE external_ids ? 'football_data'"
     )
@@ -489,18 +510,21 @@ def upsert_teams(cur, team_names: set[str], league_id_by_team: dict[str, str]) -
     or the same name with accents ("Alaves" / "Alavés"). Such a name maps
     onto that row instead of minting a twin with no history. Only a name
     that matches nothing is inserted, and each one is logged as a canary
-    (team_identity.log_new_soccer_team)."""
+    (team_identity.log_new_soccer_team).
+
+    An existing team keeps its league; only a missing one is filled, and a
+    team that needs neither is not sent (see the module docstring)."""
     if not team_names:
         return {}
-    cur.execute("SELECT id, normalized_name FROM teams WHERE sport = 'soccer'")
-    existing = {r["normalized_name"] for r in cur.fetchall()}
+    cur.execute("SELECT id, normalized_name, league_id FROM teams WHERE sport = 'soccer'")
+    existing = {r["normalized_name"]: r["league_id"] for r in cur.fetchall()}
     aliases = team_identity.load_alias_index(cur, "soccer")
     # Dedupe on the conflict key (normalized_name, sport): two RAW names
     # can normalize identically ("Alaves"/"Alavés"), and ON CONFLICT DO
     # UPDATE cannot touch the same row twice within one command
     # (CardinalityViolation) — keep the first raw spelling.
     seen: set[str] = set()
-    rows = []
+    rows: list[tuple[str, str, str | None, str]] = []
     resolved: dict[str, str] = {}
     minted: list[str] = []
     for name in sorted(team_names):
@@ -508,25 +532,30 @@ def upsert_teams(cur, team_names: set[str], league_id_by_team: dict[str, str]) -
         if norm in seen:
             continue
         seen.add(norm)
-        if norm not in existing:
-            team_id = team_identity.resolve_alias(aliases, "soccer", norm) or (
-                team_identity.find_team_accent_insensitive(cur, "soccer", norm)
-            )
-            if team_id:
-                resolved[norm] = team_id
-                logger.info("Raw team %r resolves to existing soccer team %s (alias or accent fold)", name, team_id)
-                continue
-            minted.append(name)
-        rows.append((name, norm, league_id_by_team.get(name), "soccer"))
+        league_id = league_id_by_team.get(name)
+        if norm in existing:
+            if existing[norm] is None and league_id is not None:
+                rows.append((name, norm, league_id, "soccer"))  # its missing league filled
+            continue
+        team_id = team_identity.resolve_alias(aliases, "soccer", norm) or (
+            team_identity.find_team_accent_insensitive(cur, "soccer", norm)
+        )
+        if team_id:
+            resolved[norm] = team_id
+            logger.info("Raw team %r resolves to existing soccer team %s (alias or accent fold)", name, team_id)
+            continue
+        minted.append(name)
+        rows.append((name, norm, league_id, "soccer"))
     if rows:
+        # The conflict branch is a row inserted between the read above and this statement; it too keeps its league.
         execute_values(
             cur,
             """
             INSERT INTO teams (name, normalized_name, league_id, sport)
             VALUES %s
             ON CONFLICT (normalized_name, sport) DO UPDATE
-                SET league_id = COALESCE(EXCLUDED.league_id, teams.league_id)
-                WHERE teams.league_id IS DISTINCT FROM COALESCE(EXCLUDED.league_id, teams.league_id)
+                SET league_id = COALESCE(teams.league_id, EXCLUDED.league_id)
+                WHERE teams.league_id IS NULL AND EXCLUDED.league_id IS NOT NULL
             """,
             rows,
         )
@@ -935,28 +964,42 @@ def write_match(
     return match_id
 
 
+# A row that already holds these values is not inserted at all (NOT EXISTS): no conflict, so the run neither rewrites
+# nor locks it (see the module docstring). Only a missing or differing row reaches ON CONFLICT.
+INSERT_MATCH_STATS_SQL = """
+    INSERT INTO match_stats (
+        match_id, team_id, shots, shots_on_target, corners, fouls,
+        yellow_cards, red_cards
+    )
+    SELECT v.match_id, v.team_id, v.shots, v.shots_on_target, v.corners, v.fouls, v.yellow_cards, v.red_cards
+      FROM (VALUES (%s::uuid, %s::uuid, %s::integer, %s::integer, %s::integer, %s::integer, %s::integer,
+                    %s::integer))
+           AS v (match_id, team_id, shots, shots_on_target, corners, fouls, yellow_cards, red_cards)
+     WHERE NOT EXISTS (
+           SELECT 1 FROM match_stats s
+            WHERE s.match_id = v.match_id AND s.team_id = v.team_id
+              AND (s.shots, s.shots_on_target, s.corners, s.fouls, s.yellow_cards, s.red_cards)
+                  IS NOT DISTINCT FROM (v.shots, v.shots_on_target, v.corners, v.fouls, v.yellow_cards, v.red_cards)
+     )
+    ON CONFLICT (match_id, team_id) DO UPDATE
+        SET shots = EXCLUDED.shots,
+            shots_on_target = EXCLUDED.shots_on_target,
+            corners = EXCLUDED.corners,
+            fouls = EXCLUDED.fouls,
+            yellow_cards = EXCLUDED.yellow_cards,
+            red_cards = EXCLUDED.red_cards
+        WHERE (match_stats.shots, match_stats.shots_on_target, match_stats.corners, match_stats.fouls,
+               match_stats.yellow_cards, match_stats.red_cards)
+              IS DISTINCT FROM (EXCLUDED.shots, EXCLUDED.shots_on_target, EXCLUDED.corners, EXCLUDED.fouls,
+                                EXCLUDED.yellow_cards, EXCLUDED.red_cards)
+"""
+
+
 def insert_match_stats(
     cur, match_id, team_id, *, shots, shots_on_target, corners, fouls, yellow_cards, red_cards
 ) -> None:
     cur.execute(
-        """
-        INSERT INTO match_stats (
-            match_id, team_id, shots, shots_on_target, corners, fouls,
-            yellow_cards, red_cards
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (match_id, team_id) DO UPDATE
-            SET shots = EXCLUDED.shots,
-                shots_on_target = EXCLUDED.shots_on_target,
-                corners = EXCLUDED.corners,
-                fouls = EXCLUDED.fouls,
-                yellow_cards = EXCLUDED.yellow_cards,
-                red_cards = EXCLUDED.red_cards
-            WHERE (match_stats.shots, match_stats.shots_on_target, match_stats.corners, match_stats.fouls,
-                   match_stats.yellow_cards, match_stats.red_cards)
-                  IS DISTINCT FROM (EXCLUDED.shots, EXCLUDED.shots_on_target, EXCLUDED.corners, EXCLUDED.fouls,
-                                    EXCLUDED.yellow_cards, EXCLUDED.red_cards)
-        """,
+        INSERT_MATCH_STATS_SQL,
         (match_id, team_id, shots, shots_on_target, corners, fouls, yellow_cards, red_cards),
     )
 
