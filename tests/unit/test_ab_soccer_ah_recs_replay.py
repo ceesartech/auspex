@@ -731,6 +731,8 @@ def test_captured_after_counts_quotes_between_the_tick_and_kickoff():
     rows = [_row("a", "home", -0.5, 1.9, ko - pd.Timedelta(hours=48), ts=ko - pd.Timedelta(hours=2), seen=t)]
     snaps = rp.snapshot_index([{**snap, "captured_at": ko - pd.Timedelta(hours=2)}])
     assert rp.captured_after(rows, snaps, t, ko) == 0  # seen AT the tick is not after it
+    at_tick = rp.snapshot_index([{**snap, "captured_at": t}])
+    assert rp.captured_after(rows, at_tick, t, ko) == 0  # nor is a snapshot captured at it
     snaps = rp.snapshot_index(
         [{**snap, "captured_at": ko - pd.Timedelta(hours=2)}, {**snap, "captured_at": ko - pd.Timedelta(minutes=5)}]
     )
@@ -858,6 +860,11 @@ def _world(tmp_path, after_tick=False):
         made = ko - pd.Timedelta(hours=8)  # before the early tick
         stored.append([mid, "v1", "asian_handicap", _ah(1.9, 0.95, -0.05, TARGET), {"reconcile": "1x2"}, made])
         stored.append([mid, "v1", "match_result", dict(zip(("home", "draw", "away"), TARGET)), {}, made])
+        # A row written after kickoff (a later run re-storing the match) must never be read: its 1x2 would
+        # gate the -0.5 rec (gap 0.17 > 0.10) and change every Brier.
+        late, late_t = ko + pd.Timedelta(hours=1), (0.77, 0.13, 0.10)
+        stored.append([mid, "v2", "asian_handicap", _ah(2.4, 0.7, -0.05, late_t), {"reconcile": "1x2"}, late])
+        stored.append([mid, "v2", "match_result", dict(zip(("home", "draw", "away"), late_t)), {}, late])
     if after_tick:  # a book moves after the last tick: the market IS observed after it
         snaps.append({"match_id": "m1", "bookmaker": "b", "selection": "home", "line": -0.5, "odds_decimal": 1.70,
                       "captured_at": KO1 - pd.Timedelta(minutes=5)})  # fmt: skip
@@ -945,6 +952,14 @@ class TestRunEndToEnd:
         fw = r["brier_forward_pair"]
         assert fw["n"] == 3 and fw["invariant_max_abs"] < 1e-12
         assert fw["units"][rp.POOLED]["post_incident"]["n"] == 3  # October: after the constant-prior incident
+        pre = _ah(1.9, 0.95, -0.05, TARGET)
+        want = np.mean(
+            [
+                rp.score_ah_pair(pre, rp.derive_ah(*LAMS["refit"], -0.05, TARGET, None), hs, as_)[rp.POOLED][0]
+                for _, _, _, _, hs, as_ in SPEC
+            ]
+        )
+        assert fw["units"][rp.POOLED]["baseline_brier"] == pytest.approx(want)  # the pre-kickoff stored row
         rep = r["reproduction"]
         assert rep["production_recs_on_unfinished_matches"] == 1 and rep["stored"]["both"] == 1
         assert rep["production_settled"]["pl"] == 21.25

@@ -454,22 +454,21 @@ class TestRegateRules:
         )
 
     def test_the_decision_sample_is_the_first_n_by_kickoff(self):
-        md = pd.to_datetime(
-            ["2026-11-01T23:00Z", "2026-11-03T00:00Z", "2026-11-02T01:00Z", "2026-11-02T01:00Z", "2026-11-04T00:00Z"]
-        )
+        tie = "2026-11-02T01:00Z"
+        md = pd.to_datetime(["2026-11-01T23:00Z", "2026-11-03T00:00Z", tie, tie, tie, "2026-11-04T00:00Z"])
         frame = pd.DataFrame(
             {
-                "match_id": ["m0", "m3", "m2", "m1", "m4"],
+                "match_id": ["m0", "m3", "m2", "m9", "m1", "m4"],
                 "match_date": md,
-                "season_type": ["regular", "regular", "regular", "regular", "postseason"],
-                "game_type": [None] * 5,
+                "season_type": ["regular", "regular", "regular", "regular", "regular", "postseason"],
+                "game_type": [None] * 6,
             }
         )
         mode = dataclasses.replace(gate.REGATE, min_games=2)
-        # m1 and m2 tie on kickoff and are taken by match_id; m0 is before the cutoff, m4 postseason.
+        # m1, m2 and m9 tie on kickoff and are taken by match_id; m0 is before the cutoff, m4 postseason.
         assert gate.decision_sample(frame, mode, "2026-12-31") == ({"m1", "m2"}, "2026-11-02")
-        assert gate.decision_sample(frame, dataclasses.replace(mode, min_games=5), "2026-12-31") == (
-            {"m1", "m2", "m3"},
+        assert gate.decision_sample(frame, dataclasses.replace(mode, min_games=9), "2026-12-31") == (
+            {"m1", "m2", "m3", "m9"},
             "2026-12-31",
         )
         assert gate.decision_sample(frame, mode, "2026-11-01") == (set(), "2026-11-01")
