@@ -5,15 +5,23 @@ one database per test from a template):
   * a finished UFC card cancels the stale rows it no longer lists — an
     ESPN-identified bout whose competition is gone, an unidentified one whose
     fighters are both off the card — and leaves a listed id, a fought pair
-    (either order), an unidentified row with one fighter on the card, an
-    unfinished card, a row outside the card's window or in the future, a card
-    with an unparseable competition, and every tennis sweep alone;
+    (either order; also under a stale ESPN id the sweep no longer lists, and
+    its rec is then not voided), an unidentified row with one fighter on the
+    card, an unfinished card, a row outside the card's window or in the
+    future, a card with an unparseable competition, and every tennis sweep
+    alone;
   * the cancel is correctable (a later result for the row takes) and the
     grader voids its open recs once the kickoff is 72 h old;
   * the backfill's dry run plans the results, the settlements and the voids
     and rolls everything back; an apply pinned to that plan commits it and a
     re-run plans no write; a different pin writes nothing; a rec written at or
-    after kickoff is voided, never settled.
+    after kickoff is voided, never settled; only the recs on rows this run
+    cancelled are voided (never another sport's, nor an older cancelled row's,
+    nor a duplicate's); a write outside the sport rolls the run back; a commit
+    by another session meanwhile does not reach the plan (REPEATABLE READ);
+    --expect-recs commits only the exact rec outcomes;
+  * a competition ESPN lists the other way round writes onto its row, and the
+    logs name the fighters in the row's order.
 
 Skipped where no Postgres server binaries are on PATH (initdb, pg_ctl).
 """
@@ -123,21 +131,21 @@ def _league(cur) -> str:
     return str(fu.ensure_league(cur, MMA, "UFC", "UFC", "USA"))
 
 
-def _fighter(cur, name: str) -> str:
+def _fighter(cur, name: str, sport: str = "mma") -> str:
     cur.execute(
-        "INSERT INTO teams (name, normalized_name, sport) VALUES (%s, %s, 'mma') RETURNING id::text AS id",
-        (name, fu.normalize_team(name)),
+        "INSERT INTO teams (name, normalized_name, sport) VALUES (%s, %s, %s) RETURNING id::text AS id",
+        (name, fu.normalize_team(name), sport),
     )
     return cur.fetchone()["id"]
 
 
-def _row(cur, league, home, away, kickoff, espn=None, status="scheduled"):
+def _row(cur, league, home, away, kickoff, espn=None, status="scheduled", metadata=None):
     cur.execute(
         """
-        INSERT INTO matches (league_id, home_team_id, away_team_id, match_date, status, season, external_ids)
-        VALUES (%s, %s, %s, %s, %s, '2026', %s::jsonb) RETURNING id::text AS id
+        INSERT INTO matches (league_id, home_team_id, away_team_id, match_date, status, season, external_ids, metadata)
+        VALUES (%s, %s, %s, %s, %s, '2026', %s::jsonb, %s::jsonb) RETURNING id::text AS id
         """,
-        (league, home, away, kickoff, status, json.dumps({"espn": espn} if espn else {})),
+        (league, home, away, kickoff, status, json.dumps({"espn": espn} if espn else {}), json.dumps(metadata or {})),
     )
     return cur.fetchone()["id"]
 
@@ -221,6 +229,22 @@ class TestCancelDroppedBouts:
         assert fu.cancel_dropped_bouts(cur, MMA, league, [card, elsewhere]) == 0
         assert _get(cur, "matches", listed, "status")["status"] == "scheduled"
         assert _get(cur, "matches", dup, "status")["status"] == "scheduled"
+
+    @pytest.mark.parametrize("order", ["same", "reversed"])
+    def test_an_identified_duplicate_of_a_fought_pair_is_left_and_its_rec_is_not_voided(self, cur, order):
+        # ESPN reissued the competition (or an old duplicate holds a stale id): '999' is listed nowhere, but its
+        # two fighters fought on the card under '222'. repair_stranded_recs settles its rec from the twin; a
+        # cancel here would have the grader void it for good.
+        league, f = self._setup(cur)
+        home, away = (f["Cy"], f["Di"]) if order == "same" else (f["Di"], f["Cy"])
+        dup = _row(cur, league, home, away, CARD - timedelta(hours=1), espn="999")
+        rec = _rec(cur, dup, created_at=CARD - timedelta(days=1))
+        card = _card("600", _comp("222", CARD, "Cy", "Di"), _comp("333", CARD, "Ed", "Fy"))
+        assert fu.cancel_dropped_bouts(cur, MMA, league, [card]) == 0
+        row = _get(cur, "matches", dup, "status", "external_ids")
+        assert row == {"status": "scheduled", "external_ids": {"espn": "999"}}
+        assert gcm.void_recs_on_cancelled_matches(cur) == (0, 0)
+        assert _get(cur, "betting_recommendations", rec, "status")["status"] == "pending"
 
     def test_an_unidentified_row_is_cancelled_only_when_neither_fighter_is_on_the_card(self, cur):
         league, f = self._setup(cur)
@@ -391,6 +415,123 @@ class TestBackfill:
         assert result["plan"]["recs_settled"] == 0 and result["plan"]["recs_voided"] == 2
         assert self._state(dsn, ids)["rec_fought"] == {"status": "void", "profit_loss": Decimal("0.00")}
 
+    def _extra(self, dsn):
+        """Beside the world: a soccer row and an MMA duplicate (orphan_of), both cancelled long ago, and an MMA
+        duplicate still 'scheduled' that the card drops — each with a pending rec written before kickoff."""
+        conn = psycopg2.connect(**dsn)
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            soccer = str(fu.ensure_league(cur, fu.SPORT_CONFIGS["soccer"], "E0", "Premier League", "England"))
+            h, a = _fighter(cur, "Ham", "soccer"), _fighter(cur, "Ars", "soccer")
+            soccer_row = _row(cur, soccer, h, a, CARD, status="cancelled")
+            league = _league(cur)
+            g, hy, ix, jo = (_fighter(cur, n) for n in ("Gu", "Hy", "Ix", "Jo"))
+            old_dup = _row(
+                cur, league, g, hy, CARD - timedelta(days=30), status="cancelled", metadata={"orphan_of": "x"}
+            )
+            new_dup = _row(cur, league, ix, jo, CARD, metadata={"orphan_of": "y"})
+            out = {
+                "soccer_row": soccer_row,
+                "rec_soccer": _rec(cur, soccer_row, created_at=CARD - timedelta(days=1)),
+                "rec_old_dup": _rec(cur, old_dup, created_at=CARD - timedelta(days=31)),
+                "rec_new_dup": _rec(cur, new_dup, created_at=CARD - timedelta(days=1)),
+                "new_dup": new_dup,
+            }
+        conn.commit()
+        conn.close()
+        return out
+
+    def _rec_status(self, dsn, rec_id):
+        conn = psycopg2.connect(**dsn)
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            out = _get(cur, "betting_recommendations", rec_id, "status")["status"]
+        conn.close()
+        return out
+
+    def test_only_the_recs_on_rows_this_run_cancelled_are_voided(self, dsn, tmp_path, caplog):
+        ids, events = self._world(dsn)
+        extra = self._extra(dsn)
+        # The run cancels the dropped row and the scheduled duplicate (neither pair is on the card); it voids the
+        # dropped row's rec only. The two older MMA recs stay pending on rows that are not finished: recs_left.
+        plan = {**self.PLAN, "cancelled": 2, "recs_left": 2}
+        result = self._run(dsn, events, tmp_path, "scope", apply_changes=True, expect_plan=plan)
+        assert not result["plan_mismatch"], result["plan"]
+        assert self._state(dsn, ids)["rec_dropped"]["status"] == "void"
+        for key in ("rec_soccer", "rec_old_dup", "rec_new_dup"):
+            assert self._rec_status(dsn, extra[key]) == "pending", key
+        assert any(
+            "Not voiding rec" in r.getMessage() and extra["rec_new_dup"] in r.getMessage() for r in caplog.records
+        )
+
+    def test_a_write_outside_the_sport_rolls_the_run_back(self, dsn, tmp_path, monkeypatch):
+        ids, events = self._world(dsn)
+        extra = self._extra(dsn)
+        before = self._state(dsn, ids)
+        settle = bf.settle
+
+        def settle_and_stray(cur, *a):
+            out = settle(cur, *a)
+            cur.execute("UPDATE betting_recommendations SET status = 'void' WHERE id = %s", (extra["rec_soccer"],))
+            return out
+
+        monkeypatch.setattr(bf, "settle", settle_and_stray)
+        with pytest.raises(RuntimeError, match="outside --sport mma"):
+            self._run(dsn, events, tmp_path, "stray", apply_changes=True, expect_plan=None)
+        assert self._state(dsn, ids) == before and self._rec_status(dsn, extra["rec_soccer"]) == "pending"
+        assert not (tmp_path / "stray.jsonl.gz").exists()
+
+    def test_a_commit_by_another_session_meanwhile_does_not_reach_the_plan(self, dsn, tmp_path, monkeypatch):
+        ids, events = self._world(dsn)
+        conn = psycopg2.connect(**dsn)
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            league = _league(cur)
+            other = _row(cur, league, _fighter(cur, "Ko"), _fighter(cur, "Lu"), NOW + timedelta(days=5))
+        conn.commit()
+        conn.close()
+        settle = bf.settle
+
+        def settle_while_the_sweep_commits(cur, *a):
+            out = settle(cur, *a)
+            sweep = psycopg2.connect(**dsn)
+            with sweep.cursor() as c:  # the 15-min fixtures sweep moving an unrelated UFC row
+                c.execute("UPDATE matches SET match_date = match_date + interval '1 hour' WHERE id = %s", (other,))
+            sweep.commit()
+            sweep.close()
+            return out
+
+        monkeypatch.setattr(bf, "settle", settle_while_the_sweep_commits)
+        result = self._run(dsn, events, tmp_path, "rr", apply_changes=True, expect_plan=self.PLAN)
+        assert result["plan"] == self.PLAN and not result["plan_mismatch"]
+
+    def _expect(self, ids, **over):
+        want = {
+            ids["rec_fought"]: {"status": "won", "profit_loss": Decimal("20.00"), "actual_result": "won"},
+            ids["rec_dropped"]: {
+                "status": "void",
+                "profit_loss": Decimal("0.00"),
+                "actual_result": gcm.CANCELLED_VOID_RESULT,
+            },
+        }
+        for rid, patch in over.items():
+            want[ids[rid]] = {**want[ids[rid]], **patch}
+        return want
+
+    def test_expect_recs_commits_only_the_exact_outcomes(self, dsn, tmp_path):
+        ids, events = self._world(dsn)
+        before = self._state(dsn, ids)
+        wrong = self._expect(
+            ids, rec_fought={"status": "lost", "profit_loss": Decimal("-10.00"), "actual_result": "lost"}
+        )
+        result = self._run(dsn, events, tmp_path, "wrong", apply_changes=True, expect_plan=self.PLAN, expect_recs=wrong)
+        assert result["plan_mismatch"] and self._state(dsn, ids) == before
+        short = {k: v for k, v in self._expect(ids).items() if k == ids["rec_fought"]}
+        result = self._run(dsn, events, tmp_path, "short", apply_changes=True, expect_plan=self.PLAN, expect_recs=short)
+        assert result["plan_mismatch"] and self._state(dsn, ids) == before
+        result = self._run(
+            dsn, events, tmp_path, "exact", apply_changes=True, expect_plan=self.PLAN, expect_recs=self._expect(ids)
+        )
+        assert not result["plan_mismatch"]
+        assert self._state(dsn, ids)["rec_fought"] == {"status": "won", "profit_loss": Decimal("20.00")}
+
     def test_another_sport_is_refused(self, dsn, tmp_path):
         conn = psycopg2.connect(**dsn)
         with pytest.raises(bf.UnsafeRequest):
@@ -437,6 +578,20 @@ class TestReversedListing:
             "home_score": 0,
             "away_score": 1,
         }
+
+    @pytest.mark.parametrize("handler", ["_record_result", "_process_competition"])
+    def test_a_refused_fork_logs_the_names_in_the_rows_order(self, cur, monkeypatch, handler):
+        league, al, bo, row, _ = self._setup(cur)
+        seen = []
+
+        def refuse(*a, **k):
+            raise fu.ForkRefused(row, {"home_team_id": al, "away_team_id": bo})
+
+        monkeypatch.setattr(fu, "_reconcile_match_row", refuse)
+        monkeypatch.setattr(fu, "_log_refused_fork", lambda cur, cfg, espn_id, refusal, *rest: seen.append(rest))
+        state = "post" if handler == "_record_result" else "pre"
+        assert not getattr(fu, handler)(cur, MMA, league, _comp("401927906", CARD, "Bo", "Al", state=state), {})
+        assert seen == [("Al", al, "Bo", bo, CARD)]
 
     def test_an_existing_fork_is_not_swapped_onto(self, cur, caplog):
         league, al, bo, row, twin = self._setup(cur, fork=True)

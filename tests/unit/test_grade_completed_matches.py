@@ -1339,6 +1339,22 @@ class TestCancelledRecs:
         assert "br.status IN ('pending', 'placed')" in sql and "m.status = 'cancelled'" in sql
         assert "m.metadata->>'orphan_of' AS orphan_of" in sql
         assert "m.match_date < NOW() - (%s || ' hours')::interval" in sql and params == ("72",)
+        assert "ANY(" not in sql
+
+    def test_the_cancelled_query_limited_to_given_matches(self):
+        seen = []
+
+        class Cur:
+            def execute(self, sql, params=None):
+                seen.append((" ".join(sql.split()), params))
+
+            def fetchall(self):
+                return []
+
+        gcm.list_recs_on_cancelled_matches(Cur(), match_ids=["m1", "m2"])
+        sql, params = seen[0]
+        assert "m.status = 'cancelled'" in sql and "AND m.id = ANY(%s::uuid[])" in sql
+        assert params == ("72", ["m1", "m2"])
 
     def test_the_postponement_void_is_guarded_the_same_way(self):
         pending = _open_on("r1", "m9")

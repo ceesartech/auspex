@@ -1801,8 +1801,12 @@ def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict, even
     if teams is None:
         return False
     home_id, away_id = teams
+    # The names in the ids' order, for the logs below; home_name / away_name
+    # stay in ESPN's order (the healing key).
+    log_home, log_away = home_name, away_name
     if _listed_reversed(cur, cfg, espn_id, home_id, away_id, match_dt):
-        home_id, away_id = away_id, home_id  # the row's order (names stay ESPN's: the healing key)
+        home_id, away_id = away_id, home_id  # the row's order
+        log_home, log_away = away_name, home_name
 
     season_type = (event_context or {}).get("season_type")
     try:
@@ -1816,7 +1820,7 @@ def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict, even
             allow_heal=healing_allowed((event_context or {}).get("pair_index"), home_name, away_name, match_dt),
         )
     except ForkRefused as refusal:
-        _log_refused_fork(cur, cfg, espn_id, refusal, home_name, home_id, away_name, away_id, match_dt)
+        _log_refused_fork(cur, cfg, espn_id, refusal, log_home, home_id, log_away, away_id, match_dt)
         return False
     written = bool(
         insert_scheduled_match(
@@ -1829,8 +1833,8 @@ def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict, even
             "Not stamping ESPN id %s onto %s vs %s at %s: the row that owns this fixture could not "
             "be realigned onto that slot, so stamping would put one ESPN id on two rows",
             espn_id,
-            home_name,
-            away_name,
+            log_home,
+            log_away,
             match_dt,
         )
     return written
@@ -2316,10 +2320,14 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
     if teams is None:
         return False
     home_id, away_id = teams
+    # The names in the ids' order, for the logs below; home_name / away_name
+    # stay in ESPN's order (the healing key).
+    log_home, log_away = home_name, away_name
     if _listed_reversed(cur, cfg, espn_id, home_id, away_id, match_dt):
         # The row's order, and the winner flags with it (1v1: no half-time score).
         home_id, away_id = away_id, home_id
         home_score, away_score = away_score, home_score
+        log_home, log_away = away_name, home_name
 
     # The RESULTS path fragments fixtures too: 20 of the 119 prod twins were
     # inserted here, after kickoff, because ESPN had moved the time since we
@@ -2337,7 +2345,7 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
             allow_heal=healing_allowed((event_context or {}).get("pair_index"), home_name, away_name, match_dt),
         )
     except ForkRefused as refusal:
-        _log_refused_fork(cur, cfg, espn_id, refusal, home_name, home_id, away_name, away_id, match_dt)
+        _log_refused_fork(cur, cfg, espn_id, refusal, log_home, home_id, log_away, away_id, match_dt)
         return False
     written = bool(
         insert_finished_match(
@@ -2366,8 +2374,8 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
             "Left %s %s vs %s at %s (ESPN %s) as it is: the existing row is 'cancelled' but ESPN reports a final "
             "%d-%d (%s) — check which is right",
             cfg.sport,
-            home_name,
-            away_name,
+            log_home,
+            log_away,
             match_dt,
             espn_id,
             home_score,
@@ -2381,8 +2389,8 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
             "Not stamping ESPN id %s onto %s vs %s at %s: the row that owns this fixture could not "
             "be realigned onto that slot, so stamping would put one ESPN id on two rows",
             espn_id,
-            home_name,
-            away_name,
+            log_home,
+            log_away,
             match_dt,
         )
     return written

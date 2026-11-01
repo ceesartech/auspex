@@ -154,3 +154,68 @@ def test_apply_needs_every_key_pinned(capsys):
 def test_only_mma_is_allowed():
     with pytest.raises(SystemExit):
         bf.parse_args(["--sport", "soccer", "--dates", "2026-06-06"])
+
+
+# ── --expect-recs ─────────────────────────────────────────────────────
+
+REVIEWED = SCRIPTS_DIR / "data" / "mma_stranded_recs_20261101.csv"
+
+
+def test_the_reviewed_file_reads_as_the_rec_pin():
+    want = bf.parse_expect_recs(REVIEWED)
+    assert len(want) == 21
+    statuses = [w["status"] for w in want.values()]
+    assert statuses.count("won") == 6 and statuses.count("lost") == 14 and statuses.count("void") == 1
+    assert sum(w["profit_loss"] for w in want.values()) == Decimal("-100.80")
+    assert want["d9da951f-c6a9-47ce-bb26-e04112e0f443"] == {
+        "status": "void",
+        "profit_loss": Decimal("0.00"),
+        "actual_result": "void: match cancelled",
+    }
+
+
+@pytest.mark.parametrize(
+    "body, problem",
+    [
+        ("rec_id,status\nr1,won\n", "want columns"),
+        ("rec_id,status,profit_loss,actual_result\nr1,won,1.00,won\nr1,lost,-1.00,lost\n", "twice"),
+        ("rec_id,status,profit_loss,actual_result\nr1,won,x,won\n", "profit_loss"),
+        ("rec_id,status,profit_loss,actual_result\n", "no rec"),
+    ],
+)
+def test_a_malformed_rec_pin_is_refused(tmp_path, body, problem):
+    f = tmp_path / "pin.csv"
+    f.write_text(body)
+    with pytest.raises(bf.UnsafeRequest, match=problem):
+        bf.parse_expect_recs(f)
+    with pytest.raises(bf.UnsafeRequest, match="No such file"):
+        bf.parse_expect_recs(tmp_path / "missing.csv")
+
+
+def _entry(rid, **after):
+    return {"kind": "rec", "id": rid, "change": "recs_settled", "before": _rec(), "after": _rec(**after)}
+
+
+WON = {"status": "won", "profit_loss": Decimal("20.00"), "actual_result": "won"}
+
+
+@pytest.mark.parametrize(
+    "entries, bad",
+    [
+        ([_entry("r1", **WON)], []),
+        ([_entry("r1", **{**WON, "profit_loss": Decimal("20")})], []),  # the same amount
+        ([_entry("r1", **{**WON, "status": "lost"})], ["r1 lost/20.00/'won', expected won/20.00/'won'"]),
+        ([_entry("r1", **{**WON, "profit_loss": Decimal("19.99")})], ["r1 won/19.99/'won', expected won/20.00/'won'"]),
+        ([_entry("r1", **{**WON, "profit_loss": None})], ["r1 won/None/'won', expected won/20.00/'won'"]),
+        ([], ["r1 not changed"]),
+        ([_entry("r1", **WON), _entry("r2", **WON)], ["r2 changed but not expected"]),
+    ],
+)
+def test_rec_outcomes_must_be_exactly_the_pinned_ones(entries, bad):
+    match_entry = {"kind": "match", "id": "m1", "change": "flipped", "before": _match(), "after": _match(**FINAL)}
+    assert bf.rec_outcome_mismatch([match_entry, *entries], {"r1": WON}) == bad
+
+
+def test_the_rec_pin_is_read_by_the_cli():
+    args = bf.parse_args(["--sport", "mma", "--dates", "2026-06-06", "--expect-recs", str(REVIEWED)])
+    assert len(args.expect_recs) == 21

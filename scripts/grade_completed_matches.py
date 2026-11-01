@@ -683,11 +683,15 @@ def void_recs_on_long_postponed_matches(cur) -> int:
     return voided
 
 
-def list_recs_on_cancelled_matches(cur) -> list[dict]:
+def list_recs_on_cancelled_matches(cur, match_ids: Optional[list[str]] = None) -> list[dict]:
     """Open recs on matches 'cancelled' with a kickoff CANCELLED_VOID_HOURS
-    old. `orphan_of` names the played twin of a cancelled duplicate row."""
+    old. `orphan_of` names the played twin of a cancelled duplicate row.
+    `match_ids` limits the read to those matches (scripts/backfill_results.py:
+    only the rows its own run cancelled); None reads every sport's."""
+    only = "" if match_ids is None else "AND m.id = ANY(%s::uuid[])"
+    params: tuple = (str(CANCELLED_VOID_HOURS),) if match_ids is None else (str(CANCELLED_VOID_HOURS), match_ids)
     cur.execute(
-        """
+        f"""
         SELECT br.id::text AS rec_id, br.match_id::text AS match_id,
                br.bet_type, br.selection, br.status, br.created_at,
                m.match_date AS kickoff,
@@ -697,9 +701,10 @@ def list_recs_on_cancelled_matches(cur) -> list[dict]:
         WHERE br.status IN ('pending', 'placed')
           AND m.status = 'cancelled'
           AND m.match_date < NOW() - (%s || ' hours')::interval
+          {only}
         ORDER BY m.match_date, br.id
         """,
-        (str(CANCELLED_VOID_HOURS),),
+        params,
     )
     return [dict(r) for r in cur.fetchall()]
 

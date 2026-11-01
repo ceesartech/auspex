@@ -24,12 +24,15 @@ resolved with the regular grader's own functions:
   * every row the run turned 'finished' goes through
     grade_completed_matches.grade_match: predictions graded, open recs settled
     on the result, a rec written at or after kickoff voided;
-  * the open recs on every row the run cancelled are voided as the grader
-    voids them (void_open_rec, 'void: match cancelled'), when the kickoff is
-    CANCELLED_VOID_HOURS old (a cancelled duplicate, metadata.orphan_of, is
-    never voided).
-The sport's matches and recs are read before and after, inside the
-transaction, and every difference is classified into the PLAN line:
+  * the open recs on the rows this run cancelled — those rows only, read by
+    id — are voided as the grader voids them (void_open_rec, 'void: match
+    cancelled'), when the kickoff is CANCELLED_VOID_HOURS old (a cancelled
+    duplicate, metadata.orphan_of, is never voided).
+The transaction runs at REPEATABLE READ: its reads see only its own writes, so
+a 15-min sweep or grader committing meanwhile cannot leak into the plan (a row
+both touch fails the run with a serialization error, rolled back). The sport's
+matches and recs are read before and after, inside the transaction, and every
+difference is classified into the PLAN line:
 
   results          competitions the results path wrote (an unchanged rewrite
                    counts: a re-run after success still writes them)
@@ -48,12 +51,19 @@ transaction, and every difference is classified into the PLAN line:
   identity_refused writes the results path refused or team problems it met
                    (fetch_upcoming.IDENTITY_STATS)
 
+Every other sport's matches and recs are fingerprinted before and after
+(OUTSIDE_SQL): a run that changed one of them raises and rolls back, since
+neither the plan, the pin nor the audit files would show it.
+
 Every changed row goes to a write-once audit CSV (before and after values) and,
 with --apply, the full before/after rows to a write-once gzip JSONL archive
 (the reversal record), both BEFORE the commit. A dry run (the default) rolls
 back. --apply commits only when the plan equals --expect-plan, every key; any
-difference rolls back and exits 1. A re-run after success plans 0 for every
-key but results and recs_left.
+difference rolls back and exits 1. --expect-recs <csv> (columns rec_id, status,
+profit_loss, actual_result; others ignored) pins each rec's outcome the same
+way, inside the transaction: the recs the run changed must be exactly the
+file's, each with the file's status, profit_loss and actual_result. A re-run
+after success plans 0 for every key but results and recs_left.
 
 Sports: mma only — the one whose backfill was reviewed (2026-11-01). Another
 sport needs its own review of what a wide results sweep does to its rows
@@ -61,7 +71,8 @@ before it is added to ALLOWED_SPORTS.
 
 Usage (inside the api container; scripts/ops/repair_stranded_recs_mma.sh pins it):
     python /app/scripts/backfill_results.py --sport mma --dates 2026-06-06,2026-06-14
-    python /app/scripts/backfill_results.py --sport mma --dates ... --apply --expect-plan results=N,...
+    python /app/scripts/backfill_results.py --sport mma --dates ... --apply --expect-plan results=N,... \
+        --expect-recs /app/scripts/data/<reviewed recs>.csv
 """
 
 from __future__ import annotations
@@ -156,6 +167,25 @@ RECS_LEFT_SQL = """
        AND m.match_date < NOW() - interval '24 hours'
 """
 
+# A fingerprint of every OTHER sport's matches and recs (count:md5 of the
+# fields this tool could write). The run only ever means to write --sport's
+# rows; the plan and the audit files see nothing else.
+OUTSIDE_SQL = """
+    SELECT (SELECT count(*)::text || ':' || COALESCE(md5(string_agg(md5(ROW(
+                       m.id, m.status, m.match_date, m.home_team_id, m.away_team_id, m.home_score, m.away_score,
+                       m.external_ids, m.metadata)::text), '' ORDER BY m.id)), '')
+              FROM matches m
+              LEFT JOIN leagues l ON l.id = m.league_id
+             WHERE l.sport IS DISTINCT FROM %s) AS matches,
+           (SELECT count(*)::text || ':' || COALESCE(md5(string_agg(md5(ROW(
+                       br.id, br.match_id, br.status, br.actual_result, br.profit_loss, br.settled_at)::text), ''
+                       ORDER BY br.id)), '')
+              FROM betting_recommendations br
+              JOIN matches m ON m.id = br.match_id
+              LEFT JOIN leagues l ON l.id = m.league_id
+             WHERE l.sport IS DISTINCT FROM %s) AS recs
+"""
+
 MATCH_FIELDS = (
     "status",
     "match_date",
@@ -247,6 +277,58 @@ def parse_expect_plan(text: str) -> dict[str, int]:
             raise UnsafeRequest(f"--expect-plan {text!r}: want KEY=N pairs with KEY one of {', '.join(PLAN_KEYS)}")
         out[key] = int(value)
     return out
+
+
+EXPECT_REC_COLUMNS = ("rec_id", "status", "profit_loss", "actual_result")
+
+
+def parse_expect_recs(path: Path) -> dict[str, dict]:
+    """The --expect-recs file -> {rec id: {status, profit_loss (Decimal), actual_result}};
+    UnsafeRequest when it cannot be read, lacks a column, repeats a rec or holds no rec."""
+    try:
+        with Path(path).open(newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+    except OSError as exc:
+        raise UnsafeRequest(f"--expect-recs {path}: {exc}") from exc
+    out: dict[str, dict] = {}
+    for i, r in enumerate(rows, start=2):
+        if any(r.get(c) in (None, "") for c in EXPECT_REC_COLUMNS[:3]):
+            raise UnsafeRequest(f"--expect-recs {path} line {i}: want columns {', '.join(EXPECT_REC_COLUMNS)}")
+        if r["rec_id"] in out:
+            raise UnsafeRequest(f"--expect-recs {path} line {i}: rec {r['rec_id']} is listed twice")
+        try:
+            pl = Decimal(r["profit_loss"])
+        except ArithmeticError as exc:
+            raise UnsafeRequest(f"--expect-recs {path} line {i}: profit_loss {r['profit_loss']!r}") from exc
+        out[r["rec_id"]] = {"status": r["status"], "profit_loss": pl, "actual_result": r.get("actual_result") or None}
+    if not out:
+        raise UnsafeRequest(f"--expect-recs {path}: no rec")
+    return out
+
+
+def rec_outcome_mismatch(entries: list[dict], expect: dict[str, dict]) -> list[str]:
+    """The recs whose change differs from --expect-recs: one the file lists that
+    the run did not change or changed to another outcome, or one the run changed
+    that the file does not list. Pure."""
+    got = {e["id"]: e["after"] or {} for e in entries if e["kind"] == "rec"}
+    bad = []
+    for rid in sorted(set(expect) | set(got)):
+        want, after = expect.get(rid), got.get(rid)
+        if want is None:
+            bad.append(f"{rid} changed but not expected")
+        elif after is None:
+            bad.append(f"{rid} not changed")
+        elif (
+            after.get("status") != want["status"]
+            or after.get("profit_loss") is None
+            or Decimal(str(after["profit_loss"])) != want["profit_loss"]
+            or after.get("actual_result") != want["actual_result"]
+        ):
+            bad.append(
+                f"{rid} {after.get('status')}/{after.get('profit_loss')}/{after.get('actual_result')!r}, expected "
+                f"{want['status']}/{want['profit_loss']}/{want['actual_result']!r}"
+            )
+    return bad
 
 
 def parse_dates(text: str, today: date) -> list[date]:
@@ -369,8 +451,18 @@ def settle(cur, before_matches: dict[str, dict], mid_matches: dict[str, dict]) -
         if row["status"] == "cancelled" and (before_matches.get(mid) or {}).get("status") != "cancelled"
     }
     voided = 0
-    for rec in gcm.list_recs_on_cancelled_matches(cur):
-        if rec["match_id"] not in cancelled or rec.get("orphan_of"):
+    # Only the rows this run cancelled, by id: the grader's own read spans every
+    # sport's cancelled rows, which are the 15-min grader's business.
+    open_recs = gcm.list_recs_on_cancelled_matches(cur, match_ids=sorted(cancelled)) if cancelled else []
+    for rec in open_recs:
+        if rec.get("orphan_of"):
+            logger.error(
+                "Not voiding rec %s (match %s): the row this run cancelled is a duplicate of match %s, which was "
+                "played — repair_stranded_recs settles it from the twin",
+                rec["rec_id"],
+                rec["match_id"],
+                rec["orphan_of"],
+            )
             continue
         voided += gcm.void_open_rec(cur, rec, "cancelled", gcm.CANCELLED_VOID_RESULT)
     logger.info(
@@ -402,9 +494,11 @@ def run(
     out_csv: Optional[Path] = None,
     archive: Optional[Path] = None,
     events_by_slug: Optional[dict[str, list[dict]]] = None,
+    expect_recs: Optional[dict[str, dict]] = None,
 ) -> dict:
     """Fetch, write and settle in one transaction; commit only on --apply with
-    a matching plan. `events_by_slug` replaces the ESPN fetch (tests)."""
+    a matching plan (and, given `expect_recs`, matching rec outcomes).
+    `events_by_slug` replaces the ESPN fetch (tests)."""
     if sport not in ALLOWED_SPORTS:
         raise UnsafeRequest(f"--sport {sport!r}: allowed {', '.join(ALLOWED_SPORTS)} (see the module docstring)")
     cfg = fu.SPORT_CONFIGS[sport]
@@ -418,6 +512,10 @@ def run(
     archive = archive or default_archive
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # First statement of the transaction (a connection mid-transaction fails here, loudly).
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            cur.execute(OUTSIDE_SQL, (sport, sport))
+            outside_before = dict(cur.fetchone())
             before = snapshot(cur, sport)
             written = 0
             for slug, events in events_by_slug.items():
@@ -431,6 +529,14 @@ def run(
             mid = snapshot(cur, sport)
             settle(cur, before[0], mid[0])
             after = snapshot(cur, sport)
+            cur.execute(OUTSIDE_SQL, (sport, sport))
+            outside_after = dict(cur.fetchone())
+            if outside_after != outside_before:
+                raise RuntimeError(
+                    f"the run changed rows outside --sport {sport} (matches {outside_before['matches']} -> "
+                    f"{outside_after['matches']}, recs {outside_before['recs']} -> {outside_after['recs']}); "
+                    "neither the plan nor the audit files cover them"
+                )
             counts, entries = diff(before, after)
             cur.execute(RECS_LEFT_SQL, (sport,))
             counts["recs_left"] = int(cur.fetchone()["n"])
@@ -447,6 +553,17 @@ def run(
             )
             if mismatch:
                 logger.error("The plan is not the one pinned (%s): nothing written; review %s", mismatch, out_csv)
+            bad_recs = rec_outcome_mismatch(entries, expect_recs) if expect_recs is not None else []
+            if bad_recs:
+                logger.error(
+                    "%d rec outcome(s) differ from --expect-recs: nothing written; review %s:\n  %s",
+                    len(bad_recs),
+                    out_csv,
+                    "\n  ".join(bad_recs),
+                )
+                mismatch = "; ".join(filter(None, [mismatch, f"{len(bad_recs)} rec outcome(s) not as expected"]))
+            elif expect_recs is not None:
+                logger.info("Rec outcomes as expected: %d rec(s), pinned", len(expect_recs))
             if apply_changes and not mismatch:
                 write_archive(archive, entries)
                 conn.commit()
@@ -475,11 +592,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"Commit nothing unless the plan has exactly these counts (KEY=N,... with KEY one of "
         f"{', '.join(PLAN_KEYS)}); --apply needs every key.",
     )
+    p.add_argument(
+        "--expect-recs",
+        type=Path,
+        default=None,
+        help="Commit nothing unless the recs the run changes are exactly this CSV's (columns rec_id, status, "
+        "profit_loss, actual_result), each with its outcome.",
+    )
     p.add_argument("--apply", action="store_true", help="Commit (default: dry run, rolled back).")
     args = p.parse_args(argv)
     try:
         args.dates = parse_dates(args.dates, datetime.now(timezone.utc).date())
         args.expect_plan = parse_expect_plan(args.expect_plan) if args.expect_plan is not None else None
+        args.expect_recs = parse_expect_recs(args.expect_recs) if args.expect_recs is not None else None
     except UnsafeRequest as exc:
         p.error(str(exc))
     if args.apply:
@@ -504,6 +629,7 @@ def main(argv: list[str] | None = None) -> int:
             expect_plan=args.expect_plan,
             out_csv=args.out_csv,
             archive=args.archive,
+            expect_recs=args.expect_recs,
         )
     except UnsafeRequest as exc:
         logger.error("%s", exc)
