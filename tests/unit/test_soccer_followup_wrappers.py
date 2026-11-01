@@ -68,8 +68,15 @@ LEFT_REVIEWED = [
     "8a9a1d8d-95f6-4785-85d8-265ed2d377c0 2026-10-17T16:30 Atromitos v AEK - reviewed, left alone: postponed",
 ]
 UNREVIEWED = (
-    "6b2133b1-e702-4705-80f9-0218913bbdeb 2026-11-01T01:07 Guadalajara Chivas v Atlante - NOT in the reviewed list: "
+    "5b94347b-daec-4117-aa09-710cd860a2b6 2026-11-01T23:00 Santos Laguna v Necaxa - NOT in the reviewed list: "
     "left as it is, for a separate review"
+)
+# Guadalajara Chivas v Atlante (ESPN 401876915, final 4-2) was reviewed ahead: a 'heal' row, never_resulted only when
+# the runbook starts late. Its dry run alone (replica after steps 1-11, as of 2026-11-06): 76 graded, nothing stamped.
+GVA = "6b2133b1-e702-4705-80f9-0218913bbdeb"
+NR_PLAN_LATE = (
+    "PLAN candidates=39 heal=39 done=0 refuse=0 predictions_graded=3249 predictions_regraded=0 recs_changed=0 "
+    "teams_stamped=3 espn_failed=0"
 )
 
 
@@ -188,22 +195,44 @@ def test_a_never_resulted_row_outside_the_reviewed_list_is_listed_and_left_alone
     )
     rc, out, calls, _ = _run(tmp_path, "backfill_soccer_never_resulted.sh", rules)
     assert rc == 0 and "DONE: 38 never_resulted row(s) healed" in out, out
-    assert "Guadalajara Chivas v Atlante - NOT in the reviewed list" in out
+    assert "Santos Laguna v Necaxa - NOT in the reviewed list" in out
     assert "5 left alone" in out and "never_resulted rows now 4, new ones 0" in out
     assert "candidates=38," in _applies(calls)[0]
+
+
+def test_a_late_start_heals_the_reviewed_liga_mx_fixture_within_the_bounds(tmp_path):
+    """Started after the sweep's look-back passed Guadalajara v Atlante and 96 h after its kickoff: it is a
+    never_resulted row with a reviewed 'heal' row, so it is passed with the other 38 and the plan 39 / 39 / 3,249 / 3
+    is inside the bounds and applied, pinned."""
+    verify = NR_VERIFY.replace("candidates=38", "candidates=39").replace("done=38", "done=39")
+    rules = _nr_rules(
+        pre_split=_split(39, 43),
+        dry_split=_split(39, 43),
+        pre_plan=NR_PLAN_LATE,
+        dry_plan=NR_PLAN_LATE,
+        verify_plan=verify,
+        healed="39",
+        state="39|0",
+    )
+    rc, out, calls, _ = _run(tmp_path, "backfill_soccer_never_resulted.sh", rules)
+    assert rc == 0 and "DONE: 39 never_resulted row(s) healed and graded (3249 predictions)" in out, out
+    assert (
+        "--expect-plan candidates=39,heal=39,done=0,refuse=0,predictions_graded=3249,predictions_regraded=0,"
+        "recs_changed=0,teams_stamped=3,espn_failed=0" in _applies(calls)[0]
+    )
 
 
 @pytest.mark.parametrize(
     "plan",
     [
-        NR_PLAN.replace("heal=38", "heal=39"),
-        NR_PLAN.replace("candidates=38", "candidates=39"),
+        NR_PLAN.replace("heal=38", "heal=40"),
+        NR_PLAN.replace("candidates=38", "candidates=40"),
         NR_PLAN.replace("candidates=38", "candidates=36"),  # fewer than the 38 passed: not the list it was given
         NR_PLAN.replace("recs_changed=0", "recs_changed=1"),
         NR_PLAN.replace("predictions_regraded=0", "predictions_regraded=2"),
         NR_PLAN.replace("espn_failed=0", "espn_failed=1"),
         NR_PLAN.replace("teams_stamped=3", "teams_stamped=4"),
-        NR_PLAN.replace("predictions_graded=3173", "predictions_graded=3174"),
+        NR_PLAN.replace("predictions_graded=3173", "predictions_graded=3250"),
         NR_PLAN.replace("done=0", "done=1"),
         "",
     ],
@@ -260,14 +289,15 @@ def test_the_split_passes_only_the_reviewed_heal_rows_and_lists_the_rest(tmp_pat
     reviewed = HERE.parents[1] / "scripts" / "data" / "soccer_never_resulted_reviewed.csv"
     heal = "b06808bf-385e-48cc-aefd-de83092a90f7"  # a 'heal' row of the committed list
     leave = "8a9a1d8d-95f6-4785-85d8-265ed2d377c0"  # Atromitos v AEK: 'leave'
-    other = "6b2133b1-e702-4705-80f9-0218913bbdeb"  # not in the list
+    other = "5b94347b-daec-4117-aa09-710cd860a2b6"  # Santos Laguna v Necaxa: not in the list
     merged = "11111111-1111-1111-1111-111111111111"  # another class: not a never_resulted row
     _orphans_csv(
         tmp_path / "orphans.csv",
         [
             [heal, "leave", "never_resulted", "2026-05-28 22:00:00+00", "Cerro Porteño", "Sporting Cristal"],
             [leave, "leave", "never_resulted", "2026-10-17 16:30:00+00", "Atromitos", "AEK"],
-            [other, "leave", "never_resulted", "2026-11-01 01:07:00+00", "Guadalajara Chivas", "Atlante"],
+            [other, "leave", "never_resulted", "2026-11-01 23:00:00+00", "Santos Laguna", "Necaxa"],
+            [GVA, "leave", "never_resulted", "2026-11-01 01:07:00+00", "Guadalajara Chivas", "Atlante"],
             [merged, "merge_cancel", "twin", "2026-06-15 00:00:00+00", "Coquimbo Unido", "O'Higgins"],
         ],
     )
@@ -275,12 +305,12 @@ def test_the_split_passes_only_the_reviewed_heal_rows_and_lists_the_rest(tmp_pat
     args += [str(tmp_path / "ids.txt"), str(tmp_path / "all.txt")]
     proc = subprocess.run([sys.executable, "-c", _split_program(), *args], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
-    assert (tmp_path / "ids.txt").read_text().split() == [heal]
-    assert (tmp_path / "all.txt").read_text().split() == [heal, leave, other]
+    assert (tmp_path / "ids.txt").read_text().split() == [heal, GVA]  # the reviewed 'heal' rows, in orphans order
+    assert (tmp_path / "all.txt").read_text().split() == [heal, leave, other, GVA]
     lines = proc.stdout.splitlines()
-    assert lines[-1] == "COUNTS 1 3"
+    assert lines[-1] == "COUNTS 2 4" and len(lines) == 3
     assert lines[0].startswith(f"LEFT {leave} 2026-10-17 16:30 Atromitos v AEK - reviewed, left alone: ESPN 401896749")
-    assert lines[1].startswith(f"LEFT {other} 2026-11-01 01:07 Guadalajara Chivas v Atlante - NOT in the reviewed")
+    assert lines[1].startswith(f"LEFT {other} 2026-11-01 23:00 Santos Laguna v Necaxa - NOT in the reviewed")
     again = subprocess.run([sys.executable, "-c", _split_program(), *args], capture_output=True, text=True)
     assert again.returncode != 0 and "FileExistsError" in again.stderr  # write-once
 
@@ -294,11 +324,19 @@ def test_the_split_refuses_a_reviewed_list_with_an_unknown_decision(tmp_path):
     assert not (tmp_path / "ids.txt").exists()
 
 
-def test_the_reviewed_list_is_the_rehearsals_38_heals_and_4_left_alone():
+def test_the_reviewed_list_is_the_rehearsals_38_heals_4_left_alone_and_the_liga_mx_fixture_reviewed_ahead():
     rows = list(csv.DictReader((HERE.parents[1] / "scripts" / "data" / "soccer_never_resulted_reviewed.csv").open()))
-    assert len(rows) == 42 and len({r["match_id"] for r in rows}) == 42
-    assert sorted(Counter(r["decision"] for r in rows).items()) == [("heal", 38), ("leave", 4)]
+    assert len(rows) == 43 and len({r["match_id"] for r in rows}) == 43
+    assert sorted(Counter(r["decision"] for r in rows).items()) == [("heal", 39), ("leave", 4)]
     assert all(r["espn_id"] and r["espn_final"] for r in rows if r["decision"] == "heal")
+    (gva,) = [r for r in rows if r["match_id"] == GVA]
+    assert (gva["decision"], gva["espn_id"], gva["espn_final"], gva["kickoff"]) == (
+        "heal",
+        "401876915",
+        "4-2",
+        "2026-11-01T01:07:00+00:00",
+    )
+    assert "5b94347b-daec-4117-aa09-710cd860a2b6" not in {r["match_id"] for r in rows}  # not played when reviewed
 
 
 # --- promote_raw_after_repair.sh (step 13) ------------------------------------------------------------------------

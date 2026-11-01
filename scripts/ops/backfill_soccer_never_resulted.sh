@@ -34,7 +34,24 @@
 # look-back has passed it). Such a row is NOT in the reviewed list: it is
 # listed (LEFT ... NOT in the reviewed list) and left as it is, for a
 # separate review — it neither aborts the step nor gets healed unreviewed.
-# Pins: the bounds below are that plan's; the run applies exactly its own
+# One such fixture was reviewed ahead (2026-11-01): Guadalajara Chivas v
+# Atlante (6b2133b1, ESPN 401876915, kickoff 2026-11-01 01:07Z, final 4-2,
+# scoring plays agree; 76 predictions, all before kickoff, no rec) has a
+# 'heal' row. It is never_resulted only if step 1 runs after the sweep's
+# look-back has passed it (from ~2026-11-04 00:00Z) and this step runs 96 h
+# or more after its kickoff (2026-11-05 01:07Z); started earlier, the
+# pipeline records its result after step 1 and the row is not passed here.
+# The tool's dry run of it alone, as of 2026-11-06 on the replica after
+# steps 1-11 (ESPN fetched 2026-11-01 ~07:03Z): heal 1, 76 predictions
+# graded, 0 recs changed, 0 teams stamped. Between ~11-04 00:00Z and 11-05
+# 01:07Z neither path reaches it: --only 12 after 11-05 01:07Z heals it
+# (then --only 16). Santos Laguna v Necaxa (5b94347b, ESPN 401876912, kickoff
+# 2026-11-01 23:00Z) was not yet played when reviewed, so it is not listed:
+# started after ~2026-11-04 23:00Z, this step lists it as NOT in the
+# reviewed list and leaves it a stale scheduled row (76 predictions, no rec).
+# Pins: the bounds below are that plan's, plus Guadalajara v Atlante's 1
+# row and 76 predictions (candidates and heal 39, graded 3,249, stamped
+# 3), whichever of the two cases holds; the run applies exactly its own
 # dry run's counts (--expect-plan), with the ESPN scoreboards that dry run
 # fetched (one write-once cache), so ESPN changing between the dry run and
 # the apply cannot change what is written.
@@ -50,8 +67,8 @@
 #      cleanup is done: nothing to merge, delete or mark, nothing blocked) and
 #      the tool's dry run of the reviewed 'heal' rows among them (ESPN into a
 #      new write-once cache) — abort unless the plan is within the reviewed
-#      set: candidates <= 38 and = the rows passed, heal <= 38, predictions
-#      graded <= 3,173, teams stamped <= 3, and no prediction re-graded, no
+#      set: candidates <= 39 and = the rows passed, heal <= 39, predictions
+#      graded <= 3,249, teams stamped <= 3, and no prediction re-graded, no
 #      rec changed, no row already finished, no ESPN request failed;
 #   3. apply, pinned to the dry run's counts (--expect-plan, the same cache):
 #      one transaction, every heal checked in a savepoint (see the tool);
@@ -107,10 +124,12 @@ plan_num() {  # plan_num <PLAN line> <key>: the count, or "missing"
   if [[ "$v" =~ ^[0-9]+$ ]]; then echo "$v"; else echo missing; fi
 }
 # The reviewed set (rehearsal of 2026-11-01, see the header): its 'heal' rows are the only ones passed to the tool.
+# The rehearsal's 38 heals (3,173 predictions, 3 teams stamped) plus Guadalajara v Atlante (1 row, 76 predictions,
+# no stamp), which is a never_resulted row only when the runbook starts late.
 REVIEWED=/app/scripts/data/soccer_never_resulted_reviewed.csv
-MAX_CANDIDATES=38
-MAX_HEAL=38
-MAX_GRADED=3173
+MAX_CANDIDATES=39
+MAX_HEAL=39
+MAX_GRADED=3249
 MAX_TEAMS_STAMPED=3
 ORPHANS="python /app/scripts/repair_fixture_orphans.py --sport soccer --delete-placeholders --postponed-list /app/scripts/data/soccer_postponed_stale_rows.csv"
 TOOL="python /app/scripts/backfill_never_resulted.py"

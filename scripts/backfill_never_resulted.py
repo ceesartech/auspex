@@ -16,9 +16,12 @@ other completed event of those leagues and days, healing, realigning and
 stamping rows nobody reviewed, and grade_completed_matches --days 160 would
 grade every finished match of every sport in the window. This touches the
 listed rows only, and scripts/ops/backfill_soccer_never_resulted.sh (runbook
-step 12) lists only the 38 the rehearsal reviewed for healing
-(scripts/data/soccer_never_resulted_reviewed.csv): a row that joins the
-class later is listed by the wrapper and left alone, for its own review.
+step 12) lists only the rows reviewed for healing
+(scripts/data/soccer_never_resulted_reviewed.csv: the rehearsal's 38, plus
+Guadalajara v Atlante of 2026-11-01, reviewed ahead because it joins the
+class if the runbook starts late): a row that joins the class later and is
+not on that list is listed by the wrapper and left alone, for its own
+review.
 
 WHAT IT DOES
 ------------

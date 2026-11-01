@@ -24,7 +24,13 @@
 # v Atlante, kicked off 2026-11-01 01:07Z, still 'scheduled' at 04:53Z while
 # every other fixture of that night was finished): step 1 must run before
 # ~2026-11-04 00:00Z for the sweep to record it. Later, it stays a stale
-# scheduled row; step 12 lists it as not reviewed and leaves it alone.
+# scheduled row until 96 h after its kickoff (2026-11-05 01:07Z); from then
+# step 12 heals it from the reviewed list (its 'heal' row: ESPN 401876915
+# final 4-2); a run whose step 12 falls between the two leaves it, and
+# --only 12 (then --only 16) after 2026-11-05 01:07Z heals it. Santos v
+# Necaxa (2026-11-01 23:00Z, not played when the list was reviewed) is not
+# listed: step 1 must run before ~2026-11-04 23:00Z for the sweep to record
+# it; later, step 12 lists it as not reviewed and leaves it alone.
 #
 #  1 scripts/ops/repoint_team_matches.sh --pass 1
 #    Moves 33 Liga MX sides (31 match rows) off Santos FC's 'Santos' and CD
@@ -111,7 +117,9 @@
 #    (scripts/data/soccer_never_resulted_reviewed.csv), and those rows graded
 #    (scripts/backfill_never_resulted.py, pinned, one transaction). Expect
 #    candidates 38, heal 38, refuse 0, predictions graded 3,173, recs changed
-#    0, teams stamped 3 (bounds in the wrapper). The list's other 4, and any
+#    0, teams stamped 3; started late (above), Guadalajara v Atlante's
+#    reviewed 'heal' row adds 1 / 1 / 76 / 0 (bounds in the wrapper: 39, 39,
+#    3,249, 3). The list's other 4, and any
 #    never_resulted row it does not hold (a fixture whose result never
 #    arrived joins the class 96 h after kickoff), are listed and left as they
 #    are. One of the 4 is a fork of a healed row (Coquimbo Unido v O'Higgins
