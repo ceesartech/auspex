@@ -24,15 +24,19 @@ the horse streams once no race prediction has been created for 72 h
 as warnings), and the API only lists races and recs, so it goes quiet on its
 own. The frontend mirrors this constant in
 services/frontend/src/lib/sport-switches.ts (HORSE_RACING_ENABLED): while
-False it hides the Race cards nav entry and the /races pages show a "paused"
-notice instead of empty lists. tests/unit/test_frontend_sport_switches.py
-fails if the two differ.
+False it hides the Race cards nav entry, the /races pages show a "paused"
+notice instead of empty lists, and the predictions sport filter and the
+recommendations market filter stop offering horse racing.
+tests/unit/test_frontend_sport_switches.py fails if the two differ.
 
 True: the original branch — racecards >> results >> features >>
 consensus >> ranker >> recommendations, and grade_completed_races.
 
 Re-enable: set HORSE_RACING_ENABLED = True here AND in
-services/frontend/src/lib/sport-switches.ts, and push to main. The DAG files
+services/frontend/src/lib/sport-switches.ts, and push to main. That is the
+whole code change: no test pins either value (the mirror test only keeps the
+two equal; the dormant and enabled states are each tested with the switch
+forced, and the Playwright paused flows skip themselves). The DAG files
 are bind-mounted, so the dag-processor re-parses within ~5 min; the next
 tick fetches today's racecards (the Standard tier serves today only) and
 recs follow within that tick. The frontend change ships with the next CI

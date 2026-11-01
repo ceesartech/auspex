@@ -1,8 +1,13 @@
 import { test, expect, Page } from '@playwright/test';
+import { HORSE_RACING_ENABLED } from '../../../src/lib/sport-switches';
 
-// Horse racing is dormant (HORSE_RACING_ENABLED false in src/lib/sport-switches.ts,
+// While horse racing is dormant (HORSE_RACING_ENABLED false in src/lib/sport-switches.ts,
 // mirroring services/data-ingestion/dags/sport_switches.py): no Race cards nav
 // entry, and the /races pages show a paused notice without calling the API.
+// These flows follow the committed constant: with horse racing switched back
+// on they are skipped (the enabled pages are covered by the Jest tests in
+// tests/unit/components/horse-racing-switch.test.tsx), so re-enabling needs
+// no edit here.
 
 async function signIn(page: Page) {
   await page.goto('/login');
@@ -19,6 +24,8 @@ async function signIn(page: Page) {
 }
 
 test.describe('Horse racing paused', () => {
+  test.skip(HORSE_RACING_ENABLED, 'horse racing is switched on (src/lib/sport-switches.ts)');
+
   test('/races shows the paused notice and the nav offers no Race cards entry', async ({ page }) => {
     // The races API is /api/v1/races (src/lib/api/races.ts); a paused page never asks it.
     const raceCalls: string[] = [];

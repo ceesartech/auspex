@@ -42,14 +42,26 @@ def test_the_frontend_switch_points_at_the_dag_switch():
 
 
 def test_every_races_nav_entry_and_page_reads_the_switch():
-    """The two nav lists filter through isRouteEnabled and both /races pages
-    branch on HORSE_RACING_ENABLED, so flipping the one constant is enough."""
+    """The two nav lists filter through isRouteEnabled, both /races pages
+    branch on HORSE_RACING_ENABLED, and both filters that offer horse racing
+    filter through isSportEnabled, so flipping the one constant is enough."""
     for nav in ("components/layout/sidebar.tsx", "components/layout/header.tsx"):
         text = (FRONTEND_SRC / nav).read_text()
         assert "href: '/races'" in text and "isRouteEnabled(item.href)" in text, nav
     for page in ("app/(authenticated)/races/page.tsx", "app/(authenticated)/races/[id]/page.tsx"):
         text = (FRONTEND_SRC / page).read_text()
         assert "if (!HORSE_RACING_ENABLED) return <RacesPaused />;" in text, page
+    predictions = (FRONTEND_SRC / "components/predictions/prediction-filters.tsx").read_text()
+    assert "{ value: 'horse_racing', label: 'Horse Racing' }" in predictions
+    assert "allSportOptions.filter((option) => !option.value || isSportEnabled(option.value))" in predictions
+    recommendations = (FRONTEND_SRC / "components/recommendations/recommendation-filters.tsx").read_text()
+    assert "{ value: 'win', label: 'Win (Horse Racing)', sport: 'horse_racing' }" in recommendations
+    assert "allMarketOptions.filter((option) => !option.sport || isSportEnabled(option.sport))" in recommendations
+    offering = [p for p in FRONTEND_SRC.rglob("*.tsx") if re.search(r"Horse Racing\b", p.read_text())]
+    assert sorted(p.relative_to(FRONTEND_SRC).as_posix() for p in offering) == [
+        "components/predictions/prediction-filters.tsx",
+        "components/recommendations/recommendation-filters.tsx",
+    ]
     hrefs = [p for p in FRONTEND_SRC.rglob("*.tsx") if re.search(r"href[:=]\s*['\"{`]+/races", p.read_text())]
     assert sorted(p.relative_to(FRONTEND_SRC).as_posix() for p in hrefs) == [
         "components/layout/header.tsx",

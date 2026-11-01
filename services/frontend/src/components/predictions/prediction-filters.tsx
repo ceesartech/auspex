@@ -4,9 +4,12 @@ import { Select } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
 import { usePredictionsStore } from '@/lib/store/predictions-store';
 import { marketOptionsBySport } from '@/lib/markets';
+import { isSportEnabled } from '@/lib/sport-switches';
 import { X } from 'lucide-react';
 
-const sportOptions = [
+// Filtered through isSportEnabled at render time: a switched-off sport
+// (horse racing while HORSE_RACING_ENABLED is false) is not offered.
+const allSportOptions = [
   { value: '', label: 'All Sports' },
   { value: 'soccer', label: 'Soccer' },
   { value: 'nfl', label: 'NFL' },
@@ -38,6 +41,7 @@ export function PredictionFilters({ leagueOptions = [] }: PredictionFiltersProps
     clearFilters,
   } = usePredictionsStore();
 
+  const sportOptions = allSportOptions.filter((option) => !option.value || isSportEnabled(option.value));
   const marketOptions = selectedSport ? marketOptionsBySport[selectedSport] : undefined;
 
   return (
