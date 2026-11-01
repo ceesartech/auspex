@@ -4,12 +4,14 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Menu, Moon, Sun, Bell, BellOff, LogOut } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
+import { isRouteEnabled } from '@/lib/sport-switches';
 import { Button } from '@/components/ui/button';
 import { useAuthStore } from '@/lib/store/auth-store';
 import { useSettingsStore } from '@/lib/store/settings-store';
 import { useLogout } from '@/lib/hooks/use-auth';
 import { useState } from 'react';
 
+// '/races' is left out while HORSE_RACING_ENABLED (@/lib/sport-switches) is false.
 const navItems = [
   { href: '/', label: 'Dashboard' },
   { href: '/predictions', label: 'Predictions' },
@@ -25,6 +27,7 @@ export function Header() {
   const { theme, setTheme, notifications, toggleNotifications } = useSettingsStore();
   const logout = useLogout();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const items = navItems.filter((item) => isRouteEnabled(item.href));
 
   const toggleTheme = () => {
     setTheme(theme === 'dark' ? 'light' : 'dark');
@@ -43,7 +46,7 @@ export function Header() {
 
         <nav className="hidden md:flex items-center space-x-6 text-sm font-medium">
           {isAuthenticated &&
-            navItems.map((item) => (
+            items.map((item) => (
               <Link
                 key={item.href}
                 href={item.href}
@@ -98,7 +101,7 @@ export function Header() {
       {mobileMenuOpen && isAuthenticated && (
         <div className="border-t md:hidden">
           <nav className="container flex flex-col space-y-2 py-4">
-            {navItems.map((item) => (
+            {items.map((item) => (
               <Link
                 key={item.href}
                 href={item.href}

@@ -10,8 +10,11 @@ once per switch state. What this pins:
     enabled DAG, and send_pipeline_digest still fans in the six other
     sports' recommendation tasks;
   * enabled: the original branch, chained, and its recs feed the digest;
-  * the switch is committed False (dormant), and every flag the DAG passes
-    a racing script is one that script accepts."""
+  * the committed switch is a plain bool literal (its VALUE is not pinned:
+    re-enabling is the switch plus its frontend mirror, which
+    tests/unit/test_frontend_sport_switches.py keeps equal, and both DAG
+    shapes are tested here with the switch forced), and every flag the DAG
+    passes a racing script is one that script accepts."""
 
 from __future__ import annotations
 
@@ -135,12 +138,15 @@ def _shape(tasks: dict, drop: set) -> dict:
     }
 
 
-def test_the_committed_switch_is_dormant():
+def test_the_committed_switch_is_a_plain_bool():
+    # Not pinned to False: flipping the switch (and its frontend mirror) to
+    # re-enable horse racing must not turn CI red, or nothing deploys. The
+    # dormant and enabled DAG shapes are each pinned above and below.
     spec = importlib.util.spec_from_file_location("sport_switches_real", DAGS / "sport_switches.py")
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    assert mod.HORSE_RACING_ENABLED is False
+    assert mod.HORSE_RACING_ENABLED is True or mod.HORSE_RACING_ENABLED is False
 
 
 def test_dormant_creates_no_horse_task_but_the_drain(dormant):

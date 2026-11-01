@@ -9,6 +9,8 @@ import { formatDateTime, formatPercentage } from '@/lib/utils/format';
 import { cn } from '@/lib/utils/cn';
 import { Trophy, AlertTriangle } from 'lucide-react';
 import { RaceEntrant } from '@/lib/types/race';
+import { RacesPaused } from '@/components/races/races-paused';
+import { HORSE_RACING_ENABLED } from '@/lib/sport-switches';
 
 interface PageProps {
   // Next 14 client components receive params as a PLAIN object (not a
@@ -21,8 +23,14 @@ interface PageProps {
   params: { id: string };
 }
 
+// While horse racing is dormant (HORSE_RACING_ENABLED false) a deep link
+// lands on the same paused notice as the list page and fetches nothing.
 export default function RaceDetailPage({ params }: PageProps) {
-  const { id } = params;
+  if (!HORSE_RACING_ENABLED) return <RacesPaused />;
+  return <RaceDetail id={params.id} />;
+}
+
+function RaceDetail({ id }: { id: string }) {
   const { data, isLoading, error, refetch } = useRaceDetail(id);
 
   if (isLoading) return <LoadingPage message="Loading race detail..." />;

@@ -13,6 +13,7 @@ import {
   Award,
 } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
+import { isRouteEnabled } from '@/lib/sport-switches';
 
 const sidebarItems = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -20,7 +21,8 @@ const sidebarItems = [
   { href: '/recommendations', label: 'Recommendations', icon: Star },
   // Horse racing uses its own schema (migration 013) — separate
   // page rather than shoehorning multi-runner shapes into the
-  // matches-based predictions/recommendations pages.
+  // matches-based predictions/recommendations pages. Hidden while
+  // HORSE_RACING_ENABLED (@/lib/sport-switches) is false.
   { href: '/races', label: 'Race cards', icon: Award },
   { href: '/accumulator', label: 'Accumulator', icon: Layers },
   { href: '/analytics', label: 'Analytics', icon: BarChart3 },
@@ -30,11 +32,12 @@ const sidebarItems = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const items = sidebarItems.filter((item) => isRouteEnabled(item.href));
 
   return (
     <aside className="hidden lg:flex lg:flex-col lg:w-64 lg:border-r bg-background">
       <nav className="flex flex-col gap-1 p-4">
-        {sidebarItems.map((item) => {
+        {items.map((item) => {
           const Icon = item.icon;
           const isActive = pathname === item.href;
 

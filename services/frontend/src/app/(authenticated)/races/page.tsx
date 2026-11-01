@@ -9,10 +9,20 @@ import { Badge } from '@/components/ui/badge';
 import { Award } from 'lucide-react';
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
+import { RacesPaused } from '@/components/races/races-paused';
+import { HORSE_RACING_ENABLED } from '@/lib/sport-switches';
 
 type RaceStatus = 'scheduled' | 'finished';
 
+// While horse racing is dormant (HORSE_RACING_ENABLED false, mirroring
+// services/data-ingestion/dags/sport_switches.py) the page shows a paused
+// notice and fetches nothing.
 export default function RacesPage() {
+  if (!HORSE_RACING_ENABLED) return <RacesPaused />;
+  return <RaceCardsList />;
+}
+
+function RaceCardsList() {
   const [statusFilter, setStatusFilter] = useState<RaceStatus>('scheduled');
   const { data: races, isLoading, error, refetch } = useRaces({
     status: statusFilter,

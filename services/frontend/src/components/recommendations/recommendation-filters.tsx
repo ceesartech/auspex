@@ -5,6 +5,7 @@ import { Select } from '@/components/ui/select';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { X } from 'lucide-react';
+import { isSportEnabled } from '@/lib/sport-switches';
 
 interface FilterState {
   confidence_level?: string;
@@ -31,8 +32,10 @@ const confidenceOptions = [
 
 // Values must equal the `bet_type` written by generate_recommendations.py
 // (which mirrors the odds `market_type`). Only markets we actually price are
-// listed here so the filter never yields an empty result set.
-const marketOptions = [
+// listed here so the filter never yields an empty result set. An option
+// tagged with a `sport` is offered only while that sport is switched on
+// (isSportEnabled, @/lib/sport-switches).
+const allMarketOptions: { value: string; label: string; sport?: string }[] = [
   { value: '', label: 'All Markets' },
   // Soccer (1x2-derived) markets
   { value: '1x2', label: '1X2' },
@@ -48,11 +51,12 @@ const marketOptions = [
   { value: 'total', label: 'Total' },
   { value: 'puck_line', label: 'Puck Line' },
   // Horse racing
-  { value: 'win', label: 'Win (Horse Racing)' },
+  { value: 'win', label: 'Win (Horse Racing)', sport: 'horse_racing' },
 ];
 
 export function RecommendationFilters({ onFilterChange, leagueOptions = [] }: RecommendationFiltersProps) {
   const [filters, setFilters] = useState<FilterState>({});
+  const marketOptions = allMarketOptions.filter((option) => !option.sport || isSportEnabled(option.sport));
 
   const updateFilter = (key: keyof FilterState, value: string | number | undefined) => {
     const newFilters = { ...filters, [key]: value || undefined };
