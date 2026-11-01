@@ -102,8 +102,9 @@ def _state(**over) -> "rsl.State":
     for k in [k for k, v in raw.items() if v is None]:
         del raw[k]
     state = rsl.State(
-        leagues_by_code={c: lg for c, lg in leagues.items()},
+        leagues_by_code={lg["code"]: lg for lg in leagues.values() if lg["code"]},
         leagues_by_id={lg["id"]: lg for lg in leagues.values()},
+        leagues_by_name={(lg["name"], lg["country"]): lg for lg in leagues.values()},
         teams=teams,
         team_by_norm={t["normalized_name"]: tid for tid, t in teams.items()},
         aliases=over.pop("aliases", {}),
@@ -203,6 +204,7 @@ class TestPlan:
         p = rsl.plan(_state(), MAP)
         assert _writes(p) == {
             "create_league": 2,
+            "tag_league": 0,
             "relabel_raw": 2,
             "relabel_match": 2,
             "relabel_team": 4,
@@ -210,7 +212,7 @@ class TestPlan:
             "rename_raw": 1,
         }
         assert p.refusals == [] and p.counts["mojibake_left"] == 0 and p.counts["cross_country_after"] == 0
-        assert p.creates == ["SC1", "SC2"]
+        assert p.creates == ["SC1", "SC2"] and p.tags == []
         assert [(tid, code) for tid, _old, code in p.relabel_team] == [
             ("t-arb", "SC1"),
             ("t-ayr", "SC1"),
@@ -251,6 +253,24 @@ class TestPlan:
         moved = KICKOFF.replace(hour=14)
         lo, hi = rsl.mapped_kickoff_window(MAP[0])
         assert lo <= moved <= hi and lo <= KICKOFF <= hi
+
+    def test_a_code_less_league_of_that_name_and_country_is_tagged_not_created(self):
+        # upsert_leagues conflicts on (name, country, sport): an ESPN-made 'Championship' (Scotland) is the SC1 row.
+        espn = {"id": "l-espn", "name": "Championship", "country": "Scotland", "code": None}
+        p = rsl.plan(_state(leagues={**LEAGUES, "espn": espn}), MAP)
+        assert p.refusals == [] and p.creates == ["SC2"] and p.tags == [("SC1", "l-espn")]
+        assert (p.counts["create_league"], p.counts["tag_league"]) == (1, 1)
+        by = {(e["kind"], e["row_key"], e["column"]): (e["old_value"], e["new_value"]) for e in p.entries}
+        assert by[("tag_league", "l-espn", "football_data")] == ("", "SC1")
+        assert by[("relabel_match", "m-1", "league_id")] == ("l-sp1", "l-espn")
+        assert by[("relabel_match", "m-2", "league_id")] == ("l-sp2", "(new SC2)")
+        assert ("create_league", "SC1", "row") not in by
+
+    def test_a_league_already_in_the_target_league_by_tag_counts_as_done(self):
+        espn = {"id": "l-espn", "name": "Championship", "country": "Scotland", "code": None}
+        cands = {**_state().candidates, MAP[0].raw_key: [{"id": "m-1", "league_id": "l-espn", "match_date": KICKOFF}]}
+        p = rsl.plan(_state(leagues={**LEAGUES, "espn": espn}, candidates=cands), MAP)
+        assert p.counts["already_match"] == 1 and p.refusals == []
 
     def test_cross_country_teams_outside_the_map_are_reported_not_refused(self):
         state = _state(
@@ -333,6 +353,10 @@ class TestRefusals:
         }  # noqa: E501
         assert "which already exists (a reload wrote it)" in self._refused(_state(raw=dup))
 
+    def test_a_league_of_that_name_and_country_with_another_code_is_refused(self):
+        other = {"id": "l-x", "name": "Championship", "country": "Scotland", "code": "SCX"}
+        assert "carries football_data code 'SCX'" in self._refused(_state(leagues={**LEAGUES, "SCX": other}))
+
     def test_mojibake_in_a_league_name_is_left_and_counted(self):
         leagues = {
             **LEAGUES,
@@ -398,6 +422,17 @@ class TestReversal:
         assert 'SET "HomeTeam" = \'' + GARBLED + "'" in body[0]
         assert "UPDATE matches SET league_id = 'l-sp1' WHERE id = 'm-1' AND league_id = 'l-sc1'" in sql
         assert body[-1].startswith("DO $rev$ BEGIN DELETE FROM leagues l WHERE l.id = 'l-sc1'")
+
+    def test_a_tagged_league_loses_its_code_and_is_never_deleted(self):
+        espn = {"id": "l-espn", "name": "Championship", "country": "Scotland", "code": None}
+        p = rsl.plan(_state(leagues={**LEAGUES, "espn": espn}), MAP)
+        sql = rsl.reversal_sql(_Mogrify(), p, {"SC1": "l-espn", "SC2": "l-sc2"})
+        assert (
+            "UPDATE leagues SET external_ids = external_ids - 'football_data' "
+            "WHERE id = 'l-espn' AND external_ids->>'football_data' = 'SC1'"
+        ) in sql
+        assert "DELETE FROM leagues l WHERE l.id = 'l-espn'" not in sql
+        assert "DELETE FROM leagues l WHERE l.id = 'l-sc2'" in sql
 
 
 class TestMain:
@@ -486,6 +521,7 @@ def test_apply_then_verify_then_the_reversal_restores_every_row(pg, tmp_path):
     p = rsl.run(pg, True, out, {"create_league": 2, "relabel_raw": 2, "relabel_match": 2, "rename_team": 1}, MAP)
     assert _writes(p) == {
         "create_league": 2,
+        "tag_league": 0,
         "relabel_raw": 2,
         "relabel_match": 2,
         "relabel_team": 4,
@@ -515,3 +551,150 @@ def test_a_drifted_plan_writes_nothing(pg, tmp_path):
         c.execute("SELECT count(*) FROM leagues")
         assert c.fetchone()[0] == 4
     assert not (tmp_path / "apply.csv").exists()
+
+
+def _fingerprint(pg):
+    with pg.cursor() as c:
+        c.execute(FINGERPRINT)
+        got = c.fetchone()
+    pg.commit()
+    return got
+
+
+@pytest.mark.integration
+def test_a_code_less_league_is_tagged_and_the_reversal_keeps_it(pg, tmp_path):
+    # The reviewed bug: upsert_leagues merged SC1 into an ESPN-made 'Championship' (Scotland), the wrapper's
+    # "Scottish leagues + create_league" after-state failed after the commit, and the reversal DELETEd that row.
+    with pg.cursor() as c:
+        c.execute(
+            "INSERT INTO leagues (name, country, external_ids) VALUES ('Championship', 'Scotland', %s)",
+            ('{"espn": "sco.2"}',),
+        )
+    pg.commit()
+    before = _fingerprint(pg)
+    out = str(tmp_path / "apply.csv")
+    p = rsl.run(pg, True, out, {"create_league": 1, "tag_league": 1, "relabel_match": 2}, MAP)
+    assert (p.counts["create_league"], p.counts["tag_league"]) == (1, 1)
+    with pg.cursor() as c:
+        c.execute("SELECT count(*) FROM leagues WHERE country = 'Scotland'")
+        assert c.fetchone()[0] == 3  # Premiership, the tagged Championship, the created League One
+        c.execute("SELECT external_ids FROM leagues WHERE name = 'Championship' AND country = 'Scotland'")
+        assert c.fetchone()[0] == {"espn": "sco.2", "football_data": "SC1"}
+        c.execute("SELECT name, sport, external_ids FROM leagues WHERE country = 'Scotland' AND name = 'League One'")
+        assert c.fetchone() == ("League One", "soccer", {"football_data": "SC2"})  # the row upsert_leagues inserts
+        c.execute(
+            "SELECT t.name FROM teams t JOIN leagues l ON l.id = t.league_id "
+            "WHERE l.name = 'Championship' AND l.country = 'Scotland' ORDER BY 1"
+        )
+        assert [r[0] for r in c.fetchall()] == ["Arbroath", "Ayr"]
+    pg.commit()
+    assert rsl.verify(pg, out)["now_new"] == len(list(csv.DictReader(open(out))))
+    with pg.cursor() as c:
+        c.execute(open(rsl.reversal_path(out)).read())
+    pg.commit()
+    assert _fingerprint(pg) == before
+
+
+def _inject_before(monkeypatch, fn_name, sql):
+    """Run `sql` in the apply's own transaction just before rsl.<fn_name>: a row that moved since the plan."""
+    real = getattr(rsl, fn_name)
+
+    def wrapped(cur, *args, **kw):
+        cur.execute(sql)
+        return real(cur, *args, **kw)
+
+    monkeypatch.setattr(rsl, fn_name, wrapped)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "sql, what",
+    [
+        # The raw relabel is guarded on the league AND the season it replaces.
+        ("UPDATE raw_football_data SET season = '2526' WHERE \"HomeTeam\" = 'Ayr'", "raw row SP1->SC1"),
+        ("UPDATE raw_football_data SET league = 'SP2' WHERE \"HomeTeam\" = 'Ayr'", "raw row SP1->SC1"),
+        # The match relabel is guarded on the league it replaces.
+        (
+            "UPDATE matches SET league_id = (SELECT id FROM leagues WHERE external_ids->>'football_data' = 'D2') "
+            "WHERE home_team_id = (SELECT id FROM teams WHERE name = 'Ayr')",
+            "matches row",
+        ),
+        # So is the team relabel.
+        (
+            "UPDATE teams SET league_id = (SELECT id FROM leagues WHERE external_ids->>'football_data' = 'D2') "
+            "WHERE name = 'Montrose'",
+            "team",
+        ),
+    ],
+)
+def test_a_row_that_moved_since_the_plan_rolls_everything_back(pg, tmp_path, monkeypatch, sql, what):
+    before = _fingerprint(pg)
+    _inject_before(monkeypatch, "apply_plan", sql)
+    out = tmp_path / "apply.csv"
+    with pytest.raises(RuntimeError, match=f"{what}.*0 row\\(s\\) changed, expected 1"):
+        rsl.run(pg, True, str(out), None, MAP)
+    assert _fingerprint(pg) == before  # the injected change rolled back with the rest
+    # The audit files describe changes that never happened: renamed *.void.
+    assert not out.exists() and (tmp_path / "apply.csv.void").exists()
+    assert (tmp_path / "apply.reversal.sql.void").exists() and not (tmp_path / "apply.reversal.sql").exists()
+
+
+@pytest.mark.integration
+def test_an_unclean_re_plan_inside_the_transaction_rolls_back(pg, tmp_path, monkeypatch):
+    before = _fingerprint(pg)
+    real = rsl.apply_plan
+
+    def then_a_mis_decoded_team(cur, *args, **kw):
+        real(cur, *args, **kw)
+        cur.execute(
+            "INSERT INTO teams (name, normalized_name) VALUES (%s, %s)",
+            ("München 1860".encode("utf-8").decode("latin-1"), "münchen 1860".encode("utf-8").decode("latin-1")),
+        )
+
+    monkeypatch.setattr(rsl, "apply_plan", then_a_mis_decoded_team)
+    with pytest.raises(RuntimeError, match="re-plan inside the transaction is not clean"):
+        rsl.run(pg, True, str(tmp_path / "apply.csv"), None, MAP)
+    assert _fingerprint(pg) == before
+    assert (tmp_path / "apply.csv.void").exists() and not (tmp_path / "apply.csv").exists()
+
+
+@pytest.mark.integration
+def test_a_refusing_plan_writes_nothing_even_without_expect_plan(pg, tmp_path):
+    before = _fingerprint(pg)
+    bad = [_map_row("Ayr", "Arbroath", 3, 0, "SP1", "SC1"), MAP[1]]  # the raw row says 2-0
+    with pytest.raises(rsl.Refused):
+        rsl.run(pg, True, str(tmp_path / "apply.csv"), None, bad)
+    assert _fingerprint(pg) == before
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.integration
+def test_a_league_created_since_the_plan_is_not_merged_into(pg, tmp_path, monkeypatch):
+    before_extra = "INSERT INTO leagues (name, country, external_ids) VALUES ('League One', 'Scotland', '{}')"
+    _inject_before(monkeypatch, "create_leagues", before_extra)
+    with pytest.raises(RuntimeError, match="league SC2 .* exists since the plan"):
+        rsl.run(pg, True, str(tmp_path / "apply.csv"), None, MAP)
+    with pg.cursor() as c:
+        c.execute("SELECT count(*) FROM leagues WHERE country = 'Scotland'")
+        assert c.fetchone()[0] == 1
+    pg.commit()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.integration
+def test_a_tagged_league_that_got_a_code_since_the_plan_rolls_back(pg, tmp_path, monkeypatch):
+    with pg.cursor() as c:
+        c.execute("INSERT INTO leagues (name, country, external_ids) VALUES ('Championship', 'Scotland', '{}')")
+    pg.commit()
+    _inject_before(
+        monkeypatch,
+        "create_leagues",
+        "UPDATE leagues SET external_ids = '{\"football_data\": \"SCX\"}' WHERE name = 'Championship' "
+        "AND country = 'Scotland'",
+    )
+    with pytest.raises(RuntimeError, match=r"league .* \(tag SC1\): 0 row\(s\) changed"):
+        rsl.run(pg, True, str(tmp_path / "apply.csv"), None, MAP)
+    with pg.cursor() as c:
+        c.execute("SELECT external_ids FROM leagues WHERE name = 'Championship' AND country = 'Scotland'")
+        assert c.fetchone()[0] == {}
+    pg.commit()

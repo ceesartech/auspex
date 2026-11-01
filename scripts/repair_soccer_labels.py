@@ -44,10 +44,16 @@ from 2024-25 on are UTF-8 with a byte-order mark, so:
 
 WHAT IT PLANS (from the database at run time; counts on the PLAN line)
 ------------------------------------------------------------------------
-  create_league  a league the relabel needs that does not exist yet (SC1
-                 Championship and SC2 League One, Scotland): created exactly
-                 as promote_raw creates every football-data league
-                 (promote_raw.upsert_leagues).
+  create_league  a league the relabel needs that does not exist yet, by
+                 code or by (name, country) (SC1 Championship and SC2 League
+                 One, Scotland): the row promote_raw.upsert_leagues inserts
+                 for a football-data code (LEAGUE_MAP's name and country,
+                 sport soccer, external_ids {football_data: code}).
+  tag_league     a league the relabel needs whose row exists under that name
+                 and country without a football_data code (one ESPN created,
+                 say): the code is added to its external_ids, as
+                 upsert_leagues' ON CONFLICT (name, country, sport) would do
+                 — never a second row, and never a DELETE on reversal.
   relabel_raw    a raw_football_data row of the reviewed map
                  (scripts/data/soccer_misfiled_division_rows.csv) still under
                  its wrong code: league and Div set to the right code. Its
@@ -84,7 +90,9 @@ excluded; PLAN_CROSS_COUNTRY names them — Santos and Guadalajara until
 repoint_team_matches has moved their Liga MX rows, none after).
 
 REFUSED (counted as refuse=N, each logged at ERROR; --apply writes nothing):
-a map row whose raw row is missing, or whose kickoff or score disagrees; a
+a league the map needs whose name and country a row with another
+football_data code holds (tagging would overwrite that code); a map row
+whose raw row is missing, or whose kickoff or score disagrees; a
 mapped match row missing, ambiguous (two candidates) or in a third league; a
 mapped team name that resolves to no team; a raw row both relabelled and
 renamed; a mis-decoded name that does not decode cleanly; a rename whose
@@ -93,15 +101,20 @@ exists (a duplicate row a reload wrote); a mapped match whose team would end
 up with domestic matches in two countries.
 
 --apply re-plans in ONE transaction: --expect-plan pins it to the dry run's
-counts (any drift refuses before a write); the leagues are created first,
-then the write-once audit CSV and the reversal SQL beside it are written
-(the CSV's old/new value per row and column; the SQL restores every old
-value, guarded on the new one, and drops the created leagues once nothing
-references them), then every UPDATE runs guarded on the value it replaces
-(a row changed since the plan rolls everything back), and a re-plan inside
-the transaction must find nothing left to write, nothing refused and no
-mis-decoded value left before it commits. --verify <apply CSV> checks,
-read-only, that every row of that CSV holds its new value.
+counts (any drift refuses before a write) and a plan that refuses anything
+or leaves a mis-decoded value writes nothing; the leagues are created first
+(an INSERT that meets an existing row rolls everything back instead of
+merging into it) and tagged (guarded on the row still having no code), then
+the write-once audit CSV and the reversal SQL beside it are written (the
+CSV's old/new value per row and column; the SQL restores every old value,
+guarded on the new one, removes the code it tagged and drops the leagues it
+created once nothing references them), then every UPDATE runs guarded on
+the value it replaces (a row changed since the plan rolls everything back),
+and a re-plan inside the transaction must find nothing left to write,
+nothing refused and no mis-decoded value left before it commits. On a
+rollback the audit CSV and reversal SQL are renamed *.void: they describe
+changes that never happened. --verify <apply CSV> checks, read-only, that
+every row of that CSV holds its new value.
 
 It changes the training corpus (matches.league_id of the mapped fixtures, the
 renamed team's name, which keys the Dixon-Coles / Poisson members) but no
@@ -129,7 +142,7 @@ from pathlib import Path
 from typing import Optional
 
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import Json, RealDictCursor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import promote_raw as pr  # noqa: E402
@@ -153,7 +166,15 @@ MAP_FIELDS = (
     "evidence",
 )
 
-WRITE_COUNTERS = ("create_league", "relabel_raw", "relabel_match", "relabel_team", "rename_team", "rename_raw")
+WRITE_COUNTERS = (
+    "create_league",
+    "tag_league",
+    "relabel_raw",
+    "relabel_match",
+    "relabel_team",
+    "rename_team",
+    "rename_raw",
+)
 PLAN_COUNTERS = (*WRITE_COUNTERS, "already_raw", "already_match", "refuse", "mojibake_left", "cross_country_after")
 CSV_FIELDS = ("kind", "table", "row_key", "column", "old_value", "new_value", "detail")
 
@@ -258,6 +279,7 @@ class State:
 
     leagues_by_code: dict[str, dict]
     leagues_by_id: dict[str, dict]
+    leagues_by_name: dict[tuple[str, str], dict]  # (name, country): the soccer key upsert_leagues conflicts on
     teams: dict[str, dict]
     team_by_norm: dict[str, str]
     aliases: dict[str, set[str]]
@@ -289,6 +311,7 @@ class Plan:
     entries: list[dict]
     refusals: list[str]
     creates: list[str]  # league codes to create
+    tags: list[tuple[str, str]]  # (league code, id of the code-less row with LEAGUE_MAP's name and country)
     relabel_raw: list[tuple[MapRow, dict]]
     relabel_match: list[tuple[MapRow, dict, str, Optional[str]]]  # (row, match, old league id, new league id|None)
     relabel_team: list[tuple[str, Optional[str], str]]  # (team id, old league id, new code)
@@ -326,17 +349,42 @@ def raw_key_text(key: tuple[str, str, str]) -> str:
 def plan(state: State, map_rows: list[MapRow]) -> Plan:
     """Everything to write, refuse and report, from one snapshot. Pure."""
     counts: Counter = Counter({k: 0 for k in PLAN_COUNTERS})
-    p = Plan(counts, [], [], [], [], [], [], [], [], [])
+    p = Plan(counts, [], [], [], [], [], [], [], [], [], [])
 
     def refuse(msg: str) -> None:
         p.refusals.append(msg)
 
-    # Leagues the map needs.
+    # Leagues the map needs: by code, else by the (name, country) upsert_leagues conflicts on.
+    target_ids: dict[str, Optional[str]] = {}  # code -> its league id once the plan is applied (None: created)
     for code in sorted({r.to_league for r in map_rows}):
-        if code not in state.leagues_by_code:
-            name, country = pr.LEAGUE_MAP[code]
+        if code in state.leagues_by_code:
+            target_ids[code] = state.leagues_by_code[code]["id"]
+            continue
+        name, country = pr.LEAGUE_MAP[code]
+        same = state.leagues_by_name.get((name, country))
+        target_ids[code] = None
+        if same is None:
             p.creates.append(code)
             p.entries.append(_entry("create_league", "leagues", code, "row", None, f"{name} | {country} | soccer"))
+        elif same.get("code"):
+            refuse(
+                f"league {name!r} ({country}) {same['id']} carries football_data code {same['code']!r}: giving it "
+                f"{code} would overwrite that — fix the league by hand"
+            )
+        else:
+            target_ids[code] = same["id"]
+            p.tags.append((code, same["id"]))
+            p.entries.append(
+                _entry(
+                    "tag_league",
+                    "leagues",
+                    same["id"],
+                    "football_data",
+                    None,
+                    code,
+                    f"{name} | {country} | soccer: the existing row has no football_data code",
+                )
+            )
 
     def target_country(code: str) -> str:
         return pr.LEAGUE_MAP[code][1]
@@ -378,7 +426,7 @@ def plan(state: State, map_rows: list[MapRow]) -> Plan:
             )
             continue
         match = cands[0]
-        from_id, to_id = _league_id(state, row.from_league), _league_id(state, row.to_league)
+        from_id, to_id = _league_id(state, row.from_league), target_ids.get(row.to_league)
         if to_id and match["league_id"] == to_id:
             counts["already_match"] += 1
         elif match["league_id"] == from_id:
@@ -416,7 +464,7 @@ def plan(state: State, map_rows: list[MapRow]) -> Plan:
                     tid,
                     "league_id",
                     team["league_id"],
-                    _league_id(state, code) or f"(new {code})",
+                    target_ids.get(code) or f"(new {code})",
                     f"{team['name']}: {_league_country(state, team['league_id'])} -> {code} {target_country(code)}",
                 )
             )
@@ -509,6 +557,7 @@ def plan(state: State, map_rows: list[MapRow]) -> Plan:
     counts["mojibake_left"] = left
 
     counts["create_league"] = len(p.creates)
+    counts["tag_league"] = len(p.tags)
     counts["relabel_raw"] = len(p.relabel_raw)
     counts["relabel_match"] = len(p.relabel_match)
     counts["relabel_team"] = len(p.relabel_team)
@@ -529,6 +578,7 @@ def load_state(cur, map_rows: list[MapRow]) -> State:
     state = State(
         leagues_by_code={lg["code"]: lg for lg in leagues if lg["code"]},
         leagues_by_id={lg["id"]: lg for lg in leagues},
+        leagues_by_name={(lg["name"], lg["country"]): lg for lg in leagues},
         teams=teams,
         team_by_norm={t["normalized_name"]: tid for tid, t in teams.items()},
         aliases=team_identity.load_alias_index(cur, "soccer"),
@@ -652,6 +702,15 @@ def reversal_sql(cur, p: Plan, league_ids: dict[str, str]) -> str:
                 f"raw {row.label}",
             )
         )
+    for code, lid in reversed(p.tags):
+        out.append(
+            guarded(
+                "UPDATE leagues SET external_ids = external_ids - 'football_data' "
+                "WHERE id = %s AND external_ids->>'football_data' = %s",
+                (lid, code),
+                f"league {lid} tagged {code}",
+            )
+        )
     for code in reversed(p.creates):
         out.append(
             guarded(
@@ -669,6 +728,37 @@ def _one(cur, sql: str, params: tuple, what: str) -> None:
     cur.execute(sql, params)
     if cur.rowcount != 1:
         raise RuntimeError(f"{what}: {cur.rowcount} row(s) changed, expected 1 — rolled back, nothing written")
+
+
+def create_leagues(cur, p: Plan) -> dict[str, str]:
+    """{code: id} of the leagues the plan creates or tags. A created league is the row promote_raw.upsert_leagues
+    inserts (LEAGUE_MAP name and country, sport soccer, external_ids {football_data: code}), but an INSERT that meets
+    an existing (name, country, sport) row raises instead of merging into it: the reversal would drop a row this
+    never created. A tag is guarded on the row still having no football_data code."""
+    out: dict[str, str] = {}
+    for code in p.creates:
+        name, country = pr.LEAGUE_MAP[code]
+        cur.execute(
+            "INSERT INTO leagues (name, country, sport, external_ids) VALUES (%s, %s, 'soccer', %s) "
+            "ON CONFLICT (name, country, sport) DO NOTHING RETURNING id::text AS id",
+            (name, country, Json({"football_data": code})),
+        )
+        got = cur.fetchone()
+        if got is None:
+            raise RuntimeError(
+                f"league {code} ({name!r}, {country}) exists since the plan — not created, rolled back, nothing written"
+            )
+        out[code] = got["id"]
+    for code, lid in p.tags:
+        _one(
+            cur,
+            "UPDATE leagues SET external_ids = COALESCE(external_ids, '{}'::jsonb) || %s "
+            "WHERE id = %s AND sport = 'soccer' AND NOT (COALESCE(external_ids, '{}'::jsonb) ? 'football_data')",
+            (Json({"football_data": code}), lid),
+            f"league {lid} (tag {code})",
+        )
+        out[code] = lid
+    return out
 
 
 def apply_plan(cur, p: Plan, league_ids: dict[str, str]) -> None:
@@ -715,6 +805,8 @@ def apply_plan(cur, p: Plan, league_ids: dict[str, str]) -> None:
 def log_plan(p: Plan) -> None:
     for code in p.creates:
         logger.info("create_league  %s %s", code, pr.LEAGUE_MAP[code])
+    for code, lid in p.tags:
+        logger.info("tag_league     %s %s: existing row %s gets the football_data code", code, pr.LEAGUE_MAP[code], lid)
     for row, _raw in p.relabel_raw:
         logger.info("relabel_raw    %s", row.label)
     for row, match, _prev_league, _new in p.relabel_match:
@@ -742,7 +834,18 @@ def emit(p: Plan) -> None:
     print("PLAN_CROSS_COUNTRY names=" + (",".join(p.cross_country_names) or "-"), flush=True)
 
 
+def void_files(paths: list[Path]) -> None:
+    """Rename audit files of a rolled-back apply to *.void: they describe changes that never happened."""
+    for path in paths:
+        try:
+            path.rename(path.with_name(path.name + ".void"))
+            logger.error("VOID: %s.void — the apply rolled back, nothing it lists was written", path)
+        except OSError as exc:
+            logger.error("could not rename %s to *.void (%s): it describes changes that were rolled back", path, exc)
+
+
 def run(conn, apply_changes: bool, out_csv: Optional[str], expect: Optional[dict[str, int]], map_rows) -> Plan:
+    written: list[Path] = []
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         state = load_state(cur, map_rows)
         p = plan(state, map_rows)
@@ -765,19 +868,17 @@ def run(conn, apply_changes: bool, out_csv: Optional[str], expect: Optional[dict
                     "written"
                 )
             league_ids = {code: lg["id"] for code, lg in state.leagues_by_code.items()}
-            if p.creates:
-                league_ids.update(pr.upsert_leagues(cur, set(p.creates)))
-                missing = [c for c in p.creates if c not in league_ids]
-                if missing:
-                    raise RuntimeError(f"league(s) {missing} not created — rolled back")
+            league_ids.update(create_leagues(cur, p))
             path = out_csv or default_out_csv("apply")
             entries = [
                 {**e, "new_value": league_ids[e["new_value"][5:-1]]} if e["new_value"].startswith("(new ") else e
                 for e in p.entries
             ]
             write_csv(path, entries)
+            written.append(Path(path))
             rev = reversal_path(path)
             with _open_once(Path(rev)) as fh:
+                written.append(Path(rev))
                 fh.write(reversal_sql(cur, p, league_ids))
             logger.info("audit CSV %s, reversal SQL %s", path, rev)
             apply_plan(cur, p, league_ids)
@@ -786,7 +887,9 @@ def run(conn, apply_changes: bool, out_csv: Optional[str], expect: Optional[dict
                 raise RuntimeError(f"the re-plan inside the transaction is not clean ({plan_line(after.counts)})")
         except Exception:
             conn.rollback()
+            void_files(written)
             raise
+    # A COMMIT that raises leaves the audit files as they are: whether it landed is unknown (--verify tells).
     conn.commit()
     logger.info("Applied: %s", {k: p.counts[k] for k in WRITE_COUNTERS})
     return p
@@ -803,7 +906,9 @@ def verify(conn, csv_path: str) -> Counter:
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         for r in rows:
             now: object = "__missing__"
-            if r["table"] == "leagues":
+            if r["table"] == "leagues" and r["column"] == "football_data":
+                cur.execute("SELECT external_ids->>'football_data' AS v FROM leagues WHERE id = %s", (r["row_key"],))
+            elif r["table"] == "leagues":
                 cur.execute(
                     "SELECT name || ' | ' || country || ' | ' || sport AS v FROM leagues "
                     "WHERE sport = 'soccer' AND external_ids->>'football_data' = %s",

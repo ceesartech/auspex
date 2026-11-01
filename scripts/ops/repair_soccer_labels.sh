@@ -12,13 +12,17 @@
 # football-data loaders read UTF-8 files as latin-1 and skip the Div check, and
 # promote_raw promotes such rows.
 #
-# Reviewed plan: this tool's dry run on prod 2026-11-01 03:27Z (read only:
-# default_transaction_read_only=on), and a local replica built from the
-# migrations and a read-only export (03:02Z, one REPEATABLE READ snapshot),
-# both as exported and after the runbook's step 4 moves these rows' kickoffs
-# (an hour earlier: 15:00Z -> 14:00Z on 2026-08-01) — the same counts each time:
-#   create_league  2   SC1 Championship, SC2 League One (Scotland), created as
-#                      promote_raw creates every football-data league
+# Reviewed plan: this tool's dry run on prod 2026-11-01 03:27Z and again at
+# 04:22Z after the review fixes (read only: default_transaction_read_only=on),
+# and local replicas built from the migrations and read-only exports (03:02Z
+# and 04:23Z, each one REPEATABLE READ snapshot), both as exported and after
+# the runbook's step 4 moves these rows' kickoffs (an hour earlier: 15:00Z ->
+# 14:00Z on 2026-08-01) — the same counts each time:
+#   create_league  2   SC1 Championship, SC2 League One (Scotland): the row
+#                      promote_raw.upsert_leagues inserts for a code
+#   tag_league     0   (a code-less row of that name and country — one ESPN
+#                      made — gets the code instead of a second row; prod has
+#                      none: Scotland holds only SC0. create + tag <= 2.)
 #   relabel_raw   10   raw_football_data SP1/SP2 2627 -> SC1/SC2 (league, Div)
 #   relabel_match 10   matches.league_id La Liga / La Liga 2 -> SC1 / SC2
 #   relabel_team  20   teams.league_id Spain -> SC1 / SC2 (14 clubs with only
@@ -39,29 +43,41 @@
 # plans are the same before and after this repair (replayed). The counts can
 # only fall before this runs (no football-data load or promote_raw is
 # scheduled; ESPN sweeps neither the Scottish lower divisions nor the
-# 2. Bundesliga), so the dry run gates on ceilings (each the reviewed count)
-# and the apply is pinned to the dry run's exact counts (every key).
+# 2. Bundesliga), so the dry run gates on ceilings (each the reviewed count;
+# tag_league's ceiling is the two leagues, shared with create_league: a
+# league ESPN creates under that name moves one from create to tag) and the
+# apply is pinned to the dry run's exact counts (every key).
 #   0. already done? A read-only dry run first: when it plans nothing to write,
-#      refuses nothing and finds no mis-decoded value left, this exits 0
-#      without a backup (ALREADY DONE); a refusal or a value it cannot repair
-#      aborts here, before a backup;
+#      refuses nothing and finds no mis-decoded value left, and the after-state
+#      read independently of the tool agrees (no mapped fixture in La Liga /
+#      La Liga 2, no mis-decoded soccer team or raw name), this exits 0
+#      without a backup (ALREADY DONE) — after first verifying (--verify) the
+#      apply of an earlier run that ended before its step 4 (Ctrl-C or an SSH
+#      drop during step 3 leaves the apply running in the container, and it
+#      may commit; each run records its apply CSV in
+#      /app/backups/soccer_labels_apply_pending.txt before applying and clears
+#      it once step 4 passes); a refusal, a value it cannot repair, an
+#      independent read that disagrees, or a pending apply that does not
+#      verify aborts here, before a backup;
 #   1. verified backup (B2) — abort if it does not land;
 #   2. before-state + dry run (write-once audit CSV) — abort unless every
 #      count is within its ceiling, every map row is accounted for
 #      (already + relabel = 10, raw and matches), refuse = 0,
 #      mojibake_left = 0 and the cross-country teams are among Guadalajara
 #      and Santos;
-#   3. apply, pinned to the dry run's counts: ONE transaction (leagues, then
-#      the write-once audit CSV and reversal SQL in /app/backups, then every
-#      UPDATE guarded on the value it replaces, then a clean re-plan inside
-#      the transaction before COMMIT);
+#   3. apply, pinned to the dry run's counts: ONE transaction (leagues
+#      created or tagged, then the write-once audit CSV and reversal SQL in
+#      /app/backups, then every UPDATE guarded on the value it replaces, then
+#      a clean re-plan inside the transaction before COMMIT; on a rollback
+#      the CSV and SQL are renamed *.void);
 #   4. after-state, EXACT: every row of the apply CSV holds its new value
 #      (--verify); a fresh dry run plans nothing, refuses nothing and finds
 #      all 10 map rows done in raw and matches; read independently of the
 #      tool: no mapped Scottish fixture left in La Liga / La Liga 2, no
 #      mis-decoded soccer team or raw name, the Scottish leagues up by exactly
-#      create_league, and the soccer team, soccer match and raw row counts
-#      unchanged (nothing inserted, nothing deleted).
+#      create_league (a tagged league is not a new row), and the soccer team,
+#      soccer match and raw row counts unchanged (nothing inserted, nothing
+#      deleted).
 # No DAG is paused: the write is one short transaction on rows no scheduled
 # job writes (the 15-minute pipeline never touches football-data rows), and a
 # retrain reads either side of it.
@@ -74,7 +90,8 @@
 # needs nothing more; after it, the features rebuild it prints is optional
 # (it rewrites the same values). Re-runnable: a finished repair plans nothing.
 # REVERSAL: the apply writes /app/backups/soccer_labels_apply_<stamp>.reversal.sql
-# beside its CSV (one transaction; each statement raises if its row moved).
+# beside its CSV (one transaction; each statement raises if its row moved; a
+# tagged league only loses the code, a created one is dropped).
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/repair_soccer_labels.sh 2>&1 | tee -a ~/repair_soccer_labels.log
 # (AUSPEX_DIR and TMPDIR exist for tests and rehearsals.)
@@ -107,11 +124,14 @@ plan_num() {  # plan_num <PLAN line> <key>: the count, or "missing"
   if [[ "$v" =~ ^[0-9]+$ ]]; then echo "$v"; else echo missing; fi
 }
 TOOL="python /app/scripts/repair_soccer_labels.py"
-KEYS="create_league relabel_raw relabel_match relabel_team rename_team rename_raw already_raw already_match refuse mojibake_left cross_country_after"
-WRITE_KEYS="create_league relabel_raw relabel_match relabel_team rename_team rename_raw"
+KEYS="create_league tag_league relabel_raw relabel_match relabel_team rename_team rename_raw already_raw already_match refuse mojibake_left cross_country_after"
+WRITE_KEYS="create_league tag_league relabel_raw relabel_match relabel_team rename_team rename_raw"
 MAP_ROWS=10
-# Ceilings = the reviewed counts (prod 2026-11-01 03:02Z); they can only fall.
+# Ceilings = the reviewed counts (prod 2026-11-01 03:27Z and 04:22Z); they can only fall. tag_league was 0: its
+# ceiling is the two leagues the map needs, shared with create_league (MAX_LEAGUES).
 MAX_create_league=2
+MAX_tag_league=2
+MAX_LEAGUES=2
 MAX_relabel_raw=10
 MAX_relabel_match=10
 MAX_relabel_team=20
@@ -121,6 +141,10 @@ ALLOWED_CROSS_COUNTRY="Guadalajara,Santos"
 FEATURES_CMD="docker compose exec -T api python /app/scripts/compute_features.py --backfill-finished soccer"
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 APPLY_CSV=/app/backups/soccer_labels_apply_$STAMP.csv
+# The apply CSV of a run that has not passed step 4 yet (written before the apply, emptied once step 4 passes).
+PENDING=/app/backups/soccer_labels_apply_pending.txt
+pending_csv() { $DC exec -T api sh -c "cat $PENDING 2>/dev/null" </dev/null | grep -E '^/app/backups/soccer_labels_apply_[0-9TZ]+\.csv$' | tail -1; }
+write_pending() { $DC exec -T api sh -c "cat > $PENDING.tmp && mv $PENDING.tmp $PENDING"; }  # stdin: the CSV, or nothing
 # run_tool <log name> <args...>: the tool in the api container; prints its key lines and exits with its status
 run_tool() {
   local name="$1"; shift
@@ -187,6 +211,11 @@ case $? in
   *) log "REFUSED: could not read the api container's processes (is the api container up?) — nothing changed"; exit 1 ;;
 esac
 
+verified() {  # verified <VERIFY line> <exit status>: every row of the apply CSV holds its new value
+  [ "$2" -eq 0 ] && [ "$(plan_num "$1" rows)" != missing ] && [ "$(plan_num "$1" now_new)" = "$(plan_num "$1" rows)" ]
+}
+verify_line() { $DC exec -T api sh -c "grep '^VERIFY ' /tmp/soccer_labels_verify.log | tail -1"; }
+
 log "0/4 already done? (read-only dry run)"
 run_tool soccer_labels_pre --out-csv /app/backups/soccer_labels_precheck_$STAMP.csv
 pre=$(plan_of soccer_labels_pre)
@@ -196,6 +225,24 @@ if [ "$(writes_of "$pre")" = "missing" ] || [ "$(plan_num "$pre" refuse)" != "0"
   exit 1
 fi
 if [ "$(writes_of "$pre")" = "0" ]; then
+  if ! read_state; then log "ABORT at step 0: the state query failed — nothing changed"; exit 1; fi
+  if [ "$misfiled" != "0" ] || [ "$moji_teams" != "0" ] || [ "$moji_raw" != "0" ]; then
+    log "FAILED at step 0: the tool plans nothing, but read independently there are mapped Scottish fixtures in La Liga / La Liga 2 $misfiled, mis-decoded soccer team names $moji_teams and raw rows $moji_raw (expected 0, 0 and 0) — inspect; nothing changed"
+    exit 1
+  fi
+  pending=$(pending_csv)
+  if [ -n "$pending" ]; then
+    log "an earlier run's apply has not passed its step 4 ($pending: that run ended during its apply, or its after-state FAILED) — verifying it (read only)"
+    run_tool soccer_labels_verify --verify "$pending"
+    vrc=$?
+    verify=$(verify_line)
+    if ! verified "$verify" "$vrc"; then
+      log "FAILED at step 0: the earlier run's apply CSV $pending does not verify ('${verify:-unreadable}'; expected now_new = rows) — inspect it (${pending%.csv}.reversal.sql reverts it); nothing changed"
+      exit 1
+    fi
+    write_pending < /dev/null || log "WARNING: could not empty $PENDING (a re-run verifies that apply again, which is harmless)"
+    log "the earlier run's apply verifies: $verify"
+  fi
   log "ALREADY DONE: $pre — nothing to relabel or rename (no backup)"
   within "$pre_cross" "$ALLOWED_CROSS_COUNTRY" || log "WARNING: soccer teams whose domestic matches span two countries: $pre_cross (beyond $ALLOWED_CROSS_COUNTRY) — another misfiled league or identity split; investigate"
   features_note
@@ -226,8 +273,8 @@ plan=$(plan_of soccer_labels_dry)
 cross=$(cross_of soccer_labels_dry)
 for k in $KEYS; do eval "p_$k=\$(plan_num \"\$plan\" $k)"; done
 # shellcheck disable=SC2154  # p_* are set by the eval above
-counts="$p_create_league $p_relabel_raw $p_relabel_match $p_relabel_team $p_rename_team $p_rename_raw $p_already_raw $p_already_match $p_refuse $p_mojibake_left $p_cross_country_after"
-if [ "$rc" -ne 0 ] || ! [[ "$counts" =~ ^[0-9]+(\ [0-9]+){10}$ ]]; then
+counts="$p_create_league $p_tag_league $p_relabel_raw $p_relabel_match $p_relabel_team $p_rename_team $p_rename_raw $p_already_raw $p_already_match $p_refuse $p_mojibake_left $p_cross_country_after"
+if [ "$rc" -ne 0 ] || ! [[ "$counts" =~ ^[0-9]+(\ [0-9]+){11}$ ]]; then
   log "ABORT at step 2: the dry run failed (exit $rc) or its PLAN line is unreadable ('$plan') — nothing changed"; exit 1
 fi
 over=""
@@ -237,6 +284,7 @@ for k in $WRITE_KEYS; do
   [ "$v" -le "$m" ] || over="$over $k=$v>$m"
 done
 # shellcheck disable=SC2154
+[ $((p_create_league + p_tag_league)) -le "$MAX_LEAGUES" ] || over="$over create_league+tag_league=$((p_create_league + p_tag_league))>$MAX_LEAGUES"
 if [ -n "$over" ] || [ "$p_refuse" -ne 0 ] || [ "$p_mojibake_left" -ne 0 ] \
    || [ $((p_already_raw + p_relabel_raw)) -ne "$MAP_ROWS" ] || [ $((p_already_match + p_relabel_match)) -ne "$MAP_ROWS" ] \
    || ! within "$cross" "$ALLOWED_CROSS_COUNTRY"; then
@@ -248,32 +296,39 @@ for k in $KEYS; do pin="$pin${pin:+,}$k=$(plan_num "$plan" "$k")"; done
 log "plan: $plan (cross-country: $cross)"
 
 log "3/4 apply (pinned: $pin)"
+if ! echo "$APPLY_CSV" | write_pending; then
+  log "ABORT at step 3: could not record the apply CSV in $PENDING (a re-run could not check an apply this run left unchecked) — nothing changed"
+  exit 1
+fi
 run_tool soccer_labels_apply --apply --expect-plan "$pin" --out-csv "$APPLY_CSV"
 rc=$?
 if [ "$rc" -ne 0 ]; then
-  log "ABORT at step 3 (exit $rc; full log /tmp/soccer_labels_apply.log in the api container): a plan that differs from the dry run, or a row that moved since it, rolls the one transaction back — nothing was written"
+  # $PENDING keeps $APPLY_CSV: a re-run that finds the work left applies afresh (and ignores it), and one that finds
+  # it done — the apply committed after all, its exit lost — verifies it before any ALREADY DONE.
+  log "ABORT at step 3 (exit $rc; full log /tmp/soccer_labels_apply.log in the api container): a plan that differs from the dry run, or a row that moved since it, rolls the one transaction back — nothing was written to the database (an audit CSV or reversal SQL the apply had already written is renamed ${APPLY_CSV}.void / ${APPLY_CSV%.csv}.reversal.sql.void: they list changes that never happened)"
   exit 1
 fi
 
 log "4/4 after-state"
 run_tool soccer_labels_verify --verify "$APPLY_CSV"
 vrc=$?
-verify=$($DC exec -T api sh -c "grep '^VERIFY ' /tmp/soccer_labels_verify.log | tail -1")
+verify=$(verify_line)
 run_tool soccer_labels_replan --out-csv /app/backups/soccer_labels_verify_$STAMP.csv
 prc=$?
 replan=$(plan_of soccer_labels_replan)
 if ! read_state; then log "FAILED after-state: the after-state query failed — inspect (the apply CSV $APPLY_CSV and its .reversal.sql are the record)"; exit 1; fi
 want_scot=$((scot0 + p_create_league))
 log "after: verify '$verify' (expected now_new = rows), re-plan '$replan' (expected 0 to write, refuse 0, already_raw=$MAP_ROWS already_match=$MAP_ROWS), mapped Scottish fixtures in La Liga / La Liga 2 $misfiled (expected 0), mis-decoded soccer team names $moji_teams and raw rows $moji_raw (expected 0 and 0), Scottish leagues $scot_leagues (expected $want_scot), soccer teams $n_teams / soccer matches $n_matches / raw rows $n_raw (expected $n_teams0 / $n_matches0 / $n_raw0)"
-if [ "$vrc" -eq 0 ] && [ "$(plan_num "$verify" rows)" != missing ] && [ "$(plan_num "$verify" now_new)" = "$(plan_num "$verify" rows)" ] \
+if verified "$verify" "$vrc" \
    && [ "$prc" -eq 0 ] && [ "$(writes_of "$replan")" = "0" ] && [ "$(plan_num "$replan" refuse)" = "0" ] \
    && [ "$(plan_num "$replan" mojibake_left)" = "0" ] && [ "$(plan_num "$replan" already_raw)" = "$MAP_ROWS" ] \
    && [ "$(plan_num "$replan" already_match)" = "$MAP_ROWS" ] && [ "$misfiled" = "0" ] && [ "$moji_teams" = "0" ] \
    && [ "$moji_raw" = "0" ] && [ "$scot_leagues" = "$want_scot" ] && [ "$n_teams" = "$n_teams0" ] \
    && [ "$n_matches" = "$n_matches0" ] && [ "$n_raw" = "$n_raw0" ]; then
-  log "DONE: $p_relabel_match fixture(s) and $p_relabel_raw raw row(s) relabelled, $p_relabel_team team(s) moved to their Scottish league, $p_rename_team team and $p_rename_raw raw row(s) renamed, $p_create_league league(s) created (reversal: ${APPLY_CSV%.csv}.reversal.sql)"
+  write_pending < /dev/null || log "WARNING: could not empty $PENDING (a re-run verifies $APPLY_CSV again, which is harmless)"
+  log "DONE: $p_relabel_match fixture(s) and $p_relabel_raw raw row(s) relabelled, $p_relabel_team team(s) moved to their Scottish league, $p_rename_team team and $p_rename_raw raw row(s) renamed, $p_create_league league(s) created and $p_tag_league tagged (reversal: ${APPLY_CSV%.csv}.reversal.sql)"
   features_note
 else
-  log "FAILED after-state — inspect (the apply CSV $APPLY_CSV is the record; ${APPLY_CSV%.csv}.reversal.sql reverts it)"
+  log "FAILED after-state — inspect (the apply CSV $APPLY_CSV is the record; ${APPLY_CSV%.csv}.reversal.sql reverts it; a re-run verifies it again before any ALREADY DONE)"
   exit 1
 fi
