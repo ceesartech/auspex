@@ -11,7 +11,6 @@ dataset — all international matches since 1872 in a single CSV. Covers:
     - Africa Cup of Nations
     - AFC Asian Cup
     - OFC Nations Cup
-    - Friendlies (filtered out by default)
 
 Source: https://github.com/martj42/international_results (CC0).
 
@@ -31,8 +30,17 @@ Usage:
     # Specific tournaments (comma-separated, exact tournament names)
     python scripts/load_international.py --tournaments "FIFA World Cup,UEFA Euro"
 
-    # Include friendlies (massive — ~20k rows)
-    python scripts/load_international.py --include-friendlies
+Every row this writes must be one promote_raw can promote (2026-11-01):
+promote_raw refuses a raw row whose league code is not in its LEAGUE_MAP or
+whose team name looks mis-decoded, and exits 3 on every run while such a row
+sits in raw_football_data (nothing deletes it). So a tournament with no code
+in TOURNAMENT_CODES, or whose code promote_raw.LEAGUE_MAP has no league for,
+is refused before anything is fetched (exit 2) — it was written as league
+'UNK' — and a dataset with a row promote_raw would refuse
+(promote_raw.raw_row_problem) is not written at all (exit 3). Friendlies are
+not loaded: --include-friendlies wrote league 'FRIEND', which no league
+stands for (the option is gone; a real friendlies league would be a
+LEAGUE_MAP entry and a decision about training on friendlies first).
 """
 
 from __future__ import annotations
@@ -53,7 +61,8 @@ DATASET_URL = "https://raw.githubusercontent.com/martj42/international_results/"
 
 # Map dataset tournament names → our internal (league_code, league_name).
 # Codes are non-football-data so they don't collide with the club-league
-# codes in promote_raw.LEAGUE_MAP — extended further down via INTL_LEAGUE_MAP.
+# codes; each must be one of promote_raw.LEAGUE_MAP's International leagues
+# (pinned by tests/unit/test_load_international.py), which name the league.
 TOURNAMENT_CODES: dict[str, tuple[str, str]] = {
     "FIFA World Cup": ("WC", "FIFA World Cup"),
     "FIFA World Cup qualification": ("WCQ", "FIFA World Cup Qualifiers"),
@@ -65,7 +74,6 @@ TOURNAMENT_CODES: dict[str, tuple[str, str]] = {
     "African Cup of Nations": ("AFCON", "Africa Cup of Nations"),
     "AFC Asian Cup": ("AFCASIAN", "AFC Asian Cup"),
     "Confederations Cup": ("CONFED", "FIFA Confederations Cup"),
-    "Friendly": ("FRIEND", "Friendly"),
 }
 
 DEFAULT_TOURNAMENTS = [
@@ -122,11 +130,40 @@ def normalize(df: pd.DataFrame, tournaments: list[str]) -> pd.DataFrame:
     # promote_raw.parse_match_date already understands.
     df["Date"] = pd.to_datetime(df["date"]).dt.strftime("%d/%m/%Y")
 
-    df["league"] = df["tournament"].map(lambda t: TOURNAMENT_CODES.get(t, ("UNK", t))[0])
+    unknown = sorted(set(df["tournament"]) - set(TOURNAMENT_CODES))
+    if unknown:  # main() refuses these before fetching; never a made-up code
+        raise ValueError(f"tournament(s) {unknown} have no code in TOURNAMENT_CODES")
+    df["league"] = df["tournament"].map(lambda t: TOURNAMENT_CODES[t][0])
     df["season"] = df["date"].map(_season_from_date)
 
     keep = ["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR", "league", "season"]
     return df[keep]
+
+
+def unknown_tournaments(tournaments: list[str]) -> list[str]:
+    """The tournaments promote_raw could not file: no code in TOURNAMENT_CODES, or a code promote_raw.LEAGUE_MAP has
+    no league for."""
+    import promote_raw  # it imports psycopg2, as write_database does
+
+    return sorted(
+        t for t in tournaments if t not in TOURNAMENT_CODES or TOURNAMENT_CODES[t][0] not in promote_raw.LEAGUE_MAP
+    )
+
+
+def unpromotable_rows(df: pd.DataFrame) -> list[tuple[str, dict]]:
+    """[(problem, row)] for each row promote_raw would refuse (promote_raw.raw_row_problem)."""
+    import promote_raw
+
+    out = []
+    for row in df.to_dict("records"):
+        problem = promote_raw.raw_row_problem(row)
+        if problem is not None:
+            out.append((problem, row))
+    return out
+
+
+# main()'s exit code when the dataset holds a row promote_raw would refuse (nothing written).
+REFUSED_EXIT_CODE = 3
 
 
 def write_database(df: pd.DataFrame, database_url: str) -> int:
@@ -161,9 +198,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=",".join(DEFAULT_TOURNAMENTS),
         help="Comma-separated tournament names (use --list to discover).",
     )
-    p.add_argument(
-        "--include-friendlies", action="store_true", help="Also include international friendlies (~20k rows)."
-    )
     p.add_argument("--list", action="store_true", help="List distinct tournaments in the dataset and exit.")
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     return p.parse_args(argv)
@@ -171,6 +205,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    tournaments = [t.strip() for t in args.tournaments.split(",") if t.strip()]
+    if not args.list:
+        unknown = unknown_tournaments(tournaments)
+        if unknown:
+            logger.error(
+                "Tournament(s) %s have no league promote_raw could file them under (TOURNAMENT_CODES -> "
+                "promote_raw.LEAGUE_MAP): add both first — nothing fetched",
+                unknown,
+            )
+            return 2
     df = fetch_dataset()
 
     if args.list:
@@ -179,16 +223,25 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{t:<60} {n:>6} matches")
         return 0
 
-    tournaments = [t.strip() for t in args.tournaments.split(",") if t.strip()]
-    if args.include_friendlies and "Friendly" not in tournaments:
-        tournaments.append("Friendly")
-
     df = normalize(df, tournaments)
     if df.empty:
         logger.warning("No matches matched tournaments=%s", tournaments)
         return 1
 
     logger.info("Filtered to %d matches across %d tournaments", len(df), df["league"].nunique())
+    refused = unpromotable_rows(df)
+    if refused:
+        for problem, row in refused[:10]:
+            logger.error(
+                "REFUSED %s %s: %s v %s — %s", row["league"], row["Date"], row["HomeTeam"], row["AwayTeam"], problem
+            )
+        logger.error(
+            "%d row(s) promote_raw would refuse (and then exit 3 on every run while they sit in raw_football_data) "
+            "— nothing written; exiting %d",
+            len(refused),
+            REFUSED_EXIT_CODE,
+        )
+        return REFUSED_EXIT_CODE
 
     if args.database_url:
         inserted = write_database(df, args.database_url)

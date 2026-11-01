@@ -54,8 +54,10 @@ A file is refused — logged at ERROR, nothing of it written, and the run exits
     them);
   * a team name looks mojibake (text_encoding.looks_mojibake): text decoded
     wrongly before football-data published it, which would mint a twin club.
-A season football-data does not have (HTTP 404) is skipped with a warning, as
-before.
+A file that does not parse at all (a tokenizer error, no HomeTeam/AwayTeam/
+Date column) is just as unloaded: it is logged at ERROR and counted with the
+refused ones (exit 3), never skipped while the run reports success. A season
+football-data does not have (HTTP 404) is skipped with a warning, as before.
 """
 
 from __future__ import annotations
@@ -172,6 +174,9 @@ def parse_csv(raw: bytes, league: str, season: str, source: str) -> pd.DataFrame
             f"{source} ({encoding}) has no Div column (header starts {list(df.columns[:3])}) — nothing says which "
             f"division it holds, so it is not loaded as {league}"
         )
+    missing = [c for c in ("Date", "HomeTeam", "AwayTeam") if c not in df.columns]
+    if missing:
+        raise RefusedFile(f"{source} ({encoding}) has no {missing} column(s) — not a results file; not loaded")
     keep = [c for c in CORE_COLUMNS + ODDS_COLUMNS if c in df.columns]
     df = df[keep].dropna(subset=["Date", "HomeTeam", "AwayTeam"])
     divs = df["Div"].fillna("").astype(str).str.strip()
@@ -209,8 +214,9 @@ def load_seasons(
     end_year: int | None = None,
     refused: list[str] | None = None,
 ) -> list[pd.DataFrame]:
-    """The season files of `leagues`; each file refused (RefusedFile) is
-    logged at ERROR and appended to `refused` as 'league season'."""
+    """The season files of `leagues`; each file refused (RefusedFile) or that
+    does not parse is logged at ERROR and appended to `refused` as 'league
+    season' ('league season (unparseable)')."""
     end_year = end_year or datetime.utcnow().year + (1 if datetime.utcnow().month >= 8 else 0)
     out: list[pd.DataFrame] = []
     for league in leagues:
@@ -228,9 +234,11 @@ def load_seasons(
                 continue
             except Exception as e:
                 # Malformed file (parser errors etc.) — skip loudly, keep
-                # the sweep alive. A missing season is recoverable later;
-                # a dead 300-file backfill is not.
+                # the sweep alive (a dead 300-file backfill helps nobody),
+                # and count it: main() exits 3, as for a refused file.
                 logger.error("Skipping unparseable %s %s: %s", league, season, e)
+                if refused is not None:
+                    refused.append(f"{league} {season} (unparseable)")
                 continue
             out.append(df)
             logger.info("Loaded %s %s: %d rows", league, season, len(df))
@@ -296,8 +304,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-# main()'s exit code when a file was refused (everything else written), as
-# promote_raw exits on a refused raw row.
+# main()'s exit code when a file was refused or did not parse (everything
+# else written), as promote_raw exits on a refused raw row.
 REFUSED_EXIT_CODE = 3
 
 

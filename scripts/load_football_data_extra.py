@@ -52,8 +52,10 @@ as latin-1 until 2026-11-01), when its Country column is missing or a row
 names another country than the one requested (the per-season files' Div
 check, load_football_data.parse_csv: on 2026-08-06 football-data served
 Scottish divisions at the 2026-27 SP1/SP2 URLs), or when a team name looks
-mojibake (text_encoding.looks_mojibake). An unknown country code is refused
-before anything is fetched (exit 2).
+mojibake (text_encoding.looks_mojibake). A file that does not parse, or has
+no Home/Away/Date columns, is logged at ERROR and counted with the refused
+ones (exit 3). An unknown country code is refused before anything is fetched
+(exit 2).
 """
 
 from __future__ import annotations
@@ -217,12 +219,11 @@ def normalize(df: pd.DataFrame, country: str) -> pd.DataFrame:
     elif "season" not in df.columns:
         df["season"] = ""
 
-    # Drop rows missing essentials.
-    if "HomeTeam" in df.columns and "AwayTeam" in df.columns and "Date" in df.columns:
-        df = df.dropna(subset=["HomeTeam", "AwayTeam", "Date"])
-    else:
-        logger.warning("%s file missing core columns; skipping", country)
-        return pd.DataFrame()
+    # Drop rows missing essentials; a file without those columns is refused (it was a warning and a silent skip).
+    missing = [c for c in ("HomeTeam", "AwayTeam", "Date") if c not in df.columns]
+    if missing:
+        raise RefusedFile(f"{country} file has no {missing} column(s) after the rename — not loaded")
+    df = df.dropna(subset=["HomeTeam", "AwayTeam", "Date"])
 
     keep = [c for c in KEEP_COLUMNS if c in df.columns]
     return df[keep]
@@ -230,14 +231,14 @@ def normalize(df: pd.DataFrame, country: str) -> pd.DataFrame:
 
 def load_all(countries: list[str], refused: list[str] | None = None) -> list[pd.DataFrame]:
     """The country files of `countries` (all of them in COUNTRY_MAP: main
-    refuses an unknown code first); each file refused (RefusedFile) is logged
-    at ERROR and appended to `refused`."""
+    refuses an unknown code first); each file refused (RefusedFile) or that
+    does not parse is logged at ERROR and appended to `refused`."""
     out: list[pd.DataFrame] = []
     for code in countries:
         if code not in COUNTRY_MAP:
             raise ValueError(f"unknown country code {code!r} (COUNTRY_MAP has {sorted(COUNTRY_MAP)})")
         try:
-            df = fetch_country(code)
+            df = normalize(fetch_country(code), code)
         except FileNotFoundError:
             logger.warning("No data for %s", code)
             continue
@@ -246,8 +247,14 @@ def load_all(countries: list[str], refused: list[str] | None = None) -> list[pd.
             if refused is not None:
                 refused.append(code)
             continue
-        df = normalize(df, code)
+        except Exception as e:
+            # A malformed file (parser error etc.): logged and counted (exit 3), the other countries still load.
+            logger.error("Skipping unparseable %s: %s", code, e)
+            if refused is not None:
+                refused.append(f"{code} (unparseable)")
+            continue
         if df.empty:
+            logger.warning("%s: no rows with teams and a date", code)
             continue
         out.append(df)
         logger.info("Loaded %s: %d rows", code, len(df))

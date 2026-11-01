@@ -136,3 +136,21 @@ class TestExtraMain:
 
         monkeypatch.setattr(extra, "fetch_country", fetch)
         assert extra.main(["--countries", "SWE,NOR", "--database-url", ""]) == extra.REFUSED_EXIT_CODE == 3
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            # no Home/Away columns
+            b"Country,League,Season,Date,Time,Team1,Team2\nNorway,Eliteserien,2026,12/07/2026,13:00,A,B\n",
+            # an unterminated quote: does not parse
+            b'Country,League,Season,Date,Time,Home,Away\nNorway,Eliteserien,2026,"12/07/2026,13:00,A,B\n',
+        ],
+    )
+    def test_a_file_that_does_not_parse_or_lacks_team_columns_exits_3(self, monkeypatch, bad):
+        good = ["Sweden,Allsvenskan,2026,12/07/2026,13:00,Malmo FF,Goteborg,4,0,H"]
+        files = {"SWE": _country_file(good), "NOR": bad}
+        monkeypatch.setattr(extra, "fetch_country", lambda code: extra.parse_country_csv(files[code], code, code))
+        written: list = []
+        monkeypatch.setattr(extra, "write_database", lambda frames, url: written.extend(frames) or 1)
+        assert extra.main(["--countries", "SWE,NOR", "--database-url", "pg://x"]) == 3
+        assert [df["league"].iloc[0] for df in written] == ["SE1"]

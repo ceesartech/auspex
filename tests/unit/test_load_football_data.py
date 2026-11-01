@@ -130,3 +130,21 @@ class TestMain:
 
         monkeypatch.setattr(lfd, "fetch_csv", fetch)
         assert lfd.main(["--leagues", "SP1", "--seasons", "2", "--end-year", "2027", "--database-url", ""]) == 0
+
+    def test_a_file_that_does_not_parse_exits_3_too(self, monkeypatch, caplog):
+        # A tokenizer error or a file without HomeTeam/AwayTeam used to be skipped while the run exited 0.
+        files = {
+            "E0": _file(["E0,15/08/2025,20:00,Liverpool,Bournemouth,4,2,H,1,0,H,X,19,10"]),
+            "E1": b"Div,Date,Home,Away,FTHG,FTAG\nE1,08/08/2025,Leeds,Derby,1,0\n",
+            "E2": b'Div,Date,HomeTeam,AwayTeam,FTHG,FTAG\nE2,02/08/2025,"Bolton,Wigan,2,0\n',
+        }
+        monkeypatch.setattr(lfd, "fetch_csv", lambda league, season: lfd.parse_csv(files[league], league, season, "x"))
+        written: list = []
+        monkeypatch.setattr(lfd, "write_database", lambda frames, url: written.extend(frames) or 1)
+        with caplog.at_level(logging.ERROR, logger="load_football_data"):
+            rc = lfd.main(["--leagues", "E0,E1,E2", "--seasons", "1", "--end-year", "2026", "--database-url", "pg://x"])
+        assert rc == lfd.REFUSED_EXIT_CODE == 3
+        assert [df["league"].iloc[0] for df in written] == ["E0"]
+        assert "REFUSED E1 2526" in caplog.text and "has no ['HomeTeam', 'AwayTeam'] column(s)" in caplog.text
+        assert "Skipping unparseable E2 2526" in caplog.text
+        assert "REFUSED 2 file(s) (ERROR lines above): E1 2526, E2 2526 (unparseable)" in caplog.text
