@@ -1,0 +1,20 @@
+# raw_football_data rows football-data served under another division's URL, for scripts/repair_soccer_labels.py
+# (reviewed by hand). On 2026-08-06 load_football_data fetched mmz4281/2627/SP1.csv and SP2.csv and got the
+# Scottish Championship (SC1) and League One (SC2) openers of 2026-08-01; the Div column that names a file's
+# division was hidden by the files' UTF-8 byte-order mark (read as latin-1), so nothing checked it. Re-fetched
+# 2026-11-01: 2627/SP1.csv and SP2.csv hold La Liga / La Liga 2 only (Div SP1 x99, SP2 x121), and every row
+# below is in 2627/SC1.csv or SC2.csv with that Div, that kickoff and that score. Every other raw row whose Div
+# was hidden (12,018 rows: E0 2122, F2 2223, T1 1819 and all 16 codes 2425-2627) is in today's file of its own
+# league with its own Div; every row with a Div (93,629) names its league; every /new/ row (62,430) is in its
+# country's file.
+season,date,time,home,away,home_goals,away_goals,from_league,to_league,evidence
+2627,01/08/2026,15:00,Ayr,Arbroath,2,0,SP1,SC1,football-data mmz4281/2627/SC1.csv (Div SC1) fetched 2026-11-01
+2627,01/08/2026,15:00,Inverness C,Dunfermline,0,0,SP1,SC1,football-data mmz4281/2627/SC1.csv (Div SC1) fetched 2026-11-01
+2627,01/08/2026,15:00,Livingston,Queens Park,2,0,SP1,SC1,football-data mmz4281/2627/SC1.csv (Div SC1) fetched 2026-11-01
+2627,01/08/2026,15:00,Morton,Partick,0,1,SP1,SC1,football-data mmz4281/2627/SC1.csv (Div SC1) fetched 2026-11-01
+2627,01/08/2026,15:00,Raith Rvs,Stenhousemuir,1,1,SP1,SC1,football-data mmz4281/2627/SC1.csv (Div SC1) fetched 2026-11-01
+2627,01/08/2026,15:00,Alloa,East Fife,0,0,SP2,SC2,football-data mmz4281/2627/SC2.csv (Div SC2) fetched 2026-11-01
+2627,01/08/2026,15:00,Cove Rangers,Airdrie Utd,0,0,SP2,SC2,football-data mmz4281/2627/SC2.csv (Div SC2) fetched 2026-11-01
+2627,01/08/2026,15:00,East Kilbride,Queen of Sth,5,1,SP2,SC2,football-data mmz4281/2627/SC2.csv (Div SC2) fetched 2026-11-01
+2627,01/08/2026,15:00,Montrose,Hamilton,0,5,SP2,SC2,football-data mmz4281/2627/SC2.csv (Div SC2) fetched 2026-11-01
+2627,01/08/2026,15:00,Peterhead,Ross County,0,1,SP2,SC2,football-data mmz4281/2627/SC2.csv (Div SC2) fetched 2026-11-01
