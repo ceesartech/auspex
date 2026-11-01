@@ -9,6 +9,11 @@ Retraining is a separate weekly DAG (retrain_models.py). Historical
 ingestion (football-data, StatsBomb) is one-shot via bootstrap.sh — we
 don't re-run it on a schedule.
 
+Horse racing is switched by sport_switches.HORSE_RACING_ENABLED (dormant
+since 2026-11-01): off, its seven tasks are not created and one
+drain_horse_racing task settles the recs still pending — see that module
+for what changes and how to re-enable.
+
 This DAG shells out to the /app/scripts/*.py we've already smoke-tested,
 which means the same logic runs whether you invoke it manually
 (`docker compose exec api python /app/scripts/...`) or via Airflow.
@@ -22,6 +27,7 @@ from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import DAG
 from airflow.utils.trigger_rule import TriggerRule
 from alerting import notify_failure  # shared Telegram failure alerting
+from sport_switches import HORSE_RACING_ENABLED
 
 default_args = {
     "owner": "auspex",
@@ -253,8 +259,11 @@ with DAG(
 
     fetch_upcoming_mma >> compute_features_mma >> precompute_predictions_mma >> generate_recommendations_mma
 
-    # ── Horse racing branch ───────────────────────────────────────
-    # Pipeline shape per cron tick:
+    # ── Horse racing branch (sport_switches.HORSE_RACING_ENABLED) ─
+    # Dormant since 2026-11-01: none of the enabled tasks exist and
+    # drain_horse_racing settles the recs still pending.
+    #
+    # Enabled, the pipeline shape per cron tick:
     #   1. upcoming racecards (next 7 days) from The Racing API.
     #      Captures the full bookmaker_odds[] array per runner
     #      (not just the morning_line_odds first-bookmaker decimal)
@@ -276,49 +285,88 @@ with DAG(
     #      Without step 5 a consensus prediction yields zero EV
     #      against its own morning-line decimal by construction;
     #      the recs step is what unlocks any actionable signal.
-    fetch_horse_racing_upcoming = BashOperator(
-        task_id="fetch_horse_racing_upcoming",
-        bash_command=f"{DOCKER_EXEC} python /app/scripts/load_racing_api.py --upcoming 7",
-    )
-    fetch_horse_racing_results = BashOperator(
-        task_id="fetch_horse_racing_results",
-        bash_command=(
-            f"{DOCKER_EXEC} python /app/scripts/load_racing_api.py "
-            "--results --start $(date -u -d 'yesterday' +%Y-%m-%d) --end $(date -u +%Y-%m-%d)"
-        ),
-    )
-    compute_features_horse_racing = BashOperator(
-        task_id="compute_features_horse_racing",
-        bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_horse_racing.py --days 7",
-    )
-    precompute_predictions_horse_racing = BashOperator(
-        task_id="precompute_predictions_horse_racing",
-        bash_command=f"{DOCKER_EXEC} python /app/scripts/precompute_predictions_horse_racing.py --days 7",
-    )
-    # LambdaMART ranker — beats the consensus baseline by +2.2pts
-    # top-1 on the held-out test (memory: horse-racing-ml-ranker-v1).
-    # Writes alongside the consensus into race_predictions under a
-    # distinct model_name so the recs engine can prefer the ranker
-    # when present and fall back to consensus when not. Runs AFTER
-    # precompute_predictions_horse_racing so the ranker has access
-    # to consensus_prob as an input feature (it's the top-importance
-    # feature by a wide margin).
-    precompute_predictions_horse_racing_ranker = BashOperator(
-        task_id="precompute_predictions_horse_racing_ranker",
-        bash_command=(f"{DOCKER_EXEC} python " "/app/scripts/precompute_predictions_horse_racing_ranker.py --days 7"),
-    )
-    generate_recommendations_horse_racing = BashOperator(
-        task_id="generate_recommendations_horse_racing",
-        bash_command=f"{DOCKER_EXEC} python /app/scripts/generate_recommendations_horse_racing.py --days 2",
-    )
-    (
-        fetch_horse_racing_upcoming
-        >> fetch_horse_racing_results
-        >> compute_features_horse_racing
-        >> precompute_predictions_horse_racing
-        >> precompute_predictions_horse_racing_ranker
-        >> generate_recommendations_horse_racing
-    )
+    horse_recommendation_tasks = []
+    if HORSE_RACING_ENABLED:
+        fetch_horse_racing_upcoming = BashOperator(
+            task_id="fetch_horse_racing_upcoming",
+            bash_command=f"{DOCKER_EXEC} python /app/scripts/load_racing_api.py --upcoming 7",
+        )
+        fetch_horse_racing_results = BashOperator(
+            task_id="fetch_horse_racing_results",
+            bash_command=(
+                f"{DOCKER_EXEC} python /app/scripts/load_racing_api.py "
+                "--results --start $(date -u -d 'yesterday' +%Y-%m-%d) --end $(date -u +%Y-%m-%d)"
+            ),
+        )
+        compute_features_horse_racing = BashOperator(
+            task_id="compute_features_horse_racing",
+            bash_command=f"{DOCKER_EXEC} python /app/scripts/compute_features_horse_racing.py --days 7",
+        )
+        precompute_predictions_horse_racing = BashOperator(
+            task_id="precompute_predictions_horse_racing",
+            bash_command=f"{DOCKER_EXEC} python /app/scripts/precompute_predictions_horse_racing.py --days 7",
+        )
+        # LambdaMART ranker — beats the consensus baseline by +2.2pts
+        # top-1 on the held-out test (memory: horse-racing-ml-ranker-v1).
+        # Writes alongside the consensus into race_predictions under a
+        # distinct model_name so the recs engine can prefer the ranker
+        # when present and fall back to consensus when not. Runs AFTER
+        # precompute_predictions_horse_racing so the ranker has access
+        # to consensus_prob as an input feature (it's the top-importance
+        # feature by a wide margin).
+        precompute_predictions_horse_racing_ranker = BashOperator(
+            task_id="precompute_predictions_horse_racing_ranker",
+            bash_command=(
+                f"{DOCKER_EXEC} python " "/app/scripts/precompute_predictions_horse_racing_ranker.py --days 7"
+            ),
+        )
+        generate_recommendations_horse_racing = BashOperator(
+            task_id="generate_recommendations_horse_racing",
+            bash_command=f"{DOCKER_EXEC} python /app/scripts/generate_recommendations_horse_racing.py --days 2",
+        )
+        (
+            fetch_horse_racing_upcoming
+            >> fetch_horse_racing_results
+            >> compute_features_horse_racing
+            >> precompute_predictions_horse_racing
+            >> precompute_predictions_horse_racing_ranker
+            >> generate_recommendations_horse_racing
+        )
+
+        # Parallel grader for the horse-racing schema (races,
+        # race_entrants, race_predictions, race_recommendations). Same
+        # split-from-the-pipeline rationale as grade_completed_matches:
+        # operates on finished races independently of the upcoming-race
+        # branch, so it can run alongside without ordering constraints.
+        # Per-race semantics:
+        #   - race_predictions: actual_outcome=1/0 per entrant (won vs
+        #     lost), is_correct=TRUE iff the consensus favourite won
+        #     (applied uniformly to every row in the race).
+        #   - race_recommendations: status=won/lost/void with
+        #     profit_loss = stake × (odds − 1) on won, −stake on lost,
+        #     0 on void.
+        grade_completed_races = BashOperator(
+            task_id="grade_completed_races",
+            bash_command=f"{DOCKER_EXEC} python /app/scripts/grade_completed_races.py --days 14",
+        )
+        horse_recommendation_tasks = [generate_recommendations_horse_racing]
+    else:
+        # Dormant: ONE task. `load_racing_api.py --drain` asks
+        # /results/{race_id} for each race that carries a pending rec,
+        # has been off 10 min and is at most DRAIN_DAYS (3) old, and
+        # ingests the result; the grader then settles the recs. No
+        # racecards, features, predictions or recs. Nothing pending → no
+        # API call (the task is then two cheap queries). Both steps run
+        # even when the first fails and the task fails if either did,
+        # so an API or credential failure pages instead of leaving recs
+        # unsettled. No digest edge: it writes no recs and no alerts.
+        drain_horse_racing = BashOperator(
+            task_id="drain_horse_racing",
+            bash_command=(
+                f"rc=0; {DOCKER_EXEC} python /app/scripts/load_racing_api.py --drain || rc=1; "
+                f"{DOCKER_EXEC} python /app/scripts/grade_completed_races.py --days 14 || rc=1; exit $rc"
+            ),
+        )
 
     # ── Phase 5: grade finished matches ───────────────────────────
     # Walks matches whose status flipped to 'finished' in the last
@@ -395,23 +443,6 @@ with DAG(
     )
     fetch_results >> enrich_nhl_stats
 
-    # Parallel grader for the horse-racing schema (races,
-    # race_entrants, race_predictions, race_recommendations). Same
-    # split-from-the-pipeline rationale as grade_completed_matches:
-    # operates on finished races independently of the upcoming-race
-    # branch, so it can run alongside without ordering constraints.
-    # Per-race semantics:
-    #   - race_predictions: actual_outcome=1/0 per entrant (won vs
-    #     lost), is_correct=TRUE iff the consensus favourite won
-    #     (applied uniformly to every row in the race).
-    #   - race_recommendations: status=won/lost/void with
-    #     profit_loss = stake × (odds − 1) on won, −stake on lost,
-    #     0 on void.
-    grade_completed_races = BashOperator(
-        task_id="grade_completed_races",
-        bash_command=f"{DOCKER_EXEC} python /app/scripts/grade_completed_races.py --days 14",
-    )
-
     # ── Combined digest (fan-in) ──────────────────────────────────
     # Drains the shared Redis queue both branches push into and sends
     # ONE Telegram message with every sport's picks. Runs after both
@@ -436,7 +467,7 @@ with DAG(
         generate_recommendations_nfl,
         generate_recommendations_tennis,
         generate_recommendations_mma,
-        generate_recommendations_horse_racing,
+        *horse_recommendation_tasks,
     ] >> send_pipeline_digest
 
     # Model monitoring (drift metrics) used to be this DAG's terminal task,
