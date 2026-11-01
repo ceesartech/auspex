@@ -210,6 +210,80 @@ def test_load_td_files_without_files_explains_manual_download(tmp_path):
         lto.load_td_files(tmp_path)
 
 
+# ── strict CSV decoding (text_encoding.decode_csv_bytes) ──────────────
+
+CSV_HEADER = "ATP,Location,Tournament,Date,Winner,Loser,Comment,PSW,PSL,AvgW,AvgL\r\n"
+# An accented name is what a lossy decode destroys: 'Pérez' must survive.
+CSV_ROW = "1,Montréal,Canadian Open,2024-08-06,Pérez D.,Müller A.,Completed,1.8,2.1,1.78,2.05\r\n"
+
+
+def _csv_bytes(encoding: str, bom: bool = False) -> bytes:
+    return (b"\xef\xbb\xbf" if bom else b"") + (CSV_HEADER + CSV_ROW).encode(encoding)
+
+
+@pytest.mark.parametrize(
+    "label,raw,encoding",
+    [
+        ("Excel 'CSV UTF-8' (with a byte-order mark)", _csv_bytes("utf-8", bom=True), "utf-8"),
+        ("plain UTF-8", _csv_bytes("utf-8"), "utf-8"),
+        ("Excel 'CSV' on Windows (Windows-1252)", _csv_bytes("cp1252"), "cp1252"),
+    ],
+)
+def test_csv_exports_decode_exactly(tmp_path, label, raw, encoding):
+    (tmp_path / "atp_2024.csv").write_bytes(raw)
+    table, used = lto.read_csv_rows(tmp_path / "atp_2024.csv")
+    assert used == encoding, label
+    assert table[0][0] == "ATP"  # the BOM did not glue itself onto the first header
+    assert table[1][1] == "Montréal" and table[1][4] == "Pérez D." and table[1][5] == "Müller A."
+    rows, summary = lto.load_td_files(tmp_path)
+    assert len(rows) == 1 and rows[0].winner.raw == "Pérez D." and rows[0].tournament == "Canadian Open"
+    assert summary["atp_2024.csv"]["rows_with_odds"] == 1
+
+
+def test_no_replacement_character_ever_reaches_a_row(tmp_path):
+    """The old errors='replace' read turned Windows-1252 accents into U+FFFD
+    and carried on; a strict decode cannot."""
+    (tmp_path / "atp_2024.csv").write_bytes(_csv_bytes("cp1252"))
+    table, _ = lto.read_csv_rows(tmp_path / "atp_2024.csv")
+    assert not any("�" in str(cell) for row in table for cell in row)
+
+
+def test_bytes_that_are_neither_encoding_refuse_the_whole_run(tmp_path, caplog):
+    # 0x81 is undefined in Windows-1252 and, after an ASCII byte, invalid UTF-8.
+    bad = (CSV_HEADER + "1,Doha,Qatar Open,2024-01-02,Sinner J.,Medvedev D.,Completed,1.6,2.4,1.6,2.3\r\n").encode()
+    (tmp_path / "atp_2024.csv").write_bytes(bad.replace(b"Doha", b"Do\x81ha"))
+    (tmp_path / "atp_2023.csv").write_bytes(_csv_bytes("utf-8"))
+    _write_xlsx(
+        tmp_path / "wta_2024.xlsx",
+        [["WTA", "Date", "Winner", "Loser", "AvgW", "AvgL"], [1, 45292, "Swiatek I.", "Gauff C.", 1.4, 3.0]],
+    )
+    with caplog.at_level("ERROR"), pytest.raises(lto.text_encoding.UndecodableText) as exc:
+        lto.load_td_files(tmp_path)
+    message = str(exc.value)
+    assert "1 of 3 file(s) refused, nothing loaded" in message
+    assert "atp_2024.csv" in message and "0x81" in message
+    assert any("REFUSED atp_2024.csv" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
+
+
+def test_main_exits_3_on_a_refused_file_before_touching_the_database(tmp_path, monkeypatch):
+    (tmp_path / "atp_2024.csv").write_bytes(
+        CSV_HEADER.encode() + b"1,Do\x81ha,Q,2024-01-02,A B.,C D.,,1.6,2.4,1.6,2.3\r\n"
+    )
+
+    def no_db(*_a, **_k):
+        raise AssertionError("connected to the database after a refused file")
+
+    import types
+
+    fake = types.ModuleType("psycopg2")
+    fake.connect = no_db  # type: ignore[attr-defined]
+    extras = types.ModuleType("psycopg2.extras")
+    extras.RealDictCursor = object  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psycopg2", fake)
+    monkeypatch.setitem(sys.modules, "psycopg2.extras", extras)
+    assert lto.main(["--files-dir", str(tmp_path), "--database-url", "postgresql:///unused", "--dry-run"]) == 3
+
+
 # ── pairing ───────────────────────────────────────────────────────────
 
 UTC = timezone.utc

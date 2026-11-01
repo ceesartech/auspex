@@ -15,6 +15,10 @@ http://www.tennis-data.co.uk/alldata.php and drop them in one directory;
 any file name works because the tour is read from the header ('ATP' or 'WTA'
 column) and the year from the dates. `--download` tries a plain, honestly
 identified fetch first and fails loudly with these instructions on a block.
+A .csv export is decoded strictly (scripts/text_encoding.decode_csv_bytes:
+UTF-8 with any byte-order mark dropped, else Windows-1252). A file that is
+neither stops the run with exit 3 before it touches the database. The .xlsx
+workbooks go through a strict XML parser.
 
 Matching (the hard part — ESPN and tennis-data name players differently):
   * tennis-data names a player 'Surname I.' ('Auger-Aliassime F.',
@@ -67,6 +71,7 @@ from __future__ import annotations
 import argparse
 import csv
 import importlib.util
+import io
 import json
 import logging
 import os
@@ -81,6 +86,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import text_encoding  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("load_tennis_odds")
@@ -384,18 +392,45 @@ def rows_from_table(table: list[list], source_file: str) -> tuple[list[TdRow], C
     return out, skips
 
 
+def read_csv_rows(path: str | Path) -> tuple[list[list], str]:
+    """(rows, encoding) of a .csv workbook export, decoded STRICTLY by
+    text_encoding.decode_csv_bytes: UTF-8 with any byte-order mark dropped
+    (Excel's "CSV UTF-8"), else Windows-1252 (Excel's plain "CSV" on
+    Windows). Bytes that are neither raise text_encoding.UndecodableText
+    naming the file and the offending byte.
+
+    This used to open the file as UTF-8 with errors="replace", which never
+    fails: a Windows-1252 export turned every accented character into U+FFFD
+    and the run carried on, so 'Pérez' could no longer match ESPN's name and
+    nothing said why. The .xlsx path needs no such step: its XML parser is
+    strict already and raises on bytes its declared encoding cannot read."""
+    raw = Path(path).read_bytes()
+    text, encoding = text_encoding.decode_csv_bytes(raw, Path(path).name)
+    return [list(r) for r in csv.reader(io.StringIO(text, newline=""))], encoding
+
+
 def load_td_files(files_dir: str | Path, years: Optional[set[int]] = None) -> tuple[list[TdRow], dict]:
     """Read every .xlsx / .csv under files_dir. Returns rows (optionally
-    filtered to `years`) and a per-file summary."""
+    filtered to `years`) and a per-file summary.
+
+    A .csv that is neither UTF-8 nor Windows-1252 is refused: every such file
+    is logged at ERROR, then UndecodableText is raised listing them all, so the
+    run stops before it connects to the database and nothing is written."""
     rows: list[TdRow] = []
     summary: dict = {}
+    refused: list[str] = []
     paths = sorted(p for p in Path(files_dir).rglob("*") if p.suffix.lower() in (".xlsx", ".csv"))
     if not paths:
         raise FileNotFoundError(f"no .xlsx/.csv files under {files_dir}. {DOWNLOAD_HELP}")
     for p in paths:
         if p.suffix.lower() == ".csv":
-            with open(p, newline="", encoding="utf-8-sig", errors="replace") as fh:
-                table = [list(r) for r in csv.reader(fh)]
+            try:
+                table, encoding = read_csv_rows(p)
+            except text_encoding.UndecodableText as exc:
+                logger.error("REFUSED %s", exc)
+                refused.append(str(exc))
+                continue
+            logger.info("%s: decoded as %s", p.name, encoding)
         else:
             table = read_xlsx_rows(p)
         file_rows, skips = rows_from_table(table, p.name)
@@ -404,6 +439,10 @@ def load_td_files(files_dir: str | Path, years: Optional[set[int]] = None) -> tu
         rows.extend(file_rows)
         summary[p.name] = {"rows_with_odds": len(file_rows), "skipped": dict(skips)}
         logger.info("%s: %d rows with odds (%s)", p.name, len(file_rows), dict(skips))
+    if refused:
+        raise text_encoding.UndecodableText(
+            f"{len(refused)} of {len(paths)} file(s) refused, nothing loaded: " + " | ".join(refused)
+        )
     return rows, summary
 
 
@@ -854,7 +893,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not args.database_url:
         logger.error("DATABASE_URL not set")
         return 2
-    summary = run(args)
+    try:
+        summary = run(args)
+    except text_encoding.UndecodableText as exc:
+        # Exit 3, as the football-data loaders do for a refused file.
+        logger.error("load_tennis_odds stopped before touching the database: %s", exc)
+        return 3
     print(json.dumps(summary, indent=2, default=str))
     return 0
 
