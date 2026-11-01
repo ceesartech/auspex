@@ -99,17 +99,29 @@
 # runbook, run --from 12; with no such record (a lost state file), run the
 # runbook from step 1: a finished step re-plans read-only and records
 # ALREADY DONE, which verifies its effect, then 12-16 follow. Rehearsed
-# 2026-11-01 on a read-only prod export taken 02:42Z, with real ESPN
-# scoreboards, through the shim: the 11-step runbook (d592a4d) from step 1
-# (every count above reproduced), then this one --from 12 on its state file;
-# a full re-run of that (all fifteen ALREADY DONE / checked, no backup, row
-# fingerprint unchanged); and this one from step 1 on a fresh copy (the same
-# counts in all fifteen steps). All of it again on a 05:15Z export (ESPN
-# fetched ~05:19Z) with step 12 on the reviewed list and its re-run's own
-# ceilings: the same counts, plus --from 12 refused (no pause, no backup) on
-# a state file without step 11, and a never_resulted row outside the list
-# (Guadalajara v Atlante, its kickoff moved 6 days back on the replica)
-# listed and left alone while step 12 went through:
+# 2026-11-01, with real ESPN scoreboards, through the shim, first as fifteen
+# steps (no labels repair yet) on read-only prod exports of 02:42Z and
+# 05:15Z: the 11-step runbook (d592a4d) from step 1 (every count above
+# reproduced), then --from 12 on its state file; a full re-run of that (all
+# ALREADY DONE / checked, no backup, row fingerprint unchanged); a run from
+# step 1 on a fresh copy (the same counts); --from 12 refused (no pause, no
+# backup) on a state file without step 11; and a never_resulted row outside
+# the list (Guadalajara v Atlante, its kickoff moved 6 days back on the
+# replica) listed and left alone while step 12 went through. Then as the
+# sixteen steps below on a 06:48:46Z export (ESPN fetched ~07:07Z): the
+# 11-step runbook (d592a4d) from step 1, every count above again; --from 12
+# on its state file — step 12 38/38/3,173/3 and the re-run's merge_cancel 1,
+# step 13 create 2 / tag 0 / relabel 10, 10, 20 / rename 1, 68 /
+# cross_country_after 0, step 14 match_stats 4 / odds 13 / refused_raw 0,
+# step 15 26 / 504, step 16 run, the retrain DAGs unpaused; a full re-run of
+# the sixteen (all ALREADY DONE / checked: step 13 still done after step
+# 14's promote_raw; backups 14 -> 14, row fingerprint unchanged); this
+# runbook from step 1 on a fresh copy (the same counts in all sixteen steps;
+# recs, predictions and the trigger function identical, the other tables
+# equal in counts: new uuids and timestamps);
+# --from 12 and --from 13 refused (no pause, no backup) on a state file
+# without step 11; and promote_raw's checked dry run before step 13:
+# refused_raw 68, exit 3 (why the labels repair comes first):
 # 12 scripts/ops/backfill_soccer_never_resulted.sh, then
 #    scripts/ops/cleanup_soccer_orphans.sh --after-never-resulted
 #    The cleanup's never_resulted rows (42): ESPN's result recorded, through
