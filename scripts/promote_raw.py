@@ -84,12 +84,15 @@ or changed row goes to a write-once CSV (--out-csv) first, its old values
 beside the new: the reversal record.
 scripts/ops/promote_raw_after_repair.sh (runbook step 14) drives it.
 
-EXIT STATUS: 0 done; 1 nothing written (a legacy kickoff left, a checked
-run rolled back or refused); 2 a usage error; 3 raw rows were refused,
-found duplicated or screened out (refused, duplicates, refused_raw > 0) —
-in a plain run and a checked --apply everything else IS committed (a
-checked apply only at a pin that expected those counts), and a checked
---dry-run wrote nothing; the run exits 3 until they are resolved.
+EXIT STATUS: 0 done; 1 refused before writing (a legacy kickoff left) or a
+checked run that wrote nothing (refused, rolled back, or failed: its one
+transaction is never committed) — but an unexpected error in a plain run
+(Python's own exit 1) leaves the batches it committed before the error in
+place (it commits every --batch-size matches); 2 a usage error; 3 raw rows
+were refused, found duplicated or screened out (refused, duplicates,
+refused_raw > 0) — in a plain run and a checked --apply everything else IS
+committed (a checked apply only at a pin that expected those counts), and
+a checked --dry-run wrote nothing; the run exits 3 until they are resolved.
 
 Usage (inside the api container or anywhere DATABASE_URL is set):
     python /app/scripts/promote_raw.py

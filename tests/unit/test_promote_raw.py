@@ -392,6 +392,9 @@ class TestScreenRawRows:
         assert pr.LEAGUE_MAP["SC3"] == ("League Two", "Scotland")
 
     def test_refused_rows_are_not_promoted_and_decide_no_teams_league(self, monkeypatch, caplog):
+        """Kept rows share the screened rows' league codes (D2 beside the garbled D2 row, SP1 beside the SP1 row
+        whose Div is SC1), as on prod (the 68 garbled rows sit among thousands of good D2 rows): those codes get a
+        league, so only the screen keeps the refused rows' names out of the teams and their leagues."""
         leagues_by_team: dict = {}
         league_codes: set = set()
         calls: list = []
@@ -409,6 +412,8 @@ class TestScreenRawRows:
             {**NORMAL, "league": "D2", "HomeTeam": self.GARBLED, "AwayTeam": "Holstein Kiel"},
             {**NORMAL, "league": "XX9", "HomeTeam": "Nowhere", "AwayTeam": "Somewhere"},
             {**NORMAL, "league": "SC1", "Div": "SC1", "HomeTeam": "Morton", "AwayTeam": "Partick"},
+            {**NORMAL, "league": "D2", "Div": "D2", "HomeTeam": "Karlsruhe", "AwayTeam": "Hertha"},
+            {**NORMAL, "league": "SP1", "HomeTeam": "Sevilla", "AwayTeam": "Betis"},
         ]
         monkeypatch.setattr(pr.psycopg2, "connect", lambda url: _FakeConn(rows))
         monkeypatch.setattr(pr, "check_legacy_kickoffs", lambda cur, rows, league_ids, team_ids: None)
@@ -421,9 +426,12 @@ class TestScreenRawRows:
         monkeypatch.setattr(pr, "insert_odds", lambda *a, **kw: 0)
         with caplog.at_level(logging.ERROR, logger="promote_raw"):
             stats = pr.promote("postgres://fake")
-        assert stats.refused_raw == 3 and stats.matches == 1
-        assert [c["home_id"] for c in calls] == ["t-Morton"]
-        assert set(leagues_by_team) == {"Morton", "Partick"} and league_codes == {"SC1"}
+        assert stats.refused_raw == 3 and stats.matches == 3
+        assert [c["home_id"] for c in calls] == ["t-Morton", "t-Karlsruhe", "t-Sevilla"]
+        assert league_codes == {"SC1", "D2", "SP1"}  # the refused rows' codes D2 and SP1 have a league here
+        assert set(leagues_by_team) == {"Morton", "Partick", "Karlsruhe", "Hertha", "Sevilla", "Betis"}
+        for name in (self.GARBLED, "Holstein Kiel", "Ayr", "Arbroath", "Nowhere", "Somewhere"):
+            assert name not in leagues_by_team, name  # a screened row is neither a team nor decides one's league
         assert "REFUSED 1 raw row(s) of SP1 2526 — Div names another division" in caplog.text
         assert "REFUSED 1 raw row(s) of D2 2526 — a team name looks mis-decoded" in caplog.text
         assert "REFUSED 1 raw row(s) of XX9 2526 — league code not in promote_raw.LEAGUE_MAP" in caplog.text
@@ -1216,6 +1224,10 @@ class TestCheckedModeWithTheScreen:
         {**NORMAL, "league": "D2", "HomeTeam": GARBLED, "AwayTeam": "Holstein Kiel"},
         {**NORMAL, "league": "SP1", "Div": "SC1", "HomeTeam": "Ayr", "AwayTeam": "Arbroath"},
         {**NORMAL, "league": "SC1", "Div": "SC1", "HomeTeam": "Morton", "AwayTeam": "Partick"},
+        # Kept rows under the screened rows' codes (as on prod): D2 and SP1 get a league, so only the screen keeps
+        # the garbled name, Holstein Kiel, Ayr and Arbroath out of the teams.
+        {**NORMAL, "league": "D2", "Div": "D2", "HomeTeam": "Karlsruhe", "AwayTeam": "Hertha"},
+        {**NORMAL, "league": "SP1", "HomeTeam": "Sevilla", "AwayTeam": "Betis"},
     ]
     PIN = {k: 0 for k in pr.PLAN_KEYS}
 
@@ -1306,9 +1318,12 @@ class TestCheckedModeWithTheScreen:
         with caplog.at_level(logging.INFO, logger="promote_raw"):
             stats, counts = pr.promote_checked("x", apply=False, expected=None, out_csv=str(tmp_path / "d.csv"))
         assert seen["events"] == ["screen", "leagues", "teams"]
-        assert counts["refused_raw"] == stats.refused_raw == 2 and stats.matches == 1
-        assert seen["leagues"] == {"SC1"} and set(seen["teams"]) == {"Morton", "Partick"}  # refused rows decide none
-        assert [m["home_id"] for m in seen["matches"]] == ["t-Morton"]
+        assert counts["refused_raw"] == stats.refused_raw == 2 and stats.matches == 3
+        assert seen["leagues"] == {"SC1", "D2", "SP1"}
+        assert set(seen["teams"]) == {"Morton", "Partick", "Karlsruhe", "Hertha", "Sevilla", "Betis"}
+        for name in (self.GARBLED, "Holstein Kiel", "Ayr", "Arbroath"):
+            assert name not in seen["teams"], name  # refused rows decide no team and no team's league
+        assert [m["home_id"] for m in seen["matches"]] == ["t-Morton", "t-Karlsruhe", "t-Sevilla"]
         assert conn.isolation == "REPEATABLE READ" and (conn.commits, conn.rollbacks, conn.closed) == (0, 1, True)
         assert "PLAN matches_inserted=0" in caplog.text and " refused_raw=2" in caplog.text
         assert "refused=0 duplicates=0 refused_raw=2; audit CSV" in caplog.text  # the checked run's summary line
