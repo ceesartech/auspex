@@ -13,6 +13,7 @@ import logging
 import re
 import sqlite3
 import sys
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -674,8 +675,32 @@ class TestUpdateExistingMatch:
 
     def test_a_half_time_is_only_replaced_by_a_complete_pair(self, db):
         existing = self._existing(db, ft=(2, 1), ht=(1, 0), espn=False)
-        assert pr.update_existing_match(_SqliteCursor(db), existing, _result())[1] == "updated"
+        assert pr.update_existing_match(_SqliteCursor(db), existing, _result())[1] == "unchanged"  # nothing to write
         assert _row(db)[:5] == ("finished", 2, 1, 1, 0)
+        assert pr.update_existing_match(_SqliteCursor(db), existing, _result(3, 1))[1] == "score_changed"
+        assert _row(db)[:5] == ("finished", 3, 1, 1, 0)  # written, and the pair is still kept
+
+    def test_a_finished_row_that_already_holds_the_result_is_not_written(self, db):
+        """Until 2026-11-01 every run rewrote all ~168k rows (and bumped updated_at) for nothing."""
+        for espn, ht in ((True, (1, 0)), (False, (1, 0)), (False, (None, None))):
+            db.execute("DELETE FROM matches")
+            existing = self._existing(db, ft=(2, 1), ht=ht, espn=espn)
+            db.execute("UPDATE matches SET updated_at = 'before'")
+            raw_ht = {} if ht == (None, None) else {"ht_home": 1, "ht_away": 0}
+            assert pr.update_existing_match(_SqliteCursor(db), existing, _result(**raw_ht)) == (
+                existing["id"],
+                "unchanged",
+            )
+            assert db.execute("SELECT updated_at FROM matches").fetchone() == ("before",)
+
+    def test_a_kept_half_time_conflict_is_reported_without_a_write(self, db):
+        existing = self._existing(db, ft=(2, 1), ht=(0, 0))
+        db.execute("UPDATE matches SET updated_at = 'before'")
+        assert pr.update_existing_match(_SqliteCursor(db), existing, _result(ht_home=1, ht_away=1)) == (
+            existing["id"],
+            "ht_conflict",
+        )
+        assert db.execute("SELECT updated_at FROM matches").fetchone() == ("before",)
 
     def test_a_cancelled_row_is_left_alone(self, db):
         existing = self._existing(db, status="cancelled")
@@ -1044,3 +1069,137 @@ class TestAliasSlotGuard:
         alias = {"id": "e78e7e49", "match_date": MX_KICKOFF, "status": "finished", "home_score": 3, "away_score": 2}
         stats, inserts = promote_with([SHANDONG], aliases=lambda cur, h, a, dt, day: [alias])
         assert (stats.matches, stats.refused, inserts) == (0, 1, [])
+
+
+class TestCheckedMode:
+    """--dry-run / --apply --expect-plan: one transaction, what it changed read back (read_changes), rolled back
+    unless the apply's own plan equals its pin. The real run against a replica of prod: 4 match_stats and 13 odds
+    inserted, everything else 0 (scripts/ops/promote_raw_after_repair.sh header)."""
+
+    PIN = {k: 0 for k in pr.PLAN_KEYS} | {"match_stats_inserted": 4, "odds_inserted": 13}
+
+    def test_expect_plan_needs_every_key_once(self):
+        text = ",".join(f"{k}={v}" for k, v in self.PIN.items())
+        assert pr.parse_expect_plan(text) == self.PIN
+        for bad in (text.replace(",duplicates=0", ""), text + ",bogus=1", text.replace("refused=0", "refused=x")):
+            with pytest.raises(pr.PlanRefused):
+                pr.parse_expect_plan(bad)
+
+    class _Cur:
+        def __init__(self, found):
+            self.found, self.sql = found, None
+
+        def execute(self, sql, params=None):
+            self.sql = sql
+
+        def fetchall(self):
+            for key, _table, sql in pr.CHECKED_CHANGES_SQL:
+                if sql == self.sql:
+                    return self.found.get(key, [])
+            return []
+
+    def test_read_changes_counts_every_query_and_the_refusals(self):
+        found = {
+            "match_stats_inserted": [{"key": f"m{i}/t", "old": "", "new": ""} for i in range(4)],
+            "odds_inserted": [{"key": f"o{i}", "old": "", "new": "x"} for i in range(13)],
+        }
+        stats = pr.Promotion(refused=2, duplicates=1)
+        counts, rows = pr.read_changes(self._Cur(found), stats)
+        assert pr.plan_line(counts) == (
+            "PLAN matches_inserted=0 matches_changed=0 match_stats_inserted=4 match_stats_changed=0 odds_inserted=13 "
+            "teams_inserted=0 teams_changed=0 leagues_inserted=0 leagues_changed=0 predictions_changed=0 "
+            "recs_changed=0 refused=2 duplicates=1"
+        )
+        assert len(rows) == 17 and rows[0] == {
+            "plan_key": "match_stats_inserted",
+            "table": "match_stats",
+            "key": "m0/t",
+            "old": "",
+            "new": "",
+        }
+
+    class _Conn:
+        def __init__(self):
+            self.isolation, self.commits, self.rollbacks, self.closed = None, 0, 0, False
+
+        def set_session(self, isolation_level=None):
+            self.isolation = isolation_level
+
+        def cursor(self, cursor_factory=None):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            pass
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+
+        def close(self):
+            self.closed = True
+
+    @pytest.fixture
+    def checked(self, monkeypatch):
+        conn = self._Conn()
+        calls = []
+        monkeypatch.setattr(pr.psycopg2, "connect", lambda url: conn)
+        monkeypatch.setattr(pr, "promote_rows", lambda c, cur, stats, batch_size: calls.append(batch_size))
+        monkeypatch.setattr(pr, "read_changes", lambda cur, stats: (Counter(self.PIN), []))
+        return conn, calls
+
+    def test_a_dry_run_is_one_repeatable_read_transaction_rolled_back(self, checked, tmp_path):
+        conn, calls = checked
+        _stats, counts = pr.promote_checked("x", apply=False, expected=None, out_csv=str(tmp_path / "d.csv"))
+        assert calls == [None]  # no batch commits
+        assert conn.isolation == "REPEATABLE READ" and (conn.commits, conn.rollbacks, conn.closed) == (0, 1, True)
+        assert (tmp_path / "d.csv").read_text().startswith("plan_key,table,key,old,new")
+
+    def test_an_apply_commits_only_at_its_pin(self, checked, tmp_path):
+        conn, _ = checked
+        pr.promote_checked("x", apply=True, expected=self.PIN, out_csv=str(tmp_path / "a.csv"))
+        assert (conn.commits, conn.rollbacks) == (1, 0)
+
+    def test_an_apply_that_drifted_rolls_back(self, checked, tmp_path):
+        conn, _ = checked
+        with pytest.raises(pr.PlanRefused, match="drifted"):
+            pr.promote_checked("x", apply=True, expected={**self.PIN, "odds_inserted": 12}, out_csv=str(tmp_path / "a"))
+        assert (conn.commits, conn.rollbacks, conn.closed) == (0, 1, True)
+
+    def test_the_audit_csv_is_write_once(self, checked, tmp_path):
+        conn, _ = checked
+        (tmp_path / "d.csv").write_text("earlier\n")
+        with pytest.raises(pr.PlanRefused, match="write-once"):
+            pr.promote_checked("x", apply=False, expected=None, out_csv=str(tmp_path / "d.csv"))
+        assert conn.commits == 0 and conn.closed
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["--dry-run"],  # no --out-csv
+            ["--apply", "--out-csv", "a.csv"],  # no pin
+            ["--expect-plan", "refused=0", "--out-csv", "a.csv"],  # a pin without --apply
+        ],
+    )
+    def test_main_refuses_an_incomplete_checked_command(self, argv, monkeypatch):
+        monkeypatch.setattr(pr, "promote_checked", lambda *a, **k: pytest.fail("must not run"))
+        assert pr.main(["--database-url", "x", *argv]) == 2
+
+    def test_main_checked_dry_run_exits_3_on_a_refused_row(self, monkeypatch):
+        monkeypatch.setattr(pr, "promote_checked", lambda *a, **k: (pr.Promotion(refused=1), Counter()))
+        assert pr.main(["--database-url", "x", "--dry-run", "--out-csv", "d.csv"]) == pr.REFUSED_EXIT_CODE
+
+    def test_main_checked_reports_a_legacy_kickoff_refusal(self, monkeypatch, caplog):
+        def refuse(*a, **k):
+            raise pr.LegacyKickoffsPresent("3 raw row(s) still have their legacy matches row")
+
+        monkeypatch.setattr(pr, "promote_checked", refuse)
+        assert pr.main(["--database-url", "x", "--dry-run", "--out-csv", "d.csv"]) == 1
+        assert "Refusing to promote — nothing written" in caplog.text

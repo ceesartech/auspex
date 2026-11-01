@@ -46,20 +46,44 @@ La Liga / La Liga 2 rows and set twenty clubs' league to Spain, and
 repairs both; the loaders now refuse such files,
 load_football_data.parse_csv).
 
+A re-run writes only what changes: a matches row whose status, scores and
+half-time already equal football-data's is not updated (until 2026-11-01
+every run rewrote all ~168k of them, and their match_stats and teams rows,
+for nothing), and neither is an equal match_stats, team or league row.
+
+CHECKED MODE (--dry-run, or --apply --expect-plan): the whole run is one
+REPEATABLE READ transaction, and what it changed is read back before the
+end (rows created or updated in this transaction, and match_stats compared
+with a snapshot taken first): the PLAN line counts matches, match_stats,
+odds, teams and leagues inserted or changed, the predictions and
+recommendations the outcome trigger graded or settled (a scheduled row
+finished), and the raw rows refused or found duplicated. --dry-run then rolls
+everything back; --apply commits only when every PLAN key equals
+--expect-plan (the reviewed dry run's counts), otherwise it rolls back and
+exits 1. Every inserted or changed row goes to a write-once CSV (--out-csv)
+first, its old values beside the new: the reversal record.
+scripts/ops/promote_raw_after_repair.sh (runbook step 13) drives it.
+
 Usage (inside the api container or anywhere DATABASE_URL is set):
     python /app/scripts/promote_raw.py
     python /app/scripts/promote_raw.py --database-url postgres://...
+    python /app/scripts/promote_raw.py --dry-run --out-csv /app/backups/promote_raw_dry.csv
+    python /app/scripts/promote_raw.py --apply --expect-plan matches_inserted=0,...,duplicates=0 \\
+        --out-csv /app/backups/promote_raw_apply.csv
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import os
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
+from pathlib import Path
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
@@ -247,6 +271,7 @@ class Promotion:
     ht_dropped: int = 0  # promoted without the half-time value the raw row carried
     left_cancelled: int = 0  # existing row is 'cancelled' — not resurrected
     merged: int = 0  # written onto an existing row at another kickoff (would have been a second row)
+    unchanged: int = 0  # the existing row already holds this result: not updated
     refused: int = 0  # not written: an ESPN row's score disagrees, a stale fixture row, or ambiguous
     duplicates: int = 0  # written onto an ESPN row while football-data's own finished row for the pair sits beside it
     ht_conflicts: int = 0  # an ESPN row kept its half-time where football-data's differs
@@ -445,6 +470,7 @@ def upsert_leagues(cur, codes: set[str]) -> dict[str, str]:
         VALUES %s
         ON CONFLICT (name, country, sport) DO UPDATE
             SET external_ids = leagues.external_ids || EXCLUDED.external_ids
+            WHERE leagues.external_ids IS DISTINCT FROM leagues.external_ids || EXCLUDED.external_ids
         """,
         [(name, country, sport, Json({"football_data": code})) for name, country, sport, code in rows],
     )
@@ -500,6 +526,7 @@ def upsert_teams(cur, team_names: set[str], league_id_by_team: dict[str, str]) -
             VALUES %s
             ON CONFLICT (normalized_name, sport) DO UPDATE
                 SET league_id = COALESCE(EXCLUDED.league_id, teams.league_id)
+                WHERE teams.league_id IS DISTINCT FROM COALESCE(EXCLUDED.league_id, teams.league_id)
             """,
             rows,
         )
@@ -703,9 +730,11 @@ def update_existing_match(cur, existing: dict, result: RawResult) -> tuple[str |
     football-data's. 'score_changed': a row without ESPN identity
     (football-data's own) took football-data's new score, as the upsert always
     let it. 'changed': the row moved after the lookup; nothing written.
-    Otherwise 'updated'. A half-time pair is only ever replaced by a complete
-    one, an ESPN row's only when it has none; the kickoff, season and
-    identity stay the row's own."""
+    'unchanged': a finished row that already holds exactly what would be
+    written; nothing written (an 'ht_conflict' on such a row is still
+    reported as one). Otherwise 'updated'. A half-time pair is only ever
+    replaced by a complete one, an ESPN row's only when it has none; the
+    kickoff, season and identity stay the row's own."""
     if existing["status"] == "cancelled":
         return None, "cancelled"
     espn = has_espn_identity(existing.get("espn_id"), existing.get("result_source"))
@@ -726,6 +755,8 @@ def update_existing_match(cur, existing: dict, result: RawResult) -> tuple[str |
         new_ht = raw_ht or old_ht
         if old_ft != (None, None) and old_ft != new_ft:
             outcome = "score_changed"
+    if existing["status"] == "finished" and old_ft == new_ft and old_ht == new_ht:
+        return existing["id"], ("unchanged" if outcome == "updated" else outcome)
     cur.execute(
         UPDATE_EXISTING_MATCH_SQL,
         {
@@ -880,9 +911,17 @@ def write_match(
             result.home_score,
             result.away_score,
         )
+    if outcome == "unchanged":
+        stats.unchanged += 1
     if existing is not None and not same_kickoff(existing["match_date"], match_dt):
         stats.merged += 1
-        logger.info("%s written onto %s (football-data kickoff %s)", label, where, match_dt)
+        logger.info(
+            "%s %s %s (football-data kickoff %s)",
+            label,
+            "already on" if outcome == "unchanged" else "written onto",
+            where,
+            match_dt,
+        )
     beside = duplicates_beside(existing, candidates) if existing is not None else []
     if beside:
         stats.duplicates += 1
@@ -913,6 +952,10 @@ def insert_match_stats(
                 fouls = EXCLUDED.fouls,
                 yellow_cards = EXCLUDED.yellow_cards,
                 red_cards = EXCLUDED.red_cards
+            WHERE (match_stats.shots, match_stats.shots_on_target, match_stats.corners, match_stats.fouls,
+                   match_stats.yellow_cards, match_stats.red_cards)
+                  IS DISTINCT FROM (EXCLUDED.shots, EXCLUDED.shots_on_target, EXCLUDED.corners, EXCLUDED.fouls,
+                                    EXCLUDED.yellow_cards, EXCLUDED.red_cards)
         """,
         (match_id, team_id, shots, shots_on_target, corners, fouls, yellow_cards, red_cards),
     )
@@ -1021,109 +1064,383 @@ def season_label(code: str, league: str | None = None) -> str:
     return f"{start_year}-{start_year + 1}"
 
 
+def promote_rows(conn, cur, stats: Promotion, *, batch_size: int | None) -> None:
+    """Promote every raw row through `cur`. `batch_size` commits every that
+    many matches (the plain run); None never commits (checked mode: the
+    caller decides)."""
+    cur.execute("SELECT * FROM raw_football_data")
+    rows = cur.fetchall()
+
+    if not rows:
+        logger.info("raw_football_data is empty — nothing to promote")
+        return
+    rows, refused_raw = screen_raw_rows(rows)
+    stats.refused_raw = len(refused_raw)
+
+    league_codes = {r["league"] for r in rows if r.get("league")}
+    league_ids = upsert_leagues(cur, league_codes)
+    stats.leagues = len(league_ids)
+    logger.info("Upserted %d leagues", stats.leagues)
+
+    # Collect teams and their first-seen league (for league_id assignment)
+    team_to_league: dict[str, str] = {}
+    for r in rows:
+        code = r.get("league")
+        if code in league_ids:
+            lid = league_ids[code]
+            for col in ("HomeTeam", "AwayTeam"):
+                name = r.get(col)
+                if name and name not in team_to_league:
+                    team_to_league[name] = lid
+    team_ids = upsert_teams(cur, set(team_to_league.keys()), team_to_league)
+    stats.teams = len(team_ids)
+    logger.info("Upserted %d teams", stats.teams)
+
+    # Before any match is written: the loop below commits in batches.
+    check_legacy_kickoffs(cur, rows, league_ids, team_ids)
+
+    # Insert matches one-by-one (we need the returned id for stats/odds)
+    for r in rows:
+        code = r.get("league")
+        if code not in league_ids:
+            continue
+        home_norm = normalize_team_name(r.get("HomeTeam", ""))
+        away_norm = normalize_team_name(r.get("AwayTeam", ""))
+        home_id = team_ids.get(home_norm)
+        away_id = team_ids.get(away_norm)
+        if not (home_id and away_id):
+            continue
+        match_dt = parse_match_date(r.get("Date", ""), r.get("Time"))
+        if match_dt is None:
+            continue
+        result = raw_result(r)
+        if result is None:
+            stats.skipped_no_result += 1
+            logger.warning(
+                "Not promoting %s: no full-time score (FTHG=%r FTAG=%r) — abandoned, awarded or "
+                "unplayed, not a finished match; its HTHG/HTAG (%r/%r, HTR %r) are not a half-time score",
+                fixture_label(r),
+                r.get("FTHG"),
+                r.get("FTAG"),
+                r.get("HTHG"),
+                r.get("HTAG"),
+                r.get("HTR"),
+            )
+            continue
+        if result.ht_dropped:
+            stats.ht_dropped += 1
+            logger.warning("Promoting %s without its half-time: %s", fixture_label(r), result.ht_dropped)
+        match_id = write_match(
+            cur,
+            stats,
+            r,
+            league_id=league_ids[code],
+            home_id=home_id,
+            away_id=away_id,
+            match_dt=match_dt,
+            result=result,
+        )
+        if not match_id:
+            continue
+        stats.matches += 1
+
+        # Per-team stats (home then away)
+        for tid, prefix in [(home_id, "H"), (away_id, "A")]:
+            insert_match_stats(
+                cur,
+                match_id,
+                tid,
+                shots=to_int(r.get(f"{prefix}S")),
+                shots_on_target=to_int(r.get(f"{prefix}ST")),
+                corners=to_int(r.get(f"{prefix}C")),
+                fouls=to_int(r.get(f"{prefix}F")),
+                yellow_cards=to_int(r.get(f"{prefix}Y")),
+                red_cards=to_int(r.get(f"{prefix}R")),
+            )
+        stats.match_stats += 2
+
+        stats.odds += insert_odds(cur, match_id, odds_rows_for(r))
+
+        if batch_size and stats.matches % batch_size == 0:
+            conn.commit()
+            logger.info("Committed batch: matches=%d odds=%d", stats.matches, stats.odds)
+
+
 def promote(database_url: str, *, batch_size: int = 1000) -> Promotion:
     stats = Promotion()
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM raw_football_data")
-            rows = cur.fetchall()
-
-            if not rows:
-                logger.info("raw_football_data is empty — nothing to promote")
-                return stats
-            rows, refused_raw = screen_raw_rows(rows)
-            stats.refused_raw = len(refused_raw)
-
-            league_codes = {r["league"] for r in rows if r.get("league")}
-            league_ids = upsert_leagues(cur, league_codes)
-            stats.leagues = len(league_ids)
-            logger.info("Upserted %d leagues", stats.leagues)
-
-            # Collect teams and their first-seen league (for league_id assignment)
-            team_to_league: dict[str, str] = {}
-            for r in rows:
-                code = r.get("league")
-                if code in league_ids:
-                    lid = league_ids[code]
-                    for col in ("HomeTeam", "AwayTeam"):
-                        name = r.get(col)
-                        if name and name not in team_to_league:
-                            team_to_league[name] = lid
-            team_ids = upsert_teams(cur, set(team_to_league.keys()), team_to_league)
-            stats.teams = len(team_ids)
-            logger.info("Upserted %d teams", stats.teams)
-
-            # Before any match is written: the loop below commits in batches.
-            check_legacy_kickoffs(cur, rows, league_ids, team_ids)
-
-            # Insert matches one-by-one (we need the returned id for stats/odds)
-            for r in rows:
-                code = r.get("league")
-                if code not in league_ids:
-                    continue
-                home_norm = normalize_team_name(r.get("HomeTeam", ""))
-                away_norm = normalize_team_name(r.get("AwayTeam", ""))
-                home_id = team_ids.get(home_norm)
-                away_id = team_ids.get(away_norm)
-                if not (home_id and away_id):
-                    continue
-                match_dt = parse_match_date(r.get("Date", ""), r.get("Time"))
-                if match_dt is None:
-                    continue
-                result = raw_result(r)
-                if result is None:
-                    stats.skipped_no_result += 1
-                    logger.warning(
-                        "Not promoting %s: no full-time score (FTHG=%r FTAG=%r) — abandoned, awarded or "
-                        "unplayed, not a finished match; its HTHG/HTAG (%r/%r, HTR %r) are not a half-time score",
-                        fixture_label(r),
-                        r.get("FTHG"),
-                        r.get("FTAG"),
-                        r.get("HTHG"),
-                        r.get("HTAG"),
-                        r.get("HTR"),
-                    )
-                    continue
-                if result.ht_dropped:
-                    stats.ht_dropped += 1
-                    logger.warning("Promoting %s without its half-time: %s", fixture_label(r), result.ht_dropped)
-                match_id = write_match(
-                    cur,
-                    stats,
-                    r,
-                    league_id=league_ids[code],
-                    home_id=home_id,
-                    away_id=away_id,
-                    match_dt=match_dt,
-                    result=result,
-                )
-                if not match_id:
-                    continue
-                stats.matches += 1
-
-                # Per-team stats (home then away)
-                for tid, prefix in [(home_id, "H"), (away_id, "A")]:
-                    insert_match_stats(
-                        cur,
-                        match_id,
-                        tid,
-                        shots=to_int(r.get(f"{prefix}S")),
-                        shots_on_target=to_int(r.get(f"{prefix}ST")),
-                        corners=to_int(r.get(f"{prefix}C")),
-                        fouls=to_int(r.get(f"{prefix}F")),
-                        yellow_cards=to_int(r.get(f"{prefix}Y")),
-                        red_cards=to_int(r.get(f"{prefix}R")),
-                    )
-                stats.match_stats += 2
-
-                stats.odds += insert_odds(cur, match_id, odds_rows_for(r))
-
-                if stats.matches % batch_size == 0:
-                    conn.commit()
-                    logger.info("Committed batch: matches=%d odds=%d", stats.matches, stats.odds)
-
+            promote_rows(conn, cur, stats, batch_size=batch_size)
             conn.commit()
     return stats
+
+
+# ── checked mode: one transaction, what changed read back, pinned ──────────
+
+# The PLAN keys, in order. Every one is pinned by --expect-plan.
+PLAN_KEYS = (
+    "matches_inserted",
+    "matches_changed",
+    "match_stats_inserted",
+    "match_stats_changed",
+    "odds_inserted",
+    "teams_inserted",
+    "teams_changed",
+    "leagues_inserted",
+    "leagues_changed",
+    "predictions_changed",
+    "recs_changed",
+    "refused",
+    "duplicates",
+)
+
+# Taken first, in the same REPEATABLE READ transaction: the soccer rows a run can update, with the values it can
+# change. Rows a run inserts carry created_at = now() (the transaction's start, the column default); rows it updates
+# carry updated_at = now() (the updated_at triggers), except match_stats, which has no updated_at: it is compared with
+# its snapshot. Under REPEATABLE READ no other session's write is visible here, so all of it is this run's.
+CHECKED_SNAPSHOT_SQL = (
+    """
+    CREATE TEMP TABLE promote_before_matches ON COMMIT DROP AS
+    SELECT m.id, m.status, m.home_score, m.away_score, m.half_time_home, m.half_time_away
+      FROM matches m JOIN leagues l ON l.id = m.league_id
+     WHERE l.sport = 'soccer'
+    """,
+    "ALTER TABLE promote_before_matches ADD PRIMARY KEY (id)",
+    """
+    CREATE TEMP TABLE promote_before_stats ON COMMIT DROP AS
+    SELECT s.match_id, s.team_id, s.shots, s.shots_on_target, s.corners, s.fouls, s.yellow_cards, s.red_cards
+      FROM match_stats s JOIN matches m ON m.id = s.match_id JOIN leagues l ON l.id = m.league_id
+     WHERE l.sport = 'soccer'
+    """,
+    "ALTER TABLE promote_before_stats ADD PRIMARY KEY (match_id, team_id)",
+    """
+    CREATE TEMP TABLE promote_before_teams ON COMMIT DROP AS
+    SELECT t.id, t.name, t.league_id FROM teams t WHERE t.sport = 'soccer'
+    """,
+    """
+    CREATE TEMP TABLE promote_before_leagues ON COMMIT DROP AS
+    SELECT l.id, l.external_ids FROM leagues l WHERE l.sport = 'soccer'
+    """,
+)
+
+# Each: (PLAN key, CSV table, query returning key / old / new as text). Run after promote_rows, before the end.
+CHECKED_CHANGES_SQL = (
+    (
+        "matches_inserted",
+        "matches",
+        """
+        SELECT m.id::text AS key, '' AS old,
+               concat_ws(' ', m.match_date, m.status, m.home_score || '-' || m.away_score,
+                         'ht ' || m.half_time_home || '-' || m.half_time_away, m.season) AS new
+          FROM matches m JOIN leagues l ON l.id = m.league_id
+         WHERE l.sport = 'soccer' AND m.created_at = now()
+         ORDER BY m.id
+        """,
+    ),
+    (
+        "matches_changed",
+        "matches",
+        """
+        SELECT m.id::text AS key,
+               concat_ws(' ', b.status, b.home_score || '-' || b.away_score,
+                         'ht ' || b.half_time_home || '-' || b.half_time_away) AS old,
+               concat_ws(' ', m.status, m.home_score || '-' || m.away_score,
+                         'ht ' || m.half_time_home || '-' || m.half_time_away) AS new
+          FROM matches m JOIN promote_before_matches b ON b.id = m.id
+         WHERE (m.status, m.home_score, m.away_score, m.half_time_home, m.half_time_away)
+               IS DISTINCT FROM (b.status, b.home_score, b.away_score, b.half_time_home, b.half_time_away)
+         ORDER BY m.id
+        """,
+    ),
+    (
+        "match_stats_inserted",
+        "match_stats",
+        """
+        SELECT s.match_id || '/' || s.team_id AS key, '' AS old,
+               concat_ws(' ', s.shots, s.shots_on_target, s.corners, s.fouls, s.yellow_cards, s.red_cards) AS new
+          FROM match_stats s
+         WHERE s.created_at = now()
+         ORDER BY 1
+        """,
+    ),
+    (
+        "match_stats_changed",
+        "match_stats",
+        """
+        SELECT s.match_id || '/' || s.team_id AS key,
+               concat_ws(' ', b.shots, b.shots_on_target, b.corners, b.fouls, b.yellow_cards, b.red_cards) AS old,
+               concat_ws(' ', s.shots, s.shots_on_target, s.corners, s.fouls, s.yellow_cards, s.red_cards) AS new
+          FROM match_stats s JOIN promote_before_stats b ON b.match_id = s.match_id AND b.team_id = s.team_id
+         WHERE (s.shots, s.shots_on_target, s.corners, s.fouls, s.yellow_cards, s.red_cards)
+               IS DISTINCT FROM (b.shots, b.shots_on_target, b.corners, b.fouls, b.yellow_cards, b.red_cards)
+         ORDER BY 1
+        """,
+    ),
+    (
+        "odds_inserted",
+        "odds",
+        """
+        SELECT o.id::text AS key, '' AS old,
+               concat_ws(' ', o.match_id, o.bookmaker, o.market_type, o.selection, o.line, o.odds_decimal) AS new
+          FROM odds o
+         WHERE o.created_at = now()
+         ORDER BY o.id
+        """,
+    ),
+    (
+        "teams_inserted",
+        "teams",
+        "SELECT t.id::text AS key, '' AS old, t.name AS new FROM teams t WHERE t.created_at = now() ORDER BY t.id",
+    ),
+    (
+        "teams_changed",
+        "teams",
+        """
+        SELECT t.id::text AS key, concat_ws(' ', b.name, b.league_id) AS old,
+               concat_ws(' ', t.name, t.league_id) AS new
+          FROM teams t JOIN promote_before_teams b ON b.id = t.id
+         WHERE (t.name, t.league_id) IS DISTINCT FROM (b.name, b.league_id)
+         ORDER BY t.id
+        """,
+    ),
+    (
+        "leagues_inserted",
+        "leagues",
+        """
+        SELECT l.id::text AS key, '' AS old, concat_ws(' ', l.name, l.country, l.external_ids) AS new
+          FROM leagues l WHERE l.created_at = now() ORDER BY l.id
+        """,
+    ),
+    (
+        "leagues_changed",
+        "leagues",
+        """
+        SELECT l.id::text AS key, b.external_ids::text AS old, l.external_ids::text AS new
+          FROM leagues l JOIN promote_before_leagues b ON b.id = l.id
+         WHERE l.external_ids IS DISTINCT FROM b.external_ids
+         ORDER BY l.id
+        """,
+    ),
+    (
+        # The outcome trigger, when a run finished a row that was not finished.
+        "predictions_changed",
+        "predictions",
+        """
+        SELECT p.id::text AS key, '' AS old,
+               concat_ws(' ', p.match_id, p.prediction_type, p.actual_outcome, p.is_correct) AS new
+          FROM predictions p
+         WHERE p.updated_at = now()
+         ORDER BY p.id
+        """,
+    ),
+    (
+        "recs_changed",
+        "betting_recommendations",
+        """
+        SELECT r.id::text AS key, '' AS old, concat_ws(' ', r.match_id, r.status, r.profit_loss) AS new
+          FROM betting_recommendations r
+         WHERE r.updated_at = now()
+         ORDER BY r.id
+        """,
+    ),
+)
+CHECKED_CSV_FIELDS = ("plan_key", "table", "key", "old", "new")
+
+
+class PlanRefused(RuntimeError):
+    """A checked run whose plan cannot be committed as asked: rolled back."""
+
+
+def parse_expect_plan(text: str) -> dict[str, int]:
+    """'matches_inserted=0,...' -> dict: every PLAN key exactly once, nothing else."""
+    out: dict[str, int] = {}
+    for part in (text or "").split(","):
+        key, sep, val = part.strip().partition("=")
+        if not sep or key not in PLAN_KEYS or not val.isdigit() or key in out:
+            raise PlanRefused(f"--expect-plan: bad entry {part!r} (keys: {', '.join(PLAN_KEYS)})")
+        out[key] = int(val)
+    missing = [k for k in PLAN_KEYS if k not in out]
+    if missing:
+        raise PlanRefused(f"--expect-plan must pin every key; missing {', '.join(missing)}")
+    return out
+
+
+def plan_line(counts: Counter) -> str:
+    return "PLAN " + " ".join(f"{k}={counts[k]}" for k in PLAN_KEYS)
+
+
+def read_changes(cur, stats: Promotion) -> tuple[Counter, list[dict]]:
+    """The PLAN counts and the CSV rows of what this transaction changed (CHECKED_CHANGES_SQL), plus the raw rows
+    promote_rows refused or found duplicated."""
+    counts: Counter = Counter({k: 0 for k in PLAN_KEYS})
+    rows: list[dict] = []
+    for key, table, sql in CHECKED_CHANGES_SQL:
+        cur.execute(sql)
+        found = cur.fetchall()
+        counts[key] = len(found)
+        rows += [{"plan_key": key, "table": table, "key": r["key"], "old": r["old"], "new": r["new"]} for r in found]
+    counts["refused"] = stats.refused
+    counts["duplicates"] = stats.duplicates
+    return counts, rows
+
+
+def write_changes_csv(path: str, rows: list[dict]) -> None:
+    """Write-once (mode 'x'): a re-run can never overwrite an earlier run's record."""
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fh = out.open("x", newline="")
+    except FileExistsError:
+        raise PlanRefused(f"{out} exists — the audit CSV is write-once") from None
+    with fh:
+        w = csv.DictWriter(fh, fieldnames=CHECKED_CSV_FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+
+
+def promote_checked(
+    database_url: str, *, apply: bool, expected: dict[str, int] | None, out_csv: str
+) -> tuple[Promotion, Counter]:
+    """Checked mode (see the module docstring): one REPEATABLE READ transaction, rolled back unless `apply` and the
+    plan equals `expected`. Raises LegacyKickoffsPresent (nothing written) or PlanRefused (rolled back)."""
+    stats = Promotion()
+    conn = psycopg2.connect(database_url)
+    try:
+        conn.set_session(isolation_level="REPEATABLE READ")
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            for sql in CHECKED_SNAPSHOT_SQL:
+                cur.execute(sql)
+            promote_rows(conn, cur, stats, batch_size=None)
+            counts, rows = read_changes(cur, stats)
+        write_changes_csv(out_csv, rows)
+        logger.info(
+            "Checked run: leagues=%d teams=%d matches=%d (unchanged %d) merged=%d skipped_no_result=%d ht_dropped=%d "
+            "left_cancelled=%d ht_conflicts=%d; audit CSV %s",
+            stats.leagues,
+            stats.teams,
+            stats.matches,
+            stats.unchanged,
+            stats.merged,
+            stats.skipped_no_result,
+            stats.ht_dropped,
+            stats.left_cancelled,
+            stats.ht_conflicts,
+            out_csv,
+        )
+        logger.info("%s", plan_line(counts))
+        if not apply:
+            conn.rollback()
+            logger.info("DRY-RUN: rolled back, nothing written")
+            return stats, counts
+        drift = {k: (expected[k], counts[k]) for k in PLAN_KEYS if expected is not None and expected[k] != counts[k]}
+        if expected is None or drift:
+            conn.rollback()
+            raise PlanRefused(f"the plan drifted from --expect-plan (expected, now): {drift} — rolled back")
+        conn.commit()
+        logger.info("Committed: %s", plan_line(counts)[5:])
+        return stats, counts
+    finally:
+        conn.close()  # an open transaction is rolled back
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1132,7 +1449,43 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--database-url", default=os.environ.get("DATABASE_URL"), help="Postgres URL. Defaults to $DATABASE_URL."
     )
     p.add_argument("--batch-size", type=int, default=1000)
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="Checked mode, rolled back (see CHECKED MODE).")
+    mode.add_argument("--apply", action="store_true", help="Checked mode, committed only at --expect-plan.")
+    p.add_argument("--expect-plan", default=None, help="With --apply: every PLAN key, from the reviewed dry run.")
+    p.add_argument("--out-csv", default=None, help="Checked mode: the write-once audit CSV of every change.")
     return p.parse_args(argv)
+
+
+def main_checked(args: argparse.Namespace) -> int:
+    if not args.out_csv:
+        logger.error("--dry-run / --apply need --out-csv (the write-once record of every change)")
+        return 2
+    if args.apply and not args.expect_plan:
+        logger.error("--apply needs --expect-plan (every PLAN key, from the reviewed dry run)")
+        return 2
+    if args.expect_plan and not args.apply:
+        logger.error("--expect-plan goes with --apply")
+        return 2
+    try:
+        expected = parse_expect_plan(args.expect_plan) if args.apply else None
+        stats, counts = promote_checked(args.database_url, apply=args.apply, expected=expected, out_csv=args.out_csv)
+    except LegacyKickoffsPresent as e:
+        logger.error("Refusing to promote — nothing written: %s", e)
+        return 1
+    except PlanRefused as e:
+        logger.error("REFUSED: %s", e)
+        return 1
+    if not args.apply and (stats.refused or stats.duplicates):
+        logger.error(
+            "REFUSED %d raw row(s) and found %d duplicate(s) (ERROR lines above); a checked --apply commits only "
+            "when they are pinned too; exiting %d",
+            stats.refused,
+            stats.duplicates,
+            REFUSED_EXIT_CODE,
+        )
+        return REFUSED_EXIT_CODE
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1140,14 +1493,17 @@ def main(argv: list[str] | None = None) -> int:
     if not args.database_url:
         logger.error("DATABASE_URL not set and --database-url not provided")
         return 2
+    if args.dry_run or args.apply or args.expect_plan or args.out_csv:
+        return main_checked(args)
     try:
         stats = promote(args.database_url, batch_size=args.batch_size)
     except LegacyKickoffsPresent as e:
         logger.error("Refusing to promote — nothing written: %s", e)
         return 1
     logger.info(
-        "Promotion complete: leagues=%d teams=%d matches=%d match_stats=%d odds=%d skipped_no_result=%d "
-        "ht_dropped=%d left_cancelled=%d merged=%d refused=%d duplicates=%d ht_conflicts=%d refused_raw=%d",
+        "Promotion complete: leagues=%d teams=%d matches=%d match_stats=%d odds=%d "
+        "skipped_no_result=%d ht_dropped=%d left_cancelled=%d merged=%d unchanged=%d refused=%d duplicates=%d "
+        "ht_conflicts=%d refused_raw=%d",
         stats.leagues,
         stats.teams,
         stats.matches,
@@ -1157,6 +1513,7 @@ def main(argv: list[str] | None = None) -> int:
         stats.ht_dropped,
         stats.left_cancelled,
         stats.merged,
+        stats.unchanged,
         stats.refused,
         stats.duplicates,
         stats.ht_conflicts,
