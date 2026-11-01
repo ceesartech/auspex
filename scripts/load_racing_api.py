@@ -6,7 +6,9 @@ Plan-aware endpoint dispatch:
   Standard         → /racecards/standard (TODAY only, no date param,
                      bookmaker odds array per runner) +
                      /results (date-rangeable via start_date/end_date,
-                     with sp/sp_dec and finish position).
+                     with sp/sp_dec and finish position; PAGINATED,
+                     50 per page — see fetch_results) +
+                     /results/{race_id} (one race's result).
   Pro              → /racecards/pro (date-rangeable, deepest payload)
                      + /results + per-horse stable/quotes data.
 
@@ -16,6 +18,20 @@ date range to --upcoming N is silently capped to today (one call);
 ditto on Standard since /racecards/standard also returns today only.
 --results is the multi-day workhorse (Standard+).
 
+--drain is what the auspex_pipeline DAG runs while horse racing is
+dormant (services/data-ingestion/dags/sport_switches.py): one
+/results/{race_id} call per race that still carries a pending rec, has
+been off DRAIN_GRACE_MINUTES and is at most DRAIN_DAYS old. Nothing
+pending in that window → no API call at all. Recs on races older than
+the window are "stranded"; the drain logs them and never touches them
+again (scripts/close_out_stranded_race_recs.py, operator-run, settles
+or voids them).
+
+A result also marks the entrants its `non_runners` string names as
+scratched, so grade_completed_races voids a rec on a withdrawn horse
+instead of settling it lost (before 2026-11-01 nothing ever set
+race_entrants.scratched: 0 of 36,800 entrants in 60 days).
+
 Auth: HTTP Basic with THE_RACING_API_USER + THE_RACING_API_PASS.
 
 Lazy entity creation: horses / jockeys / trainers get one DB row
@@ -24,7 +40,7 @@ resolves to one horses.id, letting rolling-form features be cheap
 JOINs at training time.
 
 Usage:
-    # Daily upcoming-racecards ingest (DAG runs this)
+    # Daily upcoming-racecards ingest (DAG runs this while horse racing is enabled)
     python scripts/load_racing_api.py --upcoming 7
 
     # Historical backfill (Standard+ plan only)
@@ -32,6 +48,10 @@ Usage:
 
     # Single-day diagnostic
     python scripts/load_racing_api.py --results --start 2024-09-08 --end 2024-09-08 --verbose
+
+    # Dormant mode: results for the races that still carry a pending rec
+    python scripts/load_racing_api.py --drain
+    python scripts/load_racing_api.py --drain --dry-run   # fetch + report, write nothing
 """
 
 from __future__ import annotations
@@ -56,6 +76,25 @@ logger = logging.getLogger("load_racing_api")
 BASE_URL = "https://api.theracingapi.com/v1"
 REQUEST_DELAY_SEC = 0.20
 DEFAULT_TIMEOUT_SEC = 30
+
+# /results is paginated: `limit` (50 — the default, and what one page
+# serves), `skip`, and the day's `total` in the body. Until 2026-11-01
+# fetch_results read the first page only, so on a busy day every race
+# past the 50th was never ingested: prod 2026-11-01 had seven recs pending
+# for five months on page-2 races (June 4: 56 results, June 6: 69; Oct 26
+# had 71). MAX_RESULTS_PAGES only bounds a misbehaving `total`.
+RESULTS_PAGE_LIMIT = 50
+MAX_RESULTS_PAGES = 20
+
+# Drain mode (horse racing dormant). A race is drained while it carries a
+# pending/placed rec, has been off DRAIN_GRACE_MINUTES (results post
+# minutes after the off) and is at most DRAIN_DAYS old — the late-posted
+# Deauville result of 2026-08-23 missed a two-day window. Older races are
+# stranded: the drain never asks about them again, and
+# close_out_stranded_race_recs.py reads this same constant, so the two never
+# act on the same race.
+DRAIN_DAYS = 3
+DRAIN_GRACE_MINUTES = 10
 
 # Furlong → meters (1 furlong = 201.168 m). Used to normalise the
 # Racing API's distance representation (always furlongs as integers
@@ -178,21 +217,82 @@ def fetch_racecards(day: date, auth: HTTPBasicAuth) -> list[dict]:
 
 
 def fetch_results(day: date, auth: HTTPBasicAuth) -> list[dict]:
-    """Pull finished-race results for one day. Requires Standard+
-    plan — Basic returns 403 'Standard Plan required'. The caller
-    logs the plan limitation and falls back to forward-accumulation."""
+    """Pull every finished-race result for one day, page by page
+    (RESULTS_PAGE_LIMIT per page until the body's `total` is read).
+    Requires Standard+ plan — Basic returns 403 'Standard Plan required'.
+    A failed page is logged at ERROR with how far the read got and ends
+    it with what arrived; the next run re-reads the day."""
     url = f"{BASE_URL}/results"
-    params = {"start_date": day.isoformat(), "end_date": day.isoformat()}
+    out: list[dict] = []
+    total = None
+    for page in range(1, MAX_RESULTS_PAGES + 1):
+        params = {
+            "start_date": day.isoformat(),
+            "end_date": day.isoformat(),
+            "limit": RESULTS_PAGE_LIMIT,
+            "skip": len(out),
+        }
+        try:
+            r = requests.get(url, params=params, auth=auth, timeout=DEFAULT_TIMEOUT_SEC)
+        except requests.RequestException as e:
+            logger.error("Racing API results %s page %d failed after %d result(s): %s", day, page, len(out), e)
+            return out
+        if r.status_code >= 400:
+            body_snippet = r.text[:200] if r.text else ""
+            logger.error(
+                "Racing API results %s page %d → %d after %d result(s): %s",
+                day,
+                page,
+                r.status_code,
+                len(out),
+                body_snippet,
+            )
+            return out
+        body = r.json()
+        rows = body.get("results", []) or []
+        out.extend(rows)
+        total = _safe_int(body.get("total"))
+        if not rows or total is None or len(out) >= total:
+            return out
+        time.sleep(REQUEST_DELAY_SEC)
+    logger.error(
+        "Racing API results %s: stopped after %d pages with %d of %s result(s)", day, MAX_RESULTS_PAGES, len(out), total
+    )
+    return out
+
+
+class RacingApiError(RuntimeError):
+    """A Racing API answer that is neither a result nor 'no result for this race'."""
+
+
+def fetch_race_result(api_race_id: str, auth: HTTPBasicAuth) -> Optional[dict]:
+    """One race's result by its Racing API id (/results/{race_id}).
+
+    Returns the payload, or None on the API's 404 "Result not found":
+    the race has not run, its result is not posted yet, or it never will
+    be — an abandoned meeting is dropped from the feed without a status
+    (prod 2026-11-01: Newbury 24 Oct, Aintree 25 Oct, ...). Anything else —
+    another status, a non-JSON body, a payload for a different race —
+    raises RacingApiError, so an auth, plan or network failure is never
+    read as 'no result'."""
+    url = f"{BASE_URL}/results/{api_race_id}"
     try:
-        r = requests.get(url, params=params, auth=auth, timeout=DEFAULT_TIMEOUT_SEC)
+        r = requests.get(url, auth=auth, timeout=DEFAULT_TIMEOUT_SEC)
     except requests.RequestException as e:
-        logger.warning("Racing API results failed for %s: %s", day, e)
-        return []
-    if r.status_code >= 400:
-        body_snippet = r.text[:200] if r.text else ""
-        logger.warning("Racing API results %s → %d: %s", day, r.status_code, body_snippet)
-        return []
-    return r.json().get("results", []) or []
+        raise RacingApiError(f"/results/{api_race_id}: {e}") from e
+    snippet = (r.text or "")[:200]
+    if r.status_code == 404 and "not found" in snippet.lower():
+        return None
+    if r.status_code != 200:
+        raise RacingApiError(f"/results/{api_race_id} -> HTTP {r.status_code}: {snippet}")
+    try:
+        payload = r.json()
+    except ValueError as e:
+        raise RacingApiError(f"/results/{api_race_id}: body is not JSON: {snippet}") from e
+    if not isinstance(payload, dict) or payload.get("race_id") != api_race_id:
+        got = payload.get("race_id") if isinstance(payload, dict) else type(payload).__name__
+        raise RacingApiError(f"/results/{api_race_id}: the payload is for race {got!r}")
+    return payload
 
 
 # ── DB I/O ─────────────────────────────────────────────────────────
@@ -430,7 +530,68 @@ def upsert_entrant(
     )
 
 
+def mark_non_runners(cur, race_id: str, names: set[str]) -> int:
+    """Set scratched on this race's entrants whose horse a result lists
+    as a non-runner (names normalized, see parse_non_runners). Sticky,
+    like upsert_entrant's own `scratched OR`. Returns the rows changed."""
+    if not names:
+        return 0
+    cur.execute(
+        """
+        UPDATE race_entrants e
+        SET scratched = TRUE,
+            updated_at = NOW()
+        FROM horses h
+        WHERE h.id = e.horse_id
+          AND e.race_id = %s
+          AND h.normalized_name = ANY(%s)
+          AND NOT e.scratched
+        """,
+        (race_id, sorted(names)),
+    )
+    return cur.rowcount
+
+
 # ── Misc parsers ──────────────────────────────────────────────────
+
+
+_TRAILING_PARENS_RE = re.compile(r"\s*\([^()]*\)\s*$")
+
+
+def parse_non_runners(text: Optional[str]) -> set[str]:
+    """A result's `non_runners` string -> normalized horse names.
+
+    The feed lists them as ONE comma-separated string, each name followed
+    by an optional parenthesised reason that can itself hold commas:
+    'Hall Lane (self certificate, lame)' (prod rac_11958661). Split on
+    commas outside parentheses, drop every trailing (...) group (reason,
+    country code), normalize like every other horse name."""
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for ch in text or "":
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        if ch == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    parts.append("".join(current))
+    names: set[str] = set()
+    for part in parts:
+        name = part.strip()
+        while True:
+            stripped = _TRAILING_PARENS_RE.sub("", name)
+            if stripped == name:
+                break
+            name = stripped
+        norm = normalize_name(name)
+        if norm:
+            names.add(norm)
+    return names
 
 
 def _safe_int(v) -> Optional[int]:
@@ -636,45 +797,61 @@ def iter_dates(start: date, end: date) -> Iterable[date]:
         cur = cur + timedelta(days=1)
 
 
+_COUNT_KEYS = ("races", "entrants", "skipped_races", "skipped_entrants", "non_runners")
+
+
+def ingest_race(cur, race: dict, finished: bool) -> tuple[Optional[str], dict]:
+    """Upsert one racecard (finished=False) or result (finished=True)
+    payload: its track's league, the race, every runner. A result also
+    marks the entrants its `non_runners` names as scratched. Returns
+    (race_id, or None when the payload was skipped; per-race counts)."""
+    counts = dict.fromkeys(_COUNT_KEYS, 0)
+    course = race.get("course") or race.get("track")
+    if not course:
+        counts["skipped_races"] += 1
+        return None, counts
+    country = "United Kingdom" if _looks_uk(course) else "Ireland"
+    league_id = ensure_league(cur, course, country)
+    if not league_id:
+        counts["skipped_races"] += 1
+        return None, counts
+    race_id = upsert_race(cur, league_id=league_id, payload=race, status="finished" if finished else "scheduled")
+    if not race_id:
+        counts["skipped_races"] += 1
+        return None, counts
+    counts["races"] += 1
+    for runner in race.get("runners", []) or []:
+        horse_id = ensure_horse(cur, runner.get("horse"))
+        if not horse_id:
+            counts["skipped_entrants"] += 1
+            continue
+        jockey_id = ensure_jockey(cur, runner.get("jockey"))
+        trainer_id = ensure_trainer(cur, runner.get("trainer"))
+        upsert_entrant(
+            cur,
+            race_id=race_id,
+            horse_id=horse_id,
+            jockey_id=jockey_id,
+            trainer_id=trainer_id,
+            runner=runner,
+            finished=finished,
+        )
+        counts["entrants"] += 1
+    if finished:
+        counts["non_runners"] += mark_non_runners(cur, race_id, parse_non_runners(race.get("non_runners")))
+    return race_id, counts
+
+
 def ingest_day(cur, day: date, auth: HTTPBasicAuth, kind: str) -> dict:
     """Pull racecards (kind='upcoming') or results (kind='results')
     for one day, upserting races + entrants. Returns per-call counts."""
     fetcher = fetch_racecards if kind == "upcoming" else fetch_results
     payloads = fetcher(day, auth)
-    counts = {"races": 0, "entrants": 0, "skipped_races": 0, "skipped_entrants": 0}
-    finished = kind == "results"
+    counts = dict.fromkeys(_COUNT_KEYS, 0)
     for race in payloads:
-        course = race.get("course") or race.get("track")
-        if not course:
-            counts["skipped_races"] += 1
-            continue
-        country = "United Kingdom" if _looks_uk(course) else "Ireland"
-        league_id = ensure_league(cur, course, country)
-        if not league_id:
-            counts["skipped_races"] += 1
-            continue
-        race_id = upsert_race(cur, league_id=league_id, payload=race, status="finished" if finished else "scheduled")
-        if not race_id:
-            counts["skipped_races"] += 1
-            continue
-        counts["races"] += 1
-        for runner in race.get("runners", []) or []:
-            horse_id = ensure_horse(cur, runner.get("horse"))
-            if not horse_id:
-                counts["skipped_entrants"] += 1
-                continue
-            jockey_id = ensure_jockey(cur, runner.get("jockey"))
-            trainer_id = ensure_trainer(cur, runner.get("trainer"))
-            upsert_entrant(
-                cur,
-                race_id=race_id,
-                horse_id=horse_id,
-                jockey_id=jockey_id,
-                trainer_id=trainer_id,
-                runner=runner,
-                finished=finished,
-            )
-            counts["entrants"] += 1
+        _, race_counts = ingest_race(cur, race, finished=kind == "results")
+        for k in _COUNT_KEYS:
+            counts[k] += race_counts[k]
     return counts
 
 
@@ -684,13 +861,13 @@ def run(database_url: str, kind: str, start: date, end: date) -> dict:
         logger.error("THE_RACING_API_USER / THE_RACING_API_PASS not set")
         return {"error": "missing_credentials"}
 
-    totals = {"days_processed": 0, "races": 0, "entrants": 0, "skipped_races": 0, "skipped_entrants": 0}
+    totals = {"days_processed": 0, **dict.fromkeys(_COUNT_KEYS, 0)}
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for day in iter_dates(start, end):
                 counts = ingest_day(cur, day, auth, kind)
                 totals["days_processed"] += 1
-                for k in ("races", "entrants", "skipped_races", "skipped_entrants"):
+                for k in _COUNT_KEYS:
                     totals[k] += counts.get(k, 0)
                 conn.commit()
                 time.sleep(REQUEST_DELAY_SEC)
@@ -718,6 +895,130 @@ def run(database_url: str, kind: str, start: date, end: date) -> dict:
     return totals
 
 
+# Pending/placed recs on races that are not finished/cancelled/abandoned:
+# the window the drain asks about, and the backlog either side of it.
+_OPEN_REC_RACE = """
+    FROM race_recommendations rec
+    JOIN races r ON r.id = rec.race_id
+    WHERE rec.status IN ('pending', 'placed')
+      AND r.status NOT IN ('finished', 'cancelled', 'abandoned')
+"""
+DRAIN_RACES_SQL = f"""
+    SELECT r.id::text AS race_id,
+           r.external_ids->>'racing_api_race_id' AS api_race_id,
+           r.race_date,
+           r.track_name,
+           count(*) AS pending_recs
+    {_OPEN_REC_RACE}
+      AND r.race_date <= NOW() - make_interval(mins => %(grace_minutes)s)
+      AND r.race_date >= NOW() - make_interval(days => %(drain_days)s)
+    GROUP BY r.id
+    ORDER BY r.race_date, r.id
+"""
+DRAIN_BACKLOG_SQL = f"""
+    SELECT count(*) FILTER (WHERE r.race_date > NOW() - make_interval(mins => %(grace_minutes)s)) AS upcoming_recs,
+           count(*) FILTER (WHERE r.race_date < NOW() - make_interval(days => %(drain_days)s)) AS stranded_recs
+    {_OPEN_REC_RACE}
+"""
+
+
+def run_drain(database_url: str, dry_run: bool = False) -> dict:
+    """Dormant-mode results: for each race DRAIN_RACES_SQL lists, ask
+    /results/{race_id} and, when the result is there, ingest it exactly as
+    the results pass does (the grader then settles its recs). One commit
+    per race. No race in the window → no credentials needed, no API call.
+    Returns counters; `errors` > 0 means a race could not be asked about
+    (missing credentials or race id, an API failure, an upsert that did
+    not land on the race row) and main() exits 1 for it."""
+    totals = {
+        "races": 0,
+        "resolved": 0,
+        "not_posted": 0,
+        "errors": 0,
+        "api_calls": 0,
+        "upcoming_recs": 0,
+        "stranded_recs": 0,
+    }
+    params = {"grace_minutes": DRAIN_GRACE_MINUTES, "drain_days": DRAIN_DAYS}
+    with psycopg2.connect(database_url) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(DRAIN_RACES_SQL, params)
+            races = list(cur.fetchall())
+            cur.execute(DRAIN_BACKLOG_SQL, params)
+            backlog = cur.fetchone() or {}
+            conn.rollback()  # close the read snapshot; each race commits on its own
+            totals["races"] = len(races)
+            totals["upcoming_recs"] = int(backlog.get("upcoming_recs") or 0)
+            totals["stranded_recs"] = int(backlog.get("stranded_recs") or 0)
+            auth = _auth() if races else None
+            if races and not auth:
+                logger.error(
+                    "THE_RACING_API_USER / THE_RACING_API_PASS not set — %d race(s) with pending recs cannot be "
+                    "drained",
+                    len(races),
+                )
+                totals["errors"] = len(races)
+                races = []
+            for race in races:
+                off = race["race_date"].astimezone(timezone.utc)
+                label = f"{race['track_name']} {off:%Y-%m-%d %H:%M}Z ({race['race_id']})"
+                if not race["api_race_id"]:
+                    logger.error("drain: %s has no racing_api_race_id — its result cannot be asked for", label)
+                    totals["errors"] += 1
+                    continue
+                if totals["api_calls"]:
+                    time.sleep(REQUEST_DELAY_SEC)
+                totals["api_calls"] += 1
+                try:
+                    payload = fetch_race_result(race["api_race_id"], auth)
+                except RacingApiError as e:
+                    logger.error("drain: %s: %s", label, e)
+                    totals["errors"] += 1
+                    continue
+                if payload is None:
+                    totals["not_posted"] += 1
+                    logger.info("drain: %s — no result yet (%d pending rec(s))", label, race["pending_recs"])
+                    continue
+                if dry_run:
+                    totals["resolved"] += 1
+                    logger.info("drain: %s — result posted; DRY RUN, not ingested", label)
+                    continue
+                race_id, counts = ingest_race(cur, payload, finished=True)
+                if race_id != race["race_id"]:
+                    conn.rollback()
+                    logger.error("drain: %s — the result upserted race %s, not this row; rolled back", label, race_id)
+                    totals["errors"] += 1
+                    continue
+                conn.commit()
+                totals["resolved"] += 1
+                logger.info(
+                    "drain: %s — result ingested (%d runner(s), %d non-runner(s) scratched)",
+                    label,
+                    counts["entrants"],
+                    counts["non_runners"],
+                )
+    logger.info(
+        "Drain%s: %d race(s) with pending recs in the %d-day window — %d resolved, %d not posted yet, %d error(s); "
+        "%d API call(s). %d pending rec(s) on races not yet off.",
+        " (dry run)" if dry_run else "",
+        totals["races"],
+        DRAIN_DAYS,
+        totals["resolved"],
+        totals["not_posted"],
+        totals["errors"],
+        totals["api_calls"],
+        totals["upcoming_recs"],
+    )
+    if totals["stranded_recs"]:
+        logger.warning(
+            "%d pending race rec(s) sit on races more than %d days old with no result: the drain no longer asks "
+            "about them. Review and close them with scripts/ops/close_out_stranded_race_recs.sh.",
+            totals["stranded_recs"],
+            DRAIN_DAYS,
+        )
+    return totals
+
+
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     group = p.add_mutually_exclusive_group(required=True)
@@ -732,11 +1033,21 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Fetch historical results between --start and --end.",
     )
+    group.add_argument(
+        "--drain",
+        action="store_true",
+        help=f"Dormant mode: fetch the result of each race with a pending rec that is off and at most "
+        f"{DRAIN_DAYS} days old (one call per race; none when nothing is pending).",
+    )
     p.add_argument("--start", help="Inclusive start date (YYYY-MM-DD), used with --results.")
     p.add_argument("--end", help="Inclusive end date (YYYY-MM-DD), used with --results.")
+    p.add_argument("--dry-run", action="store_true", help="With --drain: fetch and report, write nothing.")
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     p.add_argument("--verbose", action="store_true")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.dry_run and not args.drain:
+        p.error("--dry-run applies to --drain only")
+    return args
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -747,6 +1058,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.error("DATABASE_URL not set")
         return 2
 
+    if args.drain:
+        totals = run_drain(args.database_url, dry_run=args.dry_run)
+        return 1 if totals["errors"] else 0
     if args.upcoming is not None:
         today = date.today()
         end = today + timedelta(days=args.upcoming - 1)
