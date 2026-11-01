@@ -24,7 +24,9 @@ Runs on a rolling window (default 30 days). For each
 Coverage: the matches-based sports (soccer / NHL / NBA / NFL / tennis
 / MMA) come from `predictions`; horse racing comes from
 `race_predictions` (per-entrant consensus win prob vs actual win) so
-the consensus model's calibration is monitored too.
+the consensus model's calibration is monitored too. While horse racing is
+dormant (no race prediction created in HORSE_DORMANT_AFTER_HOURS) its
+findings are downgraded like a gated stream's: logged, not paged.
 
 Persistence: each run writes every slice's calibration report to
 `model_performance_logs` (JSONB `metrics`) so calibration is a
@@ -414,6 +416,29 @@ def fetch_slice_pairs(
         predicted.append(float(r["picked_prob"]))
         actual.append(int(r["correct"]))
     return predicted, actual
+
+
+# Horse racing can be switched off (services/data-ingestion/dags/
+# sport_switches.py, dormant since 2026-11-01). Its 30-day slices then keep
+# being computed for a month from ever fewer old races: a finding there is
+# real but nothing can act on it, so it is logged, not paged — the downgrade
+# a gated rec stream gets. Read from the data, not the switch (that lives in
+# the DAG folder, which this container does not mount): no race prediction
+# CREATED for this long means the predict tasks are not running. 72 h, not
+# 48: UK/IE racing stops for Christmas and racecards are fetched for today
+# only, so an enabled pipeline can go ~66 h without a new race.
+HORSE_DORMANT_AFTER_HOURS = 72
+
+
+def horse_racing_dormant(cur, hours: int = HORSE_DORMANT_AFTER_HOURS) -> bool:
+    """True when no race_predictions row was created in the last `hours`
+    (or none exists): the horse-racing predict tasks are not running."""
+    cur.execute(
+        "SELECT COALESCE(MAX(created_at) < NOW() - make_interval(hours => %s), TRUE) AS dormant FROM race_predictions",
+        (hours,),
+    )
+    row = cur.fetchone()
+    return True if row is None else bool(row["dormant"])
 
 
 def fetch_horse_racing_slices(cur, days: int, min_samples: int) -> list[dict]:
@@ -894,6 +919,12 @@ def run(database_url: str, days: int, min_samples: int, thresholds: DriftThresho
             slices = fetch_slices(cur, days, min_samples)
             slices += fetch_horse_racing_slices(cur, days, min_samples)
             logger.info("Found %d slices to monitor (window=%dd, min_samples=%d)", len(slices), days, min_samples)
+            horse_dormant = any(s["sport"] == "horse_racing" for s in slices) and horse_racing_dormant(cur)
+            if horse_dormant:
+                logger.info(
+                    "Horse racing is dormant (no race prediction created in %dh): its findings are logged, not paged",
+                    HORSE_DORMANT_AFTER_HOURS,
+                )
 
             for s in slices:
                 if s["sport"] == "horse_racing":
@@ -912,7 +943,8 @@ def run(database_url: str, days: int, min_samples: int, thresholds: DriftThresho
                     # binary pairs); the accuracy floor is skipped for
                     # racing inside detect_drift anyway.
                     n_classes=n_classes_for(s["prediction_type"], s.get("n_classes")),
-                    stream_gated=_stream_is_gated(s["sport"], s["prediction_type"]),
+                    stream_gated=_stream_is_gated(s["sport"], s["prediction_type"])
+                    or (s["sport"] == "horse_racing" and horse_dormant),
                     model_name=s["model_name"],
                 )
                 summary.append(
