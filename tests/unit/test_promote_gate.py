@@ -1047,3 +1047,85 @@ def test_seen_ids_round_trip_from_trainer_to_gate(tmp_path):
     assert pull.read_seen_ids(tmp_path / "missing") is None
     # a frame without match_id records nothing (the gate falls back to dates)
     assert tam.write_seen_ids(tmp_path / "ensemble_y", pd.DataFrame({"x": [1]})) is None
+
+
+def _trainer():
+    import importlib
+    import sys as _sys
+
+    ml_src = str(Path(__file__).resolve().parents[2] / "services" / "ml-models" / "src")
+    if ml_src not in _sys.path:
+        _sys.path.insert(0, ml_src)
+    return importlib.import_module("training.train_all_models")
+
+
+def _ensemble_with_ids(root: Path, model_text: str = '{"weights": {"a": 1.0}}') -> Path:
+    import pandas as pd
+
+    tam = _trainer()
+    d = root / "ensemble_x"
+    model = d / "1.0.0" / "model.bin"
+    model.parent.mkdir(parents=True)
+    model.write_text(model_text)
+    tam.write_seen_ids(
+        d, pd.DataFrame({"match_id": ["m1", "m2"]}), pd.DataFrame({"match_id": ["m3"]}), model_path=model
+    )
+    return d
+
+
+def test_seen_ids_bound_to_their_model_are_accepted(tmp_path):
+    d = _ensemble_with_ids(tmp_path)
+    assert pull.read_seen_ids(d) == {"m1", "m2", "m3"}
+
+
+def test_seen_ids_beside_a_different_model_are_refused(tmp_path):
+    """A reconstructed or misplaced file: the model it was written with is not
+    the model it now sits beside. The gate must not score on those rows."""
+    d = _ensemble_with_ids(tmp_path)
+    (d / "1.0.0" / "model.bin").write_text('{"weights": {"a": 0.5, "b": 0.5}}')
+    with pytest.raises(ValueError, match="belong to another artifact"):
+        pull.read_seen_ids(d)
+
+
+def test_seen_ids_that_record_a_model_but_sit_beside_none_are_refused(tmp_path):
+    d = _ensemble_with_ids(tmp_path)
+    (d / "1.0.0" / "model.bin").unlink()
+    with pytest.raises(ValueError, match="no model.bin beside it"):
+        pull.read_seen_ids(d)
+
+
+def test_seen_ids_written_before_the_hash_still_gate(tmp_path):
+    """Every production incumbent of 2026-11-01 carries a file without the
+    hash; those stay usable (unverifiable, as before)."""
+    import gzip
+
+    d = tmp_path / "ensemble_legacy"
+    (d / "1.0.0").mkdir(parents=True)
+    (d / "1.0.0" / "model.bin").write_text("{}")
+    with gzip.open(d / mb.SEEN_IDS_FILENAME, "wt", encoding="utf-8") as fh:
+        json.dump({"match_ids": ["a", "b"], "n": 2}, fh)
+    assert pull.read_seen_ids(d) == {"a", "b"}
+
+
+def test_seen_ids_provenance_verdicts():
+    import hashlib
+
+    model = b'{"weights": {}}'
+    doc = {"match_ids": [], "ensemble_model_sha256": hashlib.sha256(model).hexdigest()}
+    assert mb.seen_ids_provenance(doc, model)[0] is True
+    assert mb.seen_ids_provenance(doc, b"other")[0] is False
+    assert mb.seen_ids_provenance(doc, None)[0] is False
+    assert mb.seen_ids_provenance({"match_ids": []}, model)[0] is None
+    assert mb.seen_ids_provenance(None, model)[0] is None
+
+
+def test_the_api_and_the_gate_resolve_the_same_model_bin(tmp_path):
+    import os
+
+    d = tmp_path / "ensemble_x"
+    for i, version in enumerate(("1.0.0", "2.0.0")):
+        (d / version).mkdir(parents=True)
+        (d / version / "model.bin").write_text(version)
+        os.utime(d / version / "model.bin", (1_000_000 + i, 1_000_000 + i))
+    assert mb.newest_model_bin(d) == d / "2.0.0" / "model.bin"
+    assert mb.newest_model_bin(tmp_path / "nothing") is None

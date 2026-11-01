@@ -268,6 +268,99 @@ class TestFitConvergenceReporting:
         assert artifact["fit_diagnostics"]["period_two_oscillation"] is True
 
 
+class TestSeenIdsTravelWithTheirEnsemble:
+    """The seen-ids file is written only beside an ensemble THIS run wrote,
+    atomically, and names that model's sha256. swap_production replaces the
+    whole ensemble directory, so ids written beside no model would replace a
+    working production ensemble with a directory holding only ids."""
+
+    def _main(self, tmp_path, monkeypatch, outcome, model_type="all"):
+        from dataclasses import replace
+        from types import SimpleNamespace
+
+        import training.train_all_models as tam
+
+        frame = pd.DataFrame(
+            {
+                "match_id": [f"m{i:03d}" for i in range(100)],
+                "match_date": pd.date_range("2024-01-01", periods=100, freq="D"),
+                "match_outcome": [i % 3 for i in range(100)],
+            }
+        )
+        bundle = replace(
+            tam.SPORT_BUNDLES["soccer_match_result"],
+            load_frame=lambda **_kw: frame.copy(),
+            feature_columns=lambda _f, _t: [],
+        )
+        monkeypatch.setitem(tam.SPORT_BUNDLES, "soccer_match_result", bundle)
+        monkeypatch.setattr(tam, "validate_training_frame", lambda *a, **k: SimpleNamespace(to_dict=lambda: {}))
+        monkeypatch.setattr(tam, "_raw_holdout_brier", lambda *a, **k: None)
+        monkeypatch.setattr(tam, "_derived_over25_holdout", lambda *a, **k: None)
+
+        def fake_train_all(self, **_kw):
+            self.trained_models["xgboost_soccer_match_result"] = object()
+            self.results["xgboost_soccer_match_result"] = {}
+            if outcome == "ok":
+                model = self.registry.registry_dir / bundle.ensemble_name / bundle.ensemble_config.version / "model.bin"
+                model.parent.mkdir(parents=True)
+                model.write_text('{"weights": {"a": 1.0}}')
+                self.trained_models[bundle.ensemble_name] = object()
+                self.results[bundle.ensemble_name] = {}
+            elif outcome == "failed":
+                self.results[bundle.ensemble_name] = {"error": "ensemble blew up"}
+            return self.results
+
+        monkeypatch.setattr(tam.TrainingOrchestrator, "train_all", fake_train_all)
+        argv = ["--input-csv", "unused.csv", "--output-dir", str(tmp_path), "--model-type", model_type]
+        rc = tam.main(argv + ["--no-calibration"])
+        return tam, bundle, rc, tmp_path / bundle.ensemble_name / tam.SEEN_IDS_FILENAME
+
+    def test_written_beside_the_new_ensemble_with_its_hash(self, tmp_path, monkeypatch):
+        import gzip
+        import hashlib
+        import json
+
+        tam, bundle, rc, seen = self._main(tmp_path, monkeypatch, "ok")
+        assert rc == 0 and seen.is_file()
+        doc = json.loads(gzip.decompress(seen.read_bytes()))
+        model = tmp_path / bundle.ensemble_name / "1.0.0" / "model.bin"
+        assert doc["ensemble_model"] == "1.0.0/model.bin"
+        assert doc["ensemble_model_sha256"] == hashlib.sha256(model.read_bytes()).hexdigest()
+        assert doc["n"] == 85 == len(doc["match_ids"])  # train + val = int(0.85 x 100)
+        assert doc["writer"].endswith("write_seen_ids") and doc["written_at"]
+        assert not list(seen.parent.glob(".*.tmp"))  # the temp file was renamed, not left behind
+
+    def test_a_failed_ensemble_records_nothing_and_says_so(self, tmp_path, monkeypatch, caplog):
+        with caplog.at_level("ERROR"):
+            _tam, bundle, rc, seen = self._main(tmp_path, monkeypatch, "failed")
+        assert rc == 1 and not seen.exists() and not (tmp_path / bundle.ensemble_name).exists()
+        assert any("NOT recording seen ids" in r.getMessage() for r in caplog.records)
+
+    def test_a_single_model_run_records_nothing(self, tmp_path, monkeypatch):
+        _tam, bundle, rc, seen = self._main(tmp_path, monkeypatch, "none", model_type="xgboost")
+        assert rc == 0 and not (tmp_path / bundle.ensemble_name).exists()
+
+    def test_a_failed_write_leaves_the_previous_file_whole(self, tmp_path, monkeypatch):
+        import gzip
+        import json
+
+        import training.train_all_models as tam
+
+        d = tmp_path / "ensemble_x"
+        tam.write_seen_ids(d, pd.DataFrame({"match_id": ["old"]}))
+        before = (d / tam.SEEN_IDS_FILENAME).read_bytes()
+
+        def boom(*_a, **_k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(tam.os, "replace", boom)
+        with pytest.raises(OSError, match="disk full"):
+            tam.write_seen_ids(d, pd.DataFrame({"match_id": ["new1", "new2"]}))
+        assert (d / tam.SEEN_IDS_FILENAME).read_bytes() == before
+        assert json.loads(gzip.decompress(before))["match_ids"] == ["old"]
+        assert not list(d.glob(".*.tmp"))
+
+
 class TestTemperatureCalibration:
     """Temperature scaling (the ensemble self-gate's method since 2026-10-25)."""
 

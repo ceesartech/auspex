@@ -1200,7 +1200,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     # The promote gate's exact "never seen by the incumbent" set: the match ids
     # this ensemble trained AND validated on, next to its artifact so the file
     # rides into production with it (scripts/modal_bundles.SEEN_IDS_FILENAME).
-    write_seen_ids(output_dir / bundle.ensemble_name, train_df, val_df)
+    # Only when THIS run wrote the ensemble: the file names the model it
+    # belongs to, and swap_production replaces the whole ensemble directory,
+    # so ids written beside no new model would replace a working production
+    # ensemble with a directory holding nothing but ids.
+    ensemble_model = registered_ensemble_model(orchestrator, output_dir, bundle)
+    if ensemble_model is not None:
+        write_seen_ids(output_dir / bundle.ensemble_name, train_df, val_df, model_path=ensemble_model)
+    elif args.model_type in ("all", "ensemble"):
+        logger.error(
+            "%s was requested but no artifact was written this run (%s) — NOT recording seen ids for it",
+            bundle.ensemble_name,
+            results.get(bundle.ensemble_name, {}).get("error", "fewer than two base models trained"),
+        )
+    else:
+        logger.info("--model-type %s trains no ensemble; no seen ids recorded", args.model_type)
     (output_dir / "training_report.json").write_text(
         json.dumps(report, indent=2, default=_json_default),
         encoding="utf-8",
@@ -1222,11 +1236,36 @@ def main(argv: Optional[list[str]] = None) -> int:
 SEEN_IDS_FILENAME = "seen_match_ids.json.gz"  # mirrored in scripts/modal_bundles.py
 
 
-def write_seen_ids(ensemble_dir: Path, *frames: pd.DataFrame) -> Optional[Path]:
+def registered_ensemble_model(orchestrator: "TrainingOrchestrator", output_dir: Path, bundle: SportBundle):
+    """The ensemble model.bin THIS run registered under `output_dir`, or None
+    when the ensemble was not trained, failed, or left no file."""
+    if bundle.ensemble_name not in orchestrator.trained_models:
+        return None
+    if "error" in orchestrator.results.get(bundle.ensemble_name, {}):
+        return None
+    path = Path(output_dir) / bundle.ensemble_name / bundle.ensemble_config.version / "model.bin"
+    return path if path.is_file() else None
+
+
+def write_seen_ids(ensemble_dir: Path, *frames: pd.DataFrame, model_path: Optional[Path] = None) -> Optional[Path]:
     """Write the sorted union of `match_id` over `frames` (train + val) as
     gzipped JSON. Returns the path, or None when the frames carry no match_id
-    (logged loudly: the gate then falls back to its date cutoff)."""
+    (logged loudly: the gate then falls back to its date cutoff).
+
+    ATOMIC: the document goes to a temporary file in the same directory, is
+    flushed to disk, then renamed over the final name, so a reader (or a copy
+    into staging) sees the old file or the complete new one, never a torn one.
+
+    BOUND TO ITS MODEL: with `model_path` (the ensemble model.bin this run
+    registered) the document records that file's sha256 and relative path.
+    scripts/pull_modal_artifacts.read_seen_ids refuses ids whose recorded hash
+    is not the model beside them, which is how a reconstructed or misplaced
+    file is caught. The 2026-10-26 files were rebuilt after the fact, the
+    soccer one from a frame 22 rows larger than its model's, and no reader
+    could tell."""
     import gzip
+    import hashlib
+    from datetime import datetime, timezone
 
     ids: set = set()
     for f in frames:
@@ -1238,10 +1277,31 @@ def write_seen_ids(ensemble_dir: Path, *frames: pd.DataFrame) -> Optional[Path]:
         ids.update(str(m) for m in f["match_id"].dropna())
     ensemble_dir = Path(ensemble_dir)
     ensemble_dir.mkdir(parents=True, exist_ok=True)
+    doc: Dict[str, Any] = {"match_ids": sorted(ids), "n": len(ids)}
+    if model_path is not None:
+        model_path = Path(model_path)
+        doc["ensemble_model"] = model_path.relative_to(ensemble_dir).as_posix()
+        doc["ensemble_model_sha256"] = hashlib.sha256(model_path.read_bytes()).hexdigest()
+    doc["written_at"] = datetime.now(timezone.utc).isoformat()
+    doc["writer"] = "training.train_all_models.write_seen_ids"
     path = ensemble_dir / SEEN_IDS_FILENAME
-    with gzip.open(path, "wt", encoding="utf-8") as fh:
-        json.dump({"match_ids": sorted(ids), "n": len(ids)}, fh)
-    logger.info("Recorded %d train+val match ids at %s", len(ids), path)
+    tmp = ensemble_dir / f".{SEEN_IDS_FILENAME}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "wb") as raw:
+            with gzip.GzipFile(filename=SEEN_IDS_FILENAME, mode="wb", fileobj=raw) as gz:
+                gz.write(json.dumps(doc).encode("utf-8"))
+            raw.flush()
+            os.fsync(raw.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    logger.info(
+        "Recorded %d train+val match ids at %s (model %s)",
+        len(ids),
+        path,
+        doc.get("ensemble_model_sha256", "not recorded")[:12],
+    )
     return path
 
 

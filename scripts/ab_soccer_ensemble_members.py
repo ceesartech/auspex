@@ -1036,7 +1036,15 @@ def load_seen_ids(model_path: str) -> set:
     if not path.exists():
         raise RuntimeError(f"{path} is missing — without the incumbent's train+val ids there is no honest eval window")
     with gzip.open(path, "rt", encoding="utf-8") as fh:
-        return set(str(i) for i in json.load(fh)["match_ids"])
+        doc = json.load(fh)
+    import modal_bundles  # the gate's own provenance check (scripts/modal_bundles.py)
+
+    model = modal_bundles.newest_model_bin(path.parent)
+    ok, reason = modal_bundles.seen_ids_provenance(doc, model.read_bytes() if model is not None else None)
+    if ok is False:
+        raise RuntimeError(f"{path} {reason} — these are another artifact's ids; there is no honest eval window")
+    logger.info("seen ids: %s", reason)
+    return set(str(i) for i in doc["match_ids"])
 
 
 def served_fit_slice(frame: pd.DataFrame, model_path: str, member_teams: set) -> Dict[str, Any]:

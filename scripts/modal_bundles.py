@@ -108,6 +108,38 @@ MIN_PAIRED_N = 100  # fewest shared rows a paired re-scoring may decide on
 SEEN_IDS_FILENAME = "seen_match_ids.json.gz"
 
 
+def newest_model_bin(ensemble_dir):
+    """The newest */model.bin under `ensemble_dir` by mtime — the file the API
+    serves (prediction_service._latest_model_bin) — or None."""
+    from pathlib import Path
+
+    candidates = sorted(Path(ensemble_dir).glob("*/model.bin"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
+
+
+def seen_ids_provenance(doc, model_bytes):
+    """Does a seen-ids document belong to the ensemble model beside it?
+
+    Since 2026-11-02 train_all_models.write_seen_ids records the sha256 of the
+    ensemble model.bin it wrote with. Returns (True, reason) when that hash is
+    the given model's, (False, reason) when it is not or there is no model,
+    and (None, reason) for a document written before the hash was recorded:
+    unverifiable, which the caller accepts as before. The 2026-10-26 files
+    were rebuilt by hand after their run, one of them from a different frame,
+    and nothing could tell; a hash mismatch now says so."""
+    import hashlib
+
+    expected = (doc or {}).get("ensemble_model_sha256")
+    if not expected:
+        return None, "no model hash recorded (written before 2026-11-02); provenance not verifiable"
+    if model_bytes is None:
+        return False, f"records model sha256 {expected[:12]} but there is no model.bin beside it"
+    actual = hashlib.sha256(model_bytes).hexdigest()
+    if actual != expected:
+        return False, f"records model sha256 {expected[:12]} but the model beside it hashes to {actual[:12]}"
+    return True, f"model sha256 {actual[:12]} matches"
+
+
 def unseen_by_incumbent(match_ids, dates, cutoff=None, seen_ids=None):
     """Boolean mask over the challenger's held-out rows: True where the incumbent
     cannot have trained or validated on the row. Returns (mask, basis).

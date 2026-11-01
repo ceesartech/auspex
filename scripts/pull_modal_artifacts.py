@@ -93,7 +93,9 @@ from modal_bundles import (  # noqa: E402
     fingerprint_from_report,
     fingerprints_comparable,
     gate_tolerance,
+    newest_model_bin,
     paired_decision,
+    seen_ids_provenance,
     served_brier,
     unseen_by_incumbent,
 )
@@ -257,7 +259,9 @@ def read_seen_ids(ensemble_dir: Path) -> Optional[set]:
     """The incumbent's recorded train+val match ids (SEEN_IDS_FILENAME, written
     by train_all_models), or None for a legacy artifact without the file. A file
     that exists but cannot be read raises: silently treating a corrupt record as
-    "legacy" would change which rows the gate scores."""
+    "legacy" would change which rows the gate scores. So does a file whose
+    recorded model hash is not the model beside it (seen_ids_provenance): those
+    ids describe some other artifact's training rows."""
     import gzip
 
     path = Path(ensemble_dir) / SEEN_IDS_FILENAME
@@ -265,6 +269,11 @@ def read_seen_ids(ensemble_dir: Path) -> Optional[set]:
         return None
     with gzip.open(path, "rt", encoding="utf-8") as fh:
         doc = json.load(fh)
+    model = newest_model_bin(ensemble_dir)
+    ok, reason = seen_ids_provenance(doc, model.read_bytes() if model is not None else None)
+    if ok is False:
+        raise ValueError(f"{path} {reason} — these ids belong to another artifact; refusing to gate on them")
+    logger.info("[gate] %s: %s", path, reason)
     return {str(m) for m in doc["match_ids"]}
 
 
