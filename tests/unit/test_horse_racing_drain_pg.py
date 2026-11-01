@@ -12,9 +12,11 @@ own copy). The Racing API is stubbed at load_racing_api.fetch_race_result.
     result that does not land on its race, or whose ingest raises, is rolled
     back and the races behind it still drain — each fails the run;
   * close_out_stranded_race_recs settles from a result, voids where the API has
-    none, touches nothing inside the drain window or after --raced-before,
-    refuses unmatched fields and pin drift, rolls everything back when the
-    database does not end where the plan said, and a re-run plans nothing.
+    none, touches nothing inside the drain window or after --raced-before (it
+    names those), refuses unmatched fields and pin drift, rolls everything back
+    when the database does not end where the plan said, and a re-run plans
+    nothing; its reversal record (pre-images + inserted ids) undoes an apply
+    exactly.
 
 Skipped where no Postgres server binaries are on PATH (initdb, pg_ctl).
 """
@@ -532,9 +534,14 @@ def test_close_out_settles_from_a_result_voids_without_one_and_a_rerun_plans_not
 def test_raced_before_keeps_later_races_out(dsn, db, tmp_path):
     settle, settle_recs, void, void_recs, window_rec, api = _closeout_world(db)
     conn = _conn(dsn)
-    plan = cos.run(conn, NOW - timedelta(days=15), api, out_csv=str(tmp_path / "dry.csv"))["plan"]
+    out = cos.run(conn, NOW - timedelta(days=15), api, out_csv=str(tmp_path / "dry.csv"))
+    plan = out["plan"]
     assert (plan["candidates"], plan["races"], plan["void"], plan["settle"]) == (2, 1, 2, 0)
     assert api.calls == [void["api"]]
+    # The settle race (10 days old) is stranded but after the pin: named, not a candidate. The rec inside the
+    # drain window is not stranded at all.
+    assert out["beyond_pin"] == len(settle_recs)
+    assert cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "all.csv"))["beyond_pin"] == 0
     conn.close()
 
 
@@ -605,3 +612,128 @@ def test_a_rec_settled_elsewhere_after_the_plan_rolls_the_apply_back(dsn, db, tm
     assert {_rec_row(db, r)[0] for r in settle_recs.values()} == {"pending"}
     assert _rec_row(db, void_recs[1])[0] == "pending"
     conn.close()
+
+
+# ── the reversal record ───────────────────────────────────────────────────
+
+REVERSAL_TABLES = (
+    "races",
+    "race_entrants",
+    "horses",
+    "jockeys",
+    "trainers",
+    "leagues",
+    "race_predictions",
+    "race_recommendations",
+)
+
+
+def _snapshot(cur) -> dict:
+    """Every row of every table an apply can touch, minus updated_at (a trigger rewrites it on any UPDATE)."""
+    out = {}
+    for table in REVERSAL_TABLES:
+        cur.execute(f"SELECT row_to_json(t)::text AS row FROM {table} t")
+        rows = [json.loads(r["row"], parse_float=Decimal) for r in cur.fetchall()]
+        out[table] = {r["id"]: {k: v for k, v in r.items() if k != "updated_at"} for r in rows}
+    return out
+
+
+def _reverse(cur, archive: Path, inserted: Path) -> None:
+    """What an operator's reversal does with the record: put every pre-image back, delete every inserted id
+    (race_entrants first — they reference the horses)."""
+    for line in archive.read_text().splitlines():
+        rec = json.loads(line, parse_float=Decimal)
+        row = rec["row"]
+        cols = [c for c in row if c != "id"]
+        vals = [
+            (
+                psycopg2.extras.Json(row[c], dumps=lambda o: json.dumps(o, default=float))  # jsonb numbers stay numbers
+                if isinstance(row[c], (dict, list))
+                else row[c]
+            )
+            for c in cols
+        ]
+        cur.execute(
+            f"UPDATE {rec['table']} SET " + ", ".join(f"{c} = %s" for c in cols) + " WHERE id = %s", (*vals, row["id"])
+        )
+        assert cur.rowcount == 1, rec
+    ids = [json.loads(line) for line in inserted.read_text().splitlines()]
+    order = {t: i for i, t in enumerate(["race_entrants", "horses", "jockeys", "trainers", "leagues"])}
+    for item in sorted(ids, key=lambda i: order[i["table"]]):
+        cur.execute(f"DELETE FROM {item['table']} WHERE id = %s", (item["id"],))
+        assert cur.rowcount == 1, item
+
+
+def test_the_reversal_record_undoes_an_apply_exactly(dsn, db, tmp_path):
+    race = _race(db, NOW - timedelta(days=10))
+    alpha = _entrant(db, race, "Alpha", 1)
+    _entrant(db, race, "Bravo", 2)
+    win = _rec(db, race, alpha, "Alpha", odds="3.50", stake="12.34")
+    other = _race(db, NOW - timedelta(days=40), status="finished")
+    _entrant(db, other, "Known Elsewhere", 1)  # a horse of ours, not on this card; the result renames it
+    db.execute("INSERT INTO jockeys (name, normalized_name) VALUES ('J SMITH', 'j smith')")
+    void = _race(db, NOW - timedelta(days=20))
+    void_rec = _rec(db, void, _entrant(db, void, "Gone", 1), "Gone")
+    payload = _payload(race, [("Alpha", "1"), ("Bravo", "2"), ("Known Elsewhere (GB)", "3"), ("Stranger (IRE)", "4")])
+    payload["runners"][0].update(jockey="J Smith", trainer="T New")
+    payload["runners"][3].update(jockey="J New")
+    api = FakeApi({race["api"]: payload, void["api"]: None})
+    before = _snapshot(db)
+
+    conn = _conn(dsn)
+    pin = cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "dry.csv"))["plan"]
+    assert (pin["settle"], pin["void"]) == (1, 1)
+    applied = cos.run(conn, RACED_BEFORE, api, apply_changes=True, out_csv=str(tmp_path / "a.csv"), expect_plan=pin)
+    assert applied["applied"]
+    conn.close()
+    assert _rec_row(db, win) == ("won", Decimal("30.85"), "Alpha")
+    assert _rec_row(db, void_rec) == ("void", Decimal("0.00"), cos.VOID_LABEL)
+
+    archive = tmp_path / "a.reversal.jsonl"
+    inserted = tmp_path / "a.inserted.jsonl"
+    archived = {}
+    for line in archive.read_text().splitlines():
+        rec = json.loads(line)
+        archived.setdefault(rec["table"], {})[rec["row"]["id"]] = rec["row"]
+    # Rows the ingest rewrote although they are not on the candidate races' cards.
+    assert {r["name"] for r in archived["horses"].values()} >= {"Known Elsewhere", "Alpha", "Bravo", "Gone"}
+    assert [r["name"] for r in archived["jockeys"].values()] == ["J SMITH"]
+    db.execute("SELECT name FROM horses WHERE normalized_name = 'known elsewhere'")
+    assert db.fetchone()["name"] == "Known Elsewhere (GB)"
+    # Rows the apply inserted: two entrants for runners we did not hold, a horse (Stranger), a jockey (J New —
+    # J Smith already existed), a trainer, the track row.
+    got = sorted((i["table"] for i in map(json.loads, inserted.read_text().splitlines())))
+    assert got == ["horses", "jockeys", "leagues", "race_entrants", "race_entrants", "trainers"]
+
+    _reverse(db, archive, inserted)
+    assert _snapshot(db) == before
+
+
+def test_a_row_another_writer_commits_after_the_archive_is_not_recorded_as_inserted(
+    dsn, db, tmp_path, monkeypatch, caplog
+):
+    race = _race(db, NOW - timedelta(days=10))
+    alpha = _entrant(db, race, "Alpha", 1)
+    _entrant(db, race, "Bravo", 2)
+    _rec(db, race, alpha, "Alpha")
+    payload = _payload(race, [("Alpha", "1"), ("Bravo", "2")])
+    payload["runners"][0]["jockey"] = "J Late"
+    api = FakeApi({race["api"]: payload})
+    real_archive = cos.write_archive
+
+    def archive_then_the_drain_commits(cur, path, params):
+        archived = real_archive(cur, path, params)
+        db.execute("INSERT INTO jockeys (name, normalized_name) VALUES ('J LATE', 'j late')")  # another connection
+        return archived
+
+    monkeypatch.setattr(cos, "write_archive", archive_then_the_drain_commits)
+    conn = _conn(dsn)
+    pin = cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "dry.csv"))["plan"]
+    with caplog.at_level("WARNING", logger="close_out_stranded_race_recs"):
+        assert cos.run(conn, RACED_BEFORE, api, apply_changes=True, out_csv=str(tmp_path / "a.csv"), expect_plan=pin)[
+            "applied"
+        ]
+    conn.close()
+    inserted = [json.loads(line) for line in (tmp_path / "a.inserted.jsonl").read_text().splitlines()]
+    assert [i["table"] for i in inserted] == ["leagues"]  # the track row is ours; the jockey is not
+    assert "appeared after the archive but was not inserted by this apply" in caplog.text

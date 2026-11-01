@@ -2,7 +2,9 @@
 docker: the read-only 'already done' exit, the dry-run ceilings (49 candidates,
 33 races, 17 settle, 39 void, nothing unmatched or errored, adding up, equal to
 the before-state), an apply pinned to the dry run's exact counts (every key),
-the exact after-state, and the aborts before any write."""
+the exact after-state, and the aborts before any write. Stranded recs on races
+at or after the pin (the tool's BEYOND_PIN line) are named, never touched, and
+keep a re-run from reporting ALREADY DONE."""
 
 from __future__ import annotations
 
@@ -47,10 +49,15 @@ def _rules(
     dry_rc=0,
     triples=TRIPLES,
     races=SETTLED_RACES,
+    beyond_pre="BEYOND_PIN recs=0",
+    beyond_after="BEYOND_PIN recs=0",
 ):
     return [
         {"match": r"/tmp/race_closeout_pre\.log 2>&1", "out": "tool exit 0"},
         {"match": r"grep -o 'PLAN candidates=\.\*' /tmp/race_closeout_pre\.log", "out": pre},
+        {"match": r"grep -o 'BEYOND_PIN recs=\[0-9\]\*' /tmp/race_closeout_pre\.log", "out": beyond_pre},
+        {"match": r"grep -o 'BEYOND_PIN recs=\[0-9\]\*' /tmp/race_closeout_verify\.log", "out": beyond_after},
+        {"match": r"grep 'beyond pin:' /tmp/race_closeout_pre\.log", "out": "  beyond pin: rec r1  2026-11-01T13:23 X"},
         {"match": r"/tmp/race_closeout_dry\.log 2>&1", "out": f"tool exit {dry_rc}", "rc": dry_rc},
         {"match": r"grep -o 'PLAN candidates=\.\*' /tmp/race_closeout_dry\.log", "out": dry},
         {"match": r"/tmp/race_closeout_apply\.log 2>&1", "out": f"tool exit {apply_rc}", "rc": apply_rc},
@@ -151,6 +158,7 @@ def test_a_failed_dry_run_aborts_before_any_apply(tmp_path):
         {"states": ("42|2605", "0|2604")},  # a race rec disappeared
         {"after": PLAN},  # something left to do
         {"triples": "not a csv;drop table"},  # unreadable apply CSV
+        {"beyond_after": ""},  # the verify run's BEYOND_PIN line is missing
     ],
 )
 def test_a_wrong_after_state_fails(tmp_path, kw):
@@ -167,6 +175,34 @@ def test_a_failed_apply_aborts_at_step_3(tmp_path):
 def test_nothing_left_exits_0_without_a_backup_or_a_write(tmp_path):
     rc, out, calls = _run(tmp_path, _rules(pre=ZERO))
     assert rc == 0 and "ALREADY DONE" in out, out
+    assert "NOTE" not in out and "NEW PIN" not in out
+    assert fd.airflow_state(tmp_path).get("triggers", 0) == 0 and not _tool_runs(calls)
+
+
+def test_stranded_recs_beyond_the_pin_are_never_already_done(tmp_path):
+    # An abandoned 1 Nov race strands its recs on 4 Nov: the drain sends the operator here, and the reviewed set
+    # is empty — that is a new pin to review, not ALREADY DONE.
+    rc, out, calls = _run(tmp_path, _rules(pre=ZERO, beyond_pre="BEYOND_PIN recs=3"))
+    assert rc == 1 and "NEW PIN NEEDED" in out and "ALREADY DONE" not in out, out
+    assert "3 stranded race rec(s) sit on races at or after 2026-11-01T00:00:00Z" in out
+    assert "beyond pin: rec r1" in out  # the operator sees which, once
+    assert not [c for c in calls if c.startswith("UNMATCHED")]
+    assert fd.airflow_state(tmp_path).get("triggers", 0) == 0 and not _tool_runs(calls)
+
+
+def test_the_reviewed_set_still_closes_with_recs_beyond_the_pin_named(tmp_path):
+    rules = _rules(beyond_pre="BEYOND_PIN recs=3", beyond_after="BEYOND_PIN recs=3")
+    rc, out, calls = _run(tmp_path, rules)
+    assert rc == 0 and "DONE: 10 rec(s) settled" in out, out
+    (apply_,) = _tool_runs(calls)
+    assert "--expect-plan candidates=42,races=30,settle=10,void=32,unmatched=0,errors=0" in apply_
+    assert out.count("3 stranded race rec(s)") == 2 and "a re-run exits 1 (NEW PIN NEEDED)" in out
+
+
+@pytest.mark.parametrize("beyond_pre", ["", "BEYOND_PIN recs=x"])
+def test_an_unreadable_beyond_pin_line_aborts_before_the_backup(tmp_path, beyond_pre):
+    rc, out, calls = _run(tmp_path, _rules(pre=ZERO, beyond_pre=beyond_pre))
+    assert rc == 1 and "ABORT at step 0" in out, out
     assert fd.airflow_state(tmp_path).get("triggers", 0) == 0 and not _tool_runs(calls)
 
 

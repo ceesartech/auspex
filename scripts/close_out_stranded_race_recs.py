@@ -45,15 +45,23 @@ result — one of our entrants is in neither the runners nor the
 non-runners, so a rec on it, or each-way place terms, could be settled
 wrong. Any unmatched or error refuses the apply; nothing is written.
 
-The CSV (every candidate, dry run included; write-once) and, for an apply,
-the reversal archive (<csv>.reversal.jsonl: every row of races,
-race_entrants, horses, race_predictions and race_recommendations of the
-candidate races as it was before the transaction; write-once, written
-before it) are the record. One transaction; every void is guarded on the
-rec still being pending/placed.
+The record (all write-once): the CSV (every candidate, dry run included)
+and, for an apply, <csv>.reversal.jsonl — the pre-image of every row the
+apply can update or that sits where it can insert (ARCHIVE_FROM: the
+candidate races' races, race_entrants, race_predictions and
+race_recommendations rows; the horses, jockeys, trainers and leagues rows
+the settled races' results name), written before the transaction — and
+<csv>.inserted.jsonl, the ids of the rows the apply inserted (new entrants
+for runners we did not hold, new horses / jockeys / trainers, a new track
+row), written inside it just before the commit. Restoring the pre-images
+and deleting the inserted ids reverses an apply. One transaction; every
+void is guarded on the rec still being pending/placed.
 
 The PLAN line (what scripts/ops/close_out_stranded_race_recs.sh pins):
     PLAN candidates=N races=N settle=N void=N unmatched=N errors=N
+and, on its own line, the stranded recs --raced-before keeps out (listed
+one per line, never touched; they need a new reviewed pin):
+    BEYOND_PIN recs=N
 
 Usage (inside the api container):
     python /app/scripts/close_out_stranded_race_recs.py --raced-before 2026-11-01T00:00:00Z
@@ -151,6 +159,26 @@ CANDIDATES_SQL = """
     ORDER BY r.race_date, rec.id
 """
 
+# Stranded recs the pin keeps out: what CANDIDATES_SQL would list without
+# --raced-before. Reported (BEYOND_PIN), never touched: they need a new
+# reviewed --raced-before.
+BEYOND_PIN_SQL = """
+    SELECT rec.id::text AS rec_id,
+           r.race_date,
+           r.track_name,
+           rec.bet_type,
+           h.normalized_name AS horse
+    FROM race_recommendations rec
+    JOIN races r ON r.id = rec.race_id
+    JOIN race_entrants e ON e.id = rec.entrant_id
+    JOIN horses h ON h.id = e.horse_id
+    WHERE rec.status IN ('pending', 'placed')
+      AND r.status NOT IN ('finished', 'cancelled', 'abandoned')
+      AND r.race_date < NOW() - make_interval(days => %(drain_days)s)
+      AND r.race_date >= %(raced_before)s
+    ORDER BY r.race_date, rec.id
+"""
+
 FIELD_SQL = """
     SELECT e.race_id::text AS race_id, h.normalized_name AS horse, e.scratched
     FROM race_entrants e
@@ -169,20 +197,32 @@ VOID_SQL = """
       AND status IN ('pending', 'placed')
 """
 
-# Pre-images for the reversal archive: everything an apply can change on a
-# candidate race (the ingest touches races / race_entrants / horses, the
-# grader race_predictions / race_recommendations).
-ARCHIVE_SQL = {
-    "races": "SELECT row_to_json(t) AS row FROM races t WHERE t.id = ANY(%s::uuid[])",
-    "race_entrants": "SELECT row_to_json(t) AS row FROM race_entrants t WHERE t.race_id = ANY(%s::uuid[])",
+# The reversal record selects, per table, every row an apply can UPDATE or
+# INSERT. On the candidate races: races, race_entrants (the ingest and
+# mark_non_runners), race_predictions and race_recommendations (the grader,
+# the voids). From the payloads of the races it settles: horses, jockeys and
+# trainers by the normalized names its runners carry (ensure_* insert a new
+# name or rewrite an existing row's display name, on our card or not) and
+# the track's leagues row (ensure_league inserts it — the Deauville result's
+# course is 'Deauville (FR)' — or merges its external_ids). The archive
+# writes each row's JSON text verbatim (numerics exact); read again inside
+# the apply, the same selectors find the rows it inserted.
+ARCHIVE_FROM = {
+    "races": "FROM races t WHERE t.id = ANY(%(races)s::uuid[])",
+    "race_entrants": "FROM race_entrants t WHERE t.race_id = ANY(%(races)s::uuid[])",
     "horses": (
-        "SELECT row_to_json(t) AS row FROM horses t WHERE t.id IN "
-        "(SELECT horse_id FROM race_entrants WHERE race_id = ANY(%s::uuid[]))"
+        "FROM horses t WHERE t.normalized_name = ANY(%(horses)s::text[]) "
+        "OR t.id IN (SELECT horse_id FROM race_entrants WHERE race_id = ANY(%(races)s::uuid[]))"
     ),
-    "race_predictions": "SELECT row_to_json(t) AS row FROM race_predictions t WHERE t.race_id = ANY(%s::uuid[])",
-    "race_recommendations": (
-        "SELECT row_to_json(t) AS row FROM race_recommendations t WHERE t.race_id = ANY(%s::uuid[])"
+    "jockeys": "FROM jockeys t WHERE t.normalized_name = ANY(%(jockeys)s::text[])",
+    "trainers": "FROM trainers t WHERE t.normalized_name = ANY(%(trainers)s::text[])",
+    "leagues": (
+        "FROM leagues t WHERE t.sport = 'horse_racing' AND (t.name, t.country) IN "
+        "(SELECT u.name, u.country FROM unnest(%(league_names)s::text[], %(league_countries)s::text[]) "
+        "AS u(name, country))"
     ),
+    "race_predictions": "FROM race_predictions t WHERE t.race_id = ANY(%(races)s::uuid[])",
+    "race_recommendations": "FROM race_recommendations t WHERE t.race_id = ANY(%(races)s::uuid[])",
 }
 
 
@@ -216,12 +256,7 @@ def plan_race_settlement(recs: list[dict], payload: dict, field: list[dict]) -> 
     it. Pure. `field` is the race's entrants as they are now
     ({horse: normalized name, scratched}). Returns one entry per rec with
     action 'settle' (new_status won/lost/void) or 'unmatched' (reason)."""
-    runners: dict[str, dict] = {}
-    for ru in payload.get("runners") or []:
-        name = lra.normalize_name(ru.get("horse") or "")
-        if name:
-            runners[name] = ru
-    non_runners = lra.parse_non_runners(payload.get("non_runners"))
+    runners, non_runners = lra.result_names(payload)
     winners = [n for n, ru in runners.items() if lra._safe_int(ru.get("position")) == 1]
     ours = {f["horse"]: bool(f["scratched"]) for f in field}
     # The grader's field after the ingest: our entrants plus a new row for any
@@ -233,9 +268,7 @@ def plan_race_settlement(recs: list[dict], payload: dict, field: list[dict]) -> 
         if name in after:
             after[name] = True
     places_paid = gcr.ew_places(sum(1 for scratched in after.values() if not scratched))
-    unaccounted = sorted(
-        n for n, scratched in ours.items() if not scratched and n not in runners and n not in non_runners
-    )
+    unaccounted = lra.unaccounted_entrants(field, payload)
     race_problem = None
     if len(winners) > 1:
         race_problem = f"dead heat ({', '.join(winners)}): grade_race pays one winner"
@@ -381,24 +414,85 @@ def write_csv(path: str, entries: list[dict]) -> str:
     return path
 
 
-def write_archive(cur, path: str, race_ids: list[str]) -> int:
+def archive_params(race_ids: list[str], payloads: dict[str, dict]) -> dict[str, list[str]]:
+    """ARCHIVE_FROM's parameters: the candidate races, and the names the
+    payloads of the races to settle make the ingest upsert."""
+    names: dict[str, set[str]] = {"horses": set(), "jockeys": set(), "trainers": set()}
+    leagues: set[tuple[str, str]] = set()
+    for payload in payloads.values():
+        league = lra.league_key(payload)
+        if league:
+            leagues.add(league)
+        for ru in payload.get("runners") or []:
+            for table, key in (("horses", "horse"), ("jockeys", "jockey"), ("trainers", "trainer")):
+                name = lra.normalize_name(ru.get(key) or "")
+                if name:
+                    names[table].add(name)
+    ordered = sorted(leagues)
+    return {
+        "races": sorted(race_ids),
+        **{table: sorted(v) for table, v in names.items()},
+        "league_names": [name for name, _ in ordered],
+        "league_countries": [country for _, country in ordered],
+    }
+
+
+def write_archive(cur, path: str, params: dict[str, list[str]]) -> dict[str, set[str]]:
     """The reversal archive: JSON lines {"table", "row"} for every row an
-    apply can change on these races, as it is now. Write-once."""
+    apply can change (ARCHIVE_FROM), as it is now. Write-once. Returns the
+    archived ids per table (what write_inserted leaves out)."""
+    ids: dict[str, set[str]] = {}
     n = 0
     with _exclusive_open(path) as fh:
-        for table, sql in ARCHIVE_SQL.items():
-            cur.execute(sql, (race_ids,))
+        for table, frm in ARCHIVE_FROM.items():
+            cur.execute(f"SELECT t.id::text AS id, row_to_json(t)::text AS row {frm}", params)
+            ids[table] = set()
             for r in cur.fetchall():
-                fh.write(json.dumps({"table": table, "row": r["row"]}, default=str) + "\n")
+                fh.write(f'{{"table": {json.dumps(table)}, "row": {r["row"]}}}\n')
+                ids[table].add(r["id"])
                 n += 1
     logger.info("Wrote %d pre-image row(s) to %s", n, path)
+    return ids
+
+
+def write_inserted(cur, path: str, params: dict[str, list[str]], archived: dict[str, set[str]]) -> int:
+    """Inside the apply, after its writes: JSON lines {"table", "id"} for
+    every row ARCHIVE_FROM selects now that the archive did not hold and
+    that this transaction created (created_at defaults to NOW(), the
+    transaction's start, on every one of these tables) — the rows the apply
+    inserted, which a reversal deletes (race_entrants first: they
+    reference the horses). A row another writer committed since the
+    archive (the drain ingesting the same jockey) is logged and left out.
+    Write-once."""
+    n = 0
+    with _exclusive_open(path) as fh:
+        for table, frm in ARCHIVE_FROM.items():
+            cur.execute(f"SELECT t.id::text AS id, t.created_at = NOW() AS ours {frm}", params)
+            for r in cur.fetchall():
+                if r["id"] in archived[table]:
+                    continue
+                if not r["ours"]:
+                    logger.warning(
+                        "%s %s appeared after the archive but was not inserted by this apply", table, r["id"]
+                    )
+                    continue
+                fh.write(json.dumps({"table": table, "id": r["id"]}) + "\n")
+                n += 1
+    logger.info("Wrote %d inserted row id(s) to %s", n, path)
     return n
 
 
-def apply_plan(conn, entries: list[dict], payloads: dict[str, dict]) -> None:
+def apply_plan(
+    conn,
+    entries: list[dict],
+    payloads: dict[str, dict],
+    record: Optional[tuple[str, dict[str, list[str]], dict[str, set[str]]]] = None,
+) -> None:
     """One transaction: ingest + grade each race to settle, void the rest
     (guarded), then read every candidate back and compare with the plan.
-    Any difference raises ApplyMismatch after a rollback."""
+    Any difference raises ApplyMismatch after a rollback. `record` is
+    (inserted-rows path, archive params, archived ids): the rows the
+    apply inserted are written there just before the commit."""
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for race_id, payload in payloads.items():
@@ -432,6 +526,8 @@ def apply_plan(conn, entries: list[dict], payloads: dict[str, dict]) -> None:
                     wrong.append(f"{e['rec_id']}: planned {e['new_status']} {e['profit_loss']}, got {r and dict(r)}")
             if wrong:
                 raise ApplyMismatch(f"{len(wrong)} rec(s) not as planned: " + "; ".join(wrong[:5]))
+            if record:
+                write_inserted(cur, *record)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -478,10 +574,28 @@ def run(
     out_csv = out_csv or default_out_csv()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         entries, payloads, totals = build_plan(cur, raced_before, fetch)
+        cur.execute(BEYOND_PIN_SQL, {"drain_days": lra.DRAIN_DAYS, "raced_before": raced_before})
+        beyond = [dict(r) for r in cur.fetchall()]
     conn.rollback()  # close the read snapshot before any write
     write_csv(out_csv, entries)
     logger.info("%s", plan_line(totals))
     summarize(entries)
+    # Its own line, not a PLAN key: the wrapper pins every PLAN key, and these are not part of the reviewed set.
+    logger.info(
+        "BEYOND_PIN recs=%d — stranded rec(s) on races at or after --raced-before %s: not candidates, never "
+        "touched; a new reviewed --raced-before covers them",
+        len(beyond),
+        raced_before.isoformat(),
+    )
+    for b in beyond:
+        logger.info(
+            "  beyond pin: rec %s  %s %s %s/%s",
+            b["rec_id"],
+            b["race_date"].astimezone(timezone.utc).isoformat()[:16],
+            b["track_name"],
+            b["bet_type"],
+            b["horse"],
+        )
     mismatch = "; ".join(
         f"{totals[k]} {k}, expected {n}" for k, n in sorted((expect_plan or {}).items()) if totals[k] != n
     )
@@ -493,17 +607,22 @@ def run(
         logger.error("The plan is not the one pinned (%s): nothing written; review %s", mismatch, out_csv)
     applied = False
     if apply_changes and not mismatch and not refused and entries:
+        params = archive_params(sorted({e["race_id"] for e in entries}), payloads)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            write_archive(
-                cur, str(Path(out_csv).with_suffix(".reversal.jsonl")), sorted({e["race_id"] for e in entries})
-            )
+            archived = write_archive(cur, str(Path(out_csv).with_suffix(".reversal.jsonl")), params)
         conn.rollback()
-        apply_plan(conn, entries, payloads)
+        apply_plan(conn, entries, payloads, (str(Path(out_csv).with_suffix(".inserted.jsonl")), params, archived))
         applied = True
         logger.info("Applied: %d settled, %d voided (one transaction)", totals["settle"], totals["void"])
     elif not apply_changes:
         logger.info("DRY-RUN: %d rec(s) would be written. Re-run with --apply.", totals["settle"] + totals["void"])
-    return {"plan": totals, "plan_mismatch": bool(mismatch), "refused": bool(refused), "applied": applied}
+    return {
+        "plan": totals,
+        "beyond_pin": len(beyond),
+        "plan_mismatch": bool(mismatch),
+        "refused": bool(refused),
+        "applied": applied,
+    }
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:

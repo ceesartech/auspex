@@ -9,7 +9,8 @@
 # none (an abandoned race: the feed drops it without a status).
 #
 # Reviewed plan (prod 2026-11-01 02:5xZ, read only: the tool's own dry run,
-# branch modules, PGOPTIONS default_transaction_read_only=on):
+# branch modules, PGOPTIONS default_transaction_read_only=on; re-run 04:08Z
+# with the final tool: the same 42 per-rec verdicts, BEYOND_PIN recs=0):
 #   PLAN candidates=42 races=30 settle=10 void=32 unmatched=0 errors=0
 #   settle 10 recs / 8 races — 1 won +75.00, 9 lost -88.12 (net -13.12):
 #          June 4 x3 and June 6 x4 sat on page 2 of /results, which
@@ -28,15 +29,25 @@
 # errors = 0, settle + void = candidates — and the apply is pinned to the dry
 # run's exact counts (--expect-plan, every key: any drift refuses before a
 # write). --raced-before 2026-11-01T00:00:00Z keeps races from 1 Nov on out:
-# they were never reviewed (one abandoned on or after 1 Nov needs a new pin).
-#   0. already done? A read-only dry run first: candidates = 0 exits 0
-#      without a backup or a write (a re-run after success); unmatched or
-#      errors > 0 aborts here, before a backup;
+# they were never reviewed. The tool names the stranded recs it keeps out
+# (BEYOND_PIN recs=N, one line per rec in its log): this wrapper never
+# touches them, says so, and while any exist it does not report ALREADY DONE
+# — closing them needs a new reviewed pin (RACED_BEFORE and the ceilings).
+#   0. already done? A read-only dry run first: candidates = 0 with nothing
+#      beyond the pin exits 0 without a backup or a write (a re-run after
+#      success); candidates = 0 with stranded recs beyond it exits 1 (NEW
+#      PIN NEEDED); unmatched or errors > 0 aborts here, before a backup;
 #   1. verified backup (B2) — abort if it does not land;
 #   2. T0 = now; before-state + dry run (write-once audit CSV) — the gate;
-#   3. apply, pinned (one transaction; the reversal archive
-#      <apply csv>.reversal.jsonl holds the pre-image of every row the apply
-#      can change and is written first; every void guarded on 'pending');
+#   3. apply, pinned (one transaction; every void guarded on 'pending'). The
+#      reversal record, both write-once: <apply csv>.reversal.jsonl, written
+#      first, holds the pre-image of every row the apply can update or that
+#      sits where it can insert — the candidate races' races, race_entrants,
+#      race_predictions and race_recommendations rows, and the horses,
+#      jockeys, trainers and leagues rows the settled races' results name;
+#      <apply csv>.inserted.jsonl, written inside the transaction just before
+#      its commit, holds the ids of the rows it inserted. Restore the
+#      pre-images and delete those ids (race_entrants first) to reverse it;
 #   4. after-state, EXACT: every rec of the apply CSV carries its planned
 #      status and profit_loss; every race it settled is 'finished'; the
 #      stranded count fell by exactly the candidates; the race recs created
@@ -81,9 +92,10 @@ APPLY_CSV=/app/backups/closed_out_race_recs_apply_$STAMP.csv
 # run_tool <log name> <args...>: the tool in the api container; prints its PLAN line and exit
 run_tool() {
   local name="$1"; shift
-  $DC exec -T api sh -c "$TOOL $* > /tmp/$name.log 2>&1; rc=\$?; grep -E 'PLAN | settle (won|lost|void) |REFUSED|pinned|Applied|ERROR|Traceback|Error' /tmp/$name.log | tail -25; echo \"tool exit \$rc\"; exit \$rc"
+  $DC exec -T api sh -c "$TOOL $* > /tmp/$name.log 2>&1; rc=\$?; grep -E 'PLAN | settle (won|lost|void) |BEYOND_PIN|REFUSED|pinned|Applied|ERROR|Traceback|Error' /tmp/$name.log | tail -25; echo \"tool exit \$rc\"; exit \$rc"
 }
 plan_of() { $DC exec -T api sh -c "grep -o 'PLAN candidates=.*' /tmp/$1.log | tail -1"; }
+beyond_of() { plan_num "$($DC exec -T api sh -c "grep -o 'BEYOND_PIN recs=[0-9]*' /tmp/$1.log | tail -1")" recs; }
 read_plan() {  # read_plan <PLAN line>: sets p_<key> for every key
   local k
   for k in $KEYS; do eval "p_$k=\$(plan_num \"\$1\" $k)"; done
@@ -92,15 +104,23 @@ read_plan() {  # read_plan <PLAN line>: sets p_<key> for every key
 log "0/4 already done? (read-only dry run)"
 run_tool race_closeout_pre --out-csv /app/backups/closed_out_race_recs_precheck_$STAMP.csv
 pre=$(plan_of race_closeout_pre)
+beyond=$(beyond_of race_closeout_pre)
 read_plan "$pre"
 # shellcheck disable=SC2154  # p_* are set by read_plan
-if [ "$p_candidates" = "0" ]; then
-  log "ALREADY DONE: $pre — no stranded race rec left to settle or void (no backup)"
-  exit 0
+if [ "$p_candidates" = missing ] || [ "$beyond" = missing ] || [ "$p_unmatched" != "0" ] || [ "$p_errors" != "0" ]; then
+  log "ABORT at step 0: pre-plan '${pre:-unreadable}' (beyond the pin: $beyond) is unreadable or carries unmatched / errors — review the precheck CSV; nothing changed"
+  exit 1
 fi
-# shellcheck disable=SC2154
-if [ "$p_candidates" = missing ] || [ "$p_unmatched" != "0" ] || [ "$p_errors" != "0" ]; then
-  log "ABORT at step 0: pre-plan '${pre:-unreadable}' is unreadable or carries unmatched / errors — review the precheck CSV; nothing changed"
+if [ "$beyond" != "0" ]; then
+  log "NOTE: $beyond stranded race rec(s) sit on races at or after $RACED_BEFORE — outside the reviewed set, so this wrapper leaves them pending; closing them needs a new reviewed pin: RACED_BEFORE and the ceilings in this script. They are (all in /tmp/race_closeout_pre.log in the api container):"
+  $DC exec -T api sh -c "grep 'beyond pin:' /tmp/race_closeout_pre.log | head -50"
+fi
+if [ "$p_candidates" = "0" ]; then
+  if [ "$beyond" = "0" ]; then
+    log "ALREADY DONE: $pre — no stranded race rec left to settle or void (no backup)"
+    exit 0
+  fi
+  log "NEW PIN NEEDED: $pre — nothing is left before $RACED_BEFORE, but the $beyond stranded rec(s) above are not closed; nothing changed"
   exit 1
 fi
 log "not done yet (pre-plan '$pre') — continuing"
@@ -189,12 +209,16 @@ state=$(psql_at "$W/state.sql" | tr -d '[:space:]')
 IFS='|' read -r stranded1 recs1 <<< "$state"
 run_tool race_closeout_verify --out-csv /app/backups/closed_out_race_recs_verify_$STAMP.csv
 replan=$(plan_of race_closeout_verify)
+beyond1=$(beyond_of race_closeout_verify)
 want_stranded=$((stranded0 - p_candidates))
-log "after: recs as planned $as_planned (expected $p_candidates), settled races finished $finished (expected $want_finished), stranded $stranded1 (expected $want_stranded), race recs created before T0 $recs1 (expected $recs0), re-plan '$replan' (expected candidates=0)"
+log "after: recs as planned $as_planned (expected $p_candidates), settled races finished $finished (expected $want_finished), stranded $stranded1 (expected $want_stranded), race recs created before T0 $recs1 (expected $recs0), re-plan '$replan' (expected candidates=0; beyond the pin $beyond1)"
 if [ "$as_planned" = "$p_candidates" ] && [ "$finished" = "$want_finished" ] && [ "$stranded1" = "$want_stranded" ] \
-   && [ "$recs1" = "$recs0" ] && [ "$(plan_num "$replan" candidates)" = "0" ]; then
-  log "DONE: $p_settle rec(s) settled from their race's result, $p_void voided (no result: abandoned) — the apply CSV $APPLY_CSV and its .reversal.jsonl are the record"
+   && [ "$recs1" = "$recs0" ] && [ "$(plan_num "$replan" candidates)" = "0" ] && [ "$beyond1" != missing ]; then
+  log "DONE: $p_settle rec(s) settled from their race's result, $p_void voided (no result: abandoned) — the apply CSV $APPLY_CSV, its .reversal.jsonl and .inserted.jsonl are the record"
+  if [ "$beyond1" != "0" ]; then
+    log "NOTE: $beyond1 stranded race rec(s) on races at or after $RACED_BEFORE are still pending (not part of this run) — a re-run exits 1 (NEW PIN NEEDED) until RACED_BEFORE and the ceilings are moved to a new reviewed pin"
+  fi
 else
-  log "FAILED after-state — inspect (the apply CSV $APPLY_CSV and its .reversal.jsonl are the reversal record)"
+  log "FAILED after-state — inspect (the apply CSV $APPLY_CSV, its .reversal.jsonl and .inserted.jsonl are the reversal record)"
   exit 1
 fi
