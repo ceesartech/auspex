@@ -21,16 +21,22 @@ Nothing else schedules horse racing: retrain_models has no horse bundle
 (train_horse_racing_win.py runs by hand), monitor_models stops paging on
 the horse streams once no race prediction has been created for 72 h
 (monitor_models.HORSE_DORMANT_AFTER_HOURS; its findings are then logged
-as warnings), and the API / frontend only list races and recs, so they go
-quiet on their own.
+as warnings), and the API only lists races and recs, so it goes quiet on its
+own. The frontend mirrors this constant in
+services/frontend/src/lib/sport-switches.ts (HORSE_RACING_ENABLED): while
+False it hides the Race cards nav entry and the /races pages show a "paused"
+notice instead of empty lists. tests/unit/test_frontend_sport_switches.py
+fails if the two differ.
 
 True: the original branch — racecards >> results >> features >>
 consensus >> ranker >> recommendations, and grade_completed_races.
 
-Re-enable: set HORSE_RACING_ENABLED = True and push to main. The DAG files
+Re-enable: set HORSE_RACING_ENABLED = True here AND in
+services/frontend/src/lib/sport-switches.ts, and push to main. The DAG files
 are bind-mounted, so the dag-processor re-parses within ~5 min; the next
 tick fetches today's racecards (the Standard tier serves today only) and
-recs follow within that tick. Before that, check:
+recs follow within that tick. The frontend change ships with the next CI
+image build. Before that, check:
   * the Racing API subscription still exists (THE_RACING_API_USER/PASS in
     the prod .env) — without it every horse task fails loudly;
   * the ranker in /app/models/horse_racing_ranker_v1 is as old as the
