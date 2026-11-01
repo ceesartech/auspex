@@ -40,6 +40,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable, NamedTuple
@@ -328,8 +329,11 @@ SPORT_CONFIGS: dict[str, SportConfig] = {
 
 
 def normalize_team(name: str) -> str:
-    """Loose normalisation for the teams.normalized_name unique key."""
-    return " ".join(name.strip().lower().split())
+    """Loose normalisation for the teams.normalized_name unique key, in
+    Unicode NFC (composed) form: ESPN sends some names decomposed ('Rose
+    Conceição' as 'c' + U+0327, 'a' + U+0303), and an exact match against a
+    composed spelling of the same name would miss it and mint a twin."""
+    return unicodedata.normalize("NFC", " ".join(name.strip().lower().split()))
 
 
 def _strip_club_tokens(norm: str, cfg: SportConfig) -> str:
@@ -464,6 +468,7 @@ def ensure_team(
         insert_name = found.insert_name
     elif found.how == "namesake":
         insert_name = namesake_name(cur, cfg, name, espn_id, alt_names)
+    insert_name = unicodedata.normalize("NFC", insert_name)  # stored composed, like normalized_name
     cur.execute(INSERT_TEAM_SQL, (insert_name, normalize_team(insert_name), league_id, cfg.sport))
     row = cur.fetchone()
     if not row:

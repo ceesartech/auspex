@@ -1,0 +1,8 @@
+# UFC bouts stored twice on the SAME two fighter rows, the stale copy the other way round from the finished row
+# (reviewed 2026-11-01; scripts/merge_mma_fighters.py folds ONLY these, beside the fighter merges). Before
+# fetch_upcoming's reversed-listing fix (2026-11-01) a competition ESPN listed in the opposite order from its row
+# forked a reversed duplicate. run B (repair_fixture_orphans) matches twins in the same orientation only, so it
+# would delete the stale copy with its pre-game prices. Evidence from ESPN's UFC scoreboard (2026-11-01) and the
+# read-only prod export of 2026-11-01T21:06:57Z.
+stale_match_id,finished_match_id,kickoff,stale_home,stale_away,espn_competition_id,evidence
+f09d9ca8-3c3b-4414-8468-138eae71e5ec,2747abec-c2d7-4c85-8c35-94273a441a08,2026-10-03T22:00:00+00:00,Marcus McGhee,Anthony Romero,401927906,"ESPN competition 401927906 (2026-10-03 22:00Z, final, McGhee won) lists Anthony Romero (athlete 4684470) first and Marcus McGhee (4895760) second: the order and result of our finished row 2747abec (Romero 0, McGhee 1, no ESPN id). Our stale row f09d9ca8 is McGhee v Romero at the same kickoff and carries 401927906; it holds the bout's only prices: 14 pre-game odds rows and 43 pre-game snapshots, which move (home/away swapped), and 7 snapshots captured after the 22:00Z kickoff, archived and deleted with the copy."
