@@ -84,7 +84,14 @@ class FakeCursor:
         self._result = []
         self.rowcount = 0
 
-        if "JOIN leagues" in sql:  # step 1 — espn id, scoped to the sport
+        if "JOIN leagues" in sql and "m.home_team_id = %s" in sql:  # _listed_reversed — the id's row, this pair
+            espn_id, sport, h, a = params
+            self._result = [
+                {"id": r["id"]}
+                for r in self.rows
+                if r["espn"] == espn_id and self.sport == sport and r["home_team_id"] == h and r["away_team_id"] == a
+            ]
+        elif "JOIN leagues" in sql:  # step 1 — espn id, scoped to the sport
             espn_id, sport = params
             self._result = [
                 {

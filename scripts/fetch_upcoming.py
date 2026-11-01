@@ -26,7 +26,9 @@ the EXISTING row ('postponed' / 'cancelled'), never inserted, from either
 mode (see _record_status_change); grade_completed_matches voids the recs of a
 match postponed more than 72 h, or cancelled with a kickoff 72 h old. A cancel
 ESPN itself reported stays correctable (espn_cancelled); one recorded on
-purpose (an operator, a duplicate, a re-drawn slot) is final.
+purpose (an operator, a duplicate, a re-drawn slot) is final. ESPN reports no
+status at all for a bout it drops from a fight card, so results mode cancels
+the stale rows a finished card no longer lists (cancel_dropped_bouts, MMA).
 """
 
 from __future__ import annotations
@@ -146,6 +148,12 @@ class SportConfig:
     # rows (one "team" per player in the teams table — pragmatic reuse
     # of the team-sports schema for individual sports).
     is_individual: bool = False
+    # True when an ESPN event is a fight CARD: every bout of it is listed in
+    # one event and a finished card lists every bout that took place, so a
+    # bout ESPN removed from it was not fought on it (cancel_dropped_bouts).
+    # Not tennis: a tournament event spans weeks and a day's scoreboard
+    # carries only some of its matches.
+    card_events: bool = False
 
 
 # ── Soccer config ─────────────────────────────────────────────────────
@@ -314,6 +322,7 @@ SPORT_CONFIGS: dict[str, SportConfig] = {
         # positional fallback gives a consistent fighter1/fighter2
         # labeling.
         is_individual=True,
+        card_events=True,
     ),
 }
 
@@ -753,11 +762,15 @@ def insert_scheduled_match(
 # (repair_fixture_orphans: metadata.orphan_of), a re-drawn tennis/MMA slot's
 # (_release_redrawn_slot: metadata.redrawn_espn_id) — and so does a row ESPN
 # only postponed before someone else cancelled it (espn_status
-# STATUS_POSTPONED).
-ESPN_CANCEL_STATUSES = ("STATUS_CANCELED", "STATUS_CANCELLED", "STATUS_ABANDONED")
+# STATUS_POSTPONED). A bout ESPN dropped from a finished fight card
+# (cancel_dropped_bouts: espn_status DROPPED_FROM_CARD) is read off ESPN's
+# scoreboard too, and stays correctable the same way: a bout a later sweep
+# finds on the card after all gets its result.
+DROPPED_FROM_CARD = "DROPPED_FROM_CARD"
+ESPN_CANCEL_STATUSES = ("STATUS_CANCELED", "STATUS_CANCELLED", "STATUS_ABANDONED", DROPPED_FROM_CARD)
 ESPN_CANCELLED_SQL = (
     "({t}.metadata->>'status_source' = 'espn_scoreboard'"
-    " AND {t}.metadata->>'espn_status' IN ('STATUS_CANCELED', 'STATUS_CANCELLED', 'STATUS_ABANDONED')"
+    " AND {t}.metadata->>'espn_status' IN (" + ", ".join(f"'{s}'" for s in ESPN_CANCEL_STATUSES) + ")"
     " AND {t}.metadata->>'orphan_of' IS NULL"
     " AND {t}.metadata->>'redrawn_espn_id' IS NULL)"
 )
@@ -1174,8 +1187,10 @@ def _resolve_match_id(
     and shares not even the same two players, the slot was re-drawn: the
     stale row is released (id removed, status 'cancelled', the re-draw
     recorded in metadata) and resolution continues by pair. A
-    swapped pair (same two players) is NOT a re-draw and keeps the old
-    refuse-and-log behaviour in _realign_match_date.
+    swapped pair (same two players) is NOT a re-draw: both handlers first
+    turn the parse into the row's order (_listed_reversed), and only a pair
+    still reversed here (a fork already holds the parse's slot) meets the
+    old refuse-and-log behaviour in _realign_match_date.
 
     Step 3 refuses to resolve when two or more rows qualify: a same-pair
     rematch inside 72 h is routine (playoff series, back-to-backs,
@@ -1518,6 +1533,65 @@ def _reconcile_match_row(cur, cfg: SportConfig, espn_id, home_id, away_id, match
     return False
 
 
+# The row an ESPN competition id names, when it holds the given ordered pair.
+REVERSED_ROW_SQL = """
+    SELECT m.id
+      FROM matches m
+      JOIN leagues l ON l.id = m.league_id
+     WHERE m.external_ids->>'espn' = %s
+       AND l.sport = %s
+       AND m.home_team_id = %s
+       AND m.away_team_id = %s
+"""
+
+
+def _listed_reversed(cur, cfg: SportConfig, espn_id, home_id, away_id, match_dt) -> bool:
+    """True when, in a 1v1 sport, the row ESPN competition `espn_id` names
+    holds these two players the other way round and no row sits at this
+    parse's own (home, away, match_dt). The caller then writes in that row's
+    order (both handlers swap the sides, the results path the scores too), so
+    the write lands on the row that owns the fixture.
+
+    ESPN orders MMA competitors freely (see _realign_match_date), and the
+    realignment refuses a row whose pair is reversed, so the upsert at the
+    parse's slot used to fork a reversed twin: UFC 2026-10-03, McGhee v
+    Romero (ESPN 401927906, 1 prediction, 14 odds rows) stayed 'scheduled'
+    for good while the fixtures path inserted Romero v McGhee and the result
+    landed there. A row already at the parse's slot is that fork: nothing is
+    swapped (two rows for one bout need a person) and it is logged."""
+    if not (cfg.is_individual and espn_id):
+        return False
+    cur.execute(REVERSED_ROW_SQL, (str(espn_id), cfg.sport, away_id, home_id))
+    rows = cur.fetchall() or []
+    if len(rows) != 1:
+        return False
+    cur.execute(
+        "SELECT id FROM matches WHERE home_team_id = %s AND away_team_id = %s AND match_date = %s",
+        (home_id, away_id, match_dt),
+    )
+    fork = cur.fetchone()
+    if fork:
+        logger.error(
+            "ESPN %s competition %s lists %s v %s, the reverse of its row %s, and row %s already holds that order at "
+            "%s — one bout on two rows; not swapping. Repair the duplicate (its predictions/odds/recs are split).",
+            cfg.sport,
+            espn_id,
+            home_id,
+            away_id,
+            rows[0]["id"],
+            fork["id"],
+            match_dt,
+        )
+        return False
+    logger.info(
+        "ESPN %s competition %s lists its players the other way round from row %s — writing in the row's order",
+        cfg.sport,
+        espn_id,
+        rows[0]["id"],
+    )
+    return True
+
+
 def _is_identity_drift(owner: dict, home_id, away_id) -> bool:
     """True when the row an ESPN id owns differs from the parse by DRIFT —
     the two pairs share a team, or are the same pair swapped — which is our
@@ -1727,6 +1801,8 @@ def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict, even
     if teams is None:
         return False
     home_id, away_id = teams
+    if _listed_reversed(cur, cfg, espn_id, home_id, away_id, match_dt):
+        home_id, away_id = away_id, home_id  # the row's order (names stay ESPN's: the healing key)
 
     season_type = (event_context or {}).get("season_type")
     try:
@@ -2240,6 +2316,10 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
     if teams is None:
         return False
     home_id, away_id = teams
+    if _listed_reversed(cur, cfg, espn_id, home_id, away_id, match_dt):
+        # The row's order, and the winner flags with it (1v1: no half-time score).
+        home_id, away_id = away_id, home_id
+        home_score, away_score = away_score, home_score
 
     # The RESULTS path fragments fixtures too: 20 of the 119 prod twins were
     # inserted here, after kickoff, because ESPN had moved the time since we
@@ -2330,6 +2410,175 @@ def process_event(
     return inserted
 
 
+def record_results(cur, cfg: SportConfig, league_id: str, events: list[dict], league_slug: str) -> int:
+    """The results path over one league's buffered sweep: every competition
+    through _record_result, then (fight cards) cancel_dropped_bouts. Returns
+    the count of results written. fetch_results_all and
+    scripts/backfill_results.py both run exactly this, so a backfill writes
+    what the 15-min sweep would have written."""
+    pair_index = build_pair_index(cfg, events)
+    n = 0
+    for ev in events:
+        n += process_event(
+            cur, cfg, league_id, ev, handler=_record_result, pair_index=pair_index, league_slug=league_slug
+        )
+    cancel_dropped_bouts(cur, cfg, league_id, events)
+    return n
+
+
+# A bout ESPN dropped from a fight card simply disappears from the event — an
+# opponent replaced under a new competition id, a fighter withdrawn, the bout
+# moved to another card. ESPN never reports a status for it, so its row sat
+# 'scheduled' for good: its predictions never graded and a rec on it never
+# settled (Holland v Smith, UFC 2026-07-18: one rec stranded since July; prod
+# 2026-11-01: 8 of the 18 stale UFC rows of September/October). Once a card is
+# finished, a stale row of its window that the card does not list is
+# cancelled here; grade_completed_matches voids its open recs 72 h after
+# kickoff ('void: match cancelled').
+#
+# CARD_WINDOW_HOURS bounds the rows a card speaks for: a UFC card's bouts sit
+# at its segment start times (prelims, main card), a few hours apart, and
+# cards are days apart.
+CARD_WINDOW_HOURS = 6
+
+DROPPED_CANDIDATES_SQL = """
+    SELECT m.id, m.home_team_id, m.away_team_id, m.match_date, m.metadata,
+           m.external_ids->>'espn' AS espn_id
+      FROM matches m
+     WHERE m.league_id = %s
+       AND m.status = 'scheduled'
+       AND m.match_date BETWEEN %s AND %s
+       AND m.match_date < NOW()
+     ORDER BY m.match_date, m.id
+"""
+
+
+def _finished_card(event: dict, cfg: SportConfig):
+    """(event id, first bout time, last bout time, competitions) for an ESPN
+    fight card whose every competition is over (state 'post': fought, or
+    cancelled / postponed by ESPN's own status), else None."""
+    comps = [comp for comp, _context in _iter_event_competitions(event, cfg)]
+    times = []
+    for comp in comps:
+        if (comp.get("status", {}).get("type", {}).get("state") or "pre").lower() != "post":
+            return None
+        raw = comp.get("date") or comp.get("startDate")
+        try:
+            times.append(datetime.fromisoformat(str(raw).replace("Z", "+00:00")))
+        except ValueError:
+            return None
+    if not comps:
+        return None
+    return event.get("id"), min(times), max(times), comps
+
+
+def cancel_dropped_bouts(cur, cfg: SportConfig, league_id: str, events: list[dict]) -> int:
+    """Cancel the stale 'scheduled' rows a finished fight card no longer lists
+    (why: the comment above CARD_WINDOW_HOURS). Fight-card sports only
+    (cfg.card_events); results mode only, after every competition of the sweep
+    went through _record_result. Returns the count of rows cancelled.
+
+    A row of a finished card's window (its first to its last bout, +/-
+    CARD_WINDOW_HOURS, kickoff past) is left alone when the sweep lists its
+    ESPN competition id, or when its two fighters meet on the card (a
+    duplicate of a fought bout: repair_fixture_orphans / repair_stranded_recs
+    settle it from its twin). Otherwise it is cancelled when it carries an
+    ESPN id (ESPN no longer lists that competition anywhere in the sweep), or
+    — a row from before ESPN ids were stored — when neither fighter is on the
+    card at all. An unidentified row with one fighter on the card against
+    someone else is NOT cancelled: an opponent change and a fighter stored
+    under two names ('Zachary Reese' / 'Zach Reese') look the same, and only
+    the latter was fought. It is logged and left for repair_fixture_orphans.
+    A card one of whose competitions cannot be parsed is skipped whole: it
+    cannot prove a bout absent.
+
+    The cancel is _record_status_change's for a 1v1 sport: status
+    'cancelled', espn_status DROPPED_FROM_CARD / status_source
+    espn_scoreboard (correctable: ESPN_CANCEL_STATUSES), the ESPN id moved to
+    cancelled_espn_id, the card's event id in dropped_from_event; guarded on
+    status 'scheduled'."""
+    if not cfg.card_events:
+        return 0
+    listed = {str(comp.get("id")) for ev in events for comp, _ in _iter_event_competitions(ev, cfg) if comp.get("id")}
+    cancelled = 0
+    for ev in events:
+        card = _finished_card(ev, cfg)
+        if card is None:
+            continue
+        event_id, first, last, comps = card
+        pairs: set[frozenset] = set()
+        fighters: set[str] = set()
+        unparsed = False
+        for comp in comps:
+            parts = _competition_parts(comp, cfg)
+            if parts is None:
+                unparsed = True
+                break
+            home_id = find_team(cur, cfg, parts[2], league_id)
+            away_id = find_team(cur, cfg, parts[3], league_id)
+            ids = {str(t) for t in (home_id, away_id) if t}
+            fighters |= ids
+            if len(ids) == 2:
+                pairs.add(frozenset(ids))
+        if unparsed:
+            logger.warning(
+                "%s card %s: a competition could not be parsed, so the card cannot prove a bout absent — "
+                "no dropped bout is cancelled from it",
+                cfg.sport,
+                event_id,
+            )
+            continue
+        window = timedelta(hours=CARD_WINDOW_HOURS)
+        cur.execute(DROPPED_CANDIDATES_SQL, (league_id, first - window, last + window))
+        for row in cur.fetchall() or []:
+            espn_id = row.get("espn_id")
+            pair = {str(row["home_team_id"]), str(row["away_team_id"])}
+            if (espn_id and espn_id in listed) or frozenset(pair) in pairs:
+                continue
+            if not espn_id and pair & fighters:
+                logger.warning(
+                    "%s row %s (%s v %s at %s) is not on finished card %s, but one of its fighters is, against "
+                    "someone else — an opponent change or one fighter under two names; left for "
+                    "repair_fixture_orphans",
+                    cfg.sport,
+                    row["id"],
+                    row["home_team_id"],
+                    row["away_team_id"],
+                    row["match_date"],
+                    event_id,
+                )
+                continue
+            patch = {
+                "espn_status": DROPPED_FROM_CARD,
+                "status_source": "espn_scoreboard",
+                "dropped_from_event": str(event_id),
+            }
+            if espn_id:
+                patch["cancelled_espn_id"] = espn_id
+            cur.execute(STATUS_UPDATE_SQL, ("cancelled", json.dumps(patch), espn_id, row["id"], "scheduled"))
+            if cur.fetchone() is None:
+                logger.error(
+                    "%s row %s changed while cancelling it as dropped from card %s — left as it is",
+                    cfg.sport,
+                    row["id"],
+                    event_id,
+                )
+                continue
+            cancelled += 1
+            logger.warning(
+                "Cancelled %s row %s (%s v %s at %s, ESPN %s): finished card %s does not list it — the bout was "
+                "dropped from the card",
+                cfg.sport,
+                row["id"],
+                row["home_team_id"],
+                row["away_team_id"],
+                row["match_date"],
+                espn_id or "-",
+                event_id,
+            )
+    return cancelled
+
+
 def fetch_all(database_url: str, cfg: SportConfig, leagues: list[str], days: int) -> dict[str, int]:
     counts: dict[str, int] = {}
     today = date.today()
@@ -2388,12 +2637,7 @@ def fetch_results_all(database_url: str, cfg: SportConfig, leagues: list[str], d
                 for offset in range(days_back + 1):  # today back through days_back
                     day = today - timedelta(days=offset)
                     events.extend(fetch_day(cfg, slug, day))
-                pair_index = build_pair_index(cfg, events)
-                n = 0
-                for ev in events:
-                    n += process_event(
-                        cur, cfg, league_id, ev, handler=_record_result, pair_index=pair_index, league_slug=slug
-                    )
+                n = record_results(cur, cfg, league_id, events, slug)
                 counts[slug] = n
                 conn.commit()
                 if n:

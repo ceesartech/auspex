@@ -495,6 +495,7 @@ class TestCallSitesPassTheEspnId:
         self.alts = alts
 
         monkeypatch.setattr(fu, "ensure_team", fake_ensure)
+        monkeypatch.setattr(fu, "_listed_reversed", lambda *a, **k: False)
         monkeypatch.setattr(fu, "_reconcile_match_row", lambda *a, **k: True)
         monkeypatch.setattr(fu, "insert_scheduled_match", lambda *a, **k: 1)
         monkeypatch.setattr(fu, "_stamp_identity", lambda *a, **k: True)
