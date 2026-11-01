@@ -579,6 +579,9 @@ class TestRunEndToEnd:
         monkeypatch.setattr(ab, "load_ensemble", lambda path: (ens, "fake-ensemble"))
         monkeypatch.setattr(ab, "member_fingerprint", lambda path, m: {"member": m})
         monkeypatch.setattr(ab, "load_seen_ids", lambda path: set(seen))
+        # The incumbent's fingerprint: its members were fitted on the oldest
+        # int(0.7 x rows) of these rows, as the trainer does.
+        monkeypatch.setattr(ab, "load_incumbent_rows", lambda path: len(seen_rows))
         monkeypatch.setattr(ab, "load_features", lambda url, start, end: dict(features))
         monkeypatch.setattr(ab, "load_medians", medians)
         monkeypatch.setattr(ab, "load_market_1x2", lambda url, start, end, min_books: dict(market))
@@ -607,7 +610,7 @@ class TestRunEndToEnd:
         assert m["eval_rows_without_features"] == 1 and m["median_filled_values"] == 1 and calls["medians"] == 1
         assert m["fidelity_batch_max_abs"] <= ab.FIDELITY_ATOL and m["fidelity_single_row_max_abs"] <= ab.FIDELITY_ATOL
         for fit in m["fits"]:
-            if fit["fold"] != "pretest":
+            if fit["fold"] not in ("pretest", "converged"):
                 assert pd.Timestamp(fit["fit_newest"]) < pd.Timestamp(f"{fit['fold']}-01", tz="UTC")
         df = pd.read_csv(r["per_match_csv"])
         assert len(df) == r["n_eval"] and set(df["fold"]) == set(r["folds"])
@@ -625,6 +628,18 @@ class TestRunEndToEnd:
         assert np.isnan(cols(f"p::{ab.BOUND_ARM}")[~has]).all()
         d = (df["brier::refit"] - df["brier::served"]).mean()
         assert r["vs_served"]["refit"]["delta"] == pytest.approx(d)
+        # The pre-registered converged arm: the served Dixon-Coles untouched,
+        # its split proven by reproducing the served Poisson exactly, and on
+        # this one-league corpus (one component, so the served fit converged
+        # too) the converged Poisson is the served one.
+        conv = ab.CONVERGED
+        split = m["converged_arm_split"]
+        assert split["reproduction_max_abs"] <= ab.SPLIT_ATOL and split["assignments_tried"] == 1
+        dc = ab.DIXON_COLES
+        assert np.array_equal(cols(f"q::{conv}::{dc}"), cols(f"q::served::{dc}"))
+        assert cols(f"q::{conv}::{ab.POISSON}") == pytest.approx(cols(f"q::served::{ab.POISSON}"), abs=1e-5)
+        assert r["convergence_decision"]["arm"] == conv and r["convergence_decision"]["ship"] is False
+        assert any(f["fold"] == "converged" and f["converged_at"] for f in m["fits"])
 
     def test_a_fit_that_reaches_its_eval_month_fails_the_run(self, tmp_path, monkeypatch):
         *_, args = self._setup(tmp_path, monkeypatch)
@@ -651,6 +666,109 @@ class TestRunEndToEnd:
         monkeypatch.setattr(ens, "predict_proba", poisoned)
         with pytest.raises(RuntimeError, match="non-finite"):
             ab.run(args)
+
+
+def _tied_corpus(seed=21):
+    """Two leagues that never meet (the soccer split's shape), one match a
+    day, with SIX matches sharing one kickoff right at the 70% boundary."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    start = pd.Timestamp("2020-01-01 15:00", tz="UTC")
+    for i in range(400):
+        league = "A" if i % 2 else "B"
+        h, a = rng.choice(6, 2, replace=False)
+        rows.append(
+            {
+                "match_id": f"m{i:04d}",
+                "match_date": start + pd.Timedelta(days=i),
+                "league_id": league,
+                "league_name": f"League {league}",
+                "home_team": f"{league}{h}",
+                "away_team": f"{league}{a}",
+                "home_score": int(rng.poisson(0.9 if league == "A" else 2.0)),
+                "away_score": int(rng.poisson(0.7 if league == "A" else 1.7)),
+            }
+        )
+    frame = pd.DataFrame(rows)
+    n_fit = int(len(frame) * ab.TRAIN_RATIO)  # rows = len(frame): everything is "seen"
+    frame.loc[n_fit - 3 : n_fit + 2, "match_date"] = frame.loc[n_fit - 3, "match_date"]  # 6 tied rows
+    return frame.sort_values("match_date", kind="stable").reset_index(drop=True), n_fit
+
+
+class TestConvergedArm:
+    def test_the_served_split_is_found_among_the_boundary_ties_and_proven(self, tmp_path):
+        frame, n_fit = _tied_corpus()
+        ties = list(range(n_fit - 3, n_fit + 3))
+        # The trainer's unstable sort put the LAST three tied rows in train.
+        served_rows = pd.concat([frame.iloc[: n_fit - 3], frame.loc[ties[3:]]])
+        served, res = ab.fit_member(ab.POISSON, served_rows, str(tmp_path), "served")
+        assert res["fit_diagnostics"]["connected_components"] == 2 and not res["converged"]
+        split, info = ab.served_member_split(frame, set(frame["match_id"]), len(frame), served, str(tmp_path))
+        assert set(split["match_id"]) == set(served_rows["match_id"])
+        assert info["boundary_tied_rows"] == 6 and info["boundary_rows_in_train"] == 3
+        assert info["assignments_tried"] == 20 and info["reproduction_max_abs"] <= ab.SPLIT_ATOL
+
+    def test_a_split_that_reproduces_nothing_fails_the_run(self, tmp_path):
+        frame, n_fit = _tied_corpus()
+        other, _ = ab.fit_member(ab.POISSON, frame.iloc[: n_fit - 10], str(tmp_path), "other")
+        with pytest.raises(RuntimeError, match="reproduces the served Poisson"):
+            ab.served_member_split(frame, set(frame["match_id"]), len(frame), other, str(tmp_path))
+
+    def test_the_converged_fit_converges_where_the_served_one_cycles(self, tmp_path):
+        frame, n_fit = _tied_corpus()
+        _served, res_served = ab.fit_member(ab.POISSON, frame.iloc[:n_fit], str(tmp_path), "s")
+        conv, res = ab.fit_member(ab.POISSON, frame.iloc[:n_fit], str(tmp_path), "c", ab.CONVERGED_HYPERPARAMETERS)
+        assert res_served["fit_diagnostics"]["period_two_oscillation"] is True
+        assert res["converged"] is True and res["fit_diagnostics"]["gauge"] == "per_component"
+        assert conv.gauge == "global"  # served through the plain production config, as the API loads it
+
+    def test_incumbent_rows_come_from_the_fingerprint(self, tmp_path):
+        d = tmp_path / ab.ENSEMBLE_NAME
+        d.mkdir()
+        with pytest.raises(RuntimeError, match="missing"):
+            ab.load_incumbent_rows(str(tmp_path))
+        (d / "held_out_metrics.json").write_text('{"fingerprint": {"rows": 170855}}')
+        assert ab.load_incumbent_rows(str(tmp_path)) == 170855
+        (d / "held_out_metrics.json").write_text('{"fingerprint": {}}')
+        with pytest.raises(RuntimeError, match="no fingerprint rows"):
+            ab.load_incumbent_rows(str(tmp_path))
+
+
+class TestConvergenceDecision:
+    @staticmethod
+    def _pair(delta, se, se_cluster, n_folds=31, n=1000):
+        return {"delta": delta, "se": se, "delta_cluster": delta, "se_cluster": se_cluster, "n_folds": n_folds, "n": n}
+
+    def _report(self, main, units):
+        conv = ab.CONVERGED
+        return {
+            "verdicts_vs_served": {conv: ab.verdict(main, "served")},
+            "strata": {name: {"n": 100, conv: pair} for name, pair in units.items()},
+        }
+
+    def test_unit_lower_bound_is_clustered_when_it_can_be(self):
+        assert ab.unit_lower_95(self._pair(0.002, 0.0001, 0.001)) == pytest.approx(0.002 - 1.96 * 0.001)
+        one_fold = self._pair(0.002, 0.0001, None, n_folds=1)
+        assert ab.unit_lower_95(one_fold) == pytest.approx(0.002 - 1.96 * 0.0001)
+        assert ab.unit_lower_95({"delta": None, "se": None}) is None
+
+    def test_a_gate_pass_with_no_regressing_unit_ships(self):
+        main = self._pair(-0.006, 0.0005, 0.001)
+        units = {"espn_era_2026_06_on": self._pair(0.001, 0.001, 0.002)}  # worse, but inside the noise
+        d = ab.convergence_decision(self._report(main, units))
+        assert d["ship"] is True and d["units_regressed"] == [] and d["line"].startswith("SHIP")
+
+    def test_a_regressing_unit_blocks_a_gate_pass(self):
+        main = self._pair(-0.006, 0.0005, 0.001)
+        units = {"identity_split_fixtures": self._pair(0.004, 0.0005, 0.001), "not_identity_split": main}
+        d = ab.convergence_decision(self._report(main, units))
+        assert d["ship"] is False and [u["unit"] for u in d["units_regressed"]] == ["identity_split_fixtures"]
+        assert "blocking unit" in d["line"]
+
+    def test_a_null_result_does_not_ship(self):
+        main = self._pair(-0.0001, 0.00005, 0.0001)
+        d = ab.convergence_decision(self._report(main, {"espn_era_2026_06_on": main}))
+        assert d["ship"] is False and "gate is not met" in d["line"]
 
 
 class TestVerdict:
