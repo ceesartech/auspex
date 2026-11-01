@@ -278,6 +278,11 @@ def hockey_dc_markets(model, home_team: str, away_team: str) -> dict:
 # Markets the trained ensemble doesn't cover; the analytic deriver
 # fills the gap. The intersection (moneyline, spread, total) is
 # excluded because the trained ensemble's prediction is sharper.
+# All eight are written and graded, but five are NOT displayed:
+# regulation_1x2, double_chance, total_goals, over_under and
+# correct_score lost to a per-season constant beyond the noise on the
+# 2026-11-01 gate (scripts/ab_nhl_regulation_ties.py) and are listed in
+# services/api prediction_service.HIDDEN_PREDICTION_PAIRS.
 HOCKEY_DERIVE_TO_PREDICTION: dict[str, str] = {
     "regulation_1x2": "regulation_1x2",
     "puck_line": "puck_line",

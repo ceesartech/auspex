@@ -468,6 +468,73 @@ class TestPredictionService:
         with pytest.raises(ValueError, match="not found"):
             service.get_match_predictions(str(uuid.uuid4()))
 
+    def test_hidden_pairs_are_exactly_the_nhl_dixon_coles_markets_that_lost_to_the_constant(self, mock_settings):
+        """The 2026-11-01 gate (scripts/ab_nhl_regulation_ties.py): the served
+        dixon_coles_nhl artifact lost to a per-season constant beyond the noise
+        on these five markets. Its puck line, clean sheet and win to nil did
+        not, and soccer's same-named derived markets (model 'ensemble') are a
+        different model — none of those may be hidden."""
+        from services.prediction_service import HIDDEN_PREDICTION_PAIRS
+
+        assert HIDDEN_PREDICTION_PAIRS == [
+            "dixon_coles_nhl:correct_score",
+            "dixon_coles_nhl:double_chance",
+            "dixon_coles_nhl:over_under",
+            "dixon_coles_nhl:regulation_1x2",
+            "dixon_coles_nhl:total_goals",
+        ]
+        for visible in (
+            "dixon_coles_nhl:puck_line",
+            "dixon_coles_nhl:clean_sheet",
+            "dixon_coles_nhl:win_to_nil",
+            "ensemble:over_under",
+            "ensemble:correct_score",
+            "ensemble:double_chance",
+            "ensemble_nhl_reg:match_result",
+        ):
+            assert visible not in HIDDEN_PREDICTION_PAIRS
+
+    def test_every_display_query_withholds_the_hidden_pairs(self, mock_db, mock_row, mock_settings):
+        """upcoming (default and an explicit market=regulation_1x2), the match
+        detail page and the live list all filter in SQL — before DISTINCT ON
+        and LIMIT, so a hidden row can neither show nor shadow another."""
+        from services.prediction_service import HIDDEN_PREDICTION_PAIRS, PredictionService
+
+        predicate = "NOT ((p.model_name || ':' || p.prediction_type) = ANY(:hidden_pairs))"
+        service = PredictionService(mock_db)
+
+        mock_db.execute.return_value.fetchall.return_value = []
+        for kwargs in ({}, {"sport": "nhl", "market": "regulation_1x2"}):
+            service.get_upcoming_predictions(**kwargs)
+            sql, params = str(mock_db.execute.call_args[0][0]), mock_db.execute.call_args[0][1]
+            assert predicate in sql and sql.index(predicate) < sql.index("ORDER BY p.match_id")
+            assert params["hidden_pairs"] == HIDDEN_PREDICTION_PAIRS
+
+        service.get_live_predictions()
+        sql, params = str(mock_db.execute.call_args[0][0]), mock_db.execute.call_args[0][1]
+        assert predicate in sql and params["hidden_pairs"] == HIDDEN_PREDICTION_PAIRS
+
+        row = mock_row(
+            id=uuid.uuid4(),
+            match_id=uuid.uuid4(),
+            predicted_outcome="home",
+            confidence=0.6,
+            probabilities={"home": 0.6, "away": 0.4},
+            model_name="ensemble_nhl_ml",
+            model_version="v1.0",
+            prediction_type="moneyline",
+            match_date=datetime(2026, 11, 3, 0, 0),
+            venue=None,
+            league_name="NHL",
+            sport="nhl",
+            home_team="Boston Bruins",
+            away_team="Montreal Canadiens",
+        )
+        self._run_match_predictions(mock_db, mock_row, [row])
+        sql, params = str(mock_db.execute.call_args_list[-1][0][0]), mock_db.execute.call_args_list[-1][0][1]
+        assert predicate in sql and sql.index(predicate) < sql.index("ORDER BY p.prediction_type")
+        assert params == {"match_id": params["match_id"], "hidden_pairs": HIDDEN_PREDICTION_PAIRS}
+
     def test_maybe_enqueue_alert_below_threshold_is_noop(self, mock_db, mock_settings):
         """Low-confidence picks must NOT enqueue — otherwise the digest
         fills with junk and the user loses trust in the alerts."""

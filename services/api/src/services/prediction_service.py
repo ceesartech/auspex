@@ -364,6 +364,30 @@ HEADLINE_PAIRS: List[str] = sorted(
 )
 
 
+# "<model_name>:<prediction_type>" pairs that are stored and graded but NOT
+# displayed by any prediction endpoint (upcoming, match, live). The NHL
+# Dixon-Coles markets below lost to a per-season constant beyond the noise on
+# the 2026-11-01 gate (scripts/ab_nhl_regulation_ties.py: 1,611 games
+# 2025-10..2026-10, fold-clustered t 95% bound of constant - served < 0):
+# regulation_1x2 -0.0235 Brier, double_chance '12' -0.0084 / 'X2' -0.0080,
+# total_goals -0.0197, over_under's 4.5 line -0.0029, and correct_score's
+# 121-cell grid -0.0093 (it also lists tied scorelines, which an NHL final
+# never is). The served artifact puts 15% on regulation ties against ~25%
+# realised. Its puck_line, clean_sheet and win_to_nil sat inside the noise and
+# stay visible; soccer's same-named markets (model_name 'ensemble') are
+# untouched. precompute_predictions_nhl still writes and grading still grades
+# these rows, so the record keeps accruing. Remove an entry only when a gated
+# artifact replaces the one that lost.
+HIDDEN_PREDICTION_PAIRS: List[str] = sorted(
+    f"dixon_coles_nhl:{prediction_type}"
+    for prediction_type in ("regulation_1x2", "double_chance", "total_goals", "over_under", "correct_score")
+)
+# Appended to the WHERE of every display query; binds :hidden_pairs. Both
+# columns are NOT NULL (001_create_schema), so the pair is never NULL and the
+# NOT never drops a row by accident.
+_NOT_HIDDEN_SQL = "NOT ((p.model_name || ':' || p.prediction_type) = ANY(:hidden_pairs))"
+
+
 # Process-wide model registry. Populated once during app startup
 # (see services/api/src/main.py lifespan) and shared across requests.
 # Loading joblib pickles on every request adds ~10-50ms; this avoids that.
@@ -943,7 +967,7 @@ class PredictionService:
         # rows per market. Prod 2026-09-02: 28 MMA + 12 tennis + 2 NFL
         # matches carried duplicates that would render as duplicate cards.
         query = text(
-            """
+            f"""
             SELECT * FROM (
                 SELECT DISTINCT ON (p.match_id, p.prediction_type)
                        p.id, p.match_id, p.predicted_outcome, p.confidence,
@@ -963,6 +987,7 @@ class PredictionService:
                 AND (:league IS NULL OR l.name = :league)
                 AND (:prediction_type IS NULL OR p.prediction_type = :prediction_type)
                 AND (:headline_pairs IS NULL OR (l.sport || ':' || p.prediction_type) = ANY(:headline_pairs))
+                AND {_NOT_HIDDEN_SQL}
                 ORDER BY p.match_id, p.prediction_type, p.created_at DESC
             ) latest
             ORDER BY match_date ASC
@@ -981,6 +1006,7 @@ class PredictionService:
                 # `= ANY(:headline_pairs)` works without an expanding
                 # bindparam; None short-circuits the clause.
                 "headline_pairs": headline_pairs,
+                "hidden_pairs": HIDDEN_PREDICTION_PAIRS,
                 "limit": limit,
             },
         ).fetchall()
@@ -1052,7 +1078,7 @@ class PredictionService:
         # per market on long-lead fixtures, which rendered as duplicate
         # moneyline cards on the detail page).
         query = text(
-            """
+            f"""
             SELECT * FROM (
                 SELECT DISTINCT ON (p.prediction_type)
                        p.id, p.match_id, p.predicted_outcome, p.confidence,
@@ -1067,13 +1093,14 @@ class PredictionService:
                 JOIN teams ht ON m.home_team_id = ht.id
                 JOIN teams at ON m.away_team_id = at.id
                 WHERE p.match_id = :match_id
+                AND {_NOT_HIDDEN_SQL}
                 ORDER BY p.prediction_type, p.created_at DESC
             ) latest
             ORDER BY prediction_type ASC
         """
         )
 
-        results = list(db.execute(query, {"match_id": match_id}).fetchall())
+        results = list(db.execute(query, {"match_id": match_id, "hidden_pairs": HIDDEN_PREDICTION_PAIRS}).fetchall())
 
         # Headline market first, everything else keeps the SQL
         # prediction_type order (Python's sort is stable). Sport comes
@@ -1124,7 +1151,7 @@ class PredictionService:
         """Get predictions for live matches"""
 
         query = text(
-            """
+            f"""
             SELECT p.id, p.match_id, p.predicted_outcome, p.confidence,
                    p.probabilities, p.model_version,
                    m.match_date, m.venue,
@@ -1136,12 +1163,13 @@ class PredictionService:
             JOIN teams ht ON m.home_team_id = ht.id
             JOIN teams at ON m.away_team_id = at.id
             WHERE m.status = 'live'
+            AND {_NOT_HIDDEN_SQL}
             ORDER BY m.match_date ASC
         """
         )
 
         db = self._require_db()
-        results = db.execute(query).fetchall()
+        results = db.execute(query, {"hidden_pairs": HIDDEN_PREDICTION_PAIRS}).fetchall()
 
         predictions = []
         for row in results:
