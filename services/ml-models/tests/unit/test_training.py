@@ -215,7 +215,7 @@ class TestFitConvergenceReporting:
     def test_the_documented_soccer_poisson_cycle_is_a_warning(self, caplog):
         status, levels, text = self._report("poisson_soccer_match_result", _diag(), caplog)
         assert status == "accepted" and levels == ["WARNING"]
-        assert "SYSTEM_AUDIT_AND_ROADMAP.md" in text and "1000 of 1000" in text and "27 connected" in text
+        assert "SYSTEM_AUDIT_AND_ROADMAP.md" in text and "1000 of 1000" in text and "27 free scale" in text
 
     def test_any_other_mechanism_on_the_same_model_is_an_error(self, caplog):
         for diag in (_diag(oscillating=False), _diag(components=1), _diag(gauge="per_component")):
@@ -226,6 +226,20 @@ class TestFitConvergenceReporting:
     def test_another_model_failing_to_converge_is_an_error(self, caplog):
         status, levels, _ = self._report("dixon_coles_soccer_match_result", _diag(), caplog)
         assert status == "unexpected" and levels == ["ERROR"]
+
+    def test_the_summary_lists_every_classified_fit_and_nothing_else(self):
+        from training.train_all_models import fit_convergence_summary
+
+        results = {
+            "poisson_soccer_match_result": {"convergence": "accepted", **_diag(), "iterations": None},
+            "dixon_coles_soccer_match_result": {"convergence": "converged", **_diag(converged=True)},
+            "xgboost_soccer_match_result": {"validation_metrics": {}},
+            "lightgbm_soccer_match_result": {"error": "boom"},
+        }
+        summary = fit_convergence_summary(results)
+        assert set(summary) == {"poisson_soccer_match_result", "dixon_coles_soccer_match_result"}
+        assert summary["poisson_soccer_match_result"] == {"convergence": "accepted", **_diag()}
+        assert fit_convergence_summary({}) == {} and fit_convergence_summary(None) == {}
 
     def test_a_converged_fit_and_a_model_without_diagnostics_are_quiet(self, caplog):
         assert self._report("poisson_soccer_match_result", _diag(converged=True), caplog)[:2] == ("converged", [])
@@ -306,6 +320,7 @@ class TestSeenIdsTravelWithTheirEnsemble:
                 model.write_text('{"weights": {"a": 1.0}}')
                 self.trained_models[bundle.ensemble_name] = object()
                 self.results[bundle.ensemble_name] = {}
+                self.results["poisson_soccer_match_result"] = {"convergence": "accepted", **_diag()}
             elif outcome == "failed":
                 self.results[bundle.ensemble_name] = {"error": "ensemble blew up"}
             return self.results
@@ -329,6 +344,12 @@ class TestSeenIdsTravelWithTheirEnsemble:
         assert doc["n"] == 85 == len(doc["match_ids"])  # train + val = int(0.85 x 100)
         assert doc["writer"].endswith("write_seen_ids") and doc["written_at"]
         assert not list(seen.parent.glob(".*.tmp"))  # the temp file was renamed, not left behind
+        # The fit classification rides in the report, where the promote gate
+        # reads it (the Modal backend drops the log of a run that succeeded).
+        report = json.loads((tmp_path / "training_report.json").read_text())
+        assert report["fit_convergence"] == {
+            "poisson_soccer_match_result": {"convergence": "accepted", **_diag()},
+        }
 
     def test_a_failed_ensemble_records_nothing_and_says_so(self, tmp_path, monkeypatch, caplog):
         with caplog.at_level("ERROR"):

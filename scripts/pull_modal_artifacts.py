@@ -57,6 +57,21 @@ DERIVED-MARKET GUARD (second gated number, applied AFTER the above):
   that derives nothing, or an artifact predating the metric, is reported as
   "not checked" and gated on 1x2 alone; absence is never read as a pass.
 
+FIT-CONVERGENCE GUARD (applied last, to every promote path):
+  train_all_models classifies every Poisson-family fit as converged, accepted
+  (a documented non-convergence: the soccer Poisson member's 2-cycle across
+  disconnected leagues, train_all_models.ACCEPTED_NONCONVERGENCE) or
+  unexpected, and writes that into training_report.json ("fit_convergence").
+  The trainer logs it too, but train_modal captures the trainer's output and
+  nobody reads the log of a run that succeeded, so the decision is made here:
+  a bundle with an UNEXPECTED non-convergence is REJECTED (its incumbent keeps
+  serving), logged at ERROR with the fit diagnostics, listed in
+  promote_decisions.json ("nonconverged_unexpected") and named in the
+  Telegram digest, because a fit that stopped short of an optimum must be
+  looked at before it serves. An ACCEPTED one is recorded in the decision row
+  and logged at INFO, and never pages. A report without the classification
+  is "not checked", never a pass.
+
 --shadow gates + reports but writes NOTHING into staging (the bootstrap run: pull,
 gate, eyeball promote_decisions.json vs live Brier, then let a real run swap).
 
@@ -92,6 +107,7 @@ from modal_bundles import (  # noqa: E402
     derived_metric,
     fingerprint_from_report,
     fingerprints_comparable,
+    fit_convergence_from_report,
     gate_tolerance,
     newest_model_bin,
     paired_decision,
@@ -559,6 +575,34 @@ def decide_bundle(
         reason = f"1x2 gate passed ({reason}) BUT {guard_reason} — kept incumbent"
         logger.error("[gate] %s: %s", bundle, reason)
 
+    # The fit-convergence guard (module docstring). The trainer's own log line
+    # is lost on the Modal backend when the run succeeds, so this is where an
+    # unexpected non-convergence becomes loud.
+    convergence = fit_convergence_from_report(_read_json(bundle_dir / "training_report.json"))
+    for item in convergence["accepted"]:
+        logger.info(
+            "[gate] %s: %s did not converge — a documented, accepted condition (recorded, no page): %s",
+            bundle,
+            item["model"],
+            json.dumps(item["fit_diagnostics"], sort_keys=True),
+        )
+    unexpected = [item["model"] for item in convergence["unexpected"]]
+    for item in convergence["unexpected"]:
+        logger.error(
+            "[gate] %s: %s did not converge and that is NOT a documented condition; its parameters are not an "
+            "optimum: %s",
+            bundle,
+            item["model"],
+            json.dumps(item["fit_diagnostics"], sort_keys=True),
+        )
+    if unexpected:
+        what = f"{', '.join(unexpected)} did not converge (not a documented condition; investigate before it serves)"
+        if decision == "promote":
+            decision = "reject"
+            reason = f"gates passed ({reason}) BUT {what} — kept incumbent"
+        else:
+            reason = f"{reason}; also {what}"
+
     return {
         "bundle": bundle,
         "ensemble_name": ensemble_name,
@@ -578,6 +622,8 @@ def decide_bundle(
         "needs_manual": needs_manual,
         "derived_metric": derived,
         "derived_guard": {"ok": guard_ok, "reason": guard_reason},
+        "fit_convergence": convergence,
+        "nonconverged_unexpected": unexpected,
     }
 
 
@@ -632,6 +678,12 @@ def gate_and_stage(
     manual = [d["bundle"] for d in decisions if d.get("needs_manual")]
     # .get() throughout: a decision row from an older writer has no derived_guard.
     guard_failed = [d["bundle"] for d in decisions if (d.get("derived_guard") or {}).get("ok") is False]
+    nonconverged = {d["bundle"]: d["nonconverged_unexpected"] for d in decisions if d.get("nonconverged_unexpected")}
+    accepted = {
+        d["bundle"]: [item["model"] for item in d["fit_convergence"]["accepted"]]
+        for d in decisions
+        if (d.get("fit_convergence") or {}).get("accepted")
+    }
     summary = {
         "run_id": run_id,
         "shadow": shadow,
@@ -639,6 +691,9 @@ def gate_and_stage(
         "decisions": decisions,
         "needs_manual": manual,
         "derived_guard_failed": guard_failed,
+        "nonconverged_unexpected": nonconverged,
+        # Recorded, never paged: documented conditions (ACCEPTED_NONCONVERGENCE).
+        "nonconverged_accepted": accepted,
     }
     # Drop the decision log where an operator can find it: into staging on a real
     # run (rides to production), into incoming on a shadow run.
@@ -653,6 +708,14 @@ def gate_and_stage(
         head += f"; kept incumbent for {', '.join(rejects)}"
     if guard_failed:
         head += f"; ⚠️ derived-market guard FAILED for {', '.join(guard_failed)} (worse than a constant on over 2.5)"
+    if nonconverged:
+        named = "; ".join(f"{b}: {', '.join(models)}" for b, models in nonconverged.items())
+        head += f"; ⚠️ UNEXPECTED NON-CONVERGENCE ({named}) — kept incumbent, investigate before it serves"
+        logger.error(
+            "%d bundle(s) had a fit that did not converge for an undocumented reason (rejected): %s",
+            len(nonconverged),
+            named,
+        )
     if manual:
         head += f"; ⚠️ MANUAL DECISION NEEDED for {', '.join(manual)} (frames not comparable, paired re-score failed)"
         logger.error(

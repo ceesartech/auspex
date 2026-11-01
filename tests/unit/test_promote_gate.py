@@ -80,6 +80,7 @@ def make_bundle_dir(
     kept: bool = False,
     with_report: bool = True,
     derived: dict | None = None,
+    fit_convergence: dict | None = None,
 ) -> Path:
     """A fake modal-incoming/<run>/<bundle>/ tree: gate.json + the sibling
     training_report.json the fingerprint is derived from + a model dir.
@@ -102,20 +103,19 @@ def make_bundle_dir(
         gate["derived"] = derived
     (d / "gate.json").write_text(json.dumps({"status": status, "bundle": bundle, "run_id": RUN, "gate": gate}))
     if with_report:
-        (d / "training_report.json").write_text(
-            json.dumps(
-                {
-                    "data_quality": {
-                        "rows": rows,
-                        "date_min": date_min,
-                        "date_max": date_max,
-                        "feature_count": 42,
-                        "target_classes": 3,
-                    },
-                    "holdout_test": gate,
-                }
-            )
-        )
+        report = {
+            "data_quality": {
+                "rows": rows,
+                "date_min": date_min,
+                "date_max": date_max,
+                "feature_count": 42,
+                "target_classes": 3,
+            },
+            "holdout_test": gate,
+        }
+        if fit_convergence is not None:
+            report["fit_convergence"] = fit_convergence
+        (d / "training_report.json").write_text(json.dumps(report))
     return d
 
 
@@ -1129,3 +1129,156 @@ def test_the_api_and_the_gate_resolve_the_same_model_bin(tmp_path):
         os.utime(d / version / "model.bin", (1_000_000 + i, 1_000_000 + i))
     assert mb.newest_model_bin(d) == d / "2.0.0" / "model.bin"
     assert mb.newest_model_bin(tmp_path / "nothing") is None
+
+
+# ── F. the fit-convergence guard ─────────────────────────────────────
+# train_all_models classifies every Poisson-family fit; on the Modal backend
+# the trainer's log of a SUCCESSFUL run is captured and dropped, so the gate
+# is where an unexpected non-convergence must become loud.
+
+TWO_CYCLE = {
+    "converged": False,
+    "iterations_run": 1000,
+    "max_iterations": 1000,
+    "tolerance": 1e-6,
+    "final_max_change": 0.3207,
+    "final_two_step_change": 4.0e-6,
+    "period_two_oscillation": True,
+    "connected_components": 27,
+    "gauge": "global",
+}
+SLOW = {**TWO_CYCLE, "final_max_change": 2e-5, "final_two_step_change": 4e-5, "period_two_oscillation": False}
+SOCCER_CONVERGENCE_ACCEPTED = {
+    "poisson_soccer_match_result": {"convergence": "accepted", "fit_diagnostics": TWO_CYCLE},
+    "dixon_coles_soccer_match_result": {
+        "convergence": "converged",
+        "fit_diagnostics": {**TWO_CYCLE, "converged": True, "iterations_run": 54, "period_two_oscillation": False},
+    },
+}
+
+
+def test_convergence_is_read_from_the_report_summary_or_from_each_result():
+    got = mb.fit_convergence_from_report({"fit_convergence": SOCCER_CONVERGENCE_ACCEPTED})
+    assert got["checked"] is True and got["converged"] == ["dixon_coles_soccer_match_result"]
+    assert [a["model"] for a in got["accepted"]] == ["poisson_soccer_match_result"] and got["unexpected"] == []
+    assert got["accepted"][0]["fit_diagnostics"]["connected_components"] == 27
+
+    # No summary: the per-model labels in results. A model with diagnostics
+    # but no label is classified from them, and only the trainer may accept.
+    got = mb.fit_convergence_from_report(
+        {
+            "results": {
+                "hockey_poisson_nhl_ml": {"convergence": "converged", "fit_diagnostics": {"converged": True}},
+                "hockey_poisson_nhl_tot": {"fit_diagnostics": SLOW},
+                "hockey_poisson_nhl_pl": {"convergence": "fine, honestly", "fit_diagnostics": SLOW},
+                "xgboost_nhl_ml": {"validation_metrics": {}},
+            }
+        }
+    )
+    assert got["converged"] == ["hockey_poisson_nhl_ml"]
+    assert [u["model"] for u in got["unexpected"]] == ["hockey_poisson_nhl_pl", "hockey_poisson_nhl_tot"]
+
+
+def test_a_report_without_the_classification_is_not_checked_rather_than_passed():
+    legacy = {"data_quality": {"rows": 1}, "results": {"poisson_soccer_match_result": {"iterations": None}}}
+    for report in (None, {}, legacy):
+        got = mb.fit_convergence_from_report(report)
+        assert got == {"checked": False, "converged": [], "accepted": [], "unexpected": []}
+    # The classifying trainer on a bundle with no Poisson-family member.
+    assert mb.fit_convergence_from_report({"fit_convergence": {}})["checked"] is True
+
+
+def test_an_unexpected_non_convergence_rejects_a_winning_bundle_and_pages(models_dir, caplog):
+    fp = fingerprint(8000, 1200)
+    seed_incumbent(models_dir, mb.BUNDLE_TO_ENSEMBLE["nhl_moneyline"], [entry("r1", 0.2450, 1200, fp)])
+    make_bundle_dir(
+        incoming_of(models_dir),
+        "nhl_moneyline",
+        brier=0.2400,  # a clear win on the 1x2 gate
+        rows=8000,
+        holdout_n=1200,
+        fit_convergence={"hockey_poisson_nhl_ml": {"convergence": "unexpected", "fit_diagnostics": SLOW}},
+    )
+    with caplog.at_level("INFO"):
+        summary = pull.gate_and_stage(RUN, str(models_dir), shadow=False, database_url=None, paired_fn=boom)
+
+    row = row_for(summary, "nhl_moneyline")
+    assert row["decision"] == "reject" and summary["promoted"] == 0
+    assert row["reason"].startswith("gates passed (brier 0.2400")
+    assert "hockey_poisson_nhl_ml did not converge (not a documented condition" in row["reason"]
+    assert row["nonconverged_unexpected"] == ["hockey_poisson_nhl_ml"]
+    assert row["fit_convergence"]["unexpected"][0]["fit_diagnostics"] == SLOW
+    assert summary["nonconverged_unexpected"] == {"nhl_moneyline": ["hockey_poisson_nhl_ml"]}
+    # Nothing staged: the incumbent keeps serving.
+    assert not (models_dir / "staging" / "ensemble_nhl_moneyline").exists()
+    written = json.loads((models_dir / "staging" / "promote_decisions.json").read_text())
+    assert written["nonconverged_unexpected"] == {"nhl_moneyline": ["hockey_poisson_nhl_ml"]}
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert any("NOT a documented condition" in m and '"final_max_change": 2e-05' in m for m in errors)
+    assert "UNEXPECTED NON-CONVERGENCE (nhl_moneyline: hockey_poisson_nhl_ml)" in pages[-1]
+
+
+def test_an_unexpected_non_convergence_is_added_to_a_reject_it_does_not_mask(models_dir):
+    fp = fingerprint(8000, 1200)
+    seed_incumbent(models_dir, mb.BUNDLE_TO_ENSEMBLE["nhl_total"], [entry("r1", 0.2400, 1200, fp)])
+    make_bundle_dir(
+        incoming_of(models_dir),
+        "nhl_total",
+        brier=0.3000,  # loses the 1x2 gate on its own
+        rows=8000,
+        holdout_n=1200,
+        fit_convergence={"hockey_poisson_nhl_tot": {"convergence": "unexpected", "fit_diagnostics": SLOW}},
+    )
+    summary = pull.gate_and_stage(RUN, str(models_dir), shadow=True, database_url=None, paired_fn=boom)
+    row = row_for(summary, "nhl_total")
+    assert row["decision"] == "reject" and row["reason"].startswith("brier 0.3000 >")
+    assert row["reason"].endswith(
+        "hockey_poisson_nhl_tot did not converge (not a documented condition; " "investigate before it serves)"
+    )
+    assert "UNEXPECTED NON-CONVERGENCE" in pages[-1]
+
+
+def test_the_documented_soccer_two_cycle_promotes_is_recorded_and_never_pages(models_dir, caplog):
+    fp = fingerprint(30000, 4500)
+    seed_incumbent(models_dir, SOCCER_ENSEMBLE, [entry("r1", 0.5950, 4500, fp)])
+    make_bundle_dir(
+        incoming_of(models_dir),
+        SOCCER,
+        brier=0.5900,
+        rows=30000,
+        holdout_n=4500,
+        fit_convergence=SOCCER_CONVERGENCE_ACCEPTED,
+    )
+    with caplog.at_level("INFO"):
+        summary = pull.gate_and_stage(RUN, str(models_dir), shadow=True, database_url=None, paired_fn=boom)
+
+    row = row_for(summary, SOCCER)
+    assert row["decision"] == "promote" and row["nonconverged_unexpected"] == []
+    assert [a["model"] for a in row["fit_convergence"]["accepted"]] == ["poisson_soccer_match_result"]
+    assert summary["nonconverged_unexpected"] == {}
+    assert summary["nonconverged_accepted"] == {SOCCER: ["poisson_soccer_match_result"]}
+    assert not any(r.levelname in ("WARNING", "ERROR") and "converge" in r.getMessage() for r in caplog.records)
+    assert any(
+        r.levelname == "INFO" and "accepted condition (recorded, no page)" in r.getMessage() for r in caplog.records
+    )
+    assert "NON-CONVERGENCE" not in pages[-1] and "poisson" not in pages[-1]
+
+
+def test_a_report_that_predates_the_classification_gates_as_before(models_dir):
+    fp = fingerprint(30000, 4500)
+    seed_incumbent(models_dir, SOCCER_ENSEMBLE, [entry("r1", 0.5950, 4500, fp)])
+    make_bundle_dir(incoming_of(models_dir), SOCCER, brier=0.5900, rows=30000, holdout_n=4500)
+    summary = pull.gate_and_stage(RUN, str(models_dir), shadow=True, database_url=None, paired_fn=boom)
+    row = row_for(summary, SOCCER)
+    assert row["decision"] == "promote" and row["fit_convergence"]["checked"] is False
+
+
+def test_notable_log_lines_keep_only_warnings_and_errors():
+    log = "INFO training: fit\nWARNING training: poisson did not converge\nan ERROR line\nERRORS are not\n"
+    assert mb.notable_log_lines(log) == ["WARNING training: poisson did not converge", "an ERROR line"]
+    assert mb.notable_log_lines("\n".join(f"ERROR {i}" for i in range(50)), limit=3) == [
+        "ERROR 47",
+        "ERROR 48",
+        "ERROR 49",
+    ]
+    assert mb.notable_log_lines(None) == []

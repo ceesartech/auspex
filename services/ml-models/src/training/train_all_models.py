@@ -141,8 +141,12 @@ logger = logging.getLogger(__name__)
 # in the artifact (fit_diagnostics), but nothing pages on it, because the
 # condition is known and its fix was measured and did not pass the gate.
 # An entry accepts ONLY the mechanism it documents. The same model failing to
-# converge for any other reason (no 2-cycle, a single component, a different
+# converge for any other reason (no 2-cycle, a single free scale, a different
 # gauge) is still an ERROR.
+# The trainer's log is not where anyone looks on the Modal backend, so the
+# classification also rides into training_report.json ("fit_convergence"),
+# and scripts/pull_modal_artifacts.py rejects a bundle with an "unexpected"
+# fit and pages for it; an "accepted" one is recorded there and never pages.
 ACCEPTED_NONCONVERGENCE: Dict[str, Dict[str, str]] = {
     "poisson_soccer_match_result": {
         "mechanism": (
@@ -167,7 +171,7 @@ def report_fit_convergence(name: str, result: Any) -> Optional[str]:
         f"stopped at {diag.get('iterations_run')} of {diag.get('max_iterations')} iterations, "
         f"max parameter change {diag.get('final_max_change')} > tol {diag.get('tolerance')}, "
         f"change over two iterations {diag.get('final_two_step_change')}, "
-        f"{diag.get('connected_components')} connected component(s), gauge={diag.get('gauge')}"
+        f"{diag.get('connected_components')} free scale(s), gauge={diag.get('gauge')}"
     )
     entry = ACCEPTED_NONCONVERGENCE.get(name)
     documented = (
@@ -192,6 +196,17 @@ def report_fit_convergence(name: str, result: Any) -> Optional[str]:
         summary,
     )
     return "unexpected"
+
+
+def fit_convergence_summary(results: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """{model name: {"convergence": label, "fit_diagnostics": {...}}} for every
+    model whose train() reported fit diagnostics (the Poisson family), in the
+    labels report_fit_convergence gave them. Empty when no model reports."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for name, result in (results or {}).items():
+        if isinstance(result, dict) and result.get("convergence") is not None:
+            out[name] = {"convergence": result["convergence"], "fit_diagnostics": result.get("fit_diagnostics")}
+    return out
 
 
 # ── Sport bundles ─────────────────────────────────────────────────────
@@ -1193,6 +1208,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         "results": results,
         "onnx_models": onnx_paths,
         "holdout_test": holdout,
+        # How every Poisson-family fit ended, in one place the promote gate
+        # reads (scripts/modal_bundles.fit_convergence_from_report): on the
+        # Modal backend nobody reads this run's log when it succeeds.
+        "fit_convergence": fit_convergence_summary(results),
     }
 
     output_dir = Path(args.output_dir)
