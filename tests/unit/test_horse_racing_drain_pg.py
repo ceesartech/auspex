@@ -8,6 +8,9 @@ own copy). The Racing API is stubbed at load_racing_api.fetch_race_result.
     then settles the recs the way close_out's plan said it would;
   * nothing pending -> no API call and no credentials needed; an API failure or
     missing credentials with work to do fails the run; --dry-run writes nothing;
+  * a result that misses an entrant a pending rec rides on is not ingested; a
+    result that does not land on its race, or whose ingest raises, is rolled
+    back and the races behind it still drain — each fails the run;
   * close_out_stranded_race_recs settles from a result, voids where the API has
     none, touches nothing inside the drain window or after --raced-before,
     refuses unmatched fields and pin drift, rolls everything back when the
@@ -294,7 +297,7 @@ def test_the_drain_ingests_a_posted_result_and_the_grader_settles_it_as_planned(
         ], key
 
 
-def test_the_drain_asks_only_about_open_races_inside_its_window(dsn, db, monkeypatch):
+def test_the_drain_asks_only_about_open_races_inside_its_window(dsn, db, monkeypatch, caplog):
     def race_with_rec(off, race_status="scheduled", rec_status="pending"):
         race = _race(db, off, status=race_status)
         _rec(db, race, _entrant(db, race, f"Horse {uuid.uuid4().hex[:6]}", 1), "h", status=rec_status)
@@ -310,10 +313,15 @@ def test_the_drain_asks_only_about_open_races_inside_its_window(dsn, db, monkeyp
     monkeypatch.setattr(lra, "fetch_race_result", api)
     monkeypatch.setattr(lra, "_auth", lambda: object())
 
-    totals = lra.run_drain(dsn)
+    with caplog.at_level("WARNING", logger="load_racing_api"):
+        totals = lra.run_drain(dsn)
     assert api.calls == [asked["api"]]
     assert totals["not_posted"] == 1 and totals["errors"] == 0 and totals["resolved"] == 0
     assert totals["upcoming_recs"] == 2 and totals["stranded_recs"] == 1
+    # The stranded WARNING must not promise more than the close-out does: it covers races before its pin only.
+    (warning,) = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warning.startswith("1 pending race rec(s)") and "before its reviewed RACED_BEFORE" in warning
+    assert "need a new reviewed pin" in warning
     db.execute(
         "SELECT count(*) AS n FROM races WHERE status = 'scheduled' AND id = ANY(%s::uuid[])",
         ([asked["id"], not_off["id"], future["id"], stranded["id"]],),
@@ -362,6 +370,104 @@ def test_a_dry_run_writes_nothing(dsn, db, monkeypatch):
         "SELECT count(*) AS n FROM race_entrants WHERE race_id = %s AND finish_position IS NOT NULL", (race["id"],)
     )
     assert db.fetchone()["n"] == 0
+
+
+def test_a_result_that_does_not_land_on_its_race_is_rolled_back(dsn, db, monkeypatch):
+    race, recs, payload = _seed_full_field(db, NOW - timedelta(hours=2))
+    later, later_recs, later_payload = _seed_full_field(db, NOW - timedelta(hours=1))
+    del payload["off_dt"]  # upsert_race skips it: ingest_race returns no race id
+    db.execute("SELECT count(*) AS n FROM leagues")
+    leagues_before = db.fetchone()["n"]
+    monkeypatch.setattr(lra, "fetch_race_result", FakeApi({race["api"]: payload, later["api"]: later_payload}))
+    monkeypatch.setattr(lra, "_auth", lambda: object())
+
+    assert lra.main(["--drain", "--database-url", dsn]) == 1
+    db.execute("SELECT id::text AS id, status FROM races WHERE id = ANY(%s::uuid[])", ([race["id"], later["id"]],))
+    assert {r["id"]: r["status"] for r in db.fetchall()} == {race["id"]: "scheduled", later["id"]: "finished"}
+    db.execute("SELECT count(*) AS n FROM leagues")
+    assert db.fetchone()["n"] == leagues_before + 1  # the later race's track; the skipped one's was rolled back
+    db.execute(
+        "SELECT count(*) AS n FROM race_entrants WHERE race_id = %s AND (finish_position IS NOT NULL OR scratched)",
+        (race["id"],),
+    )
+    assert db.fetchone()["n"] == 0
+
+
+def test_one_ingest_that_raises_does_not_block_the_races_behind_it(dsn, db, monkeypatch):
+    first, _, first_payload = _seed_full_field(db, NOW - timedelta(hours=3))
+    second, second_recs, second_payload = _seed_full_field(db, NOW - timedelta(hours=1))
+    real_ingest = lra.ingest_race
+
+    def ingest(cur, payload, finished):
+        if payload["race_id"] == first["api"]:
+            real_ingest(cur, payload, finished)  # writes, then fails: the rollback must take it all back
+            raise psycopg2.errors.NumericValueOutOfRange("numeric field overflow")
+        return real_ingest(cur, payload, finished)
+
+    monkeypatch.setattr(lra, "ingest_race", ingest)
+    monkeypatch.setattr(lra, "fetch_race_result", FakeApi({first["api"]: first_payload, second["api"]: second_payload}))
+    monkeypatch.setattr(lra, "_auth", lambda: object())
+
+    totals = lra.run_drain(dsn)
+    assert (totals["races"], totals["resolved"], totals["errors"]) == (2, 1, 1)
+    assert lra.main(["--drain", "--database-url", dsn]) == 1  # the next tick asks again and fails again
+    db.execute("SELECT id::text AS id, status FROM races WHERE id = ANY(%s::uuid[])", ([first["id"], second["id"]],))
+    assert {r["id"]: r["status"] for r in db.fetchall()} == {first["id"]: "scheduled", second["id"]: "finished"}
+    db.execute(
+        "SELECT count(*) AS n FROM race_entrants WHERE race_id = %s AND finish_position IS NOT NULL", (first["id"],)
+    )
+    assert db.fetchone()["n"] == 0
+
+
+def _misspelt_race(db, off, place_rec_on_alpha=False, rec_on_misspelt=True):
+    """The card spells a runner 'Jo Arengeot Bey Aa', the result 'Jo Arengeot Bey (FR)' (prod, Ayr 31 Oct)."""
+    race = _race(db, off)
+    names = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Jo Arengeot Bey Aa"]
+    ent = {n: _entrant(db, race, n, i + 1) for i, n in enumerate(names)}
+    recs = [_rec(db, race, ent["Alpha"], "Alpha", bet_type="place" if place_rec_on_alpha else "win")]
+    if rec_on_misspelt:
+        recs.append(_rec(db, race, ent["Jo Arengeot Bey Aa"], "Jo Arengeot Bey Aa", odds="9.00"))
+    payload = _payload(
+        race,
+        [
+            ("Jo Arengeot Bey (FR)", "1"),
+            ("Alpha", "2"),
+            ("Bravo", "3"),
+            ("Charlie", "4"),
+            ("Delta", "5"),
+            ("Echo", "6"),
+        ],
+    )
+    return race, recs, payload
+
+
+@pytest.mark.parametrize(
+    "place_rec_on_alpha, rec_on_misspelt, refused",
+    [
+        (False, True, True),  # the rec on the misspelt horse would be graded lost — it won
+        (True, False, True),  # a place rec: the field the grader counts would carry the twin
+        (False, False, False),  # win recs only, none on it: the winner is read from positions — ingested
+    ],
+)
+def test_a_result_that_misses_an_entrant_a_rec_rides_on_is_not_ingested(
+    dsn, db, monkeypatch, caplog, place_rec_on_alpha, rec_on_misspelt, refused
+):
+    race, recs, payload = _misspelt_race(db, NOW - timedelta(hours=2), place_rec_on_alpha, rec_on_misspelt)
+    monkeypatch.setattr(lra, "fetch_race_result", FakeApi({race["api"]: payload}))
+    monkeypatch.setattr(lra, "_auth", lambda: object())
+
+    assert lra.main(["--drain", "--dry-run", "--database-url", dsn]) == (1 if refused else 0)
+    with caplog.at_level("WARNING", logger="load_racing_api"):
+        assert lra.main(["--drain", "--database-url", dsn]) == (1 if refused else 0)
+    db.execute("SELECT status FROM races WHERE id = %s", (race["id"],))
+    assert db.fetchone()["status"] == ("scheduled" if refused else "finished")
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "jo arengeot bey aa" in messages
+    if refused:
+        assert "NOT ingested" in messages and "result runners not on our card: jo arengeot bey" in messages
+    else:
+        gcr.run(dsn, 14, None)
+        assert _rec_row(db, recs[0]) == ("lost", Decimal("-10.00"), "Jo Arengeot Bey (FR)")
 
 
 # ── close-out ─────────────────────────────────────────────────────────────

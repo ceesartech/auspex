@@ -2,8 +2,9 @@
 
 * load_racing_api: /results is read page by page (prod 2026-11-01 had seven
   recs pending five months on page-2 races); /results/{race_id} tells a
-  missing result (404 "Result not found") from a failure; the non_runners
-  string parses into names; --drain / --dry-run on the CLI;
+  missing result (404 "Result not found - race <id>") from a failure, the
+  API's generic route 404 included; the non_runners string parses into
+  names; the drain's field check; --drain / --dry-run on the CLI;
 * close_out_stranded_race_recs: the verdict rules of plan_race_settlement
   (each mirrors grade_completed_races.settle_recommendations) and what the
   CLI refuses;
@@ -117,8 +118,14 @@ def test_a_total_that_never_ends_is_bounded(monkeypatch, caplog):
     "response, expect",
     [
         (FakeResponse(200, {"race_id": "rac_1", "runners": []}), "payload"),
-        (FakeResponse(404, text='{"detail":"Result not found - race rac_1"}'), None),
-        (FakeResponse(404, text="<html>Not Here</html>"), "error"),  # a wrong URL is not 'no result'
+        (FakeResponse(404, {"detail": "Result not found - race rac_1"}), None),  # the prod per-race 404
+        # A wrong path, base URL or version is the API's generic route 404 (prod probe 2026-11-01:
+        # /v1/resultz/... and /v9/results/... both answer this) — never 'no result'.
+        (FakeResponse(404, {"detail": "Not Found"}), "error"),
+        (FakeResponse(404, {"detail": "Result not found - race rac_9"}), "error"),  # about another race
+        (FakeResponse(404, text="Result not found - race rac_1"), "error"),  # not JSON
+        (FakeResponse(404, ["Result not found - race rac_1"]), "error"),
+        (FakeResponse(404, text="<html>Not Here</html>"), "error"),
         (FakeResponse(401, text="Unauthorized"), "error"),
         (FakeResponse(403, text='{"detail":"Standard Plan required"}'), "error"),
         (FakeResponse(500, text="boom"), "error"),
@@ -169,6 +176,41 @@ def test_a_network_failure_is_an_error(monkeypatch):
 )
 def test_parse_non_runners(text, names):
     assert lra.parse_non_runners(text) == names
+
+
+# ── the drain's field check ───────────────────────────────────────────────
+
+
+def _drain_field(*rows):
+    """(horse, scratched, pending recs, pending place recs) -> DRAIN_FIELD_SQL rows."""
+    return [{"horse": h, "scratched": s, "pending_recs": n, "pending_place_recs": p} for h, s, n, p in rows]
+
+
+AYR = {  # prod, Ayr 31 Oct 13:18: the card's 'Jo Arengeot Bey Aa' is the result's 'Jo Arengeot Bey (FR)'
+    "runners": [{"horse": "Jo Arengeot Bey (FR)", "position": "6"}, {"horse": "Alpha", "position": "1"}],
+    "non_runners": "Gone (IRE) (going)",
+}
+
+
+@pytest.mark.parametrize(
+    "field, problem",
+    [
+        (_drain_field(("alpha", False, 1, 0), ("jo arengeot bey", False, 0, 0), ("gone", False, 0, 0)), None),
+        (_drain_field(("alpha", False, 1, 0), ("jo arengeot bey aa", False, 1, 0)), "carry a pending rec"),
+        (_drain_field(("alpha", False, 1, 1), ("jo arengeot bey aa", False, 0, 0)), "place rec"),
+        (_drain_field(("alpha", False, 1, 0), ("jo arengeot bey aa", False, 0, 0)), None),  # win only, none on it
+        (_drain_field(("alpha", False, 1, 1), ("jo arengeot bey aa", True, 1, 0)), None),  # already scratched
+    ],
+)
+def test_drain_field_problem(field, problem):
+    got = lra.drain_field_problem(field, AYR)
+    assert got is None if problem is None else (problem in got and "jo arengeot bey" in got)
+
+
+def test_unaccounted_entrants_are_ours_unscratched_and_named_nowhere():
+    field = [{"horse": h, "scratched": s} for h, s in [("alpha", False), ("jo arengeot bey aa", False),
+                                                       ("gone", False), ("late", True)]]  # fmt: skip
+    assert lra.unaccounted_entrants(field, AYR) == ["jo arengeot bey aa"]
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────

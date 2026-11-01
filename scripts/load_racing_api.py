@@ -22,10 +22,12 @@ ditto on Standard since /racecards/standard also returns today only.
 dormant (services/data-ingestion/dags/sport_switches.py): one
 /results/{race_id} call per race that still carries a pending rec, has
 been off DRAIN_GRACE_MINUTES and is at most DRAIN_DAYS old. Nothing
-pending in that window → no API call at all. Recs on races older than
-the window are "stranded"; the drain logs them and never touches them
-again (scripts/close_out_stranded_race_recs.py, operator-run, settles
-or voids them).
+pending in that window → no API call at all. A result that does not
+account for an entrant a pending rec rides on (a name the feeds spell
+differently) is not ingested and fails the run (drain_field_problem).
+Recs on races older than the window are "stranded"; the drain logs them
+and never touches them again (scripts/close_out_stranded_race_recs.py,
+operator-run, settles or voids them).
 
 A result also marks the entrants its `non_runners` string names as
 scratched, so grade_completed_races voids a rec on a withdrawn horse
@@ -265,23 +267,39 @@ class RacingApiError(RuntimeError):
     """A Racing API answer that is neither a result nor 'no result for this race'."""
 
 
+def _is_no_result(r, api_race_id: str) -> bool:
+    """Is this the API's per-race 404 — {"detail": "Result not found - race
+    <id>"}, the body of all 25 prod probes on 2026-11-01 — and not its
+    generic route 404 {"detail": "Not Found"} (a wrong path, base URL or
+    version), which would otherwise read every race as 'no result yet'
+    and, three days on, have the close-out void them all as abandoned."""
+    if r.status_code != 404:
+        return False
+    try:
+        body = r.json()
+    except ValueError:
+        return False
+    detail = body.get("detail") if isinstance(body, dict) else None
+    return isinstance(detail, str) and detail.startswith("Result not found") and api_race_id in detail
+
+
 def fetch_race_result(api_race_id: str, auth: HTTPBasicAuth) -> Optional[dict]:
     """One race's result by its Racing API id (/results/{race_id}).
 
-    Returns the payload, or None on the API's 404 "Result not found":
-    the race has not run, its result is not posted yet, or it never will
-    be — an abandoned meeting is dropped from the feed without a status
-    (prod 2026-11-01: Newbury 24 Oct, Aintree 25 Oct, ...). Anything else —
-    another status, a non-JSON body, a payload for a different race —
-    raises RacingApiError, so an auth, plan or network failure is never
-    read as 'no result'."""
+    Returns the payload, or None on the API's 404 "Result not found - race
+    <id>" (_is_no_result): the race has not run, its result is not posted
+    yet, or it never will be — an abandoned meeting is dropped from the
+    feed without a status (prod 2026-11-01: Newbury 24 Oct, Aintree 25 Oct,
+    ...). Anything else — another status, another 404 body, a non-JSON
+    body, a payload for a different race — raises RacingApiError, so an
+    auth, plan, routing or network failure is never read as 'no result'."""
     url = f"{BASE_URL}/results/{api_race_id}"
     try:
         r = requests.get(url, auth=auth, timeout=DEFAULT_TIMEOUT_SEC)
     except requests.RequestException as e:
         raise RacingApiError(f"/results/{api_race_id}: {e}") from e
     snippet = (r.text or "")[:200]
-    if r.status_code == 404 and "not found" in snippet.lower():
+    if _is_no_result(r, api_race_id):
         return None
     if r.status_code != 200:
         raise RacingApiError(f"/results/{api_race_id} -> HTTP {r.status_code}: {snippet}")
@@ -594,6 +612,31 @@ def parse_non_runners(text: Optional[str]) -> set[str]:
     return names
 
 
+def result_names(payload: dict) -> tuple[dict[str, dict], set[str]]:
+    """One result's runners keyed by normalized horse name, and the
+    normalized names of its non-runners."""
+    runners: dict[str, dict] = {}
+    for ru in payload.get("runners") or []:
+        name = normalize_name(ru.get("horse") or "")
+        if name:
+            runners[name] = ru
+    return runners, parse_non_runners(payload.get("non_runners"))
+
+
+def unaccounted_entrants(field: list[dict], payload: dict) -> list[str]:
+    """Our entrants ({horse: normalized name, scratched}) that are not
+    scratched and that the result names neither as a runner nor as a
+    non-runner — usually a name the two feeds spell differently: 'Jo
+    Arengeot Bey Aa' on the card, 'Jo Arengeot Bey (FR)' in the result
+    (prod, Ayr 31 Oct 13:18). Ingesting the result leaves such an entrant
+    running without a position — a rec on it is graded lost — next to a
+    new row for the result's spelling, which also inflates the field the
+    each-way place terms count."""
+    runners, non_runners = result_names(payload)
+    named = runners.keys() | non_runners
+    return sorted({f["horse"] for f in field if not f["scratched"] and f["horse"] not in named})
+
+
 def _safe_int(v) -> Optional[int]:
     if v in (None, ""):
         return None
@@ -800,18 +843,26 @@ def iter_dates(start: date, end: date) -> Iterable[date]:
 _COUNT_KEYS = ("races", "entrants", "skipped_races", "skipped_entrants", "non_runners")
 
 
+def league_key(race: dict) -> Optional[tuple[str, str]]:
+    """(name, country) of the leagues row a payload's track upserts into, or
+    None when the payload names no track."""
+    course = race.get("course") or race.get("track")
+    if not course:
+        return None
+    return course, "United Kingdom" if _looks_uk(course) else "Ireland"
+
+
 def ingest_race(cur, race: dict, finished: bool) -> tuple[Optional[str], dict]:
     """Upsert one racecard (finished=False) or result (finished=True)
     payload: its track's league, the race, every runner. A result also
     marks the entrants its `non_runners` names as scratched. Returns
     (race_id, or None when the payload was skipped; per-race counts)."""
     counts = dict.fromkeys(_COUNT_KEYS, 0)
-    course = race.get("course") or race.get("track")
-    if not course:
+    league = league_key(race)
+    if not league:
         counts["skipped_races"] += 1
         return None, counts
-    country = "United Kingdom" if _looks_uk(course) else "Ireland"
-    league_id = ensure_league(cur, course, country)
+    league_id = ensure_league(cur, *league)
     if not league_id:
         counts["skipped_races"] += 1
         return None, counts
@@ -920,6 +971,52 @@ DRAIN_BACKLOG_SQL = f"""
            count(*) FILTER (WHERE r.race_date < NOW() - make_interval(days => %(drain_days)s)) AS stranded_recs
     {_OPEN_REC_RACE}
 """
+# One race's field as the drain checks it against a result: each entrant's
+# normalized horse name, scratched, and its pending recs (place ones apart).
+DRAIN_FIELD_SQL = """
+    SELECT h.normalized_name AS horse,
+           e.scratched,
+           count(rec.id) AS pending_recs,
+           count(rec.id) FILTER (WHERE rec.bet_type = 'place') AS pending_place_recs
+    FROM race_entrants e
+    JOIN horses h ON h.id = e.horse_id
+    LEFT JOIN race_recommendations rec
+           ON rec.race_id = e.race_id AND rec.entrant_id = e.id AND rec.status IN ('pending', 'placed')
+    WHERE e.race_id = %s
+    GROUP BY e.id, h.normalized_name, e.scratched
+"""
+
+
+def drain_field_problem(field: list[dict], payload: dict) -> Optional[str]:
+    """Why ingesting this result could settle a pending rec wrong, or None.
+
+    It could when one of our entrants is unaccounted for
+    (unaccounted_entrants) and either carries a pending rec itself (graded
+    lost with no position, whatever it did) or shares the race with a
+    pending place rec (the grader's place terms count it as a runner, plus
+    the new row for the result's spelling). An unaccounted entrant without
+    either settles every rec right — the winner is read from positions —
+    and is only logged. Prod over the 60 days to 2026-11-01: 12 finished
+    races had a card entrant left without a position next to a result-only
+    runner, 1 of them carried recs, none on that entrant or a place rec."""
+    unaccounted = unaccounted_entrants(field, payload)
+    if not unaccounted:
+        return None
+    runners, _ = result_names(payload)
+    ours = {f["horse"] for f in field}
+    extra = ", ".join(sorted(set(runners) - ours)) or "none"
+    with_recs = sorted(f["horse"] for f in field if f["horse"] in unaccounted and f["pending_recs"])
+    if with_recs:
+        return (
+            f"our entrant(s) {', '.join(with_recs)} carry a pending rec but the result names them neither as a "
+            f"runner nor as a non-runner (result runners not on our card: {extra})"
+        )
+    if any(f["pending_place_recs"] for f in field):
+        return (
+            f"our entrant(s) {', '.join(unaccounted)} are in neither the result's runners nor its non-runners, and "
+            f"a pending place rec's terms count the field (result runners not on our card: {extra})"
+        )
+    return None
 
 
 def run_drain(database_url: str, dry_run: bool = False) -> dict:
@@ -927,9 +1024,11 @@ def run_drain(database_url: str, dry_run: bool = False) -> dict:
     /results/{race_id} and, when the result is there, ingest it exactly as
     the results pass does (the grader then settles its recs). One commit
     per race. No race in the window → no credentials needed, no API call.
-    Returns counters; `errors` > 0 means a race could not be asked about
-    (missing credentials or race id, an API failure, an upsert that did
-    not land on the race row) and main() exits 1 for it."""
+    A result that does not account for an entrant a pending rec rides on
+    (drain_field_problem) is not ingested. Returns counters; `errors` > 0
+    means a race could not be drained (missing credentials or race id, an
+    API failure, such a result, an ingest that raised or did not land on
+    the race row) and main() exits 1 for it."""
     totals = {
         "races": 0,
         "resolved": 0,
@@ -979,11 +1078,41 @@ def run_drain(database_url: str, dry_run: bool = False) -> dict:
                     totals["not_posted"] += 1
                     logger.info("drain: %s — no result yet (%d pending rec(s))", label, race["pending_recs"])
                     continue
+                cur.execute(DRAIN_FIELD_SQL, (race["race_id"],))
+                field = [dict(r) for r in cur.fetchall()]
+                conn.rollback()
+                problem = drain_field_problem(field, payload)
+                if problem:
+                    logger.error(
+                        "drain: %s — %s. The result is NOT ingested: the drain asks again every tick, and once the "
+                        "race is stranded close_out_stranded_race_recs refuses it the same way (unmatched) — "
+                        "review the race's entrants.",
+                        label,
+                        problem,
+                    )
+                    totals["errors"] += 1
+                    continue
+                unaccounted = unaccounted_entrants(field, payload)
+                if unaccounted:
+                    logger.warning(
+                        "drain: %s — our entrant(s) %s are not in the result; no pending rec rides on them or on "
+                        "the place terms, so it is ingested",
+                        label,
+                        ", ".join(unaccounted),
+                    )
                 if dry_run:
                     totals["resolved"] += 1
                     logger.info("drain: %s — result posted; DRY RUN, not ingested", label)
                     continue
-                race_id, counts = ingest_race(cur, payload, finished=True)
+                try:
+                    race_id, counts = ingest_race(cur, payload, finished=True)
+                except Exception:
+                    # One bad payload (a constraint, an overflow) must not block the races behind it:
+                    # roll it back, count it — the run still exits 1 — and go on.
+                    conn.rollback()
+                    logger.error("drain: %s — ingesting its result failed; rolled back", label, exc_info=True)
+                    totals["errors"] += 1
+                    continue
                 if race_id != race["race_id"]:
                     conn.rollback()
                     logger.error("drain: %s — the result upserted race %s, not this row; rolled back", label, race_id)
@@ -1012,7 +1141,8 @@ def run_drain(database_url: str, dry_run: bool = False) -> dict:
     if totals["stranded_recs"]:
         logger.warning(
             "%d pending race rec(s) sit on races more than %d days old with no result: the drain no longer asks "
-            "about them. Review and close them with scripts/ops/close_out_stranded_race_recs.sh.",
+            "about them. scripts/ops/close_out_stranded_race_recs.sh settles or voids them for races before its "
+            "reviewed RACED_BEFORE; it names any on later races, which need a new reviewed pin there.",
             totals["stranded_recs"],
             DRAIN_DAYS,
         )
