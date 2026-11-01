@@ -230,6 +230,10 @@ memory; this section makes it repo-canonical.
 | Soccer half-time Dixon-Coles refit (`dixon_coles_ht_soccer` on DIXON_COLES_CONFIG: per-league baselines, 20-match prior, decay, all data) | **SHIPPED** (2026-10-31, `bc41107`) | `scripts/ab_halftime_dixon_coles.py`, monthly walk-forward 2025-08..2026-10, n=8,144, fold-clustered SE, serve path incl. ht_ft through the served second-half artifact: HT 1x2 **−0.0160** vs the legacy artifact (cluster SE 0.0026, t-bound −0.0095), **−0.0130** vs a recency-matched per-league constant; frozen single fit −0.0138; every HT market and ht_ft (−0.0137) improve. The legacy pinned config DIVERGES on the full frame (13/13 folds, non-finite probabilities); the old trainer (oldest 80% only) was worse than served on the 2026 ESPN rows. ESPN era alone (n=2,702, 5 folds) −0.0089, 4/5 folds negative, not clear of noise on its own | Refit monthly if the frozen fit's lead decays — the harness measures it (DAG `retrain_halftime_dc`, 05:30 on the 1st). The second-half and NHL Dixon-Coles artifacts were gated the same day: both DO-NOT-SHIP (rows below) |
 | Soccer second-half Dixon-Coles refit (`dixon_coles_h2_soccer`, feeds ht_ft only) | **MEASURED — NOT SHIPPED** (2026-10-31) | `scripts/ab_second_half_dixon_coles.py`, 15 monthly folds 2025-08..2026-10, n=8,144, HT side = walk-forward refit of the gated HT config (not the prod HT file), pre-registered rule: refit AND refit_frozen must pass ship_strict on ht_ft. refit −0.0057 (cluster SE 0.0009, t-bound −0.0035) passes; refit_frozen −0.0046 fails the −0.005 gate → DO-NOT-SHIP. The pinned trainer config never converges (disqualified every fold). The served artifact ≈ an HT-state-conditional constant (+0.0003). ESPN era alone −0.0024 (noise) | Re-gate when H2 joins a monthly refit DAG (then `refit` is the deployable object) on a FRESH window — not by re-reading this one |
 | NHL Dixon-Coles refit (`dixon_coles_nhl`: pinned / DIXON_COLES_CONFIG refit / one frozen fit, vs the served 2026-06 file) | **MEASURED — NOT SHIPPED** (2026-10-31) | `scripts/ab_nhl_dixon_coles.py`, rule amended after a 3-fold smoke and BEFORE the full run (A1: correct score scored as a proper 121-cell grid Brier; A2: a blocking unit regresses only when its 95% lower bound is > 0; A3: decide on folds out of sample for served only — served's fit ends 2025-04-04). Full run on prod: 15 folds 2024-10..2026-10, n=3,001; decision window 8 folds 2025-10..2026-10, **n=1,603**. refit_frozen over 5.5 **−0.0017** vs served (cluster SE 0.0007, t-bound +0.00004) fails the −0.005 gate, and over 4.5 is significantly WORSE (+0.0026, lower bound +0.0016) → DO-NOT-SHIP; refit −0.0019, pinned −0.0017 fail too. The smoke's 665 rows are 41% of the decision window; on the 5 folds it never saw (2025-10..2026-02, n=938) refit_frozen reads −0.0022 (fold SE 0.0010) — same verdict. Served is level-inflated (P(over 5.5) 0.611 vs 0.574 realised; every refit fixes the level, 0.580) but the gain is small. **Finding:** every Dixon-Coles arm (rho forced to 0) under-predicts REGULATION TIES — served 15.4% vs 24.6% realised — so a per-season constant beats served on regulation 1x2 by −0.023, double chance −0.007..−0.008, total goals −0.020, correct-score grid −0.009. Those DC markets are display-only (NHL recs use the ensemble's moneyline / puck line / total) | Not by re-reading this window. Next NHL DC lever is the regulation-tie mass (a draw-inflated or overtime-aware scoreline model), measured on a fresh window; until then consider serving the constant, or hiding, the DC regulation 1x2 / double chance |
+| Horse racing pipeline (status row, not a lever) | **DORMANT** (2026-11-01, `67b643e`) | Operator decision: no current use. One switch, `services/data-ingestion/dags/sport_switches.py` `HORSE_RACING_ENABLED = False`: `auspex_pipeline` creates none of the 7 horse tasks and runs one `drain_horse_racing` task instead (`load_racing_api.py --drain` + the race grader), which asks `/results/{race_id}` only for races carrying a pending rec, at most 3 days old. Only the per-race 404 `Result not found - race <id>` reads as "no result yet"; a result that misses an entrant a pending rec rides on is refused, not settled. The 42 stranded race recs (a 50-per-page `/results` pagination bug read only the first page on busy days, plus abandoned meetings the feed drops without a status) are closed out by `scripts/ops/close_out_stranded_race_recs.sh` (10 settle from their results, 32 void as abandoned; reversible from its record). `monitor_models` logs horse findings as warnings once no race prediction is created for 72 h. Ranker and consensus artifacts untouched | Operator wants it back. Before re-enabling: re-subscribe to the Racing API if cancelled; backfill the paginated `/results` gap (busy days lost the races past the 50th); retrain the ranker if dormant for more than a few weeks; consider the normalize_name gaps (trailing ' Aa' / ' I', '(a)', apostrophes) that leave card and result names unmatched |
+| NHL regulation-tie structure (`dixon_coles_nhl` on REGULATION scores: margin-tilted Poisson, strengths and margin log-factors fitted jointly by ML; final = regulation + the OT/SO goal; buckets 0..4 by a pre-window BIC rule) | **MEASURED — NOT SHIPPED** (2026-11-01, `c7a9400` pre-registered / `b6ee113` result) | `scripts/ab_nhl_regulation_ties.py`, committed before its single unamended run; monthly walk-forward 2025-10..2026-10, 8 folds, n=1,611, on a replica of the 2026-11-01 02:37Z prod export. Deciding arm reg_margin_frozen (fitted once at 2025-10-01): regulation 1x2 **−0.0172** vs served (cluster SE 0.0029, t-bound −0.0101; tie mass 21.5% vs served 15.4%, realised 24.6%) passes the gate, but clean_sheet_home (+0.00043) and win_to_nil_home (+0.00047) are significantly worse (95% lower bound +0.00006) → DO-NOT-SHIP under the fail-closed A2 rule. Also: total goals −0.0205, correct-score grid −0.0093, over 4.5 −0.0014. Context, never decided: reg_diag_frozen (one tie factor) −0.0171 (t-bound −0.0099) with no regression; walk-forward reg_margin −0.0231 with no regression; reg_poisson (the reframing alone) only −0.0076. Every structured arm still trails the per-season constant on regulation 1x2 (inside noise). Mechanism (2021-01..2025-09): ties 1.35× a regulation Poisson, one-goal margins 0.60×, three-goal 1.5× (empty net). Served loses to the constant beyond noise on regulation 1x2, double chance, total goals, over 4.5 and the grid → those five markets are hidden from display (`d2246cf`, API `HIDDEN_PREDICTION_PAIRS`; `641f93f` extends it to `predict_match`'s stored-prediction fallback), still written and graded. `5ff0c3f`: ship_strict's t bound is a tested pure function; the serve loader refuses a regulation structure on an artifact with rho ≠ 0. New `predictors/hockey_regulation.py` is inert (byte-identical output for the served artifact). Not calibration (closed): θ is a likelihood parameter fitted on each fold's training rows | Re-gate with reg_diag (tie factor only, optionally refitted monthly) PRE-REGISTERED as the deciding arm, scored only on games after 2026-11-01, once ≥ ~1,000 such regular-season games exist (≈ early April 2027; an earlier re-gate must accept the wider SE explicitly, ~0.0033 per-match at n=1,000). Un-hide a market only when a gated artifact beats the constant on it. Not by re-reading this window |
+| Soccer 1x2 ensemble scoreline members refit (`poisson_soccer_match_result` / `dixon_coles_soccer_match_result`, fitted by the trainer on its oldest-70% split and never refit; the 2026-10-26 artifacts end 2021-10-21 and know 951 teams; blend weight 0.046 + 0.046, both at the trainer's min_weight floor) | **MEASURED — NOT SHIPPED** (2026-11-01, `d81d039`; review fixes `eeaeaaa`) | `scripts/ab_soccer_ensemble_members.py` (arms fixed in-session before the first full run, committed with the results). Monthly walk-forward over the incumbent's unseen rows 2024-04-06..2026-10-31: 31 folds, **n=25,729**; batch equals `ensemble.predict_proba`, 164 live predictions reproduced to 7.5e-8. Served 1x2 Brier 0.60215. refit (same fitters, all data before each month) **−0.00032** (SE 0.00007; fold-clustered −0.00039 ± 0.00010, t-bound −0.00019): real, ~13× short of the gate. drop (members removed, weights renormalised) +0.00017. Diagnostic bound: with the five weights refit on the eval rows themselves (leaky, optimistic) the refit members gain at most −0.00058, so no re-weighting gets within ~8.6× of the gate. Standalone the refit Dixon-Coles beats the stale one by 0.0145 Brier but still trails the learned members by 0.012. Simulated 171-pair merge: −0.00024. Also: every Poisson-member fit stops at 1000 iterations unconverged (POISSON_CONFIG regularization 0.001) | Only for a candidate scoreline member (e.g. with xG or market inputs) whose in-sample-optimal blend bound in this harness reaches −0.005 — a cheap necessary condition; today's refit members reach −0.00058. The derived-market use of the same artifact is the next row |
+| Soccer full-time Dixon-Coles that serves the derived markets, refit monthly (`dixon_coles_soccer_match_result` as `precompute_predictions` derives from it: the 1x2 ensemble's own member, refit every Sunday on the trainer's oldest-70% split; the 2026-11-01 artifact ends 2021-10-23 and knows 951 teams) | **MEASURED — NOT SHIPPED** (2026-11-01, `a4b7057` pre-registered / `b8969db` result; `53b0452` review fixes, re-run bit-identical) | `scripts/ab_soccer_ft_dixon_coles.py`, arms and rule committed before the first full run. Monthly walk-forward over the 1x2 incumbent's unseen rows 2024-04..2026-10: 31 folds, **n=25,604**. Every arm is reconciled to the served 1x2 and scored through the served path in three O/U-2.5 anchor regimes: live (`rec_gating`'s own consensus, ≥ 3 fresh books, replayed at kickoff with post-kickoff rows refused), proxy (live, else the football-data closing O/U) and none. Units graded by `grading_outcomes` on the 90-minute score. Fidelity: derive vs readout 7.8e-16, both loaders identical, 370/370 stored live predictions re-derived. **refit** (DIXON_COLES_CONFIG on all data before each month) on the served over_2.5: live **−0.00375** (SE 0.00037; fold-clustered −0.00358 ± 0.00044, t-bound −0.00269), proxy −0.00204 (t-bound −0.00139) → fails −0.005 in both deciding regimes. No blocking unit regresses; in the live regime every shaped unit improves except odd_even (BTTS −0.00255, total goals −0.00276, AH ±0.75..±2 −0.0002..−0.0021). Only 2% of the window is live-anchored (all from 2026-07), where the primary delta is 0. refit_frozen −0.00202: a one-off refit loses half its lead in 31 months. The served artifact ties a per-league constant on over_2.5 (−0.00043) and loses to one on BTTS (+0.00131, lower bound +0.00072). Simulated 171-pair merge: live −0.00391, proxy −0.00219, so the repair cannot flip it | Not by re-reading this window. Re-gate on a fresh window (≥ 6 months after 2026-10-31) if (a) the ("soccer","over_under") rec stream is to be un-gated, or (b) the AH stream's shaped lines (±0.75..±2, 108 of 169 AH recs in the 60 days to 2026-11-01) show a CLV/ROI shortfall a better shape could close. The deployable object is a monthly refit in its own artifact: split from the 1x2 member, outside the weekly `retrain_models` swap, promoted by `promote_dc_model.py`. Whether a strictly-better, 1x2-neutral side artifact should face the single-primary −0.005 gate is an open operator policy question |
 
 ### 4.3 Validation methodology (house rules)
 
@@ -320,7 +324,11 @@ wins **and** correctly rejected calibration/match_stats/weather):
   executable experiment provenance.
 - The Racing API **Standard** tier — same-day-only is fine; the models can't monetize
   tomorrow's cards, and the code auto-upgrades if the plan ever changes
-  (`load_racing_api.py:126-128`).
+  (`load_racing_api.py:126-128`). **2026-11-01: horse racing is DORMANT (§4)**, so the
+  subscription buys nothing now (§6.3). Correction: same-day-only applies to
+  `/racecards/standard`; `/results` IS date-rangeable and paginated (50 per page). A race
+  id with no result answers 404 `{"detail":"Result not found - race <id>"}`; a wrong
+  route answers `{"detail":"Not Found"}`.
 
 ---
 
@@ -355,7 +363,7 @@ wins **and** correctly rejected calibration/match_stats/weather):
 | Downgrade the-odds-api 5M → 100K | vendor dashboard | **−$60** | Verified on the 5M tier (quota header sums to exactly 5,000,000); usage ~13.4K credits/mo by the DAG's own math at 90-min cadence. Optional later: 20K tier (−$89 total) after a peak-season observation month |
 | Cancel Visual Crossing Pro | vendor dashboard + pause 2 DAGs | **−$35** | Weather is CLOSED at current corpus (§4). ⚠️ Deliberate reversal of June's "keep the DAG refreshing" decision — approved by this audit's logic: a future revisit costs one $35 month, not a standing sub. Pause both DAGs **separately** (Airflow 2.8: one dag_id per command); with a dead key they'd stay green and silently no-op (misleading), not fail |
 | Keep Hetzner CPX41 | — | €0 | CPU over-provisioned ~10× (load 0.24–0.53 on 8 vCPU) but RAM is the true constraint (7.7/15 GiB steady + trainings). Rescale only after mem limits + one measured retrain peak |
-| Keep Racing API Standard | — | $0 | Upgrade buys nothing modelable (§5.5) |
+| Racing API Standard | vendor dashboard | **−(Standard monthly fee; not recorded in the repo)** | Horse racing is DORMANT since 2026-11-01 (§4), so the subscription buys nothing. Cancelable once the drain finishes (about 2026-11-04 16:20Z) and `close_out_stranded_race_recs.sh` has run — both call `/results/{race_id}`. After cancellation the drain makes no calls while nothing is pending, and fails loudly if something is (missing credentials or a 401/403 are errors, never "no result"). User's decision; re-enabling horse racing needs the subscription |
 | GitHub | — | $0 | Repo is public: Actions + GHCR free. Note in OPERATIONS.md: costs start if it ever goes private |
 | Enable B2 backups | §1.2 | **+$0.50** | The one justified increase |
 | **Net** | | **≈ −$95/mo (−$1,140/yr)** | ~45–50% of recurring spend, zero prediction impact |
@@ -1599,6 +1607,101 @@ with the growth-rate driver (WAL) eliminated.
 > a `promote_raw` run after repoint pass 2, to rewrite 4 archived match_stats; MMA
 > orphan cleanup (21 pending recs on stale fights); mojibake team names; Scottish
 > teams mapped under La Liga.
+
+> **Update (2026-11-01) — close-out of the open items: horse racing dormant, the
+> NHL regulation-tie gate, both stale full-time Dixon-Coles gates, MMA stranded
+> recs, the Scottish/mojibake labels, runbook steps 12–16, and the failed task
+> instances.** Every stream was built, adversarially reviewed and fixed before
+> integration; four model-side questions were gated and none shipped.
+> - **Failed task instances (the operator's "43").** All are `auspex_pipeline`
+>   soccer tasks exiting 3 on purpose: `fetch_upcoming` on every run since
+>   2026-10-31 15:45Z and `fetch_results` on every run since 2026-11-01 03:15Z
+>   (69 + 23 in the 24 h to 08:59Z). Each is the identity-drift refusal of
+>   `a071d6a` on mapped Liga MX fixtures (ESPN 401876915 Guadalajara v Atlante,
+>   played 4-2; 401876912 Santos v Necaxa; 401876908; 401876902) whose ESPN
+>   names now resolve to 'Guadalajara Chivas' / 'Santos Laguna' while the rows
+>   sit on the split 'Guadalajara' / 'Santos' teams. Every other write in the
+>   sweep commits. Runbook step 1 (repoint) ends it. No other task failed in
+>   the last 7 days; the retained 90-day history also holds older horse-racing
+>   failures (`precompute_predictions_horse_racing` ×228 Aug 3–5,
+>   `generate_recommendations_horse_racing` ×54 Aug 23–Sep 4).
+> - **Horse racing DORMANT** (`34e1d6f`, `df29f13`, `67b643e`, `3080d03`,
+>   `deabbe6`, `cb88362`; §4 status row). `sport_switches.HORSE_RACING_ENABLED =
+>   False`: the 7 horse tasks are not created; `drain_horse_racing` settles
+>   pending recs by race id (672 task runs a day → 96). The 42 stranded race
+>   recs had two causes: `fetch_results` read only the first 50 results of a
+>   paginated `/results` (now paginated), and abandoned meetings the feed drops
+>   without a status (Newbury 23–24 Oct, Aintree 25 Oct, Wexford 26 Oct, Galway
+>   24/27 Oct, Bellewstown part-cards, 6 singles). A result's `non_runners` now
+>   marks entrants scratched. `scripts/ops/close_out_stranded_race_recs.sh`:
+>   PLAN candidates=42 races=30 settle=10 (1 won +75.00, 9 lost −88.12) void=32;
+>   rehearsed on a replica, reversal restored all 8 tables exactly.
+> - **NHL regulation ties** (`c7a9400`, `b6ee113`, `d2246cf`, `5ff0c3f`,
+>   `641f93f`; §4 row): DO-NOT-SHIP — regulation 1x2 −0.0172 (t-bound −0.0101)
+>   but two blocking regressions. The five DC markets that lose to a
+>   per-season constant are hidden from the API; still written and graded.
+> - **Soccer ensemble members** (`d81d039`, `eeaeaaa`; §4 row): DO-NOT-SHIP,
+>   refit −0.00032. It found that the derived-market Dixon-Coles is the SAME
+>   2021-10 artifact (the 2026-09-04 refits were measured, never served).
+> - **Derived-market Dixon-Coles** (`a4b7057`, `b8969db`, `59733bb`, `0b0607d`,
+>   `53b0452`; §4 row): DO-NOT-SHIP, live −0.00375 (t-bound −0.00269), proxy
+>   −0.00204. Strictly better on every shaped market but short of −0.005. Also:
+>   the served derived BTTS loses to a per-league constant; both arms
+>   under-predict over-2.5 by 2.6–3.5 pts after the 1x2-only reconcile (the O/U
+>   anchor covers 25–32% of Sep–Oct 2026); the live anchor needs ≥ 3 fresh
+>   books; `predictions.updated_at` is overwritten by grading, so production's
+>   last anchor read is unrecoverable.
+> - **MMA stranded recs** (`1876700`, `edf6ee8`, `c2b6804`, `79595d5`,
+>   `072141c`, `85680d2`). 20 of the 21 pending UFC recs sit on bouts fought in
+>   June (results ingestion shipped 07-13 with a 3-day look-back); Holland v
+>   Smith was dropped from its card. `fetch_upcoming` results mode now cancels
+>   bouts a finished card no longer lists (reversible, `DROPPED_FROM_CARD`) and
+>   writes a reversed listing onto its row. New `scripts/backfill_results.py`
+>   (mma only, REPEATABLE READ, plan and per-rec pins, voids only rows its own
+>   run cancelled). `scripts/ops/repair_stranded_recs_mma.sh` run A: 44 rows
+>   get their result, 20 recs settle 6W/14L (net −100.80), Holland voided. Run
+>   B (`--retire-stale-rows`) is opt-in and held: 9 of its 42 deletes are fought
+>   bouts stored under a second fighter spelling. CI now runs the repo-root
+>   `*_pg` tests against the runner's Postgres binaries.
+> - **Scottish teams under La Liga + mojibake** (`b03aaf7`, `05fdcad`,
+>   `a9f34e6`, `5092ab3`). One root cause: both football-data loaders read every
+>   CSV as latin-1. From 2024-25 the files are UTF-8 with a BOM, which turned
+>   `Div` into `ï»¿Div` (Div dropped on 12,018 raw rows); the 2026-08-01
+>   Scottish Championship/League One openers served at the SP1/SP2 URLs became
+>   10 La Liga / La Liga 2 fixtures and gave 20 clubs a Spanish league; and
+>   'Preußen Münster' became mojibake (1 team, 68 raw rows). No prediction,
+>   rec, feature or season label was affected. Loaders now decode strictly
+>   (`scripts/text_encoding.py`), check each file's Div and Country, refuse
+>   mis-decoded names, and exit 3 on an unparseable file; `promote_raw` screens
+>   such rows out (`refused_raw`, exit 3); `load_international
+>   --include-friendlies` is gone. `scripts/ops/repair_soccer_labels.sh`
+>   relabels 10 fixtures / 10 raw rows / 20 teams, renames 1 team / 68 raw rows,
+>   creates SC1/SC2, with a reversal SQL.
+> - **Runbook steps 12–16** (`557ca5d` … `73e14bd`). The "AFTERWARDS" items now
+>   run inside `soccer_repair_runbook.sh` after steps 1–11 are recorded
+>   complete: 12 never_resulted backfill (`scripts/backfill_never_resulted.py`;
+>   heals only the 38 reviewed rows in
+>   `scripts/data/soccer_never_resulted_reviewed.csv`, 3,173 predictions graded,
+>   0 recs; lists any later stale row as PENDING or unreviewed, never heals it)
+>   plus the orphan cleanup re-run (merges the Coquimbo Unido v O'Higgins fork);
+>   13 the labels repair (a corpus step); 14 `promote_raw` checked mode
+>   (match_stats_inserted=4, odds_inserted=13; a re-run sends only what changes,
+>   so it no longer locks the rows the sweeps rewrite; an existing team keeps
+>   its league); 15 grading of the 26 folded rows (504 predictions); 16
+>   `compute_features --backfill-finished soccer`. Re-rehearsed on read-only
+>   exports at 06:48Z and 08:24Z, including step 12's late recovery with the
+>   clocks moved forward.
+> **Operator (NOT YET APPROVED):** the soccer runbook (start before
+> ~2026-11-04 00:00Z so step 1 reaches Guadalajara v Atlante while the results
+> sweep still covers it), `close_out_stranded_race_recs.sh`,
+> `repair_stranded_recs_mma.sh` (run A); optional: cancel the Racing API after
+> ~2026-11-04 16:20Z. **Open:** MMA run B; the gate policy for a
+> strictly-better 1x2-neutral side artifact; the served derived BTTS vs a
+> constant; the NHL re-gate (~April 2027); Santos v Necaxa and two later Liga MX
+> fixtures need their own reviewed heal rows if step 1 runs late; the Poisson
+> member never converges; the `seen_match_ids.json.gz` files look
+> reconstructed post hoc (eval windows verified clean); the frontend still
+> shows the Races nav entry.
 
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
