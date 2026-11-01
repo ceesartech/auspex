@@ -85,7 +85,7 @@ The rows the reviewed re-point map is about to move onto the pair count
     The row keeps its team ids (step 5 moves it); the copy's match_stats
     move only for a club in that row (STATS_FREE_ON_TWIN), the other is
     archived with the copy and promote_raw writes it again after step 5
-    (a separate approval: run promote_raw once the second pass is done).
+    (runbook step 13, scripts/ops/promote_raw_after_repair.sh, once the second pass is done).
     Every write is guarded on the row's team ids too: a row re-pointed
     between plan and write stops the batch. Never a fold across team ids.
   fold: that row is a stale 'scheduled' fixture row without ESPN identity

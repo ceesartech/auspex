@@ -38,11 +38,24 @@ HEADERS = [
     ROOT / "scripts" / "repair_football_data_kickoffs.py",
     ROOT / "scripts" / "repair_fixture_orphans.py",
 ]
+# Steps 12-15 (2026-11-01): their wrappers' RUN ORDER names all fifteen; the earlier headers name 1-10 as before.
+NEW_STEPS = [
+    ("backfill_soccer_never_resulted", r"backfill_soccer_never_resulted(\.sh)?"),
+    ("promote_raw_after_repair", r"promote_raw_after_repair(\.sh)?"),
+    ("grade_folded_soccer_rows", r"grade_folded_soccer_rows(\.sh)?"),
+    ("compute_features", r"compute_features(\.py)? --backfill-finished soccer"),
+]
+NEW_HEADERS = [
+    OPS / "backfill_soccer_never_resulted.sh",
+    OPS / "promote_raw_after_repair.sh",
+    OPS / "grade_folded_soccer_rows.sh",
+]
 
 
 def test_the_runbook_runs_the_steps_in_this_order():
-    calls = re.findall(r"^run_step (\d+) \"[^\"]*\" (.*)$", RUNBOOK.read_text(), re.M)
-    assert [int(n) for n, _ in calls] == list(range(1, 12))
+    text = RUNBOOK.read_text()
+    calls = re.findall(r"^run_step (\d+) \"[^\"]*\" (.*)$", text, re.M)
+    assert [int(n) for n, _ in calls] == list(range(1, 16))
     for (_, cmd), (name, _pat) in zip(calls, STEPS + [("step11", "")]):
         if name in ("compute_features", "step11"):
             continue
@@ -52,9 +65,20 @@ def test_the_runbook_runs_the_steps_in_this_order():
         assert f"$OPS/{name}.sh" in cmd, cmd
     assert '"$OPS/repoint_team_matches.sh" --pass 1' in calls[0][1]
     assert '"$OPS/repoint_team_matches.sh" --pass 2' in calls[4][1]
+    # 12-15: the never_resulted backfill then the cleanup again (step12), promote_raw, the folded rows' grading,
+    # and the same feature recompute as step 10.
+    assert [cmd for _, cmd in calls[11:]] == [
+        "step12",
+        'bash "$OPS/promote_raw_after_repair.sh"',
+        'bash "$OPS/grade_folded_soccer_rows.sh"',
+        "recompute_features",
+    ]
+    assert calls[9][1] == "recompute_features"
+    body = re.search(r"^step12\(\) \{\n(.*?)^\}", text, re.M | re.S).group(1)
+    assert body.index('"$OPS/backfill_soccer_never_resulted.sh"') < body.index('"$OPS/cleanup_soccer_orphans.sh"')
 
 
-@pytest.mark.parametrize("path", HEADERS, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", HEADERS + NEW_HEADERS, ids=lambda p: p.name)
 def test_each_run_order_header_names_the_runbooks_order(path):
     text = path.read_text()
     start = re.search(r"^(# )?RUN ORDER", text, re.M).start()  # the header, not a mention in passing
@@ -62,7 +86,18 @@ def test_each_run_order_header_names_the_runbooks_order(path):
     self_name = path.stem
     block = re.sub(r"\bTHIS\b", f"{self_name}.sh", block)
     pos = 0
-    for _name, pat in STEPS:
+    for _name, pat in STEPS + (NEW_STEPS if path in NEW_HEADERS else []):
         m = re.compile(pat).search(block, pos)
         assert m, f"{path.name}: {pat!r} missing or out of order in its RUN ORDER"
+        pos = m.end()
+
+
+def test_the_runbook_header_describes_steps_12_to_15_in_order():
+    text = RUNBOOK.read_text()
+    start = text.index("# Steps 12-15")
+    block = text[start : start + 4000]
+    pos = 0
+    for _name, pat in NEW_STEPS:
+        m = re.compile(pat).search(block, pos)
+        assert m, f"the runbook header: {pat!r} missing or out of order in steps 12-15"
         pos = m.end()

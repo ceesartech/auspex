@@ -110,11 +110,14 @@
 # Re-runnable: merged rows are gone, cancelled/postponed rows leave the
 # candidate set, and a listed row already marked counts as done.
 #
-# AFTERWARDS (separate approval): the 43 never_resulted rows are real matches
-# ESPN has full-time results for (39 in these leagues); a results backfill
-# heals and settles them and their recs:
-#   docker compose exec -T api python /app/scripts/fetch_upcoming.py --sport soccer --results --days-back 160 \
-#     --leagues chi.1,jpn.1,col.1,conmebol.libertadores,uefa.champions,bel.1
+# AFTERWARDS: the never_resulted rows (42 after run-order steps 1-7 on the
+# 2026-11-01 replica) are mostly real matches ESPN has full-time results for.
+# Runbook step 12 (scripts/ops/backfill_soccer_never_resulted.sh, with
+# scripts/backfill_never_resulted.py) records those results on exactly these
+# rows and grades them, then runs this script again: a row it heals can leave
+# a fork of the same fixture with a finished twin, which this merges. Not a
+# blanket `fetch_upcoming.py --results --days-back 160` (it would re-write
+# every other completed event of those leagues and days too).
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/cleanup_soccer_orphans.sh 2>&1 | tee -a ~/cleanup_soccer_orphans.log
 set -uo pipefail
@@ -377,4 +380,4 @@ else
 fi
 
 [ -z "$followup_failed" ] || incomplete "steps 5/6 need a manual re-run (see the ERROR lines above)"
-log "DONE. Next (separate approval): the never_resulted rows — see the results backfill command in this script's header."
+log "DONE. The never_resulted rows left alone here are runbook step 12's (scripts/ops/backfill_soccer_never_resulted.sh)."

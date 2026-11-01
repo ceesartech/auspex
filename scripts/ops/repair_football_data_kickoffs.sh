@@ -63,7 +63,7 @@
 #   --dedupe alias_merge: the same, into an ESPN row the re-point map is about
 #            to move onto the copy's pair (MX1 4); only the match_stats of a
 #            club in that row move (4 of 8; the other club's is archived and
-#            promote_raw writes it again after step 5, a separate approval);
+#            promote_raw writes it again after step 5: runbook step 13);
 #   --dedupe fold: a copy into the stale pre-023 'scheduled' row at exactly its
 #            corrected kickoff (CN1 21, NO1 3, BR1 2): the row takes the copy's
 #            score and turns 'finished', guarded on the values observed, no
@@ -102,13 +102,15 @@
 # Each tool step writes its output to a log file inside the api container and
 # exits with the tool's own status; a pipe through tail would report tail's 0.
 # Re-runnable: merged and folded copies are gone, shifted rows plan as done.
-# AFTERWARDS (optional, separate approval): the trigger grades only the market
-# types it knows; the folded rows' other predictions stay ungraded until
-#   docker compose exec -T api python /app/scripts/grade_completed_matches.py --match-id <id>
-# runs for each (step 6 prints the ids). It settles no rec there: besides open
-# recs it settles only a won/lost/void rec whose profit_loss is NULL, and step
-# 6 requires 0 of those on the folded rows (their 31 'void' recs keep their
-# void and their P&L).
+# AFTERWARDS: the trigger grades only the market types it knows; the folded
+# rows' other predictions stay ungraded until runbook step 14
+# (scripts/ops/grade_folded_soccer_rows.sh: scripts/grade_matches.py, pinned,
+# one transaction) grades them (step 6 prints the ids; 504 on the 2026-11-01
+# rehearsal). It settles no rec there: besides open recs it settles only a
+# won/lost/void rec whose profit_loss is NULL, and step 6 requires 0 of those
+# on the folded rows (their 31 'void' recs keep their void and their P&L).
+# The alias-merged fixtures' archived match_stats are written again by
+# runbook step 13 (scripts/ops/promote_raw_after_repair.sh).
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/repair_football_data_kickoffs.sh 2>&1 | tee -a ~/repair_football_data_kickoffs.log
 # (AUSPEX_DIR and TMPDIR exist for tests and rehearsals.)
@@ -271,10 +273,10 @@ log "recs without a profit_loss on the folded rows (directly or through their pr
 if [ "$check_rc" -eq 0 ] && [ "$soccer1" = "$want_soccer" ] && [ "$stale1" = "$want_stale" ] && [ "$replanned" = "0 0 0 0 0 0" ] \
    && { [ "$unsettled" = "0" ] || [ "$unsettled" = "none folded" ]; }; then
   if [ -n "$aliased" ]; then
-    log "DONE: check_legacy_kickoffs passes, but promote_raw runs and refuses the $(echo $aliased | wc -w | tr -d " ") alias-merged fixture(s) (exit 3) until the second re-point pass has moved them. Folded rows (for the optional grading in the header; it settles no rec on them): ${folded:-none}"
+    log "DONE: check_legacy_kickoffs passes, but promote_raw runs and refuses the $(echo $aliased | wc -w | tr -d " ") alias-merged fixture(s) (exit 3) until the second re-point pass has moved them. Folded rows (runbook step 14 grades the rest of their predictions; it settles no rec on them): ${folded:-none}"
     log "NEXT (runbook step 5, its own approval): bash /opt/auspex/scripts/ops/repoint_team_matches.sh --pass 2 — these alias-merged rows are still on the wrong club and now have no twin: $aliased"
   else
-    log "DONE: promote_raw may run again (its check_legacy_kickoffs passes). Folded rows (for the optional grading in the header; it settles no rec on them): ${folded:-none}"
+    log "DONE: promote_raw may run again (its check_legacy_kickoffs passes). Folded rows (runbook step 14 grades the rest of their predictions; it settles no rec on them): ${folded:-none}"
   fi
   log "THEN (runbook steps 6-7): scripts/ops/repair_stranded_recs_soccer.sh, scripts/ops/cleanup_soccer_orphans.sh"
 else
