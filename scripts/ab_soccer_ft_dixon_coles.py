@@ -81,13 +81,20 @@ PRE-REGISTERED DESIGN (fixed 2026-11-01 and committed BEFORE the first full run)
            precompute_predictions builds (ab_soccer_ensemble_members.serve_row),
            IDENTICAL in every arm. A single-row sample must equal the batch.
   Anchor   three regimes, every Dixon-Coles arm scored in each:
-    live    the live rule exactly: pre-kickoff rows only (prematch_odds), the
-            newest non-live quote per (book, side) at line 2.5 seen within
-            MAX_ODDS_AGE_HOURS of KICKOFF (the last tick is <= 15 min before
-            it, so this is up to 15 min permissive), then
+    live    the live rule replayed at KICKOFF: pre-kickoff rows only
+            (prematch_odds), the newest non-live quote per (book, side) at
+            line 2.5 seen within MAX_ODDS_AGE_HOURS of kickoff, then
             rec_gating.market_consensus_prob itself (power de-vig, >= 3 books).
             The football-data aggregates 'Average' and 'Max' are not books and
-            are excluded (they never occur live).
+            are excluded (they never occur live). The replay reads the odds
+            rows as they stood at export, i.e. the closing prices (the row is
+            refreshed in place), which differs from production's last tick in
+            both directions: stricter on age (the age at kickoff is never less
+            than the age at the last tick), more permissive on a quote
+            refreshed between the last tick and kickoff. See the anchor-replay
+            comparison in RESULT. [Wording corrected after review: this
+            paragraph said "up to 15 min permissive". Amendment 1 below also
+            refuses rows created or last seen after kickoff.]
     proxy   live where the live rule anchors; otherwise the football-data
             closing O/U 2.5 ('Average', else 'Bet365'), power de-vigged. In
             this window the live rule can only see the-odds-api books (from
@@ -203,12 +210,19 @@ THE RUNS (fixed with the rule)
           --model-path a byte-identical copy of the production registry, and
           --live-check-model-version for the incumbent's stored predictions.
   merged  the same with --simulate-merge-map scripts/data/soccer_team_merge_map.csv.
-  Before this commit the harness ran once on one fold (2026-09) for mechanics
-  only: the fidelity checks (derive_from_lambdas vs readout 6.7e-16, the two
+  Before this commit the harness ran once on one fold (2026-09) for mechanics:
+  the fidelity checks (derive_from_lambdas vs readout 6.7e-16, the two
   loaders' lambdas identical, invariant units 1.4e-15, anchor hit 1e-10) and
   the live check (370 stored live predictions of the 2026-11-01 incumbent
   re-derived: 1x2-only rows to 1.1e-16, the 43 anchored rows to 4.9e-7 — the
-  stored anchor is rounded to 6 dp). No delta of that run was read.
+  stored anchor is rounded to 6 dp). [Corrected after review: this paragraph
+  said no delta of that run was read, which cannot be verified.] That run was
+  not --limit'ed: it scored the whole fold (n = 773) and printed and saved a
+  decision line for it (refit - served +0.00113 on over_2.5, adverse to the
+  refit). The script and the rule were committed after it unchanged, and the
+  script is byte-identical from this commit through the full run. For a
+  future gate: run mechanics with --limit and without the report, or commit
+  the rule first.
 
 RESULT (2026-11-01; local replica of the 06:44Z read-only prod export, the
 pre-runbook corpus; served = the 2026-11-01 weekly-retrain artifact, sha256
@@ -261,9 +275,35 @@ pre-runbook corpus; served = the 2026-11-01 weekly-retrain artifact, sha256
   gives -0.00378 (the none regime). It cannot move the verdict.
   Every number above recomputes from the run's per_match.csv.gz / scores.npz.
 
+AMENDMENTS AFTER THE RUN (2026-11-01, adversarial review; the rule, the arms
+and the units are unchanged)
+  1. Live replay. consensus_rows also refuses a row created (COALESCE(
+     created_at, timestamp), prematch_odds' own clock) at or after kickoff,
+     and a row last seen after kickoff. prematch_odds keeps every row of a
+     match that has no pre-kickoff row, so football-data rows inserted years
+     later reached the replay with a negative age and passed as fresh. Here
+     they were Average / Max / Bet365 only, at most one book per match, below
+     MIN_CONSENSUS_BOOKS, so no anchor could move; a future backfill of three
+     or more individual books would have anchored historical rows silently.
+     The refused rows are counted and printed (meta.live_replay).
+     Both runs were re-run with every amendment on the same replica: all 495
+     per-row Brier arrays, every per_match.csv.gz column and every report
+     number are bit-identical to the original runs; the only new output is
+     meta.live_replay (full: 23,834 non-aggregate rows created after kickoff
+     refused on 11,917 eval matches, none last seen after kickoff, no
+     consensus outside 0.05..0.95).
+  2. refit_frozen guard. Its fit rows must precede the first fold's cutoff
+     (check_frozen_fit) and every fold's eval rows (members.
+     check_fold_disjoint); before, only the slicing expression ensured it.
+  3. --live-check-model-version served resolves the model_version
+     precompute_predictions stores for the loaded ensemble, so a re-run on prod
+     keeps its strongest fidelity check without looking the version up.
+  4. run() is now tested end to end on a synthetic corpus with the database
+     and the registry faked (tests/unit/test_ab_soccer_ft_dixon_coles.py).
+
 Read-only: SELECTs, plus temp files for the save/load round-trip. Usage (api container):
     python /app/scripts/ab_soccer_ft_dixon_coles.py --end 2026-10-31 \\
-        --out-json /tmp/ab_ftdc.json --out-dir /tmp/ab_ftdc
+        --live-check-model-version served --out-json /tmp/ab_ftdc.json --out-dir /tmp/ab_ftdc
     python /app/scripts/ab_soccer_ft_dixon_coles.py --end 2026-10-31 --simulate-merge-map \\
         /app/scripts/data/soccer_team_merge_map.csv --out-json /tmp/ab_ftdc_merged.json
 A local replica works too: point --database-url at it and --model-path at a
@@ -438,7 +478,10 @@ FRAME_SQL = """
 
 # Every over/under 2.5 row of the eval matches; run() wraps it in
 # prematch_odds() (pre-kickoff rows only, or all rows of a match that has none:
-# the football-data backfill) before it reaches the database.
+# the football-data backfill) before it reaches the database. `created` is the
+# moment the row was first written, prematch_odds' own clock: the live replay
+# refuses a row created at or after kickoff, which only the backfill branch of
+# prematch_odds can let through.
 OU_ODDS_SQL = """
     SELECT
         o.match_id::text AS match_id,
@@ -448,6 +491,7 @@ OU_ODDS_SQL = """
         o.odds_decimal::float AS odds_decimal,
         o."timestamp" AS ts,
         o.last_seen_at,
+        COALESCE(o.created_at, o."timestamp") AS created,
         o.is_live
     FROM odds o
     JOIN matches m ON m.id = o.match_id
@@ -710,31 +754,63 @@ def _ts(value: Any) -> Optional[pd.Timestamp]:
     return out.tz_localize("UTC") if out.tzinfo is None else out.tz_convert("UTC")
 
 
+REPLAY_DROP_REASONS = ("live", "aggregate", "other_line", "created_at_or_after_kickoff", "seen_after_kickoff", "stale")
+
+
 def consensus_rows(
-    rows: Sequence[Dict[str, Any]], kickoff: Any, max_age_hours: float = rec_gating.MAX_ODDS_AGE_HOURS
+    rows: Sequence[Dict[str, Any]],
+    kickoff: Any,
+    max_age_hours: float = rec_gating.MAX_ODDS_AGE_HOURS,
+    drops: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
-    """rec_gating._CONSENSUS_SQL replayed at the last tick before kickoff:
-    non-live rows at line 2.5 whose COALESCE(last_seen_at, timestamp) is within
-    max_age_hours of the kickoff, newest timestamp per (bookmaker, lower
-    selection, line), NULLs last. The football-data aggregates are dropped:
-    they are not books and never reach the live table. `rows` must already be
-    pre-kickoff (prematch_odds)."""
+    """rec_gating._CONSENSUS_SQL replayed at kickoff: non-live rows at line
+    2.5 whose COALESCE(last_seen_at, timestamp) is within max_age_hours of the
+    kickoff, newest timestamp per (bookmaker, lower selection, line), NULLs
+    last. The football-data aggregates are dropped: they are not books and
+    never reach the live table.
+
+    Only a row that existed before kickoff can have been read at the last
+    pre-kickoff tick. prematch_odds keeps every row of a match that has no
+    pre-kickoff row (the historical backfill, inserted years later), so a row
+    whose `created` (COALESCE(created_at, timestamp)) is at or after kickoff
+    is refused here, and so is a row LAST SEEN after kickoff: the writer never
+    stamps a pre-match row after commence (fetch_live_odds.insert_odds_row),
+    so its state at the last tick cannot be reconstructed, and the replay
+    never anchors on what production could not have read. Each refused row is
+    counted in `drops` by reason (REPLAY_DROP_REASONS) when it is given."""
     ko = _ts(kickoff)
     if ko is None:
         raise ValueError(f"kickoff {kickoff!r} is not a timestamp")
+
+    def drop(reason: str) -> None:
+        if drops is not None:
+            drops[reason] = drops.get(reason, 0) + 1
+
     best: Dict[Tuple[str, str, float], Tuple[Optional[pd.Timestamp], Dict[str, Any]]] = {}
     for row in rows:
         if bool(row.get("is_live")):
+            drop("live")
             continue
         if str(row.get("bookmaker") or "").strip().lower() in AGGREGATE_BOOKS:
+            drop("aggregate")
             continue
         line = row.get("line")
         if line is None or abs(float(line) - ANCHOR_LINE) > 1e-9:
+            drop("other_line")
+            continue
+        created = _ts(row["created"])
+        if created is None or created >= ko:
+            drop("created_at_or_after_kickoff")
             continue
         seen = _ts(row.get("last_seen_at"))
         if seen is None:
             seen = _ts(row.get("ts"))
-        if seen is None or (ko - seen).total_seconds() / 3600.0 > max_age_hours:
+        age_hours = None if seen is None else (ko - seen).total_seconds() / 3600.0
+        if age_hours is not None and age_hours < 0:
+            drop("seen_after_kickoff")
+            continue
+        if age_hours is None or age_hours > max_age_hours:
+            drop("stale")
             continue
         key = (str(row["bookmaker"]), str(row["selection"]).strip().lower(), float(line))
         stamp = _ts(row.get("ts"))
@@ -765,11 +841,13 @@ class _RowsCursor:
         return list(self._rows)
 
 
-def live_anchor(rows: Sequence[Dict[str, Any]], kickoff: Any, match_id: str = "") -> Optional[float]:
+def live_anchor(
+    rows: Sequence[Dict[str, Any]], kickoff: Any, match_id: str = "", drops: Optional[Dict[str, int]] = None
+) -> Optional[float]:
     """The anchor precompute_predictions would have read at the last tick:
     rec_gating.market_consensus_prob itself on the replayed rows (power
     de-vig per book, mean over >= MIN_CONSENSUS_BOOKS books), or None."""
-    cur = _RowsCursor(consensus_rows(rows, kickoff))
+    cur = _RowsCursor(consensus_rows(rows, kickoff, drops=drops))
     p = rec_gating.market_consensus_prob(cur, match_id, "over_under", "over", ANCHOR_LINE)
     return float(p) if p is not None else None
 
@@ -1000,6 +1078,33 @@ def fit_refit(fit_df: pd.DataFrame, tmp: str, tag: str) -> Tuple[Any, Dict[str, 
     """DIXON_COLES_CONFIG on `fit_df`, saved and re-loaded through the
     side-artifact loader precompute_predictions uses (ht.fit_arm)."""
     return ht.fit_arm(fit_df, {}, tmp, tag)
+
+
+def check_frozen_fit(frozen_fit: pd.DataFrame, folds: Sequence[Any]) -> None:
+    """refit_frozen is fitted ONCE, before the first fold: refuse it if any
+    of its fit rows is dated on or after the first fold's cutoff (it would
+    then be scored on matches it was fitted on). run() also checks it against
+    every fold's eval rows (members.check_fold_disjoint)."""
+    if not folds:
+        raise RuntimeError("no folds to freeze a fit before")
+    late = frozen_fit["match_date"] >= folds[0].fit_cutoff
+    if late.any():
+        raise RuntimeError(
+            f"refit_frozen: {int(late.sum())} fit row(s) on or after the first fold's cutoff "
+            f"{folds[0].fit_cutoff} (newest {frozen_fit['match_date'].max()})"
+        )
+
+
+SERVED_VERSION = "served"
+
+
+def served_model_version(meta_path: Any) -> str:
+    """The predictions.model_version precompute_predictions stores for the
+    ensemble whose meta file is `meta_path`: prediction_service.
+    load_models_into_process names it '<ensemble dir>_<version dir>+<int
+    mtime of the meta file>'."""
+    path = Path(str(meta_path))
+    return f"{path.parent.parent.name}_{path.parent.name}+{int(path.stat().st_mtime)}"
 
 
 def load_frame(database_url: str) -> pd.DataFrame:
@@ -1394,14 +1499,36 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     odds = load_ou_rows(args.database_url, folds[0].eval_start, span_end)
     a_live = np.full(len(eval_df), np.nan)
     a_proxy = np.full(len(eval_df), np.nan)
+    replay_drops: Dict[str, int] = {k: 0 for k in REPLAY_DROP_REASONS}
+    replay_after_ko_matches = 0
+    invalid_live = 0
     for r, (mid, ko) in enumerate(zip(eval_df["match_id"], eval_df["match_date"])):
         recs = odds.get(str(mid), [])
-        lv = live_anchor(recs, ko, str(mid))
+        drops: Dict[str, int] = {}
+        lv = live_anchor(recs, ko, str(mid), drops=drops)
+        for reason, n_rows in drops.items():
+            replay_drops[reason] += n_rows
+        replay_after_ko_matches += int(
+            bool(drops.get("created_at_or_after_kickoff") or drops.get("seen_after_kickoff"))
+        )
+        invalid_live += int(lv is not None and not valid_ou_anchor(lv))
         lv = lv if valid_ou_anchor(lv) else None
         px = lv if lv is not None else proxy_anchor(recs)
         px = px if valid_ou_anchor(px) else None
         a_live[r] = np.nan if lv is None else lv
         a_proxy[r] = np.nan if px is None else px
+    live_replay = {
+        "rows_dropped": replay_drops,
+        "matches_with_rows_after_kickoff": replay_after_ko_matches,
+        "consensus_outside_valid_range": invalid_live,
+    }
+    if replay_after_ko_matches:
+        logger.warning(
+            "live replay: %d eval match(es) carry O/U 2.5 rows created or last seen at/after kickoff "
+            "(refused: production could not have read them): %s",
+            replay_after_ko_matches,
+            replay_drops,
+        )
 
     eh = eval_df["s_home"].to_numpy(dtype=int)
     ea = eval_df["s_away"].to_numpy(dtype=int)
@@ -1423,6 +1550,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     fid = {"derive": 0.0, "invariance": 0.0, "anchor": 0.0}
     with tempfile.TemporaryDirectory() as tmp:
         frozen_fit = frame[frame_dates < folds[0].fit_cutoff]
+        check_frozen_fit(frozen_fit, folds)
         frozen, frozen_res = fit_refit(frozen_fit, tmp, "frozen")
         fits.append(_fit_record("frozen", "refit_frozen", frozen_fit, frozen_res))
         for fold in folds:
@@ -1435,6 +1563,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 logger.warning("fold %s skipped: %d eval rows < %d", fold.label, len(ev), MIN_FOLD_EVAL)
                 continue
             members.check_fold_disjoint(fit_df, ev, fold)
+            members.check_fold_disjoint(frozen_fit, ev, fold)
             n_fit = len(fit_df)
             if n_fit and not (frame_dates.iloc[:n_fit] < fold.fit_cutoff).all():
                 raise RuntimeError(f"fold {fold.label}: the fit rows are not the frame's first {n_fit} rows")
@@ -1503,9 +1632,11 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 int(np.isfinite(a_proxy[idx]).sum()),
             )
 
-    live = (
-        live_check(args.database_url, args.live_check_model_version, served) if args.live_check_model_version else None
-    )
+    live_version = args.live_check_model_version
+    if live_version == SERVED_VERSION:
+        live_version = served_model_version(meta)
+        logger.info("live check: the loaded ensemble stores its predictions as %s", live_version)
+    live = live_check(args.database_url, live_version, served) if live_version else None
     meta_out = {
         "model_path": args.model_path,
         "ensemble_artifact": str(meta),
@@ -1532,6 +1663,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         "simulated_merge": merge_stats,
         "corpus_rows": int(len(frame)),
         "live_check": live,
+        "live_replay": live_replay,
         "decay": decay,
     }
     return build_report(c.stack(), meta_out, out_dir=args.out_dir)
@@ -1779,6 +1911,13 @@ def format_report(r: Dict[str, Any]) -> str:
         f"anchored rows: live {an['live']} (football-data era {an['live_by_era']['football_data']}, ESPN era "
         f"{an['live_by_era']['espn']} of {an['espn_rows']}); proxy {an['proxy']}",
     ]
+    if m.get("live_replay"):
+        lr = m["live_replay"]
+        L.append(
+            f"live replay refused rows: {lr['rows_dropped']}; eval matches with O/U rows created or last seen at/after "
+            f"kickoff {lr['matches_with_rows_after_kickoff']}; consensus outside 0.05..0.95 "
+            f"{lr['consensus_outside_valid_range']}"
+        )
     if m.get("live_check"):
         lc = m["live_check"]
         L.append(
@@ -1874,7 +2013,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--live-check-model-version",
         default=None,
-        help="also re-derive this model_version's stored live predictions from the served artifact (read only)",
+        help="also re-derive this model_version's stored live predictions from the served artifact (read only); "
+        "'served' = the version precompute_predictions stores for the loaded ensemble",
     )
     p.add_argument("--limit", type=int, default=0, help="cap eval rows per fold (smoke run); 0 = all")
     p.add_argument("--out-json", default=None)

@@ -171,15 +171,30 @@ class TestTruth:
 KO = pd.Timestamp("2026-10-20 15:00", tz="UTC")
 
 
-def _row(book, sel, price, seen_hours_before=1.0, ts_hours_before=None, line=2.5, live=False, last_seen=True):
-    ts = KO - pd.Timedelta(hours=ts_hours_before if ts_hours_before is not None else seen_hours_before + 1)
+def _row(
+    book,
+    sel,
+    price,
+    seen_hours_before=1.0,
+    ts_hours_before=None,
+    line=2.5,
+    live=False,
+    last_seen=True,
+    created_hours_before=None,
+    ko=None,
+):
+    """One OU_ODDS_SQL row; `created` defaults to the price timestamp (a row
+    whose price never moved), and every offset counts back from `ko`."""
+    ko = KO if ko is None else ko
+    ts = ko - pd.Timedelta(hours=ts_hours_before if ts_hours_before is not None else seen_hours_before + 1)
     return {
         "bookmaker": book,
         "selection": sel,
         "line": line,
         "odds_decimal": price,
         "ts": ts,
-        "last_seen_at": (KO - pd.Timedelta(hours=seen_hours_before)) if last_seen else None,
+        "last_seen_at": (ko - pd.Timedelta(hours=seen_hours_before)) if last_seen else None,
+        "created": ts if created_hours_before is None else ko - pd.Timedelta(hours=created_hours_before),
         "is_live": live,
     }
 
@@ -640,3 +655,356 @@ class TestAnchorGuard:
         monkeypatch.setattr(ab, "derive_fidelity", lambda *args, **kw: 0.0)  # the sampled check would catch it first
         with pytest.raises(RuntimeError, match="misses its anchor"):
             ab.score_fold("2026-09", ev, tg, a_live, a_proxy, truth, {"served": _FakeDC(lam)}, const, ab.unit_weights())
+
+
+# ── Guards the decision rests on ─────────────────────────────────────
+
+
+class TestReplayGuards:
+    def test_live_anchor_drops_stale_live_aggregate_and_off_line_rows(self):
+        from rec_gating import devig_power
+
+        two = _book("BetMGM", 1.9, 1.95) + _book("BetRivers", 1.85, 2.0)
+        for third in (
+            _book("Bovada", 2.0, 1.83, seen_hours_before=6.5),  # stale
+            _book("Bovada", 2.0, 1.83, live=True),
+            _book("Average", 2.0, 1.83),  # a football-data aggregate, not a book
+            _book("Bovada", 2.0, 1.83, line=3.5),
+        ):
+            assert ab.live_anchor(two + third, KO) is None
+        books = [("BetMGM", 1.9, 1.95), ("BetRivers", 1.85, 2.0), ("Bovada", 2.0, 1.83)]
+        want = np.mean([devig_power({"over": o, "under": u})["over"] for _, o, u in books])
+        assert ab.live_anchor(two + _book("Bovada", 2.0, 1.83), KO) == pytest.approx(want, abs=1e-15)
+
+    def test_a_backfilled_trio_created_after_kickoff_never_anchors(self):
+        trio = [("BetMGM", 1.9, 1.95), ("BetRivers", 1.85, 2.0), ("Bovada", 2.0, 1.83)]
+        years_later = -2 * 365 * 24.0  # hours BEFORE kickoff, i.e. two years after it
+        backfill = [
+            r
+            for b in trio
+            for r in _book(*b, ts_hours_before=years_later, created_hours_before=years_later, last_seen=False)
+        ]
+        drops: dict = {}
+        assert ab.consensus_rows(backfill, KO, drops=drops) == []
+        assert drops == {"created_at_or_after_kickoff": 6}
+        assert ab.live_anchor(backfill, KO) is None
+        at_kickoff = [r for b in trio for r in _book(*b, created_hours_before=0.0)]
+        assert ab.live_anchor(at_kickoff, KO) is None  # created AT kickoff: never read pre-kickoff
+        assert ab.live_anchor([r for b in trio for r in _book(*b)], KO) is not None  # the control
+
+    def test_a_row_last_seen_after_kickoff_is_refused_and_counted(self):
+        trio = [("BetMGM", 1.9, 1.95), ("BetRivers", 1.85, 2.0), ("Bovada", 2.0, 1.83)]
+        rows = [r for b in trio for r in _book(*b, seen_hours_before=-0.5, created_hours_before=5.0)]
+        drops: dict = {}
+        assert ab.live_anchor(rows, KO, drops=drops) is None
+        assert drops == {"seen_after_kickoff": 6}
+
+    def test_the_odds_query_selects_the_creation_clock_and_is_read_pre_kickoff(self, monkeypatch):
+        from utils.training_data import PREMATCH_ODDS_SQL
+
+        assert 'COALESCE(o.created_at, o."timestamp") AS created' in ab.OU_ODDS_SQL
+        seen = {}
+
+        def fake(url, sql, params=None):
+            seen["sql"], seen["params"] = sql, params
+            return pd.DataFrame([{"match_id": "m1", **_row("BetMGM", "over", 1.9)}])
+
+        monkeypatch.setattr(ab.members, "_read_sql", fake)
+        out = ab.load_ou_rows("db", pd.Timestamp("2026-09-01", tz="UTC"), pd.Timestamp("2026-10-01", tz="UTC"))
+        assert PREMATCH_ODDS_SQL in seen["sql"] and set(out) == {"m1"}
+
+
+class TestValidityChecks:
+    def _probs(self, anchored=False):
+        rows = _random_matrices(8, 11, anchored)
+        lams = np.array([[h, a] for h, a, *_ in rows])
+        tg = np.array([t for *_, t, _p in rows])
+        anchors = [p for *_, p in rows]
+        mats = ab.arm_matrices(lams, -0.06, tg, anchors)
+        return lams, tg, anchors, ab.unit_probabilities(mats, ab.unit_weights())
+
+    def test_invalid_probabilities_rejects_rows_that_are_not_probabilities(self):
+        _l, _t, _a, probs = self._probs()
+        assert ab.invalid_probabilities(probs, ab.UNIT_NAMES) is None
+        for unit, how in (
+            ("winning_margin", lambda v: v * 0.9),  # a partition that sums to 0.9
+            ("ah_-1.5", lambda v: v + np.array([0.05, 0.0, 0.0])),  # a handicap that sums to 1.05
+            (ab.GRID, lambda v: v * 1.01),
+            ("btts", lambda v: v + 1.0),  # a binary above 1
+            ("over_3.5", lambda v: v * np.nan),
+        ):
+            bad = {k: (v.copy() if isinstance(v, np.ndarray) else v) for k, v in probs.items()}
+            bad[unit][0] = how(bad[unit][0])
+            assert unit in (ab.invalid_probabilities(bad, ab.UNIT_NAMES) or ""), unit
+
+    def test_derive_fidelity_refuses_a_readout_off_by_more_than_the_tolerance(self):
+        for anchored in (False, True):
+            lams, tg, anchors, probs = self._probs(anchored)
+            rows = list(range(len(lams)))
+            assert ab.derive_fidelity(lams, -0.06, tg, anchors, probs, rows) <= ab.DERIVE_ATOL
+            for unit in ("btts", "ah_1.75", "total_goals"):
+                bad = {k: (v.copy() if isinstance(v, np.ndarray) else v) for k, v in probs.items()}
+                bad[unit][3, 0] += 1e-9
+                with pytest.raises(RuntimeError, match=unit):
+                    ab.derive_fidelity(lams, -0.06, tg, anchors, bad, rows)
+
+
+class TestFrozenFitAndVersion:
+    def test_a_frozen_fit_reaching_the_first_cutoff_is_refused(self):
+        folds = ab.ft.build_folds("2024-04-07", "2024-06-30")
+        assert folds[0].fit_cutoff == pd.Timestamp("2024-04-01", tz="UTC")
+        dates = pd.date_range("2024-01-01", "2024-03-31 23:00", freq="7h", tz="UTC")
+        ab.check_frozen_fit(pd.DataFrame({"match_date": dates}), folds)
+        leaky = pd.DataFrame({"match_date": dates.append(pd.DatetimeIndex([folds[0].fit_cutoff]))})
+        with pytest.raises(RuntimeError, match="refit_frozen"):
+            ab.check_frozen_fit(leaky, folds)
+
+    def test_served_model_version_is_the_name_precompute_stores(self, tmp_path):
+        import os
+
+        meta = tmp_path / "ensemble_soccer_match_result" / "1.0.0" / "model.bin"
+        meta.parent.mkdir(parents=True)
+        meta.write_text("{}")
+        os.utime(meta, (1793505994, 1793505994))
+        assert ab.served_model_version(meta) == "ensemble_soccer_match_result_1.0.0+1793505994"
+
+
+# ── run() end to end ─────────────────────────────────────────────────
+
+
+class _Learned:
+    """A fitted learned member: a fixed function of one serve-row feature."""
+
+    is_fitted = True
+    feature_names = ["feature__f1"]
+
+    def __init__(self, scale):
+        self.scale = scale
+
+    def predict_proba(self, X):
+        f = pd.to_numeric(X["feature__f1"]).to_numpy(dtype=float)
+        raw = np.stack([np.exp(self.scale * f), np.ones_like(f), np.exp(-self.scale * f)], axis=1)
+        return raw / raw.sum(axis=1, keepdims=True)
+
+
+ENSEMBLE_WEIGHTS = {
+    "xgboost_soccer_match_result": 0.4484,
+    "lightgbm_soccer_match_result": 0.1051,
+    "neural_network_soccer_match_result": 0.3545,
+    "poisson_soccer_match_result": 0.046,
+    "dixon_coles_soccer_match_result": 0.046,
+}
+
+
+def _run_corpus(seed=7):
+    """Two matches a day, 2023-01-01 .. 2024-06-30, eight teams of fixed
+    strength, one league, with every column FRAME_SQL selects."""
+    rng = np.random.default_rng(seed)
+    strength = rng.normal(0.0, 0.3, 8)
+    dates = pd.date_range("2023-01-01 15:00", "2024-06-30 15:00", freq="12h", tz="UTC")
+    rows = []
+    for i, d in enumerate(dates):
+        h, a = rng.choice(8, 2, replace=False)
+        rows.append(
+            {
+                "match_id": f"m{i:05d}",
+                "match_date": d,
+                "league_id": "L1",
+                "league_name": "League One",
+                "home_team_id": f"t{h}",
+                "away_team_id": f"t{a}",
+                "home_team": f"Team {h}",
+                "away_team": f"Team {a}",
+                "home_score": int(rng.poisson(1.45 * np.exp(strength[h] - strength[a]))),
+                "away_score": int(rng.poisson(1.15 * np.exp(strength[a] - strength[h]))),
+                "regulation_home_score": None,
+                "regulation_away_score": None,
+            }
+        )
+    frame = pd.DataFrame(rows)
+    frame["outcome"] = np.where(
+        frame["home_score"] > frame["away_score"], 0, np.where(frame["home_score"] == frame["away_score"], 1, 2)
+    )
+    return frame
+
+
+@pytest.fixture(scope="module")
+def run_world(tmp_path_factory):
+    """The synthetic corpus, the incumbent ensemble (its two scoreline members
+    fitted on the oldest 70% of its seen rows, as the trainer does) and the
+    path of the served Dixon-Coles' saved artifact. Fitted once per module."""
+    from predictors.ensemble import EnsemblePredictor
+    from predictors.model_config import ENSEMBLE_CONFIG
+
+    tmp = tmp_path_factory.mktemp("ftdc_registry")
+    frame = _run_corpus()
+    seen_rows = frame[frame["match_date"] < pd.Timestamp("2024-03-16", tz="UTC")]
+    ens = EnsemblePredictor(ENSEMBLE_CONFIG)
+    for m, scale in zip(ab.members.LEARNED_MEMBERS, (0.3, 0.5, 0.8)):
+        ens.add_model(m, _Learned(scale), weight=ENSEMBLE_WEIGHTS[m])
+    for m in ab.members.SCORELINE_MEMBERS:
+        model, _ = ab.members.fit_member(m, seen_rows.head(int(0.7 * len(seen_rows))), str(tmp), "incumbent")
+        ens.add_model(m, model, weight=ENSEMBLE_WEIGHTS[m])
+    dc_path = tmp / f"{ab.SERVED_DC}_incumbent.bin"
+    assert dc_path.exists()
+    return frame, set(seen_rows["match_id"]), ens, str(dc_path)
+
+
+def _replay_odds(frame):
+    """O/U 2.5 rows for five eval matches, each built to exercise one rule.
+    Returns (rows DataFrame, {role: match_id}, expected anchors)."""
+    from rec_gating import devig_power
+
+    late = frame[frame["match_date"] >= pd.Timestamp("2024-05-01", tz="UTC")].reset_index(drop=True)
+    roles = {name: late.loc[k, "match_id"] for k, name in enumerate(("good", "extreme", "mixed", "backfill", "after"))}
+    ko = dict(zip(late["match_id"], late["match_date"]))
+    trio = [("BetMGM", 1.9, 1.95), ("BetRivers", 1.85, 2.0), ("Bovada", 2.0, 1.83)]
+    later = -2 * 365 * 24.0
+    rows = []
+
+    def add(role, recs):
+        rows.extend({"match_id": roles[role], **r} for r in recs)
+
+    add("good", [r for b in trio for r in _book(*b, ko=ko[roles["good"]])])
+    add(
+        "extreme", [r for b in ("BetMGM", "BetRivers", "Bovada") for r in _book(b, 1.02, 15.0, ko=ko[roles["extreme"]])]
+    )
+    k = ko[roles["mixed"]]
+    add(
+        "mixed",
+        _book("BetMGM", 1.9, 1.95, ko=k)
+        + _book("BetRivers", 1.85, 2.0, ko=k)
+        + _book("Bovada", 2.0, 1.83, seen_hours_before=7.0, ko=k)
+        + _book("FanDuel", 2.0, 1.83, live=True, ko=k)
+        + _book("Average", 1.8, 2.05, ko=k),
+    )
+    k = ko[roles["backfill"]]
+    late_kw = dict(ts_hours_before=later, created_hours_before=later, last_seen=False, ko=k)
+    add(
+        "backfill",
+        [r for b in trio for r in _book(*b, **late_kw)]
+        + _book("Average", 1.75, 2.1, **late_kw)
+        + _book("Bet365", 1.7, 2.2, **late_kw),
+    )
+    k = ko[roles["after"]]
+    add("after", [r for b in trio for r in _book(*b, seen_hours_before=-0.5, created_hours_before=5.0, ko=k)])
+    want_live = float(np.mean([devig_power({"over": o, "under": u})["over"] for _, o, u in trio]))
+    want = {
+        "live": {roles["good"]: want_live},
+        "proxy": {
+            roles["good"]: want_live,
+            roles["mixed"]: devig_power({"over": 1.8, "under": 2.05})["over"],
+            roles["backfill"]: devig_power({"over": 1.75, "under": 2.1})["over"],
+        },
+    }
+    return pd.DataFrame(rows), roles, want
+
+
+class TestRunEndToEnd:
+    """run() on a synthetic corpus with only the database reads and the
+    registry faked: the serve rows, the anchor replay, the refits and their
+    refusal rule, the fold guards, the scoring, the report and the per-match
+    CSV are the real code."""
+
+    def _setup(self, run_world, tmp_path, monkeypatch):
+        frame, seen, ens, dc_path = run_world
+        late = frame[frame["match_date"] >= pd.Timestamp("2024-03-01", tz="UTC")]
+        rng = np.random.default_rng(1)
+        features = {mid: {"f1": float(rng.normal())} for mid in late["match_id"]}
+        no_features = late["match_id"].iloc[-5]
+        del features[no_features]
+        unservable = late["match_id"].iloc[-9]
+        features[unservable] = {"f2": 1.0}  # no f1 at all: production skips the match
+        odds, roles, want = _replay_odds(frame)
+        calls = []
+
+        def read_sql(url, sql, params=None):
+            calls.append((sql, params))
+            if "o.market_type = 'over_under'" in sql:
+                return odds.copy()
+            raise AssertionError(f"unexpected query: {sql[:80]}")
+
+        served = ens.models[ab.SERVED_DC]
+        fingerprint = {"path": dc_path, "sha256": "f" * 64, "teams": 8, "league_baselines": 1, "rho": served.rho}
+        monkeypatch.setattr(ab, "load_frame", lambda url: frame.copy())
+        monkeypatch.setattr(ab.members, "load_ensemble", lambda path: (ens, "fake-ensemble"))
+        monkeypatch.setattr(ab.members, "member_fingerprint", lambda path, m: dict(fingerprint))
+        monkeypatch.setattr(ab.members, "served_fit_slice", lambda *a: {"checked": False, "reason": "synthetic"})
+        monkeypatch.setattr(ab.members, "load_seen_ids", lambda path: set(seen))
+        monkeypatch.setattr(ab.members, "load_features", lambda url, start, end: dict(features))
+        monkeypatch.setattr(ab.members, "load_medians", lambda url: {"f1": 0.0})
+        monkeypatch.setattr(ab.members, "_read_sql", read_sql)
+        args = ab.parse_args(
+            ["--database-url", "postgresql:///unused", "--merge-map", "", "--out-dir", str(tmp_path / "out")]
+        )
+        return frame, calls, roles, want, {"no_features": no_features, "unservable": unservable}, args
+
+    def test_runs_and_replays_the_anchor_on_pre_kickoff_rows_only(self, run_world, tmp_path, monkeypatch):
+        from utils.training_data import PREMATCH_ODDS_SQL
+
+        frame, calls, roles, want, removed, args = self._setup(run_world, tmp_path, monkeypatch)
+        r = ab.run(args)
+        m = r["meta"]
+        assert r["folds"] == ["2024-04", "2024-05", "2024-06"]
+        assert [f["fold"] for f in m["skipped_folds"]] == ["2024-03"]  # 32 rows < MIN_FOLD_EVAL
+        # the odds are read once, through prematch_odds, over the whole eval span
+        assert len(calls) == 1 and PREMATCH_ODDS_SQL in calls[0][0]
+        assert calls[0][1] == {
+            "start": pd.Timestamp("2024-03-16", tz="UTC").to_pydatetime(),
+            "end": pd.Timestamp("2024-07-01", tz="UTC").to_pydatetime(),
+        }
+        # rows the serve path could not predict are excluded and counted
+        assert m["eval_rows_unservable"] == 1 and m["eval_rows_without_features"] == 1
+        scored = frame[frame["match_date"] >= pd.Timestamp("2024-04-01", tz="UTC")]
+        df = pd.read_csv(r["outputs"]["per_match_csv"])
+        assert r["n_eval"] == len(df) == len(scored) - 2
+        assert not set(removed.values()) & set(df["match_id"])
+        # the replay: one live anchor; the extreme consensus, the stale / live / aggregate mix, the
+        # post-kickoff backfill and the rows seen after kickoff never anchor live
+        for regime in ("live", "proxy"):
+            got = dict(zip(df["match_id"], df[f"anchor_{regime}"]))
+            anchored = {k: v for k, v in got.items() if np.isfinite(v)}
+            assert set(anchored) == set(want[regime]), regime
+            for mid, v in want[regime].items():
+                assert anchored[mid] == pytest.approx(v, abs=1e-12)
+        assert m["live_replay"] == {
+            "rows_dropped": {
+                "live": 2,
+                "aggregate": 4,
+                "other_line": 0,
+                "created_at_or_after_kickoff": 8,
+                "seen_after_kickoff": 6,
+                "stale": 2,
+            },
+            "matches_with_rows_after_kickoff": 2,
+            "consensus_outside_valid_range": 1,
+        }
+        # no fit reaches the matches it is scored on, the frozen one included
+        frozen = [f for f in m["fits"] if f["arm"] == "refit_frozen"]
+        assert len(frozen) == 1 and pd.Timestamp(frozen[0]["fit_newest"]) < pd.Timestamp("2024-03-01", tz="UTC")
+        for fit in m["fits"]:
+            if fit["arm"] == "refit":
+                assert pd.Timestamp(fit["fit_newest"]) < pd.Timestamp(f"{fit['fold']}-01", tz="UTC")
+        assert m["disqualified"] == {} and r["decision"]["arm"] == "refit"
+        assert m["loader_lambda_gap"] == 0.0 and m["derive_fidelity_max_abs"] <= ab.DERIVE_ATOL
+        d = (df["p::refit::live::over_2.5"] - df["p::served::live::over_2.5"]).abs()
+        assert d[df["match_id"] == roles["good"]].max() < 1e-9  # an anchored over_2.5 is the market's number
+        text = ab.format_report(r)
+        assert "live replay refused rows" in text and "DECISION (pre-registered" in text
+
+    def test_a_refit_the_trainer_would_refuse_is_disqualified_and_never_ships(self, run_world, tmp_path, monkeypatch):
+        *_, args = self._setup(run_world, tmp_path, monkeypatch)
+        real = ab.htrainer.fit_refusal
+        calls = {"n": 0}
+
+        def refuse_first(result, model, fixtures, **kw):
+            calls["n"] += 1  # per fold: the refit is checked first, then refit_frozen
+            return "the fit did not converge" if calls["n"] == 1 else real(result, model, fixtures, **kw)
+
+        monkeypatch.setattr(ab.htrainer, "fit_refusal", refuse_first)
+        r = ab.run(args)
+        assert set(r["meta"]["disqualified"]) == {"refit"}
+        assert r["meta"]["disqualified"]["refit"]["fold"] == "2024-04"
+        assert not r["decision"]["ship"] and r["decision"]["reason"].startswith("disqualified")
+        assert "refit" not in r["vs_served"]["live"] and "refit_frozen" in r["vs_served"]["live"]
+        assert "DO-NOT-SHIP" in ab.format_report(r)
