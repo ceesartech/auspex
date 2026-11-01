@@ -86,9 +86,10 @@ EXPECTED_ORDER = [
     "cleanup_soccer_orphans",
     "backfill_soccer_regulation_scores",
     "backfill_season_labels",
-    # step 12: the never_resulted backfill, then the orphan cleanup again (for the forks it leaves)
+    # step 12: the never_resulted backfill, then the orphan cleanup again (for the forks it leaves), on that
+    # re-run's own ceilings
     "backfill_soccer_never_resulted",
-    "cleanup_soccer_orphans",
+    "cleanup_soccer_orphans --after-never-resulted",
     "promote_raw_after_repair",
     "grade_folded_soccer_rows",
 ]
@@ -795,6 +796,19 @@ def test_a_failing_step_12_keeps_the_retrains_paused_until_step_15(tmp_path):
     assert rc == 0 and "STEP 12/15 DONE (already_done)" in out and "not complete" not in out, out
     assert "adopted" in out and "STEP 15/15 DONE (changed)" in out  # the failure is remembered: 15 recomputes
     assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": False, "retrain_halftime_dc": False}
+
+
+@pytest.mark.parametrize("rc_cleanup", ["1", "2"])
+def test_a_failing_cleanup_re_run_fails_step_12_and_keeps_the_retrains_paused(tmp_path, rc_cleanup):
+    """The backfill applied, then the cleanup re-run failed (1) or ended INCOMPLETE (2): step 12 fails with its exit
+    code, is recorded 'failed', and the retrains stay paused until step 15 has run."""
+    (tmp_path / "state").write_text(OLD_RUN_STATE)
+    rc, out, steps, _, af = _run(tmp_path, "--from", "12", FAIL_CLEANUP_SOCCER_ORPHANS=rc_cleanup)
+    assert rc == int(rc_cleanup) and f"STEP 12 FAILED (exit {rc_cleanup})" in out and "--from 12" in out, out
+    assert steps == ["backfill_soccer_never_resulted", "cleanup_soccer_orphans --after-never-resulted"]
+    state = (tmp_path / "state").read_text()
+    assert "step=12 result=failed" in state and "step=12 result=changed" not in state
+    assert _paused(af) == {"retrain_models": True, "retrain_halftime_dc": True}
 
 
 def test_a_failing_step_14_is_not_a_corpus_failure(tmp_path):

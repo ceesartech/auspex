@@ -224,9 +224,40 @@ def test_followups_only_runs_steps_5_and_6_alone(tmp_path):
     assert _pending(tmp_path) == []
 
 
-def test_an_unknown_argument_exits_2(tmp_path):
-    rc, out, calls = _run(tmp_path, "--bogus")
+@pytest.mark.parametrize("args", [["--bogus"], ["--followups-only", "--after-never-resulted"]])
+def test_an_unknown_argument_exits_2(tmp_path, args):
+    rc, out, calls = _run(tmp_path, *args)
     assert rc == 2 and "usage" in out and calls == []
+
+
+FORK_PLAN = ZERO_PLAN.replace("merge_cancel=0", "merge_cancel=1")
+
+
+def test_the_re_run_after_the_never_resulted_backfill_merges_the_one_fork(tmp_path):
+    """Runbook step 12's re-run: the fork of a row the backfill healed (merge_cancel 1), nothing else."""
+    rc, out, calls = _run(tmp_path, "--after-never-resulted", DRY_PLAN=FORK_PLAN, AFTER_STATE="99|3|500|0|0")
+    assert rc == 0 and "after-state OK" in out and "DONE." in out, out
+    assert "ceilings merges <= 1, placeholders <= 0, postponed <= 0" in out
+    (apply_,) = [c for c in _tool_calls(calls) if "--apply" in c]
+    assert "--expect-plan merge_delete=0,merge_cancel=1,delete_placeholder=0,mark_postponed=0" in apply_
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        FORK_PLAN.replace("merge_delete=0", "merge_delete=1"),  # two merges
+        FORK_PLAN.replace("delete_placeholder=0", "delete_placeholder=1"),
+        FORK_PLAN.replace("mark_postponed=0", "mark_postponed=1"),
+    ],
+    ids=["merges", "placeholder", "postponed"],
+)
+def test_the_re_run_after_the_never_resulted_backfill_aborts_above_its_own_ceilings(tmp_path, plan):
+    """Step 7's ceilings (merges <= 204, placeholders <= 65, postponed <= 6) are not this re-run's review."""
+    rc, out, calls = _run(tmp_path, "--after-never-resulted", DRY_PLAN=plan)
+    assert rc == 1 and "ABORT at step 2" in out and "merges <= 1, placeholders <= 0, postponed <= 0" in out, out
+    assert not [c for c in _tool_calls(calls) if "--apply" in c]
+    rc, out, _ = _run(tmp_path, DRY_PLAN=plan, AFTER_STATE="98|3|500|1|0")  # the same plan is inside step 7's review
+    assert "ABORT at step 2" not in out, out
 
 
 def test_a_wrong_after_state_exits_1(tmp_path):

@@ -113,20 +113,29 @@
 # AFTERWARDS: the never_resulted rows (42 after run-order steps 1-7 on the
 # 2026-11-01 replica) are mostly real matches ESPN has full-time results for.
 # Runbook step 12 (scripts/ops/backfill_soccer_never_resulted.sh, with
-# scripts/backfill_never_resulted.py) records those results on exactly these
-# rows and grades them, then runs this script again: a row it heals can leave
+# scripts/backfill_never_resulted.py) records those results on the reviewed
+# ones (scripts/data/soccer_never_resulted_reviewed.csv) and grades them, then
+# runs this script again with --after-never-resulted: a row it heals can leave
 # a fork of the same fixture with a finished twin, which this merges. Not a
 # blanket `fetch_upcoming.py --results --days-back 160` (it would re-write
 # every other completed event of those leagues and days too).
+# --after-never-resulted: that re-run's own reviewed set, in place of the
+# ceilings below: merges <= 1 (Coquimbo Unido v O'Higgins 2026-06-15, the one
+# fork of a healed row: merge_cancel, it holds void recs — the rehearsal's
+# re-run merged exactly it), no placeholder deleted, no postponement marked
+# (step 7 did those). Anything more aborts at step 2, nothing changed.
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/cleanup_soccer_orphans.sh 2>&1 | tee -a ~/cleanup_soccer_orphans.log
 set -uo pipefail
 FOLLOWUPS_ONLY=""
+AFTER_NEVER_RESULTED=""
 case "${1:-}" in
   "") ;;
   --followups-only) FOLLOWUPS_ONLY=1 ;;
-  *) echo "usage: $0 [--followups-only]   (see the header)"; exit 2 ;;
+  --after-never-resulted) AFTER_NEVER_RESULTED=1 ;;
+  *) echo "usage: $0 [--followups-only | --after-never-resulted]   (see the header)"; exit 2 ;;
 esac
+[ $# -le 1 ] || { echo "usage: $0 [--followups-only | --after-never-resulted]   (see the header)"; exit 2; }
 cd "${AUSPEX_DIR:-/opt/auspex}" || exit 1
 DC="docker compose"
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
@@ -150,6 +159,12 @@ TOOL="python /app/scripts/repair_fixture_orphans.py --sport soccer --delete-plac
 MAX_MERGES=204
 MAX_PLACEHOLDERS=65
 MAX_POSTPONED=6
+if [ -n "$AFTER_NEVER_RESULTED" ]; then
+  # Runbook step 12's re-run (header): the fork of a row its backfill healed, nothing else.
+  MAX_MERGES=1
+  MAX_PLACEHOLDERS=0
+  MAX_POSTPONED=0
+fi
 STATE_SQL=$(mktemp "${TMPDIR:-/tmp}/soccer_orphans_state.XXXXXX") || exit 1
 cleanup() {
   rm -f "$STATE_SQL"
@@ -243,6 +258,7 @@ if [ -n "$FOLLOWUPS_ONLY" ]; then
   followups_for_pending
 fi
 
+[ -z "$AFTER_NEVER_RESULTED" ] || log "--after-never-resulted (runbook step 12's re-run): ceilings merges <= $MAX_MERGES, placeholders <= $MAX_PLACEHOLDERS, postponed <= $MAX_POSTPONED"
 log "0/6 already done? (read-only dry run)"
 PRE_AT=$(date -u +%FT%TZ)
 $DC exec -T api sh -c "$TOOL --as-of $PRE_AT --out-csv /app/backups/fixture_orphans_soccer_precheck_$(date -u +%Y%m%dT%H%M%SZ).csv > /tmp/rfo_soccer_pre.log 2>&1; echo \"tool exit \$?\""

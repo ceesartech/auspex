@@ -76,6 +76,7 @@ def test_the_runbook_runs_the_steps_in_this_order():
     assert calls[9][1] == "recompute_features"
     body = re.search(r"^step12\(\) \{\n(.*?)^\}", text, re.M | re.S).group(1)
     assert body.index('"$OPS/backfill_soccer_never_resulted.sh"') < body.index('"$OPS/cleanup_soccer_orphans.sh"')
+    assert '"$OPS/cleanup_soccer_orphans.sh" --after-never-resulted' in body  # that re-run's own ceilings
 
 
 @pytest.mark.parametrize("path", HEADERS + NEW_HEADERS, ids=lambda p: p.name)

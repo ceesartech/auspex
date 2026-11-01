@@ -20,7 +20,11 @@
 # reads (every step ALREADY DONE, 0 backups, row fingerprint unchanged).
 # Start it right after the deploy: until step 1 runs, results for the mapped
 # upcoming Liga MX fixtures are refused as identity drift, and the results
-# sweep only looks back 3 days.
+# sweep only looks back 3 days. On 2026-11-01 one already waits (Guadalajara
+# v Atlante, kicked off 2026-11-01 01:07Z, still 'scheduled' at 04:53Z while
+# every other fixture of that night was finished): step 1 must run before
+# ~2026-11-04 00:00Z for the sweep to record it. Later, it stays a stale
+# scheduled row; step 12 lists it as not reviewed and leaves it alone.
 #
 #  1 scripts/ops/repoint_team_matches.sh --pass 1
 #    Moves 33 Liga MX sides (31 match rows) off Santos FC's 'Santos' and CD
@@ -96,15 +100,19 @@
 # fingerprint unchanged); and this one from step 1 on a fresh copy (the same
 # counts in all fifteen steps):
 # 12 scripts/ops/backfill_soccer_never_resulted.sh, then
-#    scripts/ops/cleanup_soccer_orphans.sh again
-#    The cleanup's never_resulted rows (42): ESPN's result recorded on the
-#    rows it finds completed, through the results path, and those rows graded
+#    scripts/ops/cleanup_soccer_orphans.sh --after-never-resulted
+#    The cleanup's never_resulted rows (42): ESPN's result recorded, through
+#    the results path, on the 38 the rehearsal reviewed for healing
+#    (scripts/data/soccer_never_resulted_reviewed.csv), and those rows graded
 #    (scripts/backfill_never_resulted.py, pinned, one transaction). Expect
-#    heal 38, refuse 4, predictions graded 3,173, recs changed 0, teams
-#    stamped 3 (bounds in the wrapper). Of the 4 left: one is a fork of a
-#    healed row (Coquimbo Unido v O'Higgins 2026-06-15), which the cleanup
-#    re-run then merges (merge_cancel 1: it holds void recs); the others
-#    ESPN does not report final. A corpus step.
+#    candidates 38, heal 38, refuse 0, predictions graded 3,173, recs changed
+#    0, teams stamped 3 (bounds in the wrapper). The list's other 4, and any
+#    never_resulted row it does not hold (a fixture whose result never
+#    arrived joins the class 96 h after kickoff), are listed and left as they
+#    are. One of the 4 is a fork of a healed row (Coquimbo Unido v O'Higgins
+#    2026-06-15), which the cleanup re-run then merges (merge_cancel 1: it
+#    holds void recs; that re-run's ceilings are merges <= 1, no placeholder,
+#    no postponement); ESPN does not report the other 3 final. A corpus step.
 # 13 scripts/ops/promote_raw_after_repair.sh
 #    promote_raw in checked mode (scripts/promote_raw.py --dry-run, then
 #    --apply --expect-plan): re-writes the 4 match_stats rows step 4 archived
@@ -499,7 +507,8 @@ recompute_features() {
 }
 
 # Step 12: the never_resulted backfill, then the orphan cleanup again — a row it healed can leave a fork of the same
-# fixture with a finished twin now, which the cleanup merges (ALREADY DONE when there is none). Exit 2 from the
+# fixture with a finished twin now, which the cleanup merges (ALREADY DONE when there is none; --after-never-resulted:
+# that re-run's own reviewed ceilings, the one fork and nothing else). Exit 2 from the
 # cleanup (its feature/grading follow-ups failed) fails the step; --from 12 then finds the backfill ALREADY DONE and
 # the cleanup runs only its pending follow-ups.
 step12() {
@@ -507,8 +516,8 @@ step12() {
   bash "$OPS/backfill_soccer_never_resulted.sh" 2>&1 | tee "$out1"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || return "$rc"
-  log "step 12: the forks of the rows healed above — scripts/ops/cleanup_soccer_orphans.sh again"
-  bash "$OPS/cleanup_soccer_orphans.sh" 2>&1 | tee "$out2"
+  log "step 12: the forks of the rows healed above — scripts/ops/cleanup_soccer_orphans.sh --after-never-resulted"
+  bash "$OPS/cleanup_soccer_orphans.sh" --after-never-resulted 2>&1 | tee "$out2"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || return "$rc"
   if grep -q "ALREADY DONE" "$out1" && grep -q "ALREADY DONE" "$out2"; then
