@@ -12,8 +12,16 @@ built from services/data-ingestion/db/migrations, one database per test):
     fetch_upcoming.ensure_team mints no team for 'Zachary Reese' nor for the
     decomposed 'Rose Conceição' ESPN still sends;
   * an apply whose plan changed since the dry run refuses with nothing written;
-    one whose in-transaction after-state fails (a resolver that misses) rolls
-    everything back; a copy a rec holds is left in place, its rec untouched;
+    so does one whose (expected) plan refuses a pair; one whose
+    in-transaction after-state fails rolls everything back — a resolver that
+    misses every name, and one that misses only the merged spelling (the
+    per-pair check alone: the soccer lesson); a copy a rec holds is left in
+    place, its rec untouched;
+  * --check-after counts a team re-minted under a merged spelling and a stale
+    row of a folded bout left beside its finished row;
+  * the SQL guards: a rec that arrives after the plan on a prediction the fold
+    moves, or on the copy itself, stops the fold (GuardError, not a move or a
+    foreign-key error);
   * the archive holds the stale copy and every child row before the first write.
 
 Skipped where no Postgres server binaries are on PATH (initdb, pg_ctl).
@@ -25,11 +33,13 @@ import dataclasses
 import gzip
 import importlib.util
 import json
+import logging
 import shutil
 import subprocess
 import sys
 import tempfile
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -170,8 +180,8 @@ def _pred(cur, match_id, version, written):
     return cur.fetchone()["id"]
 
 
-def _rec(cur, match_id):
-    pid = _pred(cur, match_id, "rec-v", CARD - timedelta(days=2))
+def _rec(cur, match_id, prediction_id=None):
+    pid = prediction_id or _pred(cur, match_id, "rec-v", CARD - timedelta(days=2))
     cur.execute(
         """INSERT INTO betting_recommendations (prediction_id, match_id, bet_type, selection, odds_at_recommendation,
                                                 bookmaker, recommended_stake, status, created_at)
@@ -181,9 +191,9 @@ def _rec(cur, match_id):
     return cur.fetchone()["id"]
 
 
-def _world(conn) -> dict:
+def _world(conn, nfd: bool = True) -> dict:
     """The merged fighter's copy beside the finished row, his history, a
-    reversed duplicate, and a decomposed name."""
+    reversed duplicate, and (nfd) a decomposed name."""
     with _cur(conn) as cur:
         league = str(fu.ensure_league(cur, MMA, "UFC", "UFC", "USA"))
         w = {"league": league}
@@ -191,7 +201,8 @@ def _world(conn) -> dict:
             w[key] = _fighter(cur, name)
         for key, name in (("old", "Eli Aronov"), ("mcghee", "Marcus McGhee"), ("romero", "Anthony Romero")):
             w[key] = _fighter(cur, name)
-        w["rose"] = _fighter(cur, NFD_NAME, fu.normalize_team(NFD_NAME).replace("çã", "çã"))
+        if nfd:
+            w["rose"] = _fighter(cur, NFD_NAME, fu.normalize_team(NFD_NAME).replace("çã", "çã"))
         w["fin"] = _row(cur, league, w["kept"], w["opp"], CARD, "finished", score=(0, 1))
         w["stale"] = _row(cur, league, w["merged"], w["opp"], CARD, espn="401874061")
         w["hist"] = _row(cur, league, w["merged"], w["old"], CARD - timedelta(days=400), "finished", score=(1, 0))
@@ -342,6 +353,91 @@ def test_a_resolver_miss_inside_the_transaction_rolls_everything_back(conn, tmp_
     assert _one(conn, "SELECT count(*) AS n FROM matches WHERE id = %s", w["stale"])["n"] == 1
     assert _one(conn, "SELECT name FROM teams WHERE id = %s", w["rose"])["name"] == NFD_NAME
     assert _one(conn, "SELECT match_id::text AS m FROM odds WHERE id = %s", w["odds_new"])["m"] == w["stale"]
+
+
+def test_a_resolver_miss_on_the_merged_spelling_alone_rolls_everything_back(conn, tmp_path, caplog):
+    # no NFC rename in this world: only the per-pair check (every merged and kept spelling -> the kept row) can trip
+    w = _world(conn, nfd=False)
+    rc, dry = _run(conn, w, tmp_path, tag="dry")
+    assert rc == 0 and dry["summary"]["nfc_renamed"] == 0
+    res, _ = mm.load_resolvers()
+    misses_old_name = dataclasses.replace(
+        res,
+        find_team=lambda cur, name, league: (
+            None if fu.normalize_team(name) == "zachary reese" else res.find_team(cur, name, league)
+        ),
+    )
+    caplog.set_level(logging.INFO, logger="merge_mma_fighters")
+    rc, _ = _run(conn, w, tmp_path, apply=True, expect=dry, resolvers=misses_old_name, tag="apply")
+    assert rc == 1
+    (after,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("AFTER (in the transaction)")]
+    assert " resolver_misses=1 " in after and " alias_misses=0 " in after, after
+    assert _one(conn, "SELECT count(*) AS n FROM teams WHERE id = %s", w["merged"])["n"] == 1
+    assert _one(conn, "SELECT count(*) AS n FROM matches WHERE id = %s", w["stale"])["n"] == 1
+    assert _one(conn, "SELECT home_team_id::text AS h FROM matches WHERE id = %s", w["hist"])["h"] == w["merged"]
+
+
+def test_an_expected_plan_that_refuses_a_pair_is_never_applied(conn, tmp_path):
+    w = _world(conn)
+    with _cur(conn) as cur:  # the kept row holds another athlete id than the map: the pair refuses
+        cur.execute("""UPDATE teams SET external_ids = '{"espn": "999"}'::jsonb WHERE id = %s""", (w["kept"],))
+    conn.commit()
+    rc, dry = _run(conn, w, tmp_path, tag="dry")
+    assert rc == 1 and dry["summary"]["pairs_refuse"] == 1 and dry["summary"]["folds"] == 1  # the listed fold
+    rc, applied = _run(conn, w, tmp_path, apply=True, expect=dry, tag="apply")
+    assert rc == 2 and applied["digest"] == dry["digest"]  # the same plan: refused for its refusal, not a drift
+    assert not (tmp_path / "apply.jsonl.gz").exists()
+    assert _one(conn, "SELECT count(*) AS n FROM matches WHERE id = %s", w["rev_stale"])["n"] == 1
+    assert _one(conn, "SELECT name FROM teams WHERE id = %s", w["rose"])["name"] == NFD_NAME
+
+
+def test_check_after_counts_a_reminted_name_and_a_stale_row_left_beside_a_folded_bout(conn, tmp_path):
+    w = _world(conn)
+    rc, dry = _run(conn, w, tmp_path, tag="dry")
+    rc, _ = _run(conn, w, tmp_path, apply=True, expect=dry, tag="apply")
+    assert rc == 0
+    with _cur(conn) as cur:
+        _fighter(cur, "Zachary Reese")  # the next sweep minted the merged spelling again
+        _row(cur, w["league"], w["opp"], w["kept"], CARD + timedelta(hours=2))  # a stale row of the folded bout
+    conn.commit()
+    res, _ = mm.load_resolvers()
+    with _cur(conn) as cur:
+        out = mm.check_after(cur, dry, res)
+    conn.rollback()
+    assert out["teams_reminted"] == 1 and out["stale_twins_left"] == 1, out
+    assert not mm.after_state_ok(out) and not mm.after_state_ok(out, after_later_steps=True)
+
+
+def _plan_now(conn, w):
+    res, _ = mm.load_resolvers()
+    with _cur(conn) as cur:
+        schema, unknown = mm.load_schema(cur)
+        assert schema is not None, unknown
+        plan = mm.plan_run(w["pairs"], w["folds"], mm.load_state(cur, w["pairs"], w["folds"], schema), NOW, res)
+    conn.rollback()
+    (fold,) = [f for f in plan.folds() if f.stale_id == w["stale"]]
+    assert fold.predictions == [w["pred"]]
+    return plan, schema, fold
+
+
+def test_the_sql_guards_stop_a_fold_when_a_rec_arrives_after_the_plan(conn, tmp_path):
+    w = _world(conn)
+    plan, schema, fold = _plan_now(conn, w)
+    # a rec on the prediction the fold moves, filed on the finished row (as repair_stranded_recs files them)
+    with _cur(conn) as cur:
+        _rec(cur, w["fin"], prediction_id=w["pred"])
+        _, held = mm.write_archive(cur, tmp_path / "a.jsonl.gz", plan, schema)
+        with pytest.raises(mm.GuardError, match="move predictions"):
+            mm.apply_fold(cur, fold, schema, held, Counter())
+    conn.rollback()
+    # a rec filed on the copy itself, its prediction on the finished row: the guarded delete changes nothing
+    with _cur(conn) as cur:
+        _rec(cur, w["stale"], prediction_id=_pred(cur, w["fin"], "rec-v", CARD - timedelta(days=2)))
+        _, held = mm.write_archive(cur, tmp_path / "b.jsonl.gz", plan, schema)
+        with pytest.raises(mm.GuardError, match="delete stale copy"):
+            mm.apply_fold(cur, fold, schema, held, Counter())
+    conn.rollback()
+    assert _one(conn, "SELECT count(*) AS n FROM matches WHERE id = %s", w["stale"])["n"] == 1
 
 
 def test_a_copy_a_rec_holds_is_left_in_place_with_its_rec(conn, tmp_path):

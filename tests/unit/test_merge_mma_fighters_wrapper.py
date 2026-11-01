@@ -3,9 +3,11 @@ it refuses unless run A is done and verified (repair_stranded_recs_mma.sh
 --verify-a, read only); the exact reviewed plan before the backup and again
 from the dry run; the apply pinned to the dry run's plan file; the exact
 after-state (--check-after and a done re-plan); the follow-ups (exit 2 when
-one fails, --followups-only); 'already done' only once the recorded plan's
-after-state holds, finishing an apply whose follow-ups did not; --verify for
-run B (read only, never a backup)."""
+one fails, --followups-only); no write before a backup that landed; 'already
+done' only once the recorded plan's after-state holds (strictly while the
+apply is recorded 'applying'), finishing an apply whose follow-ups did not;
+--verify for run B (read only, never a backup; never on an apply whose strict
+after-state did not pass)."""
 
 from __future__ import annotations
 
@@ -70,8 +72,8 @@ def _rules(
     return rules
 
 
-def _install(tmp_path, rules, state=None):
-    env = fd.install(tmp_path, rules)
+def _install(tmp_path, rules, state=None, airflow=None):
+    env = fd.install(tmp_path, rules, airflow)
     data = tmp_path / "auspex" / "scripts" / "data"
     data.mkdir(parents=True, exist_ok=True)
     for name in ("mma_fighter_merge_map.csv", "mma_reversed_fixture_folds.csv", "mma_stranded_recs_20261101.csv"):
@@ -81,8 +83,8 @@ def _install(tmp_path, rules, state=None):
     return env
 
 
-def _run(tmp_path, rules, *args, state=None):
-    env = _install(tmp_path, rules, state)
+def _run(tmp_path, rules, *args, state=None, airflow=None):
+    env = _install(tmp_path, rules, state, airflow)
     rc, out = fd.run(WRAPPER, env, *args)
     return rc, out, fd.calls(tmp_path)
 
@@ -149,6 +151,16 @@ def test_a_pre_plan_that_is_neither_reviewed_nor_done_aborts_before_the_backup(t
     assert _backups(tmp_path) == 0 and not _applies(calls)
 
 
+def test_a_backup_that_does_not_land_aborts_before_the_dry_run(tmp_path):
+    rc, out, calls = _run(tmp_path, _rules(), airflow={"backup_fails": True})
+    assert rc == 1 and "backup did not land" in out, out
+    assert _backups(tmp_path) == 1  # it was asked for
+    after = calls[next(i for i, c in enumerate(calls) if "dags trigger db_backup_daily" in c) + 1 :]
+    assert not [c for c in after if "merge_mma_fighters.py" in c or "grade_completed" in c or "compute_features" in c]
+    assert [c for c in calls if "/tmp/merge_mma_pre.log" in c]  # the read-only pre-check ran before it
+    assert _state(tmp_path) == "" and "2/5 dry run" not in out
+
+
 def test_a_dry_run_plan_other_than_the_reviewed_one_aborts_before_the_apply(tmp_path):
     rc, out, calls = _run(tmp_path, _rules(dry=PLAN_M.replace("repoints=11", "repoints=12")))
     assert rc == 1 and "ABORT at step 2" in out, out
@@ -189,6 +201,14 @@ def test_a_failed_follow_up_exits_2_and_followups_only_finishes_it(tmp_path):
     assert any("grade_completed_matches.py --match-id" in c for c in calls)
 
 
+def test_followups_only_refuses_an_apply_whose_strict_after_state_never_passed(tmp_path):
+    rec = "PLAN=/app/backups/merge_mma_fighters_dryrun_X.plan.json\nGRADE_IDS=abc\nSTATUS=applying\n"
+    rc, out, calls = _run(tmp_path, _rules(), "--followups-only", state=rec)
+    assert rc == 1 and "STATUS=applying" in out and "without arguments" in out, out
+    assert not [c for c in calls if "merge_mma_fighters.py" in c or "grade_completed" in c or "compute_features" in c]
+    assert "STATUS=applying" in _state(tmp_path) and _backups(tmp_path) == 0
+
+
 def test_a_rerun_after_success_is_already_done_without_a_backup(tmp_path):
     rc, _, _ = _run(tmp_path, _rules())
     assert rc == 0
@@ -206,6 +226,25 @@ def test_done_with_its_follow_ups_unfinished_runs_them_without_a_backup(tmp_path
     assert _backups(tmp_path) == 0 and not _applies(calls)
     assert any("for mid in abc def" in c for c in calls)
     assert "STATUS=done" in _state(tmp_path)
+
+
+def test_done_with_its_apply_recorded_applying_checks_the_strict_after_state_first(tmp_path):
+    # step 4 never passed for this apply: no tolerance for a missing re-point until the strict check holds
+    rec = "PLAN=/app/backups/merge_mma_fighters_dryrun_X.plan.json\nGRADE_IDS=abc\nSTATUS=applying\n"
+    rc, out, calls = _run(tmp_path, _rules(pre=DONE_M), state=rec)
+    assert rc == 0 and "COMPLETED" in out, out
+    (check,) = [c for c in calls if "--check-after" in c]
+    assert "--check-after /app/backups/merge_mma_fighters_dryrun_X.plan.json" in check
+    assert "--after-later-steps" not in check
+    assert _backups(tmp_path) == 0 and not _applies(calls) and "STATUS=done" in _state(tmp_path)
+
+
+def test_done_with_its_apply_recorded_applying_and_a_failing_strict_check_fails(tmp_path):
+    rec = "PLAN=/app/backups/merge_mma_fighters_dryrun_X.plan.json\nGRADE_IDS=abc\nSTATUS=applying\n"
+    rc, out, calls = _run(tmp_path, _rules(pre=DONE_M, after_rc=1), state=rec)
+    assert rc == 1 and "after-state of the recorded plan" in out and "STATUS=applying" in out, out
+    assert not [c for c in calls if "compute_features" in c or "grade_completed" in c]
+    assert "STATUS=applying" in _state(tmp_path)
 
 
 def test_done_without_a_recorded_apply_fails(tmp_path):
@@ -230,6 +269,13 @@ def test_verify_passes_only_on_the_done_plan_and_never_backs_up(tmp_path):
     rc, out, calls = _rerun(tmp_path, _rules(pre=PLAN_M, a_states=()), "--verify")
     assert rc == 1 and "NOT VERIFIED" in out, out
     assert not [c for c in calls if "dags trigger db_backup_daily" in c] and not _applies(calls)
+
+
+def test_verify_refuses_an_apply_whose_strict_after_state_never_passed(tmp_path):
+    rec = "PLAN=/app/backups/merge_mma_fighters_dryrun_X.plan.json\nGRADE_IDS=\nSTATUS=applying\n"
+    rc, out, calls = _run(tmp_path, _rules(pre=DONE_M, a_states=()), "--verify", state=rec)
+    assert rc == 1 and "NOT VERIFIED" in out and "STATUS=applying" in out, out
+    assert not [c for c in calls if "--check-after" in c] and _backups(tmp_path) == 0
 
 
 def test_lists_other_than_the_reviewed_ones_refuse(tmp_path):

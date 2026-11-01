@@ -4,14 +4,17 @@ pre-game price per key, pre-game snapshots, the latest pre-game prediction per
 key; a reversed copy's prices with home/away swapped and none of its
 predictions), the refusals (a live row, two finished rows, a copy not yet
 stale, a re-point that collides, an alias or a name another row holds, an
-athlete id on a third row), the rec-held copy left in place, 'done' detection,
-the NFC renames, the plan digest and its comparison, and the after-state rule.
+athlete id on a third row), the rec-held copy left in place (a listed one
+refused), a rec's prediction never moved, 'done' detection, the NFC renames,
+the plan digest and its comparison, the after-state rule, and apply_fold's
+refusal to delete a copy holding a child row the archive lacks.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import sys
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -298,6 +301,16 @@ def test_a_reversed_fold_swaps_the_selection_and_moves_no_prediction():
     assert f.predictions == [] and f.predictions_dropped == 4
 
 
+def test_a_fold_never_moves_a_prediction_a_rec_references():
+    stale, keep, deps = _fold_state()
+    deps["s"].predictions = [
+        pred(_uid(21), "s", "v1", CARD - timedelta(hours=10)),
+        pred(_uid(22), "s", "v1", CARD - timedelta(hours=9), rec=True),  # the latest, but a rec's: it stays
+    ]
+    f = mm.plan_fold(stale, keep, deps, False, "pair 1", {})
+    assert f.predictions == [_uid(21)] and f.predictions_dropped == 1
+
+
 def test_a_reversed_copy_with_a_price_that_has_no_side_refuses():
     stale, keep, deps = _fold_state()
     deps["s"].odds.append(odd(_uid(7), "s", "over", CARD - timedelta(hours=2), market="total"))
@@ -473,6 +486,15 @@ def test_what_a_listed_fold_refuses(rows, listed, why):
     assert lp.action == "refuse" and why in lp.reason, lp.reason
 
 
+@pytest.mark.parametrize("dep", [mm.Deps(recs=1), mm.Deps(history=1), mm.Deps(pred_recs=1)])
+def test_a_listed_copy_a_rec_holds_is_refused_not_folded(dep):
+    rows = [match("s", OPP, OPP2, CARD, "scheduled", espn="401927906"), match("f", OPP2, OPP, CARD)]
+    p = plan(state(rows, deps={"s": dep}), pairs=(), listed=(_listed(),))
+    (lp,) = p.listed
+    assert lp.action == "refuse" and "left in place" in lp.reason and lp.fold is None, lp.reason
+    assert mm.summarize(p)["folds_refuse"] == 1 and p.folds() == []
+
+
 def test_a_decomposed_name_is_renamed_unless_its_composed_form_is_taken():
     nfd = team(OTHER, "Rose Conceição")
     nfd["name"] = "Rose Conceição"
@@ -537,3 +559,41 @@ def test_the_after_state_rule():
 def test_normalize_team_composes_a_decomposed_name():
     assert fu.normalize_team("Rose Conceição ") == "rose conceição"
     assert fu.normalize_team("  Zach   REESE ") == "zach reese"
+
+
+# ── apply_fold: the archive guard ─────────────────────────────────────
+
+
+class _ChildCursor:
+    """Just enough cursor for apply_fold on a copy with nothing to move: the
+    child-row read answers `children`; every other statement changes 1 row."""
+
+    def __init__(self, schema, children):
+        self.children_sql, self.children = mm.children_sql(schema), children
+        self.sql: list[str] = []
+        self.rowcount = 0
+        self._rows: list[dict] = []
+
+    def execute(self, sql, params=None):
+        self.sql.append(sql)
+        self._rows, self.rowcount = (self.children, len(self.children)) if sql == self.children_sql else ([], 1)
+
+    def fetchall(self):
+        return self._rows
+
+
+def _bare_fold():
+    return mm.Fold(
+        "s", "k", False, CARD, "pair 1", match("s", MERGED, OPP, CARD, "scheduled"), match("k", KEPT, OPP, CARD)
+    )
+
+
+def test_a_copy_holding_a_child_row_the_archive_lacks_is_never_deleted():
+    schema = mm.Schema(team_refs=(("matches", "home_team_id"), ("matches", "away_team_id")), match_children=("odds",))
+    cur = _ChildCursor(schema, [{"tbl": "odds", "id": "o1"}, {"tbl": "odds", "id": "o2"}])  # o2 arrived after
+    with pytest.raises(mm.GuardError, match="1 row\\(s\\) the archive lacks.*odds:o2"):
+        mm.apply_fold(cur, _bare_fold(), schema, {"odds": {"o1"}}, Counter())
+    assert mm.DELETE_STALE_SQL not in cur.sql
+    cur, done = _ChildCursor(schema, [{"tbl": "odds", "id": "o1"}]), Counter()
+    mm.apply_fold(cur, _bare_fold(), schema, {"odds": {"o1"}}, done)
+    assert mm.DELETE_STALE_SQL in cur.sql and done["stale_copies_deleted"] == 1

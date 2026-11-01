@@ -27,7 +27,8 @@
 #
 # Reviewed plan — a local replica of the 2026-11-01T21:06:57Z read-only export
 # of every UFC match, team, rec, prediction, odds row and snapshot, with run A
-# applied first (its plan did not change), this commit's code:
+# applied first (its plan did not change), this commit's code; re-rehearsed on
+# the 2026-11-01T22:47:06Z export (the same plan, plan digest 27dbe46f...):
 #   scripts/merge_mma_fighters.py, ONE transaction:
 #     PLAN pairs_merge=9 pairs_done=0 pairs_refuse=0 folds=9 folds_reversed=2 folds_done=0 folds_refuse=0
 #          repoints=11 left_rec_held=0 odds_moved=32 snapshots_moved=51 predictions_moved=15
@@ -50,9 +51,12 @@
 #      Already done? The tool's read-only dry run must plan exactly the
 #      reviewed plan (not done) or exactly the done plan; a done plan is
 #      checked with --check-after on the plan the last apply recorded
-#      ($STATE_FILE) before ALREADY DONE (exit 0, no backup); if that apply
-#      recorded its follow-ups unfinished, they run now. Anything else aborts
-#      before the backup;
+#      ($STATE_FILE) before ALREADY DONE (exit 0, no backup): strictly while
+#      that apply is recorded STATUS=applying (its step 4 never passed), and
+#      with --after-later-steps only once STATUS is followups or done (step
+#      4 passed strictly; run B may have deleted a re-pointed no-twin row
+#      since). If that apply recorded its follow-ups unfinished, they run
+#      now. Anything else aborts before the backup;
 #   1. verified backup (B2) — abort if it does not land;
 #   2. dry run (write-once CSV + plan file) — abort unless it exits 0 with
 #      exactly the reviewed plan;
@@ -72,10 +76,14 @@
 #      --days 14 --force (the kept fighters' histories changed); STATUS=done.
 #      A failure exits 2; re-run them with
 #        bash /opt/auspex/scripts/ops/merge_mma_fighters.sh --followups-only
-#   --verify (run B's step 0 calls it; read only): the done plan, and
-#      --check-after --after-later-steps on the recorded plan (B deletes one
-#      re-pointed no-twin row on purpose) — exit 0 when the merge is done and
-#      verified, else 1.
+#      (it refuses an apply recorded STATUS=applying: a plain re-run checks
+#      that one strictly first)
+#   --verify (run B's step 0 calls it; read only): the done plan, a
+#      recorded apply whose strict after-state passed (STATUS followups or
+#      done; STATUS=applying is NOT VERIFIED: re-run this script to finish
+#      it), and --check-after --after-later-steps on the recorded plan (B
+#      deletes one re-pointed no-twin row on purpose) — exit 0 when the
+#      merge is done and verified, else 1.
 # Exit: 0 done (or already done, or verified); 1 aborted or an after-state
 # failed; 2 the merge is verified but a follow-up failed.
 # WHEN: not while a UFC card is being fought (Saturday evening US time). The
@@ -175,6 +183,9 @@ if [ "$MODE" = followups ]; then
   if [ -z "$rec_plan" ] || [ -z "$rec_status" ]; then
     log "ABORT: no apply is recorded in $STATE_FILE (got '${REC:-nothing}') — nothing to follow up"; exit 1
   fi
+  if [ "$rec_status" = applying ]; then
+    log "ABORT: the recorded apply is STATUS=applying (its strict after-state never passed) — run scripts/ops/merge_mma_fighters.sh without arguments: it checks the after-state, then runs the follow-ups; nothing changed"; exit 1
+  fi
   run_followups "$(rec_val GRADE_IDS)"
   [ -z "$followup_failed" ] || incomplete
   write_state_file "$rec_plan" "$(rec_val GRADE_IDS)" done || { log "FAILED: could not record STATUS=done in $STATE_FILE"; exit 1; }
@@ -210,8 +221,18 @@ if same_plan "$pre" "$DONE_M"; then
     log "FAILED: the merge reads done ('$pre') but no apply is recorded in $STATE_FILE (got '${REC:-nothing}') — inspect /app/backups/merge_mma_fighters_*; nothing changed"
     exit 1
   fi
-  if ! check_recorded "$rec_plan" --after-later-steps; then
-    log "FAILED: the merge reads done but the after-state of the recorded plan ($rec_plan) fails (above) — inspect; nothing changed"
+  # --after-later-steps (a re-pointed row run B deleted is reported, not failed) only once the strict after-state
+  # passed: STATUS moves past 'applying' only after step 4, or the strict check below, held.
+  case "$rec_status" in
+    followups|done) later="--after-later-steps" ;;
+    *) later="" ;;
+  esac
+  if [ "$MODE" = verify ] && [ -z "$later" ]; then
+    log "NOT VERIFIED: the merge reads done ('$pre') but its recorded apply is STATUS=$rec_status (its strict after-state never passed) — re-run scripts/ops/merge_mma_fighters.sh to check it and finish the follow-ups"
+    exit 1
+  fi
+  if ! check_recorded "$rec_plan" $later; then
+    log "FAILED: the merge reads done but the ${later:+later-steps }after-state of the recorded plan ($rec_plan, STATUS=$rec_status) fails (above) — inspect; nothing changed"
     exit 1
   fi
   if [ "$MODE" = verify ]; then
@@ -221,6 +242,9 @@ if same_plan "$pre" "$DONE_M"; then
   if [ "$rec_status" = "done" ]; then
     log "ALREADY DONE: '$pre' and the after-state of $rec_plan holds — nothing to write (no backup)"
     exit 0
+  fi
+  if [ -z "$later" ]; then
+    write_state_file "$rec_plan" "$rec_ids" followups || log "WARNING: could not record STATUS=followups in $STATE_FILE"
   fi
   log "the merge is committed and verified, but the last apply recorded STATUS=$rec_status: running its follow-ups now"
   run_followups "$rec_ids"
