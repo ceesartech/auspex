@@ -196,6 +196,7 @@ import logging
 import os
 import re
 import sys
+import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -359,8 +360,9 @@ class Ctx:
 
 
 def normalize_name(name: str) -> str:
-    """teams.normalized_name as fetch_upcoming.normalize_team builds it."""
-    return " ".join((name or "").strip().lower().split())
+    """teams.normalized_name as fetch_upcoming.normalize_team builds it (since
+    2026-11-01 in Unicode NFC, composed, form)."""
+    return unicodedata.normalize("NFC", " ".join((name or "").strip().lower().split()))
 
 
 # ---------------------------------------------------------------------------

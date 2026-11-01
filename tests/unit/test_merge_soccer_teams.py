@@ -346,6 +346,15 @@ class TestSeedConflict:
 # ---------------------------------------------------------------------------
 
 
+class TestNormalizeName:
+    def test_it_is_fetch_upcomings_normalized_name_composed_too(self):
+        import fetch_upcoming as fu
+
+        decomposed = "O\u0308rgryte IS Sa\u0303o Paulo"  # as ESPN sends some names: letters plus combining marks
+        assert ms.normalize_name(decomposed) == fu.normalize_team(decomposed) == "\u00f6rgryte is s\u00e3o paulo"
+        assert ms.normalize_name("  Santos   FC ") == fu.normalize_team("  Santos   FC ") == "santos fc"
+
+
 class TestLoadResolvers:
     def test_the_scripts_tree_provides_them(self):
         resolvers, reason = ms.load_resolvers(SCRIPTS_DIR)

@@ -1465,3 +1465,12 @@ class TestInsertMatchStatsSql:
         ((sql, params),) = seen
         assert sql is pr.INSERT_MATCH_STATS_SQL and params == ("m", "t", 1, 2, 3, 4, 5, None)
         assert sql.count("%s") == 8
+
+
+def test_normalize_team_name_is_fetch_upcomings_normalized_name_composed_too():
+    if str(SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_DIR))
+    import fetch_upcoming as fu
+
+    decomposed = "O\u0308rgryte IS Sa\u0303o Paulo"
+    assert pr.normalize_team_name(decomposed) == fu.normalize_team(decomposed) == "\u00f6rgryte is s\u00e3o paulo"

@@ -110,6 +110,7 @@ import logging
 import os
 import re
 import sys
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
@@ -287,7 +288,11 @@ def to_float(v: str | None) -> float | None:
 
 
 def normalize_team_name(name: str) -> str:
-    return " ".join(name.strip().lower().split())
+    """teams.normalized_name as fetch_upcoming.normalize_team builds it, in
+    Unicode NFC (composed) form: a decomposed spelling of a stored name must
+    find that row, not mint a twin (prod 2026-11-01: no raw_football_data name
+    is decomposed, so this changes no current promotion)."""
+    return unicodedata.normalize("NFC", " ".join(name.strip().lower().split()))
 
 
 @dataclass
