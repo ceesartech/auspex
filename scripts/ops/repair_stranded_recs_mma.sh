@@ -45,22 +45,28 @@
 #      plans the done plan (DONE_A): results=56 and 0 for every other key.
 #   B. (--retire-stale-rows, only once A is done and verified AND the fighter
 #      merge, scripts/ops/merge_mma_fighters.sh, is done and verified)
-#      scripts/repair_fixture_orphans.py --sport mma --as-of $AS_OF:
-#        PLAN merge_delete=31 merge_cancel=0 delete_no_twin=33 delete_placeholder=4 mark_postponed=0
-#             left=7 blocked_pending_recs=0 list_mismatch=0
+#      scripts/repair_fixture_orphans.py --sport mma --as-of $AS_OF
+#        --hold-list scripts/data/mma_stale_rows_hold_20261101.csv:
+#        PLAN merge_delete=31 merge_cancel=0 delete_no_twin=31 delete_placeholder=4 mark_postponed=0
+#             left=9 blocked_pending_recs=0 list_mismatch=0
 #      Re-pinned 2026-11-01 to the state after A and the merge (a replica of
-#      the 2026-11-01T21:06:57Z read-only export with A, then the merge,
+#      the 2026-11-01T22:47:06Z read-only export with A, then the merge,
 #      applied): 31 duplicates merged onto 28 finished twins (strictly
-#      pre-game odds, snapshots, predictions moved) and deleted; 33 rows
-#      without a twin deleted (25 bouts whose opponent was replaced, 6
-#      dropped from their card, 1 whose ESPN competition swapped a fighter
-#      five days out, 1 fought to no winner — a draw or no contest, which
-#      results ingestion does not record, so it never finished); 4 'TBA v
-#      Opponent TBA' rows; 7 left because a rec references them (Holland v
-#      Smith's voided rec, and 6 rows holding the prediction of a rec settled
-#      on a twin). Every row B may write, its action and its twin are pinned
-#      in scripts/data/mma_stale_rows_retire_20261101.csv with the ESPN
-#      evidence; B refuses unless its dry run plans exactly those rows.
+#      pre-game odds, snapshots, predictions moved) and deleted; 31 rows
+#      without a twin deleted, none of them fought (25 bouts whose opponent
+#      was replaced, 6 dropped from their card); 4 'TBA v Opponent TBA' rows;
+#      9 left: 7 because a rec references them (Holland v Smith's voided rec,
+#      and 6 rows holding the prediction of a rec settled on a twin) and 2
+#      HELD for the user's decision (the hold list: Gatto v Kareckaite, fought
+#      to no winner — a draw or no contest, which results ingestion does not
+#      record, so it never finished and has no twin; and Valesca Machado v
+#      Melissa Amaya, whose ESPN competition now names Tina Black: a
+#      replacement or a second spelling, undecided). Every row B may write,
+#      its action and its twin are pinned in
+#      scripts/data/mma_stale_rows_retire_20261101.csv with the ESPN
+#      evidence: the apply refuses before its first write unless it plans
+#      exactly those rows (--expect-rows), and the wrapper checks the
+#      pre-check, dry-run and apply audit CSVs against them and the hold list.
 #      --as-of is fixed, so rows that go stale later never enter this plan.
 #      The 9 fought bouts stored under a second fighter spelling or the
 #      other way round (Zachary/Zach Reese, Adrian Yanez/Yañez, Cristian
@@ -87,9 +93,11 @@
 #      fighter merge (scripts/ops/merge_mma_fighters.sh --verify, read only);
 #      B's dry run (read only) must plan exactly the reviewed plan, its CSV
 #      holding exactly the reviewed rows of
-#      scripts/data/mma_stale_rows_retire_20261101.csv, or exactly its done
-#      plan (0 writes, left=7, with 7 stale UFC rows and the 49 UFC recs in
-#      the database: ALREADY DONE, exit 0, no backup); anything else aborts;
+#      scripts/data/mma_stale_rows_retire_20261101.csv and holding back
+#      exactly the rows of scripts/data/mma_stale_rows_hold_20261101.csv, or
+#      exactly its done plan (0 writes, left=9, with 9 stale UFC rows and the
+#      49 UFC recs in the database: ALREADY DONE, exit 0, no backup); anything
+#      else aborts;
 #   1. verified backup (B2) — abort if it does not land;
 #   2. T0 = now; before-state + A's dry run (write-once audit CSV) — abort
 #      unless the 21 reviewed recs are all still pending, the plan is exactly
@@ -102,12 +110,17 @@
 #      are all still there; a fresh dry run plans exactly the done plan;
 #   5. B's before-state + dry run — abort unless the plan is exactly the
 #      reviewed one (every key, left and blocked included) and its CSV
-#      plans exactly the reviewed rows, actions and twins;
-#   6. B's apply, pinned (--expect-plan); the archive lands before the
-#      first write;
-#   7. B's after-state: the stale UFC rows (as of AS_OF) fell by exactly
-#      merge_delete + delete_no_twin + delete_placeholder; the UFC recs are
-#      all still there; a fresh dry run plans exactly B's done plan (DONE_B);
+#      plans exactly the reviewed rows, actions and twins, and holds back
+#      exactly the 2 held rows;
+#   6. B's apply, pinned to the dry run's counts (--expect-plan) and to the
+#      reviewed rows (--expect-rows: it refuses before its first write
+#      unless it plans exactly those rows, actions and twins); the archive
+#      lands before the first write;
+#   7. B's after-state: the apply's own audit CSV plans exactly the reviewed
+#      rows and the 2 held rows; the stale UFC rows (as of AS_OF) fell by
+#      exactly merge_delete + delete_no_twin + delete_placeholder; the UFC
+#      recs are all still there; a fresh dry run plans exactly B's done plan
+#      (DONE_B);
 #   8. follow-ups (derived data only): compute_features_mma --all-finished
 #      --force (A: 44 new results change fighter histories; B: twins received
 #      prices), then grade the ungraded predictions of finished UFC rows
@@ -176,27 +189,31 @@ DATES=2026-06-06,2026-06-14,2026-06-20,2026-06-27,2026-07-18
 AS_OF=2026-11-01T00:00:00Z
 REVIEWED=scripts/data/mma_stranded_recs_20261101.csv  # host path; /app/$REVIEWED in the api container
 TOOL_A="python /app/scripts/backfill_results.py --sport mma --dates $DATES"
-TOOL_B="python /app/scripts/repair_fixture_orphans.py --sport mma --as-of $AS_OF"
+# The rows held for the user's decision (B leaves them alone: a fought draw / no contest, and a fighter swap).
+HOLD_B=scripts/data/mma_stale_rows_hold_20261101.csv  # host path; /app/$HOLD_B in the api container
+N_HELD_B=2
+TOOL_B="python /app/scripts/repair_fixture_orphans.py --sport mma --as-of $AS_OF --hold-list /app/$HOLD_B"
 PLAN_A="results=56 flipped=44 inserted=0 cancelled=3 stamped=12 rescored=0 other=0 recs_settled=20 recs_voided=1 recs_other=0 recs_left=0 fetch_failed=0 identity_refused=0"
 DONE_A="results=56 flipped=0 inserted=0 cancelled=0 stamped=0 rescored=0 other=0 recs_settled=0 recs_voided=0 recs_other=0 recs_left=0 fetch_failed=0 identity_refused=0"
-# Re-pinned 2026-11-01 to the state after A and scripts/ops/merge_mma_fighters.sh (it folds 9 of the 42 no-twin rows).
-PLAN_B="merge_delete=31 merge_cancel=0 delete_no_twin=33 delete_placeholder=4 mark_postponed=0 left=7 blocked_pending_recs=0 list_mismatch=0"
+# Re-pinned 2026-11-01 to the state after A and scripts/ops/merge_mma_fighters.sh (it folds 9 of the 42 no-twin rows)
+# with the 2 held rows left alone.
+PLAN_B="merge_delete=31 merge_cancel=0 delete_no_twin=31 delete_placeholder=4 mark_postponed=0 left=9 blocked_pending_recs=0 list_mismatch=0"
 # Every row B may write: match_id, action, twin_id (the CSV's other columns are the evidence).
 REVIEWED_B=scripts/data/mma_stale_rows_retire_20261101.csv  # host path; /app/$REVIEWED_B in the api container
-N_REVIEWED_B=68
-DONE_B="merge_delete=0 merge_cancel=0 delete_no_twin=0 delete_placeholder=0 mark_postponed=0 left=7 blocked_pending_recs=0 list_mismatch=0"
+N_REVIEWED_B=66
+DONE_B="merge_delete=0 merge_cancel=0 delete_no_twin=0 delete_placeholder=0 mark_postponed=0 left=9 blocked_pending_recs=0 list_mismatch=0"
 # Pinned from the review (prod 2026-11-01, read only): every UFC rec was created before AS_OF (the last one
 # 2026-08-29), and a rec's FKs are NO ACTION, so this count can only fall by a deliberate delete. B leaves the
-# 7 stale rows that hold a rec.
+# 7 stale rows that hold a rec and the 2 held rows.
 RECS_BEFORE_AS_OF=49
-STALE_AFTER_B=7
+STALE_AFTER_B=9
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)_$$  # the process id too: two runs within one second must not collide on write-once files
 APPLY_A_CSV=/app/backups/backfill_results_mma_apply_$STAMP.csv
 APPLY_B_CSV=/app/backups/fixture_orphans_mma_apply_$STAMP.csv
 
 # run_tool <log name> <command>: the command in the api container; prints its summary lines and exit
 run_tool() {
-  $DC exec -T api sh -c "$2 > /tmp/$1.log 2>&1; rc=\$?; grep -E 'PLAN |candidates=|APPLIED|Archived|archived|DONE|pinned|ERROR|Traceback|Error' /tmp/$1.log | tail -25; echo \"tool exit \$rc\"; exit \$rc"
+  $DC exec -T api sh -c "$2 > /tmp/$1.log 2>&1; rc=\$?; grep -E 'PLAN |candidates=|hold list|APPLIED|Archived|archived|DONE|pinned|ERROR|Traceback|Error' /tmp/$1.log | tail -25; echo \"tool exit \$rc\"; exit \$rc"
 }
 # The tool's own PLAN line only (KEY=N pairs), never a log line that merely mentions a plan.
 plan_of() { $DC exec -T api sh -c "grep -oE 'PLAN [a-z_]+=[0-9]+( [a-z_]+=[0-9]+)*' /tmp/$1.log | tail -1"; }
@@ -266,8 +283,9 @@ fi
 if [ ! -r "$REVIEWED" ]; then log "ABORT: $REVIEWED is missing — pull this commit first; nothing changed"; exit 1; fi
 if [ "$MODE" = b ]; then
   n_b=$( (grep -v '^#' "$REVIEWED_B" 2>/dev/null || true) | tail -n +2 | grep -c .)
-  if [ "$n_b" != "$N_REVIEWED_B" ]; then
-    log "ABORT: $REVIEWED_B holds ${n_b:-no} row(s), B is pinned to $N_REVIEWED_B — pull this commit first; nothing changed"; exit 1
+  n_h=$( (grep -v '^#' "$HOLD_B" 2>/dev/null || true) | tail -n +2 | grep -c .)
+  if [ "$n_b" != "$N_REVIEWED_B" ] || [ "$n_h" != "$N_HELD_B" ]; then
+    log "ABORT: $REVIEWED_B holds ${n_b:-no} row(s) and $HOLD_B ${n_h:-no}; B is pinned to $N_REVIEWED_B and $N_HELD_B — pull this commit first; nothing changed"; exit 1
   fi
 fi
 reviewed=$(tail -n +2 "$REVIEWED" | awk -F, '{print $1 "|" $14 "|" $15 "|" $16}')
@@ -319,15 +337,23 @@ not_verified() {
   log "ABORT at step 0: A looks committed ('$preA') but is not verified — a run whose step 4 failed, or one that died after its apply committed. Inspect the earlier run's /app/backups/backfill_results_mma_apply_*.csv and its backfill_results_mma_*.jsonl.gz archive (the reversal record) before anything else; nothing changed (no backup)"
   exit 1
 }
-# check_b_rows <B's audit CSV in the api container>: "OK <n>" when the rows B plans to write (and their actions and
-# twins) are exactly the reviewed ones, else "MISMATCH ...".
+# check_b_rows <B's audit CSV in the api container>: "OK <writes> held <n>" when the rows B plans to write (and their
+# actions and twins) are exactly the reviewed ones and the rows it holds back are exactly the hold list, else
+# "MISMATCH ...".
 CHECK_B_PY="import csv, sys
 writes = ('merge_delete', 'merge_cancel', 'delete_no_twin', 'delete_placeholder', 'mark_postponed')
-got = {(r['match_id'], r['action'], r['twin_id'] or '') for r in csv.DictReader(open(sys.argv[1])) if r['action'] in writes}
+rows = list(csv.DictReader(open(sys.argv[1])))
+got = {(r['match_id'], r['action'], r['twin_id'] or '') for r in rows if r['action'] in writes}
 want = {(r['match_id'], r['action'], r['twin_id'] or '') for r in csv.DictReader(l for l in open(sys.argv[2]) if not l.startswith('#'))}
+held = {r['match_id'] for r in rows if r['action'] == 'leave' and r['reason'] == 'held_for_decision'}
+hold = {r['match_id'] for r in csv.DictReader(l for l in open(sys.argv[3]) if not l.startswith('#'))}
 extra, missing = sorted(got - want), sorted(want - got)
-print('OK %d' % len(got) if not (extra or missing) else 'MISMATCH %d not reviewed %s, %d reviewed not planned %s' % (len(extra), extra[:3], len(missing), missing[:3]))"
-check_b_rows() { $DC exec -T api python -c "$CHECK_B_PY" "$1" "/app/$REVIEWED_B" </dev/null; }
+if extra or missing or held != hold:
+    print('MISMATCH %d not reviewed %s, %d reviewed not planned %s, held %s, hold list %s' % (len(extra), extra[:3], len(missing), missing[:3], sorted(held), sorted(hold)))
+else:
+    print('OK %d held %d' % (len(got), len(held)))"
+check_b_rows() { $DC exec -T api python -c "$CHECK_B_PY" "$1" "/app/$REVIEWED_B" "/app/$HOLD_B" </dev/null; }
+ROWS_OK="OK $N_REVIEWED_B held $N_HELD_B"
 
 if [ "$MODE" = verify_a ]; then
   if verify_a_done; then
@@ -381,8 +407,8 @@ if [ "$MODE" = b ]; then
     exit 1
   fi
   rows=$(check_b_rows "/app/backups/fixture_orphans_mma_precheck_$STAMP.csv")
-  if [ "$rows" != "OK $N_REVIEWED_B" ]; then
-    log "ABORT at step 0: B's pre-check plans other rows than the reviewed $REVIEWED_B ($rows) — nothing changed (no backup)"
+  if [ "$rows" != "$ROWS_OK" ]; then
+    log "ABORT at step 0: B's pre-check plans other rows than the reviewed $REVIEWED_B and $HOLD_B ($rows) — nothing changed (no backup)"
     exit 1
   fi
   log "A and the fighter merge are done and verified; B is not ('$preB'; rows as reviewed: $rows) — continuing with B"
@@ -486,15 +512,15 @@ if [ "$rc" -ne 0 ] || ! same_plan "$plan" "$PLAN_B"; then
   exit 1
 fi
 rows=$(check_b_rows "/app/backups/fixture_orphans_mma_dryrun_$STAMP.csv")
-if [ "$rows" != "OK $N_REVIEWED_B" ]; then
-  log "ABORT at step 5: the dry run plans other rows than the reviewed $REVIEWED_B ($rows) — nothing changed"
+if [ "$rows" != "$ROWS_OK" ]; then
+  log "ABORT at step 5: the dry run plans other rows than the reviewed $REVIEWED_B and $HOLD_B ($rows) — nothing changed"
   exit 1
 fi
 md=$(plan_num "$plan" merge_delete); dn=$(plan_num "$plan" delete_no_twin); dp=$(plan_num "$plan" delete_placeholder)
 log "plan: $plan; rows as reviewed ($rows)"
 
-log "6/8 B's apply (pinned to the dry run's counts, as of $AS_OF)"
-run_tool stranded_mma_b_apply "$TOOL_B --apply --expect-plan merge_delete=$md,merge_cancel=0,delete_no_twin=$dn,delete_placeholder=$dp,mark_postponed=0 --out-csv $APPLY_B_CSV"
+log "6/8 B's apply (pinned to the dry run's counts and to the reviewed rows, as of $AS_OF)"
+run_tool stranded_mma_b_apply "$TOOL_B --apply --expect-plan merge_delete=$md,merge_cancel=0,delete_no_twin=$dn,delete_placeholder=$dp,mark_postponed=0 --expect-rows /app/$REVIEWED_B --out-csv $APPLY_B_CSV"
 rc=$?
 if [ "$rc" -ne 0 ]; then
   log "ABORT at step 6 (exit $rc; full log /tmp/stranded_mma_b_apply.log in the api container): if it refused before 'archived', nothing changed; otherwise the committed batches stand and the archive holds every planned row — inspect before re-running"
@@ -502,17 +528,18 @@ if [ "$rc" -ne 0 ]; then
 fi
 
 log "7/8 B's after-state (as of $AS_OF)"
+applied_rows=$(check_b_rows "$APPLY_B_CSV")
 state=$(read_state "$W/state_b.sql" 2)
 IFS='|' read -r stale1 recsb1 <<< "$state"
 run_tool stranded_mma_b_verify "$TOOL_B --out-csv /app/backups/fixture_orphans_mma_verify_$STAMP.csv"
 replan=$(plan_of stranded_mma_b_verify)
 want_stale=$((stale0 - md - dn - dp))
-log "after: stale UFC rows ${stale1:-?} (expected $want_stale), UFC recs ${recsb1:-?} (expected $recsb0), re-plan '$replan' (expected $DONE_B)"
-if [ "${stale1:-}" != "$want_stale" ] || [ "${recsb1:-}" != "$recsb0" ] || ! same_plan "$replan" "$DONE_B"; then
-  log "FAILED after-state at step 7 — inspect (the archive and audit CSVs are in /app/backups); a re-run refuses unless B's dry run plans exactly its done plan with 7 stale UFC rows and the 49 UFC recs in the database"
+log "after: the apply's rows '$applied_rows' (expected '$ROWS_OK'), stale UFC rows ${stale1:-?} (expected $want_stale), UFC recs ${recsb1:-?} (expected $recsb0), re-plan '$replan' (expected $DONE_B)"
+if [ "$applied_rows" != "$ROWS_OK" ] || [ "${stale1:-}" != "$want_stale" ] || [ "${recsb1:-}" != "$recsb0" ] || ! same_plan "$replan" "$DONE_B"; then
+  log "FAILED after-state at step 7 — inspect (the archive and audit CSVs are in /app/backups); a re-run refuses unless B's dry run plans exactly its done plan with $STALE_AFTER_B stale UFC rows and the $RECS_BEFORE_AS_OF UFC recs in the database"
   exit 1
 fi
 
 run_followups
 [ -z "$followup_failed" ] || incomplete
-log "DONE: the stale UFC fixture rows are retired (the 21 recs were closed out by the default run)"
+log "DONE: the stale UFC fixture rows are retired, the $N_HELD_B held rows left for the user's decision ($HOLD_B); the 21 recs were closed out by the default run"

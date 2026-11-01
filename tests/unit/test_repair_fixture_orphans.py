@@ -964,3 +964,101 @@ class TestMain:
         assert self._run(monkeypatch, tmp_path, db, "--as-of", "2026-10-30T09:15:00+00:00") == 0
         (params,) = db.params[rfo.LIST_CANDIDATES_SQL]
         assert params == ("soccer", ["scheduled"], datetime(2026, 10, 30, 9, 15, tzinfo=timezone.utc), "96")
+
+
+# ── --hold-list and --expect-rows ─────────────────────────────────────
+
+
+def _write_rows(path, header, rows, comment="# reviewed by hand\n"):
+    path.write_text(comment + header + "\n" + "\n".join(rows) + "\n", encoding="utf-8")
+    return path
+
+
+class TestHoldAndExpectedRows:
+    def test_a_held_candidate_is_left_alone_whatever_it_would_have_been(self):
+        cands = [_cand("fought"), _cand("dup", 3), _cand("tbd", names=("TBA", "Opponent TBA"))]
+        held = {"fought": "fought_no_winner", "dup": "x", "tbd": "y"}
+        p = rfo.plan(cands, lambda c: [_twin("real")] if c["id"] == "dup" else [], TENNIS, held=held)
+        assert p["no_twin"] == [] and p["groups"] == {} and p["placeholders"] == []
+        assert [e["reason"] for e in p["entries"]] == [rfo.LEFT_HELD] * 3
+        assert p["counts"][f"left_{rfo.LEFT_HELD}"] == 3
+        assert rfo.plan_line(p["counts"]).startswith("PLAN merge_delete=0 merge_cancel=0 delete_no_twin=0 ")
+        assert " left=3 " in rfo.plan_line(p["counts"])
+        # without the hold the same rows are written
+        p = rfo.plan(cands, lambda c: [_twin("real")] if c["id"] == "dup" else [], TENNIS)
+        assert p["no_twin"] == ["fought"] and p["groups"] == {"real": ["dup"]} and p["placeholders"] == ["tbd"]
+
+    def test_the_hold_list_loads_comments_and_refuses_rows_without_evidence(self, tmp_path):
+        hdr = ",".join(rfo.HOLD_LIST_FIELDS)
+        ok = _write_rows(tmp_path / "h.csv", hdr, ["a,fought_no_winner,ESPN final with no winner", "b,swap,e"])
+        assert rfo.load_hold_list(ok) == {"a": "fought_no_winner", "b": "swap"}
+        for rows, why in ((["a,r,"], "empty"), (["a,r,e", "a,r,e"], "listed twice"), ([",r,e"], "no match_id")):
+            with pytest.raises(rfo.UnsafeRequest, match=why):
+                rfo.load_hold_list(_write_rows(tmp_path / "bad.csv", hdr, rows))
+        with pytest.raises(rfo.UnsafeRequest, match="missing column"):
+            rfo.load_hold_list(_write_rows(tmp_path / "cols.csv", "match_id,reason", ["a,r"]))
+
+    def test_the_committed_mma_hold_list_loads(self):
+        held = rfo.load_hold_list(SCRIPTS_DIR / "data" / "mma_stale_rows_hold_20261101.csv")
+        assert sorted(held.values()) == ["competitor_replaced_in_competition", "fought_no_winner"]
+        rows = rfo.load_expected_rows(SCRIPTS_DIR / "data" / "mma_stale_rows_retire_20261101.csv")
+        assert len(rows) == 66 and not {r[0] for r in rows} & set(held)
+
+    def test_expected_rows_must_be_writes(self, tmp_path):
+        hdr = "match_id,action,twin_id,evidence"
+        p = _write_rows(tmp_path / "r.csv", hdr, ["a,merge_delete,t,e", "b,delete_no_twin,,e"])
+        assert rfo.load_expected_rows(p) == {("a", "merge_delete", "t"), ("b", "delete_no_twin", "")}
+        with pytest.raises(rfo.UnsafeRequest, match="is not one of"):
+            rfo.load_expected_rows(_write_rows(tmp_path / "x.csv", hdr, ["a,leave,,e"]))
+        with pytest.raises(rfo.UnsafeRequest, match="lists no row"):
+            rfo.load_expected_rows(_write_rows(tmp_path / "y.csv", hdr, []))
+
+    def test_the_plan_must_write_exactly_the_reviewed_rows_actions_and_twins(self):
+        p = rfo.plan(
+            [_cand("dup"), _cand("never", home="a", away="b")],
+            lambda c: [_twin("real")] if c["id"] == "dup" else [],
+            TENNIS,
+        )
+        want = {("dup", "merge_delete", "real"), ("never", "delete_no_twin", "")}
+        assert rfo.planned_writes(p["entries"]) == want
+        rfo.check_expected_rows(p["entries"], want)
+        for bad in (
+            want - {("never", "delete_no_twin", "")},  # a write nobody reviewed
+            want | {("other", "delete_no_twin", "")},  # a reviewed row the plan leaves
+            {("dup", "merge_delete", "elsewhere"), ("never", "delete_no_twin", "")},  # another twin
+            {("dup", "delete_no_twin", ""), ("never", "delete_no_twin", "")},  # another action
+        ):
+            with pytest.raises(rfo.UnsafeRequest, match="differs from --expect-rows"):
+                rfo.check_expected_rows(p["entries"], bad)
+
+
+class TestMainHoldAndExpectedRows:
+    def _run(self, monkeypatch, tmp_path, db, *argv):
+        monkeypatch.setenv("BACKUP_LOCAL_DIR", str(tmp_path / "out"))
+        monkeypatch.setattr(rfo.psycopg2, "connect", lambda *a, **k: db)
+        return rfo.main(["--sport", "mma", "--database-url", "x", *argv])
+
+    def _db(self):
+        return _MainDB([_cand("fought"), _cand("never", home="a", away="b")], {})
+
+    def _lists(self, tmp_path, reviewed_rows):
+        hold = _write_rows(tmp_path / "hold.csv", "match_id,reason,evidence", ["fought,fought_no_winner,e"])
+        reviewed = _write_rows(tmp_path / "rows.csv", "match_id,action,twin_id", reviewed_rows)
+        return hold, reviewed
+
+    def test_a_held_row_is_left_and_the_reviewed_rows_pass(self, monkeypatch, tmp_path):
+        hold, reviewed = self._lists(tmp_path, ["never,delete_no_twin,"])
+        db = self._db()
+        assert self._run(monkeypatch, tmp_path, db, "--hold-list", str(hold), "--expect-rows", str(reviewed)) == 0
+        (out,) = (tmp_path / "out").glob("fixture_orphans_mma_dryrun_*.csv")
+        got = {r["match_id"]: (r["action"], r["reason"]) for r in csv.DictReader(out.open())}
+        assert got == {"fought": ("leave", rfo.LEFT_HELD), "never": ("delete_no_twin", "")}
+        assert db.writes == []
+
+    def test_an_apply_whose_rows_are_not_the_reviewed_ones_refuses_before_anything(self, monkeypatch, tmp_path):
+        # without the hold list the fought row would be deleted: not a reviewed write
+        _, reviewed = self._lists(tmp_path, ["never,delete_no_twin,"])
+        db = self._db()
+        with pytest.raises(rfo.UnsafeRequest, match="1 planned write"):
+            self._run(monkeypatch, tmp_path, db, "--apply", "--expect-rows", str(reviewed))
+        assert db.writes == [] and not (tmp_path / "out").exists()  # no audit CSV, no archive

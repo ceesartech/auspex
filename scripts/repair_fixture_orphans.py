@@ -132,6 +132,21 @@ no longer matches is reported (list_mismatch on the PLAN line): the dry run
 exits 1 and --apply refuses before any write. A listed row already marked
 by an earlier run counts as done.
 
+HELD ROWS (--hold-list) AND THE REVIEWED WRITES (--expect-rows)
+---------------------------------------------------------------
+--hold-list names a reviewed CSV (match_id, reason, evidence; '#' lines are
+comments) of candidates a person must decide on first: each is LEFT ALONE
+(reason held_for_decision, counted in `left`), whatever its twin or class.
+MMA 2026-11-01: a bout that was fought to no winner (a draw or no contest,
+which results ingestion does not record, so it never finished and has no
+twin) and a row whose ESPN competition swapped one fighter for another name
+five days out (scripts/data/mma_stale_rows_hold_20261101.csv).
+--expect-rows names a reviewed CSV (match_id, action, twin_id; other columns
+are evidence) of EVERY row the run may write: the plan's writes must be
+exactly those rows, actions and twins, or the run refuses before it writes
+anything (the dry run too: it then exits with the refusal and no audit CSV).
+It pins an apply row by row where --expect-plan pins only the counts.
+
 RUN ORDER (soccer; scripts/ops/soccer_repair_runbook.sh runs it, each step
 through its own wrapper)
 ------------------
@@ -264,6 +279,7 @@ NO_TWIN_NEVER_RESULTED = "never_resulted"
 # soccer: the twin is a football-data copy 1 h late; repair_football_data_kickoffs folds it
 HELD_FD_COPY = "fd_copy_awaiting_repair"
 LEFT_POSTPONED_MISMATCH = "postponed_list_mismatch"
+LEFT_HELD = "held_for_decision"  # on the reviewed --hold-list: a person decides first
 
 # promote_raw stored football-data's UK local Time as UTC until 2026-10-31:
 # a summer football-data row sits exactly this much after the real kickoff.
@@ -271,6 +287,9 @@ FD_LEGACY_OFFSET = timedelta(hours=1)
 
 # The reviewed postponed list (--postponed-list): every column must be present.
 POSTPONED_LIST_FIELDS = ("match_id", "kickoff", "replay_match_id", "replay_kickoff", "replay_espn_event", "evidence")
+# The reviewed hold list (--hold-list) and the reviewed writes (--expect-rows).
+HOLD_LIST_FIELDS = ("match_id", "reason", "evidence")
+EXPECT_ROWS_FIELDS = ("match_id", "action", "twin_id")
 
 _HAS_RECS = """
     EXISTS (SELECT 1 FROM betting_recommendations r WHERE r.match_id = m.id)
@@ -629,6 +648,68 @@ def load_postponed_list(path: Path) -> dict[str, Postponement]:
     return out
 
 
+def _reviewed_rows(path: Path, fields: tuple[str, ...], what: str) -> list[dict]:
+    """The data rows of a reviewed CSV ('#' lines are comments), every column in
+    `fields` present; a row listed twice refuses."""
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(line for line in fh if not line.startswith("#"))
+        missing = [f for f in fields if f not in (reader.fieldnames or [])]
+        if missing:
+            raise UnsafeRequest(f"{what} {path}: missing column(s) {missing}")
+        rows = [{k: (v or "").strip() for k, v in r.items() if k is not None} for r in reader]
+    seen: set[str] = set()
+    for n, r in enumerate(rows, start=1):
+        if not r["match_id"]:
+            raise UnsafeRequest(f"{what} {path}: data row {n} has no match_id")
+        if r["match_id"] in seen:
+            raise UnsafeRequest(f"{what} {path}: {r['match_id']} is listed twice")
+        seen.add(r["match_id"])
+    return rows
+
+
+def load_hold_list(path: Path) -> dict[str, str]:
+    """The reviewed hold list: match_id -> why it waits for a decision. Every
+    row needs its reason and evidence."""
+    out: dict[str, str] = {}
+    for n, r in enumerate(_reviewed_rows(path, HOLD_LIST_FIELDS, "--hold-list"), start=1):
+        empty = [f for f in HOLD_LIST_FIELDS if not r.get(f)]
+        if empty:
+            raise UnsafeRequest(f"--hold-list {path}: data row {n}: empty {empty} — only reviewed rows with evidence")
+        out[r["match_id"]] = r["reason"]
+    return out
+
+
+def load_expected_rows(path: Path) -> set[tuple[str, str, str]]:
+    """The reviewed writes: {(match_id, action, twin_id)}; every action a write
+    action (a row the run leaves alone is not listed)."""
+    out: set[tuple[str, str, str]] = set()
+    for n, r in enumerate(_reviewed_rows(path, EXPECT_ROWS_FIELDS, "--expect-rows"), start=1):
+        if r["action"] not in WRITE_ACTIONS:
+            raise UnsafeRequest(
+                f"--expect-rows {path}: data row {n}: action {r['action']!r} is not one of {WRITE_ACTIONS}"
+            )
+        out.add((r["match_id"], r["action"], r.get("twin_id") or ""))
+    if not out:
+        raise UnsafeRequest(f"--expect-rows {path} lists no row")
+    return out
+
+
+def planned_writes(entries: list[dict]) -> set[tuple[str, str, str]]:
+    """The plan's writes as {(match_id, action, twin_id)}, comparable with load_expected_rows."""
+    return {(e["match_id"], e["action"], str(e.get("twin_id") or "")) for e in entries if e["action"] in WRITE_ACTIONS}
+
+
+def check_expected_rows(entries: list[dict], expected: set[tuple[str, str, str]]) -> None:
+    got = planned_writes(entries)
+    extra, missing = sorted(got - expected), sorted(expected - got)
+    if extra or missing:
+        raise UnsafeRequest(
+            f"plan differs from --expect-rows: {len(extra)} planned write(s) not reviewed {extra[:3]}, "
+            f"{len(missing)} reviewed row(s) not planned as reviewed {missing[:3]} — the data moved since the review; "
+            "re-run the dry run and review"
+        )
+
+
 def postponed_problem(
     c: dict, listed: Postponement, twin: Optional[dict], twin_reason: str, rows: list[dict], twin_window_hours: int
 ) -> Optional[str]:
@@ -730,6 +811,7 @@ def plan(
     twin_window_hours: int = 72,
     twin_is_espn: Optional[Callable[[str], bool]] = None,
     postponed: Optional[dict[str, Postponement]] = None,
+    held: Optional[dict[str, str]] = None,
 ) -> dict:
     """Decide every candidate's action. `twins_for(candidate)` returns the
     already-orientation-checked twin list (find_twins); `context_for` the
@@ -737,9 +819,12 @@ def plan(
     replay of a listed postponed row); `twin_is_espn(twin_id)` the twin's
     ESPN identity (asked only for a twin exactly 1 h late; unknown counts as
     none, which holds the row). `postponed`: the listed rows among the
-    candidates. Pure apart from the callables."""
+    candidates. `held`: the reviewed hold list (match_id -> reason); a held
+    candidate is left alone before anything else is asked of it. Pure apart
+    from the callables."""
     policy = policy or policy_for("tennis", False)
     postponed = postponed or {}
+    held = held or {}
     groups: dict[str, list[str]] = defaultdict(list)  # twin_id -> orphans to merge, then delete
     cancel: dict[str, list[str]] = defaultdict(list)  # twin_id -> orphans to merge, then mark cancelled
     kickoff: dict[str, datetime] = {}
@@ -770,6 +855,9 @@ def plan(
         entries.append(e)
         observed[c["id"]] = _observed(c)
 
+        if c["id"] in held:
+            e["reason"] = LEFT_HELD
+            continue
         listed = postponed.get(c["id"])
         if listed is not None:
             twin, reason = rsr.select_twin(twins_for(c), c["match_date"])
@@ -1151,6 +1239,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="refuse unless the plan's write counts equal these, e.g. merge_delete=203,merge_cancel=28",
     )
+    ap.add_argument(
+        "--hold-list",
+        type=Path,
+        default=None,
+        help="reviewed CSV (match_id, reason, evidence) of rows left alone until a person decides (see HELD ROWS)",
+    )
+    ap.add_argument(
+        "--expect-rows",
+        type=Path,
+        default=None,
+        help="reviewed CSV (match_id, action, twin_id) of every row the run may write: refuse unless the plan is "
+        "exactly those (see HELD ROWS)",
+    )
     ap.add_argument("--apply", action="store_true", help="execute (default: dry-run)")
     args = ap.parse_args(argv)
     if args.stale_after_hours < MIN_STALE_AFTER_HOURS:
@@ -1212,6 +1313,8 @@ def main(argv: list[str] | None = None) -> int:
         raise UnsafeRequest("DATABASE_URL not set")
     policy = policy_for(args.sport, args.delete_placeholders)
     listed = load_postponed_list(args.postponed_list) if args.postponed_list else {}
+    held = load_hold_list(args.hold_list) if args.hold_list else {}
+    expected_rows = load_expected_rows(args.expect_rows) if args.expect_rows else None
     conn = psycopg2.connect(args.database_url, cursor_factory=RealDictCursor)
     try:
         with conn.cursor() as cur:
@@ -1256,6 +1359,7 @@ def main(argv: list[str] | None = None) -> int:
                 twin_window_hours=args.twin_window_hours,
                 twin_is_espn=twin_is_espn,
                 postponed={i: v for i, v in listed.items() if i in candidate_ids},
+                held=held,
             )
         conn.rollback()  # end the read transaction
         counts = p["counts"]
@@ -1272,6 +1376,14 @@ def main(argv: list[str] | None = None) -> int:
                 already_postponed,
                 len(mismatches),
             )
+        if held:
+            n_held = sum(1 for e in p["entries"] if e["reason"] == LEFT_HELD)
+            logger.info(
+                "hold list: %d row(s), %d held among the candidates (left alone), %d not a candidate",
+                len(held),
+                n_held,
+                len(held) - n_held,
+            )
         for m in mismatches:
             logger.error("postponed list does not match the data — %s", m)
         logger.info(plan_line(counts))
@@ -1285,6 +1397,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.expected is not None:
             check_expected(counts, args.expected)
+        if expected_rows is not None:
+            check_expected_rows(p["entries"], expected_rows)
+            logger.info(
+                "rows pinned (--expect-rows): the plan writes exactly the %d reviewed row(s)", len(expected_rows)
+            )
         if args.apply and pending:
             raise UnsafeRequest(f"{pending} orphan(s) with a twin hold pending recs: run repair_stranded_recs.py first")
         if args.apply and mismatches:

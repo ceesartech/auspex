@@ -1,0 +1,17 @@
+# Stale UFC rows that run B of scripts/ops/repair_stranded_recs_mma.sh must NOT delete until the user decides
+# (B passes this file as repair_fixture_orphans --hold-list: each row is left alone, reason held_for_decision, and
+# counted in B's left=9). Reviewed 2026-11-01 from the read-only prod exports of 2026-11-01 (21:06:57Z and 22:47:06Z)
+# and ESPN's UFC scoreboard. B does not touch these rows, so nothing archives or changes them; each holds 2
+# predictions and no prices.
+#   fought_no_winner: the bout WAS fought. ESPN marks it final with no winner flag on either fighter (a draw or a no
+#     contest); fetch_upcoming records no MMA result without a winner, so the row never finished and has no twin.
+#     Deleting it would erase the fight from both fighters' histories. Keeping it for good needs MMA draws and no
+#     contests recorded by fetch_upcoming, or this hold kept.
+#   competitor_replaced_in_competition: ESPN kept competition 401914464 at the same kickoff and now lists Tina Black
+#     where it listed Valesca Machado five days before the card; our finished row 588fc028 Tina Black v Melissa Amaya
+#     (no ESPN id) is that bout. ESPN has no athlete named Valesca Machado, and Tina Black is athlete 4836549 (a
+#     Brazilian strawweight), so whether this is a replacement (delete the row) or a second spelling of one fighter
+#     (merge the two team rows and fold this copy) cannot be settled from the data.
+match_id,reason,evidence,kickoff,home,away,status,espn_competition_id
+787bd68e-2ce8-4beb-b346-c9f422c42574,competitor_replaced_in_competition,"ESPN competition 401914464 (STATUS_FINAL) is now Tina Black v Melissa Amaya at this row's kickoff; no ESPN athlete is named Valesca Machado; our finished row 588fc028 holds the new pairing. A replacement or a second spelling: undecided",2026-09-27T00:00:00+00:00,Valesca Machado,Melissa Amaya,scheduled,401914464
+b7f16d27-42a1-41b0-a6f6-6e8e9837da47,fought_no_winner,"ESPN 401924511 STATUS_FINAL with no winner flag on either fighter (a draw or no contest): fetch_upcoming records no MMA result without a winner, so the row stays 'scheduled'; the row's ESPN competition 401924511 is still listed",2026-10-10T21:00:00+00:00,Melissa Gatto,Ernesta Kareckaite,scheduled,401924511

@@ -1,14 +1,18 @@
 # Run B of scripts/ops/repair_stranded_recs_mma.sh (repair_fixture_orphans --sport mma --as-of 2026-11-01T00:00:00Z),
 # pinned to the state AFTER run A and scripts/ops/merge_mma_fighters.sh (reviewed 2026-11-01). Every row B may write,
 # with what it does: merge_delete (folded into the finished twin with the same fighters in the same order, then
-# deleted), delete_no_twin, delete_placeholder. The wrapper refuses unless B's dry run plans exactly these rows,
-# actions and twins. Evidence: ESPN's UFC scoreboard for each card (2026-11-01), by ESPN athlete id and name.
-# Classes of the 33 no-twin rows: opponent_replaced (25: one fighter fought someone else on that card, the other is
-# not on it), dropped_neither_on_card (6), competitor_replaced_in_competition (1: ESPN kept competition 401914464
-# and swapped Valesca Machado for Tina Black five days before the card; no ESPN athlete is named Valesca Machado),
-# fought_no_winner (1: Gatto v Kareckaite 2026-10-10 ended with no winner flag, a draw or no contest, which
-# fetch_upcoming does not record, so the row never finished; it is fought, but has no twin and never will).
-# The 9 fought bouts stored under a second spelling or the other way round are NOT here: the merge folded them.
+# deleted), delete_no_twin, delete_placeholder. B passes this file as --expect-rows to its apply (the tool refuses
+# before its first write unless it plans exactly these rows, actions and twins), and the wrapper checks its pre-check,
+# dry-run and apply audit CSVs against it. Evidence: ESPN's UFC scoreboard for each card (2026-11-01), by ESPN athlete
+# id and name.
+# Classes of the 31 no-twin rows: opponent_replaced (25: one fighter fought someone else on that card, the other is
+# not on it) and dropped_neither_on_card (6: neither fighter is on ESPN's card). None of them was fought.
+# Two of the 6 dropped rows are Jhonata Diniz v 'José Luiz' and v 'José Montanha' (2026-06-20 21:00Z, created a day
+# apart): possibly one opponent under two names, but neither bout is on ESPN's card (run A cancels both as dropped),
+# so B deletes both whoever the opponent was; the 'José Luiz' team row is left with no bout (see the map's header).
+# NOT here, held for a decision in scripts/data/mma_stale_rows_hold_20261101.csv (B leaves them alone): Gatto v
+# Kareckaite (fought to no winner) and Valesca Machado v Melissa Amaya (ESPN swapped the fighter in the competition).
+# NOT here either: the 9 fought bouts stored under a second spelling or the other way round (the merge folded them).
 match_id,action,twin_id,kickoff,home,away,status,espn_competition_id,class,evidence
 28982783-d8b8-44e6-88e6-e58b79e5180e,delete_no_twin,,2026-06-20T21:00:00+00:00,Jhonata Diniz,José Montanha,cancelled,,dropped_neither_on_card,neither fighter is on ESPN's card
 97e7815a-7771-4df7-8dc9-8c40ee257aae,delete_no_twin,,2026-06-20T21:00:00+00:00,Giga Chikadze,Vinicius Oliveira,scheduled,,opponent_replaced,"Giga Chikadze is not on the card; Vinicius Oliveira fought Andre Fili (ESPN 401877217, STATUS_FINAL)"
@@ -37,10 +41,8 @@ e34c1342-a591-467b-a4bd-e2fca7727386,delete_no_twin,,2026-08-29T10:00:00+00:00,J
 cdc56c94-894b-4998-9d0f-a53645b75f77,delete_no_twin,,2026-09-12T18:00:00+00:00,Rodrigo Vera,Ramiro Jimenez,scheduled,401913546,dropped_neither_on_card,neither fighter is on ESPN's card; the row's ESPN competition 401913546 is no longer listed
 0d120484-b333-4708-8a91-a17d01640dcd,delete_no_twin,,2026-09-20T01:00:00+00:00,Renato Moicano,Brian Ortega,scheduled,401905377,dropped_neither_on_card,neither fighter is on ESPN's card; the row's ESPN competition 401905377 is no longer listed
 34a607b3-a179-4443-9ab8-22ac80c5870b,delete_no_twin,,2026-09-26T21:00:00+00:00,Mickey Gall,Sedriques Dumas,scheduled,401923433,opponent_replaced,"Mickey Gall is not on the card; Sedriques Dumas fought Luis Hernandez (ESPN 401924683, STATUS_FINAL); the row's ESPN competition 401923433 is no longer listed"
-787bd68e-2ce8-4beb-b346-c9f422c42574,delete_no_twin,,2026-09-27T00:00:00+00:00,Valesca Machado,Melissa Amaya,scheduled,401914464,competitor_replaced_in_competition,ESPN re-used competition 401914464 for Tina Black v Melissa Amaya (STATUS_FINAL): Valesca Machado was replaced (no ESPN athlete of that name; our finished row of the new pairing exists); the row's ESPN competition 401914464 is still listed
 9353e4e2-3e17-4441-9de2-204dbc73ff04,delete_no_twin,,2026-09-29T23:00:00+00:00,Ilias Bulaid,Erick Visconde,scheduled,401923734,dropped_neither_on_card,neither fighter is on ESPN's card; the row's ESPN competition 401923734 is no longer listed
 d662c393-9475-4860-9d6b-749b58236e2f,delete_no_twin,,2026-10-03T22:00:00+00:00,Marcus McGhee,Bernardo Sopaj,scheduled,401917348,opponent_replaced,"Marcus McGhee fought Anthony Romero (ESPN 401927906, STATUS_FINAL); Bernardo Sopaj is not on the card; the row's ESPN competition 401917348 is no longer listed"
-b7f16d27-42a1-41b0-a6f6-6e8e9837da47,delete_no_twin,,2026-10-10T21:00:00+00:00,Melissa Gatto,Ernesta Kareckaite,scheduled,401924511,fought_no_winner,"ESPN 401924511 STATUS_FINAL with no winner flag on either fighter (a draw or no contest): fetch_upcoming records no MMA result without a winner, so the row stays 'scheduled'; the row's ESPN competition 401924511 is still listed"
 7eb25783-143e-4d2d-912b-f8766478a86d,delete_no_twin,,2026-10-17T21:00:00+00:00,Katlyn Cerminara,Jamey-Lyn Horth,scheduled,401908374,opponent_replaced,"Katlyn Cerminara fought Mackenzie Stiller (ESPN 401929675, STATUS_FINAL); Jamey-Lyn Horth is not on the card; the row's ESPN competition 401908374 is no longer listed"
 ee02dfc4-8981-4122-a6a4-3355aa78453a,delete_no_twin,,2026-10-17T21:00:00+00:00,Louie Sutherland,Javad Mahjoub,scheduled,401916451,opponent_replaced,"Louie Sutherland is not on the card; Javad Mahjoub fought Joel Faglier (ESPN 401929676, STATUS_FINAL); the row's ESPN competition 401916451 is no longer listed"
 29cafe88-2f42-4665-8516-6799b7713ec5,delete_placeholder,,2026-08-11T23:00:00+00:00,TBA,Opponent TBA,scheduled,,placeholder,placeholder fighters 'TBA' v 'Opponent TBA'
