@@ -57,7 +57,7 @@ SERVE PATH (mapped from the code at 5092ab3, 2026-11-01)
   last 60 days). ("soccer","over_under") and ("soccer","odd_even") are
   disabled. ("soccer","asian_handicap") is ENABLED (max_odds 4.0, max_ev 0.30,
   max_gap 0.10): the one rec-emitting market served from this artifact. In the
-  last 60 days 168 AH recs were written, 106 of them on lines this artifact
+  last 60 days 169 AH recs were written, 108 of them on lines this artifact
   shapes (+-0.75..+-2; away +1 alone is 33). btts / double_chance /
   draw_no_bet / correct_score inherit the enabled soccer default but have no
   odds feed, and the remaining derived markets have no odds mapping at all:
