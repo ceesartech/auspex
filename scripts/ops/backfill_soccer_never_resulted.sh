@@ -33,45 +33,63 @@
 # The never_resulted class grows: a fixture whose result never arrives joins
 # it 96 h after kickoff (e.g. a Liga MX fixture the results path refuses as
 # identity drift until runbook step 1 has run, once the sweep's 3-day
-# look-back has passed it). Such a row is NOT in the reviewed list: it is
-# listed (LEFT ... NOT in the reviewed list) and left as it is, for a
-# separate review — it neither aborts the step nor gets healed unreviewed.
+# look-back has passed it: the sweep fetches ESPN's scoreboards for today
+# back through today-3, UTC, and ESPN files a fixture under its local date).
+# Such a row is NOT in the reviewed list: it is listed (LEFT ... NOT in the
+# reviewed list) and left as it is, for a separate review — it neither
+# aborts the step nor gets healed unreviewed. Before its 96 h no class holds
+# it, so step 0 lists every soccer row still 'scheduled' 6 h or more after
+# kickoff and short of 96 h (PENDING, read only; on prod at 2026-11-01 08:10Z
+# that was Guadalajara v Atlante alone): the step goes on, and running it
+# again after the time each line shows reaches the row.
 # One such fixture was reviewed ahead (2026-11-01): Guadalajara Chivas v
-# Atlante (6b2133b1, ESPN 401876915, kickoff 2026-11-01 01:07Z, final 4-2,
-# scoring plays agree; 76 predictions, all before kickoff, no rec) has a
-# 'heal' row. It is never_resulted only if step 1 runs after the sweep's
-# look-back has passed it (from ~2026-11-04 00:00Z) and this step runs 96 h
-# or more after its kickoff (2026-11-05 01:07Z); started earlier, the
-# pipeline records its result after step 1 and the row is not passed here.
-# The tool's dry run of it alone, as of 2026-11-06 on the replica after
-# steps 1-11 (ESPN fetched 2026-11-01 ~07:03Z): heal 1, 76 predictions
-# graded, 0 recs changed, 0 teams stamped. Between ~11-04 00:00Z and 11-05
-# 01:07Z neither path reaches it: --only 12 after 11-05 01:07Z heals it
-# (then --only 16). Santos Laguna v Necaxa (5b94347b, ESPN 401876912, kickoff
-# 2026-11-01 23:00Z) was not yet played when reviewed, so it is not listed:
-# started after ~2026-11-04 23:00Z, this step lists it as NOT in the
-# reviewed list and leaves it a stale scheduled row (76 predictions, no rec).
-# Pins: the bounds below are that plan's, plus Guadalajara v Atlante's 1
-# row and 76 predictions (candidates and heal 39, graded 3,249, stamped
-# 3), whichever of the two cases holds; the run applies exactly its own
-# dry run's counts (--expect-plan), with the ESPN scoreboards that dry run
-# fetched (one write-once cache), so ESPN changing between the dry run and
-# the apply cannot change what is written.
+# Atlante (6b2133b1, ESPN 401876915, scoreboard date 10-31, kickoff
+# 2026-11-01 01:07Z, final 4-2, scoring plays agree; 76 predictions, all
+# before kickoff, no rec) has a 'heal' row. It is never_resulted only if
+# step 1 runs after the sweep's look-back has passed it (from ~2026-11-04
+# 00:00Z) and this step runs 96 h or more after its kickoff (2026-11-05
+# 01:07Z); started earlier, the pipeline records its result after step 1
+# and the row is not passed here. The tool's dry run of it alone, as of
+# 2026-11-06 on the replica after steps 1-11 (ESPN fetched 2026-11-01
+# ~07:03Z): heal 1, 76 predictions graded, 0 recs changed, 0 teams stamped.
+# Between ~11-04 00:00Z and 11-05 01:07Z it is PENDING here: --only 12 after
+# 11-05 01:07Z heals it (then --only 16). Santos Laguna v Necaxa (5b94347b,
+# ESPN 401876912, scoreboard date 11-01, kickoff 2026-11-01 23:00Z) was not
+# yet played when reviewed, so it has no row: the sweep covers it until
+# ~2026-11-05 00:00Z; with step 1 later than that, this step lists it as
+# PENDING until 2026-11-05 23:00Z and as NOT in the reviewed list after, and
+# leaves it a stale scheduled row (76 predictions, no rec) — healing it
+# needs its own reviewed 'heal' row (a commit and a deploy), then --only 12
+# and --only 16. The same holds for Atlante v Santos Laguna (52c8d673, ESPN
+# 401876908, kickoff 2026-11-07 03:00Z: step 1 before ~11-10 00:00Z) and
+# León v Guadalajara Chivas (0e7f388c, ESPN 401876902, kickoff 2026-11-09
+# 02:00Z: before ~11-12 00:00Z).
+# Pins: the bounds below are the rehearsal plan's (candidates and heal 38,
+# graded 3,173, stamped 3), plus Guadalajara v Atlante's 1 row and 76
+# predictions only when it is among the rows passed (39 / 3,249); the run
+# applies exactly its own dry run's counts (--expect-plan), with the ESPN
+# scoreboards that dry run fetched (one write-once cache), so ESPN changing
+# between the dry run and the apply cannot change what is written.
 #   0. already done? Read-only: the never_resulted ids (a repair_fixture_orphans
 #      dry run, as of now), split into the reviewed 'heal' rows and the rest
-#      (listed, left alone): none of the former exits 0 without a backup;
-#      then the tool's dry run of them (it fetches ESPN): nothing to heal
-#      exits 0 without a backup, but a failed run or any failed ESPN request
-#      aborts here (its rows would be refused, so 'nothing to heal' would not
-#      be the real plan) — re-run later, nothing changed;
+#      (listed, left alone), and the PENDING rows (listed): none of the
+#      reviewed 'heal' rows exits 0 without a backup; then the tool's dry run
+#      of them (it fetches ESPN): nothing to heal exits 0 without a backup,
+#      but a failed run or any failed ESPN request aborts here (its rows
+#      would be refused, so 'nothing to heal' would not be the real plan) —
+#      re-run later, nothing changed; so does an orphan cleanup with work
+#      left (rows that went stale after runbook step 7: --only 7 first), and
+#      a PENDING list that cannot be read;
 #   1. verified backup (B2) — abort if it does not land;
 #   2. START = now; the never_resulted ids as of START (abort unless the
 #      cleanup is done: nothing to merge, delete or mark, nothing blocked) and
 #      the tool's dry run of the reviewed 'heal' rows among them (ESPN into a
-#      new write-once cache) — abort unless the plan is within the reviewed
-#      set: candidates <= 39 and = the rows passed, heal <= 39, predictions
-#      graded <= 3,249, teams stamped <= 3, and no prediction re-graded, no
-#      rec changed, no row already finished, no ESPN request failed;
+#      new write-once cache) — abort unless the ids read back are the rows
+#      passed and the plan is within the reviewed set: candidates <= 38 (39
+#      with Guadalajara v Atlante) and = the rows passed, heal <= 38 (39),
+#      predictions graded <= 3,173 (3,249), teams stamped <= 3, and no
+#      prediction re-graded, no rec changed, no row already finished, no
+#      ESPN request failed;
 #   3. apply, pinned to the dry run's counts (--expect-plan, the same cache):
 #      one transaction, every heal checked in a savepoint (see the tool);
 #   4. after-state, EXPECTED: the healed rows are finished; a re-plan of the
@@ -110,15 +128,16 @@ log() { echo "[$(date -u +%FT%TZ)] $*"; }
 W=$(mktemp -d "${TMPDIR:-/tmp}/never_resulted.XXXXXX") || { echo "ABORT: mktemp failed — nothing changed"; exit 1; }
 cleanup() {
   rm -rf "$W"
-  $DC exec -T postgres rm -f /tmp/never_resulted_q.sql >/dev/null 2>&1
+  $DC exec -T postgres rm -f /tmp/never_resulted_q.sql /tmp/never_resulted_pending_q.sql >/dev/null 2>&1
 }
 trap cleanup EXIT
 latest_dump() {
   $DC exec -T api python -c "import sys; sys.path.insert(0,'/app/scripts'); import b2_io; s=b2_io.s3_client(); o=max(b2_io._list(s,'postgres/'), key=lambda o:o['LastModified']); print(int(o['LastModified'].timestamp()), o['Key'])" 2>/dev/null | tail -1
 }
-psql_at() {  # psql_at <local.sql>: unaligned, '|'-separated
-  $DC cp "$1" postgres:/tmp/never_resulted_q.sql >/dev/null 2>&1 || return 1
-  $DC exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /tmp/never_resulted_q.sql'
+psql_at() {  # psql_at <local.sql> [container file name]: unaligned, '|'-separated
+  local f="/tmp/${2:-never_resulted_q.sql}"
+  $DC cp "$1" "postgres:$f" >/dev/null 2>&1 || return 1
+  $DC exec -T postgres sh -c "psql -v ON_ERROR_STOP=1 -At -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -f $f"
 }
 plan_num() {  # plan_num <PLAN line> <key>: the count, or "missing"
   local v
@@ -126,13 +145,18 @@ plan_num() {  # plan_num <PLAN line> <key>: the count, or "missing"
   if [[ "$v" =~ ^[0-9]+$ ]]; then echo "$v"; else echo missing; fi
 }
 # The reviewed set (rehearsal of 2026-11-01, see the header): its 'heal' rows are the only ones passed to the tool.
-# The rehearsal's 38 heals (3,173 predictions, 3 teams stamped) plus Guadalajara v Atlante (1 row, 76 predictions,
-# no stamp), which is a never_resulted row only when the runbook starts late.
+# The bounds are the rehearsal's 38 heals (3,173 predictions, 3 teams stamped); Guadalajara v Atlante, reviewed
+# ahead and a never_resulted row only when the runbook starts late, adds its 1 row and 76 predictions (no stamp)
+# only when it is among the rows passed (step 2).
 REVIEWED=/app/scripts/data/soccer_never_resulted_reviewed.csv
-MAX_CANDIDATES=39
-MAX_HEAL=39
-MAX_GRADED=3249
+MAX_CANDIDATES=38
+MAX_HEAL=38
+MAX_GRADED=3173
 MAX_TEAMS_STAMPED=3
+LATE_HEAL_ID=6b2133b1-e702-4705-80f9-0218913bbdeb
+LATE_HEAL_GRADED=76
+# A soccer row still 'scheduled' this long after kickoff, but not yet never_resulted (96 h), is listed (PENDING).
+PENDING_AFTER_HOURS=6
 ORPHANS="python /app/scripts/repair_fixture_orphans.py --sport soccer --delete-placeholders --postponed-list /app/scripts/data/soccer_postponed_stale_rows.csv"
 TOOL="python /app/scripts/backfill_never_resulted.py"
 KEEP="listed row|PLAN|refused [0-9]|recs |DRY-RUN|Committed|REFUSED|ERROR|Traceback|Error"
@@ -182,10 +206,46 @@ tool() {  # tool <log name> <args...>: the tool in the api container; exits with
   $DC exec -T api sh -c "$TOOL $* > /tmp/$name.log 2>&1; rc=\$?; grep -E '$KEEP' /tmp/$name.log | tail -30; echo \"tool exit \$rc\"; exit \$rc"
 }
 plan_of() { $DC exec -T api sh -c "grep -o 'PLAN .*' /tmp/$1.log | tail -1 | sed 's/ (audit CSV.*//'"; }
+# orphan_work <orphans PLAN>: the counts of the cleanup's own work (merges, placeholders, postponements, blocked,
+# list mismatches); "0 0 0 0 0 0" when the cleanup (runbook step 7) is done.
+orphan_work() {
+  echo "$(plan_num "$1" merge_delete) $(plan_num "$1" merge_cancel) $(plan_num "$1" delete_placeholder) $(plan_num "$1" mark_postponed) $(plan_num "$1" blocked_pending_recs) $(plan_num "$1" list_mismatch)"
+}
+# pending_rows <as-of>: lists (PENDING) the soccer rows still 'scheduled' PENDING_AFTER_HOURS or more after kickoff
+# but not yet never_resulted (kickoff less than 96 h before <as-of>): no step reaches them yet, so they are named
+# here rather than left unnoticed. Read only. 1 when the query cannot be read.
+pending_rows() {
+  local at="$1" out n
+  cat > "$W/never_resulted_pending.sql" <<SQLEOF
+BEGIN READ ONLY;
+SELECT format('PENDING %s kickoff %s %s v %s (%s) - joins the never_resulted class at %s', m.id,
+              to_char(m.match_date AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI"Z"'), hm.name, aw.name, l.name,
+              to_char((m.match_date + interval '96 hours') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI"Z"'))
+  FROM matches m JOIN leagues l ON l.id = m.league_id
+  JOIN teams hm ON hm.id = m.home_team_id JOIN teams aw ON aw.id = m.away_team_id
+ WHERE l.sport = 'soccer' AND m.status = 'scheduled'
+   AND m.match_date < '$at'::timestamptz - interval '$PENDING_AFTER_HOURS hours'
+   AND m.match_date >= '$at'::timestamptz - interval '96 hours'
+ ORDER BY m.match_date, m.id;
+SELECT 'PENDING_OK';
+ROLLBACK;
+SQLEOF
+  out=$(psql_at "$W/never_resulted_pending.sql" never_resulted_pending_q.sql) || { log "could not list the pending rows (psql failed)"; return 1; }
+  echo "$out" | grep -qx 'PENDING_OK' || { log "could not list the pending rows (no PENDING_OK in '$(echo "$out" | tail -1)')"; return 1; }
+  n=$(echo "$out" | grep -c '^PENDING ')
+  if [ "$n" -eq 0 ]; then
+    log "no soccer row is still 'scheduled' ${PENDING_AFTER_HOURS} h or more after kickoff short of the never_resulted class (96 h)"
+    return 0
+  fi
+  log "PENDING: $n soccer row(s) still 'scheduled' ${PENDING_AFTER_HOURS} h or more after kickoff, not yet never_resulted (96 h) — no step reaches them yet; left as they are:"
+  echo "$out" | grep '^PENDING ' | sed 's/^PENDING /  /'
+  log "  the results sweep records each one while its 3-day look-back still covers ESPN's date for it; one it no longer covers stays 'scheduled' and becomes never_resulted at the time shown. Then this step heals it only if $REVIEWED marks it 'heal' (Guadalajara v Atlante has a row); otherwise it needs its own reviewed 'heal' row (a commit and a deploy). Either way, run this step again after that time (runbook --only 12, then --only 16)."
+}
 
-log "0/4 already done? (read-only: the never_resulted rows, and the tool's dry run of the reviewed ones)"
+log "0/4 already done? (read-only: the never_resulted rows, the pending ones, and the tool's dry run of the reviewed ones)"
 PRE_AT=$(date -u +%FT%TZ)
 never_resulted_ids "$PRE_AT" precheck || { log "ABORT at step 0 — nothing changed"; exit 1; }
+pending_rows "$PRE_AT" || { log "ABORT at step 0 — nothing changed"; exit 1; }
 if [ "$N_IDS" = "0" ]; then
   log "ALREADY DONE: none of the reviewed never_resulted rows is left to heal ($N_ALL never_resulted row(s) left alone, listed above) — nothing to do (no backup)"
   exit 0
@@ -205,6 +265,12 @@ fi
 if [ "$pre_heal" = "0" ]; then
   log "ALREADY DONE: nothing to heal ($pre) — the rows passed are refused, reasons above; nothing to do (no backup)"
   exit 0
+fi
+# Step 2 checks this again as of START; here it saves a backup when the cleanup has new work (rows that went stale
+# since runbook step 7 ran — e.g. a late --only 12).
+if [ "$(orphan_work "$ORPHAN_PLAN")" != "0 0 0 0 0 0" ]; then
+  log "ABORT at step 0: the soccer orphan cleanup is not done ($ORPHAN_PLAN) — run scripts/ops/cleanup_soccer_orphans.sh (runbook step 7: --only 7) first, then this step again; nothing changed (no backup)"
+  exit 1
 fi
 log "not done yet (pre-plan '$pre') — continuing"
 
@@ -228,10 +294,20 @@ DRY_IDS=$IDS
 DRY_ALL=$ALL
 n0=$N_IDS
 if [ "$n0" = "0" ]; then log "DONE: none of the reviewed never_resulted rows is left to heal as of $START — no write"; exit 0; fi
-busy="$(plan_num "$ORPHAN_PLAN" merge_delete) $(plan_num "$ORPHAN_PLAN" merge_cancel) $(plan_num "$ORPHAN_PLAN" delete_placeholder) $(plan_num "$ORPHAN_PLAN" mark_postponed) $(plan_num "$ORPHAN_PLAN" blocked_pending_recs) $(plan_num "$ORPHAN_PLAN" list_mismatch)"
-if [ "$busy" != "0 0 0 0 0 0" ]; then
-  log "ABORT at step 2: the soccer orphan cleanup is not done ($ORPHAN_PLAN) — run scripts/ops/cleanup_soccer_orphans.sh (runbook step 7) first; nothing changed"
+if [ "$(orphan_work "$ORPHAN_PLAN")" != "0 0 0 0 0 0" ]; then
+  log "ABORT at step 2: the soccer orphan cleanup is not done ($ORPHAN_PLAN) — run scripts/ops/cleanup_soccer_orphans.sh (runbook step 7: --only 7) first, then this step again; nothing changed"
   exit 1
+fi
+# The bounds: the rehearsal's 38 heals, plus Guadalajara v Atlante's row only when it is among the rows passed.
+dry_ids_txt=$($DC exec -T api sh -c "cat $DRY_IDS 2>/dev/null" </dev/null | grep -E '^[0-9a-f-]{36}$')
+n_read=$(printf '%s\n' "$dry_ids_txt" | grep -c .)
+if [ "$n_read" != "$n0" ]; then
+  log "ABORT at step 2: read $n_read id(s) back from $DRY_IDS, not the $n0 passed — nothing changed"
+  exit 1
+fi
+if printf '%s\n' "$dry_ids_txt" | grep -qx "$LATE_HEAL_ID"; then
+  MAX_CANDIDATES=$((MAX_CANDIDATES + 1)); MAX_HEAL=$((MAX_HEAL + 1)); MAX_GRADED=$((MAX_GRADED + LATE_HEAL_GRADED))
+  log "Guadalajara v Atlante ($LATE_HEAL_ID, reviewed 'heal') is among the rows passed (a late start): bounds candidates <= $MAX_CANDIDATES, heal <= $MAX_HEAL, predictions_graded <= $MAX_GRADED"
 fi
 tool nr_dry --match-ids-file "$DRY_IDS" --as-of "$START" --espn-cache "$CACHE" --out-csv ${B}_dryrun_$STAMP.csv
 rc=$?

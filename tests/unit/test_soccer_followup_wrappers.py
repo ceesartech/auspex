@@ -80,6 +80,16 @@ NR_PLAN_LATE = (
 )
 
 
+# The pending-rows query (soccer rows still 'scheduled' 6-96 h after kickoff): none, or Santos v Necaxa in the window
+# where neither the results sweep nor the never_resulted class reaches it.
+PENDING_NONE = "BEGIN\nPENDING_OK\nROLLBACK"
+PENDING_SANTOS = (
+    "BEGIN\nPENDING 5b94347b-daec-4117-aa09-710cd860a2b6 kickoff 2026-11-01T23:00Z Santos Laguna v Necaxa (Liga MX) - "
+    "joins the never_resulted class at 2026-11-05T23:00Z\nPENDING_OK\nROLLBACK"
+)
+IDS_LATE = HEALED + "\n" + GVA
+
+
 def _split(n_ids, n_all, left=tuple(LEFT_REVIEWED)):
     """What the wrapper's split of the orphans CSV prints: a LEFT line per row it leaves alone, then the counts."""
     return "\n".join([f"LEFT {line}" for line in left] + [f"COUNTS {n_ids} {n_all}"])
@@ -89,7 +99,11 @@ def _nr_rules(
     pre_split=_split(38, 42),
     pre_plan=NR_PLAN,
     pre_rc=0,
+    pre_orphans=ORPHANS_DONE,
+    pending=PENDING_NONE,
+    pending_rc=0,
     orphans=ORPHANS_DONE,
+    dry_ids=HEALED,
     dry_split=_split(38, 42),
     dry_plan=NR_PLAN,
     apply_rc=0,
@@ -102,7 +116,7 @@ def _nr_rules(
     split = r"orphans, reviewed, ids_out, all_out = sys\.argv.*never_resulted_orphans_"
     return [
         {"match": r"/tmp/never_resulted_orphans_\w+\.log 2>&1; echo", "out": "orphans dry run exit 0"},
-        {"match": r"grep -o 'PLAN \.\*' /tmp/never_resulted_orphans_precheck\.log", "out": ORPHANS_DONE},
+        {"match": r"grep -o 'PLAN \.\*' /tmp/never_resulted_orphans_precheck\.log", "out": pre_orphans},
         {"match": r"grep -o 'PLAN \.\*' /tmp/never_resulted_orphans_dryrun\.log", "out": orphans},
         {"match": r"grep -o 'PLAN \.\*' /tmp/never_resulted_orphans_verify\.log", "out": ORPHANS_AFTER},
         {"match": split + "precheck_", "out": pre_split},
@@ -116,6 +130,8 @@ def _nr_rules(
         {"match": r"grep -o 'PLAN \.\*' /tmp/nr_dry\.log", "out": dry_plan},
         {"match": r"grep -o 'PLAN \.\*' /tmp/nr_verify\.log", "out": verify_plan},
         {"match": r"sh -c cat /app/backups/never_resulted_healed_\S+ 2>/dev/null", "out": HEALED},
+        {"match": r"sh -c cat /app/backups/never_resulted_ids_dryrun_\S+ 2>/dev/null", "out": dry_ids},
+        {"match": r"postgres sh -c psql .*-f /tmp/never_resulted_pending_q\.sql", "out": pending, "rc": pending_rc},
         {"match": r"postgres sh -c psql", "out": state},
         {"match": r"python -c import sys; before = set", "out": new_rows},
         {"match": r"postgres rm -f", "out": ""},
@@ -213,9 +229,14 @@ def test_a_late_start_heals_the_reviewed_liga_mx_fixture_within_the_bounds(tmp_p
         verify_plan=verify,
         healed="39",
         state="39|0",
+        dry_ids=IDS_LATE,
     )
     rc, out, calls, _ = _run(tmp_path, "backfill_soccer_never_resulted.sh", rules)
     assert rc == 0 and "DONE: 39 never_resulted row(s) healed and graded (3249 predictions)" in out, out
+    assert (
+        "is among the rows passed (a late start): bounds candidates <= 39, heal <= 39, predictions_graded <= 3249"
+        in out
+    )
     assert (
         "--expect-plan candidates=39,heal=39,done=0,refuse=0,predictions_graded=3249,predictions_regraded=0,"
         "recs_changed=0,teams_stamped=3,espn_failed=0" in _applies(calls)[0]
@@ -233,10 +254,26 @@ def test_a_late_start_heals_the_reviewed_liga_mx_fixture_within_the_bounds(tmp_p
         NR_PLAN.replace("espn_failed=0", "espn_failed=1"),
         NR_PLAN.replace("teams_stamped=3", "teams_stamped=4"),
         NR_PLAN.replace("predictions_graded=3173", "predictions_graded=3250"),
+        # Without Guadalajara v Atlante among the rows passed, the reviewed 38's own ceilings: 38 heals, 3,173 graded.
+        NR_PLAN.replace("predictions_graded=3173", "predictions_graded=3174"),
+        NR_PLAN.replace("heal=38", "heal=39"),
         NR_PLAN.replace("done=0", "done=1"),
         "",
     ],
-    ids=["heal", "candidates", "candidates-not-passed", "recs", "regraded", "espn", "stamped", "graded", "done", "-"],
+    ids=[
+        "heal",
+        "candidates",
+        "candidates-not-passed",
+        "recs",
+        "regraded",
+        "espn",
+        "stamped",
+        "graded",
+        "graded-without-the-late-row",
+        "heal-without-the-late-row",
+        "done",
+        "-",
+    ],
 )
 def test_never_resulted_plan_outside_the_reviewed_set_aborts_before_any_write(tmp_path, plan):
     rc, out, calls, triggers = _run(tmp_path, "backfill_soccer_never_resulted.sh", _nr_rules(dry_plan=plan))
@@ -244,11 +281,69 @@ def test_never_resulted_plan_outside_the_reviewed_set_aborts_before_any_write(tm
     assert not _applies(calls)
 
 
-def test_never_resulted_refuses_while_the_cleanup_is_not_done(tmp_path):
+@pytest.mark.parametrize(
+    "work",
+    ["merge_delete=2", "merge_cancel=1", "delete_placeholder=1", "mark_postponed=1", "blocked_pending_recs=1"],
+)
+def test_never_resulted_refuses_before_the_backup_while_the_cleanup_is_not_done(tmp_path, work):
+    """Rows that went stale after runbook step 7 (a late --only 12) give the cleanup new work: step 0 sees it in its
+    own orphans dry run and aborts before the backup (the operator runs --only 7 first)."""
+    busy = ORPHANS_DONE.replace(work.split("=")[0] + "=0", work)
+    rc, out, calls, triggers = _run(
+        tmp_path, "backfill_soccer_never_resulted.sh", _nr_rules(pre_orphans=busy, orphans=busy)
+    )
+    assert rc == 1 and "ABORT at step 0: the soccer orphan cleanup is not done" in out, out
+    assert "runbook step 7: --only 7" in out and "nothing changed (no backup)" in out
+    assert triggers == 0 and not [c for c in _tool_calls(calls) if "dryrun" in c]
+
+
+def test_never_resulted_refuses_when_the_cleanup_has_work_as_of_start(tmp_path):
+    """Work that appears between step 0 and START (after the backup) still aborts before any write, at step 2."""
     rules = _nr_rules(orphans=ORPHANS_DONE.replace("merge_delete=0", "merge_delete=2"))
+    rc, out, calls, triggers = _run(tmp_path, "backfill_soccer_never_resulted.sh", rules)
+    assert rc == 1 and "ABORT at step 2: the soccer orphan cleanup is not done" in out and "runbook step 7" in out, out
+    assert triggers == 1 and not [c for c in _tool_calls(calls) if "dryrun" in c]
+
+
+def test_never_resulted_aborts_when_the_ids_passed_cannot_be_read_back(tmp_path):
+    rules = _nr_rules(dry_ids="\n".join(HEALED.splitlines()[:37]))
     rc, out, calls, _ = _run(tmp_path, "backfill_soccer_never_resulted.sh", rules)
-    assert rc == 1 and "the soccer orphan cleanup is not done" in out and "runbook step 7" in out, out
-    assert not [c for c in _tool_calls(calls) if "dryrun" in c]
+    assert rc == 1 and "ABORT at step 2: read 37 id(s) back" in out and "not the 38 passed" in out, out
+    assert not _applies(calls)
+
+
+def test_never_resulted_lists_pending_rows_and_goes_on(tmp_path):
+    """A row still 'scheduled' 6-96 h after kickoff is reached by no step yet (Santos v Necaxa if step 1 runs after
+    the sweep's look-back passed it but step 12 runs before its 96 h): it is named, not left unnoticed, and the step
+    goes on — here to ALREADY DONE, then to a full run."""
+    rules = _nr_rules(pre_split=_split(0, 4), pending=PENDING_SANTOS)
+    rc, out, calls, triggers = _run(tmp_path, "backfill_soccer_never_resulted.sh", rules)
+    assert rc == 0 and "ALREADY DONE" in out, out
+    assert "PENDING: 1 soccer row(s) still 'scheduled' 6 h or more after kickoff, not yet never_resulted (96 h)" in out
+    assert (
+        "  5b94347b-daec-4117-aa09-710cd860a2b6 kickoff 2026-11-01T23:00Z Santos Laguna v Necaxa (Liga MX) - joins "
+        "the never_resulted class at 2026-11-05T23:00Z" in out
+    )
+    assert "runbook --only 12, then --only 16" in out and triggers == 0
+    sql = (tmp_path / "fake" / "cp" / "never_resulted_pending_q.sql").read_text()
+    assert sql.startswith("BEGIN READ ONLY;") and sql.rstrip().endswith("ROLLBACK;")
+    assert "m.status = 'scheduled'" in sql and "interval '6 hours'" in sql and "interval '96 hours'" in sql
+    rc, out, _, _ = _run(tmp_path, "backfill_soccer_never_resulted.sh", _nr_rules(pending=PENDING_SANTOS))
+    assert rc == 0 and "DONE: 38 never_resulted row(s) healed" in out and "PENDING: 1 soccer row(s)" in out, out
+
+
+def test_never_resulted_without_pending_rows_says_so(tmp_path):
+    rc, out, _, _ = _run(tmp_path, "backfill_soccer_never_resulted.sh", _nr_rules(pre_split=_split(0, 4)))
+    assert rc == 0 and "no soccer row is still 'scheduled' 6 h or more after kickoff" in out, out
+
+
+@pytest.mark.parametrize(
+    "kw", [{"pending_rc": 1}, {"pending": "BEGIN\nROLLBACK"}, {"pending": ""}], ids=["psql-failed", "no-ok", "empty"]
+)
+def test_never_resulted_pending_list_that_cannot_be_read_aborts_at_step_0(tmp_path, kw):
+    rc, out, calls, triggers = _run(tmp_path, "backfill_soccer_never_resulted.sh", _nr_rules(**kw))
+    assert rc == 1 and "could not list the pending rows" in out and "ABORT at step 0" in out, out
+    assert triggers == 0 and not _tool_calls(calls)
 
 
 def test_never_resulted_apply_refusal_says_nothing_changed(tmp_path):

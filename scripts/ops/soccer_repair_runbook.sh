@@ -19,18 +19,27 @@
 # apply: 52 rows graded, 0 unsettled, COMPLETED); and a full re-run that only
 # reads (every step ALREADY DONE, 0 backups, row fingerprint unchanged).
 # Start it right after the deploy: until step 1 runs, results for the mapped
-# upcoming Liga MX fixtures are refused as identity drift, and the results
-# sweep only looks back 3 days. On 2026-11-01 one already waits (Guadalajara
-# v Atlante, kicked off 2026-11-01 01:07Z, still 'scheduled' at 04:53Z while
-# every other fixture of that night was finished): step 1 must run before
-# ~2026-11-04 00:00Z for the sweep to record it. Later, it stays a stale
-# scheduled row until 96 h after its kickoff (2026-11-05 01:07Z); from then
-# step 12 heals it from the reviewed list (its 'heal' row: ESPN 401876915
-# final 4-2); a run whose step 12 falls between the two leaves it, and
-# --only 12 (then --only 16) after 2026-11-05 01:07Z heals it. Santos v
-# Necaxa (2026-11-01 23:00Z, not played when the list was reviewed) is not
-# listed: step 1 must run before ~2026-11-04 23:00Z for the sweep to record
-# it; later, step 12 lists it as not reviewed and leaves it alone.
+# Liga MX fixtures are refused as identity drift, and the results sweep only
+# looks back 3 days (ESPN's scoreboards for today back through today-3, UTC;
+# ESPN files a fixture under its local date). Four mapped fixtures were not
+# finished on prod at 2026-11-01 08:10Z (scoreboard date in brackets):
+#   Guadalajara v Atlante  6b2133b1  11-01 01:07Z [10-31]  played: 4-2
+#   Santos v Necaxa        5b94347b  11-01 23:00Z [11-01]
+#   Atlante v Santos       52c8d673  11-07 03:00Z [11-06]
+#   León v Guadalajara     0e7f388c  11-09 02:00Z [11-08]
+# Step 1 must run before the sweep stops covering each — ~2026-11-04 00:00Z,
+# 11-05 00:00Z, 11-10 00:00Z, 11-12 00:00Z — for the sweep to record it.
+# One step 1 reaches too late stays a stale 'scheduled' row, and joins the
+# never_resulted class 96 h after kickoff (11-05 01:07Z, 11-05 23:00Z,
+# 11-11 03:00Z, 11-13 02:00Z). From then step 12 heals it only if the
+# reviewed list holds a 'heal' row for it (only Guadalajara v Atlante does:
+# ESPN 401876915 final 4-2); any other it lists "NOT in the reviewed list"
+# and leaves (healing it takes its own reviewed row, a commit and a deploy,
+# then --only 12 and --only 16). Before its 96 h step 12 lists it as
+# PENDING (soccer rows still 'scheduled' 6-96 h after kickoff) and leaves
+# it; --only 12 (then --only 16) after the time shown reaches it. If that
+# late --only 12 aborts because the orphan cleanup has work again (rows that
+# went stale since step 7), run --only 7, then --only 12, then --only 16.
 #
 #  1 scripts/ops/repoint_team_matches.sh --pass 1
 #    Moves 33 Liga MX sides (31 match rows) off Santos FC's 'Santos' and CD
@@ -129,12 +138,14 @@
 #    (scripts/data/soccer_never_resulted_reviewed.csv), and those rows graded
 #    (scripts/backfill_never_resulted.py, pinned, one transaction). Expect
 #    candidates 38, heal 38, refuse 0, predictions graded 3,173, recs changed
-#    0, teams stamped 3; started late (above), Guadalajara v Atlante's
-#    reviewed 'heal' row adds 1 / 1 / 76 / 0 (bounds in the wrapper: 39, 39,
-#    3,249, 3). The list's other 4, and any
+#    0, teams stamped 3 (the wrapper's bounds); started late (above),
+#    Guadalajara v Atlante's reviewed 'heal' row adds 1 / 1 / 76 / 0, and
+#    only then are the bounds 39, 39, 3,249, 3. The list's other 4, any
 #    never_resulted row it does not hold (a fixture whose result never
-#    arrived joins the class 96 h after kickoff), are listed and left as they
-#    are. One of the 4 is a fork of a healed row (Coquimbo Unido v O'Higgins
+#    arrived joins the class 96 h after kickoff), and every PENDING row
+#    (still 'scheduled' 6-96 h after kickoff) are listed and left as they
+#    are; an orphan cleanup with work left (rows that went stale after step
+#    7) aborts it before its backup. One of the 4 is a fork of a healed row (Coquimbo Unido v O'Higgins
 #    2026-06-15), which the cleanup re-run then merges (merge_cancel 1: it
 #    holds void recs; that re-run's ceilings are merges <= 1, no placeholder,
 #    no postponement); ESPN does not report the other 3 final. A corpus step.
