@@ -34,7 +34,7 @@ import modal
 # PYTHONPATH=/app/scripts so this same top-level import resolves when Modal
 # imports the module to run a (non-serialized) function.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
-from modal_bundles import ARTIFACT_PREFIX, BUNDLES, DUMP_PREFIX, served_brier  # noqa: E402
+from modal_bundles import ARTIFACT_PREFIX, BUNDLES, DUMP_PREFIX, notable_log_lines, served_brier  # noqa: E402
 
 app = modal.App("auspex-train")
 
@@ -221,6 +221,15 @@ def _train_one(bundle: str, run_id: str) -> dict:
         ok = proc.returncode == 0
         if not ok:
             print(f"[{bundle}] TRAIN FAILED rc={proc.returncode}\n{proc.stdout[-1500:]}\n{proc.stderr[-1500:]}")
+        else:
+            # A run that succeeds can still have logged a WARNING or an ERROR
+            # (an unconverged Poisson-family fit, a failed calibration). The
+            # output is captured, so echo those lines or nobody ever sees them.
+            # The promote gate does not rely on this: it reads the fit
+            # classification from training_report.json.
+            notable = notable_log_lines(proc.stderr) + notable_log_lines(proc.stdout)
+            if notable:
+                print(f"[{bundle}] trained rc=0 with {len(notable)} warning/error line(s):\n" + "\n".join(notable))
 
         # Served held-out Brier from the training report's calibration gate.
         gate_metrics = {}

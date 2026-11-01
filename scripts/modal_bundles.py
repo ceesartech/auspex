@@ -108,6 +108,108 @@ MIN_PAIRED_N = 100  # fewest shared rows a paired re-scoring may decide on
 SEEN_IDS_FILENAME = "seen_match_ids.json.gz"
 
 
+def newest_model_bin(ensemble_dir):
+    """The newest */model.bin under `ensemble_dir` by mtime — the file the API
+    serves (prediction_service._latest_model_bin) — or None."""
+    from pathlib import Path
+
+    candidates = sorted(Path(ensemble_dir).glob("*/model.bin"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
+
+
+def seen_ids_provenance(doc, model_bytes):
+    """Does a seen-ids document belong to the ensemble model beside it?
+
+    train_all_models.write_seen_ids records the sha256 of the ensemble
+    model.bin it wrote with, from the first retrain that runs this code
+    onward (2026-11-08 at the earliest, and per bundle only once a retrain of
+    that bundle is promoted). Returns (True, reason) when that hash is the
+    given model's, (False, reason) when it is not or there is no model, and
+    (None, reason) for a document written before the trainer recorded model
+    hashes: unverifiable, which the caller accepts as before. The 2026-10-26
+    files were rebuilt by hand after their run, one of them from a different
+    frame, and nothing could tell; a hash mismatch now says so."""
+    import hashlib
+
+    expected = (doc or {}).get("ensemble_model_sha256")
+    if not expected:
+        return (
+            None,
+            "no model hash recorded (written before the trainer recorded model hashes); provenance not verifiable",
+        )
+    if model_bytes is None:
+        return False, f"records model sha256 {expected[:12]} but there is no model.bin beside it"
+    actual = hashlib.sha256(model_bytes).hexdigest()
+    if actual != expected:
+        return False, f"records model sha256 {expected[:12]} but the model beside it hashes to {actual[:12]}"
+    return True, f"model sha256 {actual[:12]} matches"
+
+
+# ── Did every Poisson-family fit converge? ───────────────────────────────────
+# train_all_models classifies each Poisson-family fit: "converged",
+# "accepted" (a documented non-convergence, ACCEPTED_NONCONVERGENCE: the
+# soccer Poisson member's 2-cycle) or "unexpected" (any other non-convergence:
+# its parameters are not an optimum). The trainer logs it, but on the Modal
+# backend a run that succeeds has its log captured and thrown away, so the
+# promote gate reads the classification from training_report.json instead.
+FIT_CONVERGENCE_LABELS = ("converged", "accepted", "unexpected")
+
+
+def fit_convergence_from_report(report):
+    """{"checked", "converged", "accepted", "unexpected"} from a bundle's
+    training_report.json. "converged" is a list of model names; "accepted" and
+    "unexpected" are lists of {"model", "fit_diagnostics"}. checked is False
+    when there is no report or it predates the classification (then the lists
+    are empty and nothing is decided on them: absence is not a pass). A
+    report from the classifying trainer for a bundle with no Poisson-family
+    member is checked with nothing in any list.
+
+    Reads the report's "fit_convergence" summary, else each results[name]
+    "convergence" label. A model with fit_diagnostics but no label is
+    classified from the diagnostics alone, and an unconverged one counts as
+    "unexpected": only the trainer may call a non-convergence accepted. So
+    does a label the gate does not know."""
+    out = {"checked": False, "converged": [], "accepted": [], "unexpected": []}
+    if not isinstance(report, dict):
+        return out
+    entries = report.get("fit_convergence")
+    if not isinstance(entries, dict):
+        entries = {}
+        for name, result in (report.get("results") or {}).items():
+            if isinstance(result, dict) and (result.get("convergence") or result.get("fit_diagnostics")):
+                entries[name] = {
+                    "convergence": result.get("convergence"),
+                    "fit_diagnostics": result.get("fit_diagnostics"),
+                }
+        if not entries:
+            return out  # written before the trainer classified fits
+    out["checked"] = True
+    for name in sorted(entries):
+        entry = entries[name] if isinstance(entries[name], dict) else {}
+        diag = entry.get("fit_diagnostics") if isinstance(entry.get("fit_diagnostics"), dict) else {}
+        label = entry.get("convergence")
+        if label is None:
+            label = "converged" if diag.get("converged") else "unexpected"
+        if label not in FIT_CONVERGENCE_LABELS:
+            label = "unexpected"
+        if label == "converged":
+            out["converged"].append(name)
+        else:
+            out[label].append({"model": name, "fit_diagnostics": diag or None})
+    return out
+
+
+def notable_log_lines(text, limit=40):
+    """The WARNING / ERROR / CRITICAL lines of a captured log, the last
+    `limit` of them. train_modal echoes these for a run that SUCCEEDED too,
+    so a warning like an unconverged fit reaches the Modal function log."""
+    import re
+
+    pattern = re.compile(r"\b(WARNING|ERROR|CRITICAL)\b")
+    lines = [line for line in (text or "").splitlines() if pattern.search(line)]
+    return lines[-limit:] if limit else lines
+
+
 def unseen_by_incumbent(match_ids, dates, cutoff=None, seen_ids=None):
     """Boolean mask over the challenger's held-out rows: True where the incumbent
     cannot have trained or validated on the row. Returns (mask, basis).

@@ -182,6 +182,233 @@ class TestPerLeagueBaselineGuard:
         assert set(model.league_baselines) >= {"L1", "L2"}
 
 
+def _diag(converged=False, oscillating=True, components=27, gauge="global"):
+    return {
+        "fit_diagnostics": {
+            "converged": converged,
+            "iterations_run": 30 if converged else 1000,
+            "max_iterations": 1000,
+            "tolerance": 1e-6,
+            "final_max_change": 5e-7 if converged else 0.32,
+            "final_two_step_change": 4e-6,
+            "period_two_oscillation": oscillating,
+            "connected_components": components,
+            "gauge": gauge,
+        }
+    }
+
+
+class TestFitConvergenceReporting:
+    """A Poisson-family fit that stops unconverged is loud: ERROR, unless it is
+    the documented soccer-Poisson 2-cycle, which logs a WARNING (no page) and
+    is still recorded in the artifact and the registry."""
+
+    def _report(self, name, result, caplog):
+        from training.train_all_models import report_fit_convergence
+
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="training.train_all_models"):
+            status = report_fit_convergence(name, result)
+        levels = [r.levelname for r in caplog.records if r.name == "training.train_all_models"]
+        return status, levels, " ".join(r.getMessage() for r in caplog.records)
+
+    def test_the_documented_soccer_poisson_cycle_is_a_warning(self, caplog):
+        status, levels, text = self._report("poisson_soccer_match_result", _diag(), caplog)
+        assert status == "accepted" and levels == ["WARNING"]
+        assert "SYSTEM_AUDIT_AND_ROADMAP.md" in text and "1000 of 1000" in text and "27 free scale" in text
+
+    def test_any_other_mechanism_on_the_same_model_is_an_error(self, caplog):
+        for diag in (_diag(oscillating=False), _diag(components=1), _diag(gauge="per_component")):
+            status, levels, text = self._report("poisson_soccer_match_result", diag, caplog)
+            assert status == "unexpected" and levels == ["ERROR"], diag
+            assert "NOT a documented condition" in text
+
+    def test_another_model_failing_to_converge_is_an_error(self, caplog):
+        status, levels, _ = self._report("dixon_coles_soccer_match_result", _diag(), caplog)
+        assert status == "unexpected" and levels == ["ERROR"]
+
+    def test_the_summary_lists_every_classified_fit_and_nothing_else(self):
+        from training.train_all_models import fit_convergence_summary
+
+        results = {
+            "poisson_soccer_match_result": {"convergence": "accepted", **_diag(), "iterations": None},
+            "dixon_coles_soccer_match_result": {"convergence": "converged", **_diag(converged=True)},
+            "xgboost_soccer_match_result": {"validation_metrics": {}},
+            "lightgbm_soccer_match_result": {"error": "boom"},
+        }
+        summary = fit_convergence_summary(results)
+        assert set(summary) == {"poisson_soccer_match_result", "dixon_coles_soccer_match_result"}
+        assert summary["poisson_soccer_match_result"] == {"convergence": "accepted", **_diag()}
+        assert fit_convergence_summary({}) == {} and fit_convergence_summary(None) == {}
+
+    def test_a_converged_fit_and_a_model_without_diagnostics_are_quiet(self, caplog):
+        assert self._report("poisson_soccer_match_result", _diag(converged=True), caplog)[:2] == ("converged", [])
+        assert self._report("xgboost_soccer_match_result", {"validation_metrics": {}}, caplog)[:2] == (None, [])
+        assert self._report("x", None, caplog)[:2] == (None, [])
+
+    def test_the_orchestrator_records_the_diagnostics_in_the_registry(self, tmp_path, caplog):
+        import json
+
+        from training.train_all_models import TrainingOrchestrator
+
+        rng = np.random.default_rng(1)
+        n = 400
+        # Two leagues that never meet: the soccer member's 2-cycle in miniature.
+        frame = pd.DataFrame(
+            {
+                "match_date": pd.date_range("2024-01-01", periods=n, freq="D"),
+                "home_team": [f"{'A' if i % 2 else 'B'}{i % 5}" for i in range(n)],
+                "away_team": [f"{'A' if i % 2 else 'B'}{(i + 2) % 5}" for i in range(n)],
+                "home_score": np.where(np.arange(n) % 2, rng.poisson(0.9, n), rng.poisson(2.2, n)).astype(float),
+                "away_score": np.where(np.arange(n) % 2, rng.poisson(0.7, n), rng.poisson(1.8, n)).astype(float),
+            }
+        )
+        frame["match_outcome"] = np.where(
+            frame["home_score"] > frame["away_score"], 0, np.where(frame["home_score"] == frame["away_score"], 1, 2)
+        )
+        orch = TrainingOrchestrator(registry_dir=str(tmp_path / "registry"), run_cv=False, calibrate=False)
+        with caplog.at_level("WARNING"):
+            orch.train_all(frame, frame, features=[], target="match_outcome", model_types=["poisson"])
+
+        result = orch.results["poisson_soccer_match_result"]
+        assert result["convergence"] == "accepted"
+        assert result["fit_diagnostics"]["connected_components"] == 2
+        index = json.loads((tmp_path / "registry" / "registry_index.json").read_text())
+        meta = index["poisson_soccer_match_result"][-1]["metadata"]
+        assert meta["convergence"] == "accepted" and meta["fit_diagnostics"]["converged"] is False
+        artifact = json.loads(
+            (tmp_path / "registry" / "poisson_soccer_match_result" / "1.0.0" / "model.bin").read_text()
+        )
+        assert artifact["fit_diagnostics"]["period_two_oscillation"] is True
+
+
+class TestSeenIdsTravelWithTheirEnsemble:
+    """The seen-ids file is written only beside an ensemble THIS run wrote,
+    atomically, and names that model's sha256. swap_production replaces the
+    whole ensemble directory, so ids written beside no model would replace a
+    working production ensemble with a directory holding only ids."""
+
+    def _main(self, tmp_path, monkeypatch, outcome, model_type="all"):
+        from dataclasses import replace
+        from types import SimpleNamespace
+
+        import training.train_all_models as tam
+
+        frame = pd.DataFrame(
+            {
+                "match_id": [f"m{i:03d}" for i in range(100)],
+                "match_date": pd.date_range("2024-01-01", periods=100, freq="D"),
+                "match_outcome": [i % 3 for i in range(100)],
+            }
+        )
+        bundle = replace(
+            tam.SPORT_BUNDLES["soccer_match_result"],
+            load_frame=lambda **_kw: frame.copy(),
+            feature_columns=lambda _f, _t: [],
+        )
+        monkeypatch.setitem(tam.SPORT_BUNDLES, "soccer_match_result", bundle)
+        monkeypatch.setattr(tam, "validate_training_frame", lambda *a, **k: SimpleNamespace(to_dict=lambda: {}))
+        monkeypatch.setattr(tam, "_raw_holdout_brier", lambda *a, **k: None)
+        monkeypatch.setattr(tam, "_derived_over25_holdout", lambda *a, **k: None)
+
+        def write_model_bin(self):
+            model = self.registry.registry_dir / bundle.ensemble_name / bundle.ensemble_config.version / "model.bin"
+            model.parent.mkdir(parents=True)
+            model.write_text('{"weights": {"a": 1.0}}')
+
+        def fake_train_all(self, **_kw):
+            self.trained_models["xgboost_soccer_match_result"] = object()
+            self.results["xgboost_soccer_match_result"] = {}
+            if outcome == "ok":
+                write_model_bin(self)
+                self.trained_models[bundle.ensemble_name] = object()
+                self.results[bundle.ensemble_name] = {}
+                self.results["poisson_soccer_match_result"] = {"convergence": "accepted", **_diag()}
+            elif outcome == "failed":
+                self.results[bundle.ensemble_name] = {"error": "ensemble blew up"}
+            elif outcome == "failed_after_save":
+                # _train_ensemble puts the ensemble in trained_models before
+                # register_model, so a save that raises midway leaves a
+                # model.bin beside an error.
+                write_model_bin(self)
+                self.trained_models[bundle.ensemble_name] = object()
+                self.results[bundle.ensemble_name] = {"error": "register_model raised after writing model.bin"}
+            elif outcome == "stale_model_bin":
+                # A model.bin this run did not train: a VM run aborted before
+                # its swap left it in staging, and this run trained no ensemble.
+                write_model_bin(self)
+            return self.results
+
+        monkeypatch.setattr(tam.TrainingOrchestrator, "train_all", fake_train_all)
+        argv = ["--input-csv", "unused.csv", "--output-dir", str(tmp_path), "--model-type", model_type]
+        rc = tam.main(argv + ["--no-calibration"])
+        return tam, bundle, rc, tmp_path / bundle.ensemble_name / tam.SEEN_IDS_FILENAME
+
+    def test_written_beside_the_new_ensemble_with_its_hash(self, tmp_path, monkeypatch):
+        import gzip
+        import hashlib
+        import json
+
+        tam, bundle, rc, seen = self._main(tmp_path, monkeypatch, "ok")
+        assert rc == 0 and seen.is_file()
+        doc = json.loads(gzip.decompress(seen.read_bytes()))
+        model = tmp_path / bundle.ensemble_name / "1.0.0" / "model.bin"
+        assert doc["ensemble_model"] == "1.0.0/model.bin"
+        assert doc["ensemble_model_sha256"] == hashlib.sha256(model.read_bytes()).hexdigest()
+        assert doc["n"] == 85 == len(doc["match_ids"])  # train + val = int(0.85 x 100)
+        assert doc["writer"].endswith("write_seen_ids") and doc["written_at"]
+        assert not list(seen.parent.glob(".*.tmp"))  # the temp file was renamed, not left behind
+        # The fit classification rides in the report, where the promote gate
+        # reads it (the Modal backend drops the log of a run that succeeded).
+        report = json.loads((tmp_path / "training_report.json").read_text())
+        assert report["fit_convergence"] == {
+            "poisson_soccer_match_result": {"convergence": "accepted", **_diag()},
+        }
+
+    def test_a_failed_ensemble_records_nothing_and_says_so(self, tmp_path, monkeypatch, caplog):
+        with caplog.at_level("ERROR"):
+            _tam, bundle, rc, seen = self._main(tmp_path, monkeypatch, "failed")
+        assert rc == 1 and not seen.exists() and not (tmp_path / bundle.ensemble_name).exists()
+        assert any("NOT recording seen ids" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("outcome", ["failed_after_save", "stale_model_bin"])
+    def test_a_model_bin_that_is_not_a_good_ensemble_from_this_run_records_nothing(
+        self, tmp_path, monkeypatch, caplog, outcome
+    ):
+        """The model.bin exists in both cases, so only the trained_models and
+        error checks can refuse it."""
+        with caplog.at_level("ERROR"):
+            _tam, bundle, rc, seen = self._main(tmp_path, monkeypatch, outcome)
+        assert (tmp_path / bundle.ensemble_name / "1.0.0" / "model.bin").is_file()
+        assert not seen.exists()
+        assert rc == (1 if outcome == "failed_after_save" else 0)
+        assert any("NOT recording seen ids" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
+
+    def test_a_single_model_run_records_nothing(self, tmp_path, monkeypatch):
+        _tam, bundle, rc, seen = self._main(tmp_path, monkeypatch, "none", model_type="xgboost")
+        assert rc == 0 and not (tmp_path / bundle.ensemble_name).exists()
+
+    def test_a_failed_write_leaves_the_previous_file_whole(self, tmp_path, monkeypatch):
+        import gzip
+        import json
+
+        import training.train_all_models as tam
+
+        d = tmp_path / "ensemble_x"
+        tam.write_seen_ids(d, pd.DataFrame({"match_id": ["old"]}))
+        before = (d / tam.SEEN_IDS_FILENAME).read_bytes()
+
+        def boom(*_a, **_k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(tam.os, "replace", boom)
+        with pytest.raises(OSError, match="disk full"):
+            tam.write_seen_ids(d, pd.DataFrame({"match_id": ["new1", "new2"]}))
+        assert (d / tam.SEEN_IDS_FILENAME).read_bytes() == before
+        assert json.loads(gzip.decompress(before))["match_ids"] == ["old"]
+        assert not list(d.glob(".*.tmp"))
+
+
 class TestTemperatureCalibration:
     """Temperature scaling (the ensemble self-gate's method since 2026-10-25)."""
 

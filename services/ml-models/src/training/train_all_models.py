@@ -134,6 +134,81 @@ from utils.training_data import (
 logger = logging.getLogger(__name__)
 
 
+# ── Fits that are allowed to end unconverged ──────────────────────────
+# A Poisson-family fit that stops at max_iterations is logged as an ERROR by
+# _train_model, except where an entry here documents the condition as measured
+# and accepted. Those log a WARNING: still loud in every run log and recorded
+# in the artifact (fit_diagnostics), but nothing pages on it, because the
+# condition is known and its fix was measured and did not pass the gate.
+# An entry accepts ONLY the mechanism it documents. The same model failing to
+# converge for any other reason (no 2-cycle, a single free scale, a different
+# gauge) is still an ERROR.
+# The trainer's log is not where anyone looks on the Modal backend, so the
+# classification also rides into training_report.json ("fit_convergence"),
+# and scripts/pull_modal_artifacts.py rejects a bundle with an "unexpected"
+# fit and pages for it; an "accepted" one is recorded there and never pages.
+ACCEPTED_NONCONVERGENCE: Dict[str, Dict[str, str]] = {
+    "poisson_soccer_match_result": {
+        "mechanism": (
+            "a 2-cycle across disconnected leagues: the soccer train split has one connected component per "
+            "country, and the global attack normalisation fixes only one of their scales"
+        ),
+        "doc": "docs/SYSTEM_AUDIT_AND_ROADMAP.md §4, 'Soccer Poisson member: converged fit'",
+    },
+}
+
+
+def report_fit_convergence(name: str, result: Any) -> Optional[str]:
+    """Log how one Poisson-family fit ended, from the fit_diagnostics its
+    train() returns. Returns "converged", "accepted" (a documented condition,
+    WARNING), "unexpected" (ERROR) or None for a model that reports none."""
+    diag = result.get("fit_diagnostics") if isinstance(result, dict) else None
+    if not isinstance(diag, dict):
+        return None
+    if diag.get("converged"):
+        return "converged"
+    summary = (
+        f"stopped at {diag.get('iterations_run')} of {diag.get('max_iterations')} iterations, "
+        f"max parameter change {diag.get('final_max_change')} > tol {diag.get('tolerance')}, "
+        f"change over two iterations {diag.get('final_two_step_change')}, "
+        f"{diag.get('connected_components')} free scale(s), gauge={diag.get('gauge')}"
+    )
+    entry = ACCEPTED_NONCONVERGENCE.get(name)
+    documented = (
+        entry is not None
+        and bool(diag.get("period_two_oscillation"))
+        and int(diag.get("connected_components") or 0) > 1
+        and diag.get("gauge") == "global"
+    )
+    if entry is not None and documented:
+        logger.warning(
+            "%s did not converge (%s). Documented and accepted: %s. See %s.",
+            name,
+            summary,
+            entry["mechanism"],
+            entry["doc"],
+        )
+        return "accepted"
+    logger.error(
+        "%s did not converge (%s). This is NOT a documented condition: its parameters are not an optimum, "
+        "so investigate before this artifact serves.",
+        name,
+        summary,
+    )
+    return "unexpected"
+
+
+def fit_convergence_summary(results: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """{model name: {"convergence": label, "fit_diagnostics": {...}}} for every
+    model whose train() reported fit diagnostics (the Poisson family), in the
+    labels report_fit_convergence gave them. Empty when no model reports."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for name, result in (results or {}).items():
+        if isinstance(result, dict) and result.get("convergence") is not None:
+            out[name] = {"convergence": result["convergence"], "fit_diagnostics": result.get("fit_diagnostics")}
+    return out
+
+
 # ── Sport bundles ─────────────────────────────────────────────────────
 # Each bundle wires up the four sport-specific pieces of a training run:
 #   * how to load the frame (different SQL queries / target columns)
@@ -592,6 +667,9 @@ class TrainingOrchestrator:
         try:
             model = model_class(config)
             result = model.train(train_df, val_df=val_df, features=features, target=target)
+            convergence = report_fit_convergence(name, result)
+            if convergence is not None:
+                result["convergence"] = convergence  # rides into training_report.json
 
             self.trained_models[name] = model
             self.results[name] = result
@@ -613,13 +691,19 @@ class TrainingOrchestrator:
                 except Exception as e:
                     logger.warning(f"Calibration failed for {name}: {e}")
 
-            # Register model
+            # Register model. The fit diagnostics (converged, iterations run,
+            # final changes) ride into registry_index.json as metadata, next
+            # to the copy the artifact itself carries.
             metrics = result.get("validation_metrics", {})
+            metadata = None
+            if convergence is not None:
+                metadata = {"fit_diagnostics": result["fit_diagnostics"], "convergence": convergence}
             self.registry.register_model(
                 model=model,
                 name=name,
                 version=config.version,
                 metrics=metrics,
+                metadata=metadata,
             )
 
             duration = time.time() - start
@@ -1124,6 +1208,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         "results": results,
         "onnx_models": onnx_paths,
         "holdout_test": holdout,
+        # How every Poisson-family fit ended, in one place the promote gate
+        # reads (scripts/modal_bundles.fit_convergence_from_report): on the
+        # Modal backend nobody reads this run's log when it succeeds.
+        "fit_convergence": fit_convergence_summary(results),
     }
 
     output_dir = Path(args.output_dir)
@@ -1131,7 +1219,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     # The promote gate's exact "never seen by the incumbent" set: the match ids
     # this ensemble trained AND validated on, next to its artifact so the file
     # rides into production with it (scripts/modal_bundles.SEEN_IDS_FILENAME).
-    write_seen_ids(output_dir / bundle.ensemble_name, train_df, val_df)
+    # Only when THIS run wrote the ensemble: the file names the model it
+    # belongs to, and swap_production replaces the whole ensemble directory,
+    # so ids written beside no new model would replace a working production
+    # ensemble with a directory holding nothing but ids.
+    ensemble_model = registered_ensemble_model(orchestrator, output_dir, bundle)
+    if ensemble_model is not None:
+        write_seen_ids(output_dir / bundle.ensemble_name, train_df, val_df, model_path=ensemble_model)
+    elif args.model_type in ("all", "ensemble"):
+        logger.error(
+            "%s was requested but no artifact was written this run (%s) — NOT recording seen ids for it",
+            bundle.ensemble_name,
+            results.get(bundle.ensemble_name, {}).get("error", "fewer than two base models trained"),
+        )
+    else:
+        logger.info("--model-type %s trains no ensemble; no seen ids recorded", args.model_type)
     (output_dir / "training_report.json").write_text(
         json.dumps(report, indent=2, default=_json_default),
         encoding="utf-8",
@@ -1153,11 +1255,36 @@ def main(argv: Optional[list[str]] = None) -> int:
 SEEN_IDS_FILENAME = "seen_match_ids.json.gz"  # mirrored in scripts/modal_bundles.py
 
 
-def write_seen_ids(ensemble_dir: Path, *frames: pd.DataFrame) -> Optional[Path]:
+def registered_ensemble_model(orchestrator: "TrainingOrchestrator", output_dir: Path, bundle: SportBundle):
+    """The ensemble model.bin THIS run registered under `output_dir`, or None
+    when the ensemble was not trained, failed, or left no file."""
+    if bundle.ensemble_name not in orchestrator.trained_models:
+        return None
+    if "error" in orchestrator.results.get(bundle.ensemble_name, {}):
+        return None
+    path = Path(output_dir) / bundle.ensemble_name / bundle.ensemble_config.version / "model.bin"
+    return path if path.is_file() else None
+
+
+def write_seen_ids(ensemble_dir: Path, *frames: pd.DataFrame, model_path: Optional[Path] = None) -> Optional[Path]:
     """Write the sorted union of `match_id` over `frames` (train + val) as
     gzipped JSON. Returns the path, or None when the frames carry no match_id
-    (logged loudly: the gate then falls back to its date cutoff)."""
+    (logged loudly: the gate then falls back to its date cutoff).
+
+    ATOMIC: the document goes to a temporary file in the same directory, is
+    flushed to disk, then renamed over the final name, so a reader (or a copy
+    into staging) sees the old file or the complete new one, never a torn one.
+
+    BOUND TO ITS MODEL: with `model_path` (the ensemble model.bin this run
+    registered) the document records that file's sha256 and relative path.
+    scripts/pull_modal_artifacts.read_seen_ids refuses ids whose recorded hash
+    is not the model beside them, which is how a reconstructed or misplaced
+    file is caught. The 2026-10-26 files were rebuilt after the fact, the
+    soccer one from a frame 22 rows larger than its model's, and no reader
+    could tell."""
     import gzip
+    import hashlib
+    from datetime import datetime, timezone
 
     ids: set = set()
     for f in frames:
@@ -1169,10 +1296,31 @@ def write_seen_ids(ensemble_dir: Path, *frames: pd.DataFrame) -> Optional[Path]:
         ids.update(str(m) for m in f["match_id"].dropna())
     ensemble_dir = Path(ensemble_dir)
     ensemble_dir.mkdir(parents=True, exist_ok=True)
+    doc: Dict[str, Any] = {"match_ids": sorted(ids), "n": len(ids)}
+    if model_path is not None:
+        model_path = Path(model_path)
+        doc["ensemble_model"] = model_path.relative_to(ensemble_dir).as_posix()
+        doc["ensemble_model_sha256"] = hashlib.sha256(model_path.read_bytes()).hexdigest()
+    doc["written_at"] = datetime.now(timezone.utc).isoformat()
+    doc["writer"] = "training.train_all_models.write_seen_ids"
     path = ensemble_dir / SEEN_IDS_FILENAME
-    with gzip.open(path, "wt", encoding="utf-8") as fh:
-        json.dump({"match_ids": sorted(ids), "n": len(ids)}, fh)
-    logger.info("Recorded %d train+val match ids at %s", len(ids), path)
+    tmp = ensemble_dir / f".{SEEN_IDS_FILENAME}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "wb") as raw:
+            with gzip.GzipFile(filename=SEEN_IDS_FILENAME, mode="wb", fileobj=raw) as gz:
+                gz.write(json.dumps(doc).encode("utf-8"))
+            raw.flush()
+            os.fsync(raw.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    logger.info(
+        "Recorded %d train+val match ids at %s (model %s)",
+        len(ids),
+        path,
+        doc.get("ensemble_model_sha256", "not recorded")[:12],
+    )
     return path
 
 

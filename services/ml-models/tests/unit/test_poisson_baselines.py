@@ -453,6 +453,167 @@ class TestShrinkagePrior:
         assert result["iterations"] is not None
 
 
+# ── 5. convergence: disconnected leagues and the 2-cycle ─────────────
+
+
+def two_disconnected_leagues():
+    """Two leagues whose teams never meet, scoring at very different rates:
+    the shape of the soccer train split (one component per country)."""
+    return pd.concat(
+        [
+            make_league(league_id="LOW", n=600, home_rate=1.0, away_rate=0.8, seed=31),
+            make_league(league_id="HIGH", n=600, home_rate=2.0, away_rate=1.6, seed=32),
+        ],
+        ignore_index=True,
+    )
+
+
+def per_league_fitted_vs_observed(model, df):
+    out = {}
+    for league, sub in df.groupby("league_id"):
+        fitted = np.mean([sum(model.lambdas_for_match(h, a)) for h, a in zip(sub["home_team"], sub["away_team"])])
+        out[league] = (float(fitted), observed_mean_total(sub))
+    return out
+
+
+# The production soccer Poisson settings that matter here: an inert prior,
+# the 1e-6 tolerance, the global gauge.
+POISSON_LIKE = {"regularization": 0.001, "max_iterations": 400, "convergence_threshold": 1e-6}
+
+
+@pytest.mark.unit
+class TestConvergenceDiagnostics:
+    def test_free_scales_are_counted_on_the_attack_defense_graph(self):
+        from predictors.poisson_models import scale_components
+
+        # A triangle of fixtures (any round robin has one): one free scale.
+        count, labels = scale_components(np.array([0, 1, 2]), np.array([1, 2, 0]), 3)
+        assert count == 1 and len(set(labels.tolist())) == 1
+        # Two teams that only play each other carry TWO free scales (A's
+        # attack with B's defense, B's attack with A's defense), so three such
+        # pairs plus a team with no fixture are 3 x 2 + 1 = 7.
+        count, labels = scale_components(np.array([0, 2, 4]), np.array([1, 3, 5]), 7)
+        assert count == 7 and len(set(labels.tolist())) == 7
+        # Two triangles that never meet: one scale each, labelled per triangle.
+        count, labels = scale_components(np.array([0, 1, 2, 3, 4, 5]), np.array([1, 2, 0, 4, 5, 3]), 6)
+        assert count == 2 and labels[0] == labels[1] == labels[2] != labels[3] == labels[4] == labels[5]
+        assert scale_components(np.array([], dtype=int), np.array([], dtype=int), 0)[0] == 0
+
+    def test_a_two_colourable_schedule_has_two_scales_and_the_per_component_gauge_pins_both(self):
+        """Eight teams, home i always meets away i+3 (mod 8): ONE connected
+        group of teams, but the fixtures form an even cycle, so attack and
+        defense split into two groups that never touch. Counting the team
+        graph (one component) left a scale free and the fit cycling."""
+        from predictors.poisson_models import scale_components
+
+        rng = np.random.default_rng(36)
+        home = np.tile(np.arange(8), 80)
+        away = (home + 3) % 8
+        df = pd.DataFrame(
+            {
+                "match_date": pd.date_range("2020-01-01", periods=len(home), freq="D"),
+                "league_id": "CYC",
+                "home_team": [f"C{i}" for i in home],
+                "away_team": [f"C{i}" for i in away],
+                "home_score": rng.poisson(1.6, len(home)).astype(float),
+                "away_score": rng.poisson(1.1, len(home)).astype(float),
+            }
+        )
+        assert scale_components(home, away, 8)[0] == 2
+        glob = PoissonMatchPredictor(make_config(**POISSON_LIKE)).train(df)["fit_diagnostics"]
+        assert glob["converged"] is False and glob["period_two_oscillation"] is True
+        assert glob["connected_components"] == 2
+        comp = PoissonMatchPredictor(make_config(gauge="per_component", **POISSON_LIKE)).train(df)
+        assert comp["converged"] is True and comp["fit_diagnostics"]["connected_components"] == 2
+
+    def test_disconnected_leagues_never_converge_under_the_global_gauge(self, caplog):
+        """The defect: the global normalisation fixes one scale of two, and
+        the simultaneous update flips the other every iteration."""
+        df = two_disconnected_leagues()
+        model = PoissonMatchPredictor(make_config(**POISSON_LIKE))
+        with caplog.at_level("WARNING"):
+            result = model.train(df)
+
+        diag = result["fit_diagnostics"]
+        assert result["iterations"] is None and result["converged"] is False
+        assert diag["converged"] is False and diag["iterations_run"] == 400
+        assert diag["connected_components"] == 2 and diag["gauge"] == "global"
+        # A 2-cycle, not slow progress: two steps apart the iterates agree,
+        # one step apart they differ by a lot.
+        assert diag["period_two_oscillation"] is True
+        assert diag["final_two_step_change"] < 1e-4 < 0.1 < diag["final_max_change"]
+        # And the phase it stops on is wrong per league, not near an optimum.
+        fit = per_league_fitted_vs_observed(model, df)
+        assert abs(fit["LOW"][0] / fit["LOW"][1] - 1.0) > 0.2
+        message = " ".join(r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+        assert "did not converge" in message and "2-cycle" in message and "2 free scale" in message
+
+    def test_the_per_component_gauge_converges_to_each_leagues_level(self):
+        df = two_disconnected_leagues()
+        model = PoissonMatchPredictor(make_config(gauge="per_component", **POISSON_LIKE))
+        result = model.train(df)
+        assert result["converged"] is True and result["iterations"] is not None and result["iterations"] < 100
+        assert result["fit_diagnostics"]["period_two_oscillation"] is False
+        for fitted, observed in per_league_fitted_vs_observed(model, df).values():
+            assert fitted == pytest.approx(observed, rel=1e-4)
+
+    def test_one_connected_league_converges_under_the_global_gauge(self):
+        """Why the NHL Poisson members converge (in about 10 iterations) on
+        the same fitter and the same 0.001 prior: one league, one component."""
+        result = PoissonMatchPredictor(make_config(**POISSON_LIKE)).train(make_league(league_id="ONE", seed=33))
+        diag = result["fit_diagnostics"]
+        assert diag["converged"] is True and diag["connected_components"] == 1
+        assert diag["iterations_run"] == result["iterations"]
+
+    def test_the_gauges_agree_on_a_single_component(self):
+        df = make_league(league_id="ONE", seed=34)
+        glob = PoissonMatchPredictor(make_config(**POISSON_LIKE))
+        glob.train(df)
+        comp = PoissonMatchPredictor(make_config(gauge="per_component", **POISSON_LIKE))
+        comp.train(df)
+        for team in glob.team_attack:
+            assert comp.team_attack[team] == pytest.approx(glob.team_attack[team], abs=1e-12)
+            assert comp.team_defense[team] == pytest.approx(glob.team_defense[team], abs=1e-12)
+
+    def test_the_global_gauge_is_the_default_and_no_production_config_sets_another(self):
+        from predictors import model_config
+
+        assert PoissonMatchPredictor(make_config()).gauge == "global"
+        for name in dir(model_config):
+            cfg = getattr(model_config, name)
+            if isinstance(cfg, ModelConfig):
+                assert cfg.hyperparameters.get("gauge", "global") == "global", name
+
+    def test_an_unknown_gauge_is_refused(self):
+        with pytest.raises(ValueError, match="gauge"):
+            PoissonMatchPredictor(make_config(gauge="per_league"))
+
+    def test_the_artifact_records_how_the_fit_ended(self, tmp_path):
+        df = two_disconnected_leagues()
+        model = PoissonMatchPredictor(make_config(**POISSON_LIKE))
+        model.train(df)
+        path = tmp_path / "poisson.json"
+        model.save(str(path))
+
+        saved = json.loads(path.read_text())["fit_diagnostics"]
+        assert saved["converged"] is False and saved["iterations_run"] == 400
+        assert saved["connected_components"] == 2 and saved["period_two_oscillation"] is True
+
+        reloaded = PoissonMatchPredictor(make_config())
+        reloaded.load(str(path))
+        assert reloaded.fit_diagnostics == model.fit_diagnostics
+        # Metadata only: the reloaded model serves exactly what the fit does.
+        x = df[["home_team", "away_team", "league_id"]].head(50)
+        assert np.array_equal(reloaded.predict_proba(x), model.predict_proba(x))
+
+    def test_dixon_coles_artifacts_record_it_too(self, tmp_path):
+        model = DixonColesPredictor(make_config(per_league_baselines=True, regularization=20.0))
+        model.train(make_league(league_id="ONE", seed=35))
+        path = tmp_path / "dc.json"
+        model.save(str(path))
+        assert json.loads(path.read_text())["fit_diagnostics"]["converged"] is True
+
+
 # ── backward compatibility ───────────────────────────────────────────
 
 
@@ -501,6 +662,7 @@ class TestLegacyArtifacts:
         model = PoissonMatchPredictor(make_config(per_league_baselines=True))
         model.load(self._write(tmp_path, payload))
         assert model.is_fitted is True
+        assert model.fit_diagnostics is None  # written before fits recorded how they ended
         assert model.lambdas_for_match("Alpha", "Beta", league="L1")[0] == pytest.approx(1.2 * 1.1 * (1.3615 + 0.25))
 
     def test_unknown_team_in_a_legacy_artifact_is_the_global_constant(self, tmp_path):

@@ -184,6 +184,73 @@ incumbent = the 2026-10-26 artifacts): DO-NOT-SHIP, every arm.
   converging (POISSON_CONFIG, regularization 0.001). The served artifact is
   the same.
 
+ARM ADDED 2026-11-01 EVENING: poisson_converged (PRE-REGISTERED: this arm,
+its readout and its decision rule were committed before its first run).
+  The question. The served Poisson member never converges. Its train split
+  has 27 connected components (one per country: football-data domestic
+  leagues 2007-2021, no cups), the fitter normalises attack over all teams,
+  which fixes only one of their 27 scales, and the simultaneous update flips
+  each remaining scale every iteration. The artifact is iteration 1000 of an
+  exact 2-cycle. Within a league its expected goals sit up to 18% off the
+  converged fit on its own training rows. Normalising attack within each
+  component (PoissonMatchPredictor gauge="per_component", an ablation knob)
+  converges in 32 iterations to the true fixed point. It moves the member's
+  1x2 by up to 0.08 on recent fixtures (0.0038 in the served blend), so it is
+  a model change and must pass the gate before it ships.
+  The arm. poisson_converged = the served ensemble with ONE change: the
+  Poisson member refitted with POISSON_CONFIG plus gauge="per_component" on
+  the served member's own train split. Every other member and every weight is
+  the production one. The split is rebuilt as the trainer built it: the
+  incumbent's seen ids (its train+val) sorted by match_date, the first
+  int(rows x TRAIN_RATIO) rows, where rows is the incumbent's fingerprint.
+  Rows that share the boundary kickoff are resolved by refitting with the
+  production config and keeping the assignment that reproduces the served
+  artifact to SPLIT_ATOL. If no assignment does, the run fails, so the arm
+  can never be fitted on rows the served member did not see.
+  Readout. Primary: the served soccer 1x2 Brier, poisson_converged - served,
+  on the same eval rows as every other arm.
+  Decision rule (fixed before the run):
+    SHIP only if all of:
+      (1) ship_strict: delta <= -0.005, the per-match and fold-clustered 95%
+          upper bounds below zero, and the t(n_folds-1) clustered bound below
+          zero (verdict());
+      (2) no blocking unit regresses. Blocking units are the strata the report
+          already prints: served_knows_both / one / neither, the football-data
+          and ESPN eras, identity-split and other fixtures. A2 rule: a unit
+          regresses only when its 95% lower bound is above zero, using
+          delta_cluster - 1.96 x se_cluster when the unit spans at least two
+          folds and delta - 1.96 x se otherwise (unit_lower_95).
+    Otherwise DO-NOT-SHIP: the trainer keeps the global gauge, and the 2-cycle
+    stays a documented, accepted condition (train_all_models.
+    ACCEPTED_NONCONVERGENCE logs it as a WARNING and the artifact records it).
+  Expectation, stated before the run: DO-NOT-SHIP. At 4.65% blend weight the
+  arm moves the served 1x2 by about 0.0007 on average, and the in-sample-
+  optimal bound above caps any change to these members near -0.0006.
+  RESULT (2026-11-01 evening; read-only export of prod at 21:22Z, runbook not
+  started; incumbent = the 2026-11-01 04:06Z artifacts, whose Poisson member
+  the rebuilt split reproduced to 0.0; how many boundary assignments that
+  took depends on the database's row order: 10 here, 14 on a second replica):
+  DO-NOT-SHIP, because the gate is not met.
+    n = 25,604 matches (2024-04-07 .. 2026-10-31, 31 monthly folds), served
+    1x2 Brier 0.60173.
+    poisson_converged - served  +0.0000077 ± 0.0000089, clustered
+                                +0.0000105 ± 0.0000096, t-bound +0.0000301.
+                                Null, and nowhere near -0.005.
+    Blocking units: under the pre-registered bound, identity_split_fixtures
+    (n=1,582) regresses only marginally and not robustly: its clustered delta
+    +0.000074 has a z lower bound of +0.000022, but that SE comes from 4 folds
+    (and is smaller than the per-match SE), and both the per-match bound
+    (delta +0.000090, lower -0.0000016) and the t(3) clustered bound
+    (-0.000011) include zero. The decision does not rest on it. Later arms
+    should pre-register the t(n_folds-1) quantile for clustered unit bounds;
+    unit_regression() now reports all three.
+    The arm moves the served 1x2 by mean L1 0.0013 (max |dp| 0.0040).
+    Standalone the converged member is slightly WORSE than the 2-cycle one
+    (Brier 0.63380 vs 0.63329): converging fixes the fit, not the forecast.
+    The other arms, re-run on this incumbent, repeat their earlier readings:
+    refit -0.00032 (clustered -0.00040 ± 0.00010), drop +0.00013,
+    refit_pretest -0.00009.
+
 Read-only: SELECTs, plus temp files for the round-trip. Usage (api container):
     python /app/scripts/ab_soccer_ensemble_members.py --end 2026-10-31 \\
         --out-json /tmp/ab_members.json --out-dir /tmp/ab_members
@@ -235,11 +302,24 @@ LEARNED_MEMBERS = (
 ALL_MEMBERS = LEARNED_MEMBERS + SCORELINE_MEMBERS
 
 # Arms that carry their own scoreline members; "drop" carries none.
-MEMBER_ARMS = ("served", "refit", "refit_pretest")
-ARMS = ("served", "refit", "drop", "refit_pretest")
+CONVERGED = "poisson_converged"
+MEMBER_ARMS = ("served", "refit", "refit_pretest", CONVERGED)
+ARMS = ("served", "refit", "drop", "refit_pretest", CONVERGED)
 PRIMARY_CHALLENGERS = ("refit", "drop")
 SECONDARY_CHALLENGERS = ("refit_pretest",)
+# The pre-registered 2026-11-01-evening question (see the docstring): does a
+# CONVERGED Poisson member pass the gate? Decided by convergence_decision().
+CONVERGENCE_CHALLENGERS = (CONVERGED,)
 BOUND_ARM = "members_as_market"
+# The trainer's split (train_all_models --train-ratio default) and the knob
+# the converged arm sets on POISSON_CONFIG.
+TRAIN_RATIO = 0.7
+CONVERGED_HYPERPARAMETERS = {"gauge": "per_component"}
+# A boundary-tie assignment counts as the served member's split only if a
+# production-config refit on it reproduces every team strength to this.
+SPLIT_ATOL = 1e-9
+MAX_TIE_ASSIGNMENTS = 500
+UNIT_Z = 1.96  # the A2 blocking-unit rule's two-sided 95% bound
 
 CLASSES = ("home", "draw", "away")  # TaskSpec labels == match_outcome 0/1/2
 # The trainer's member frame: train_all_models passes the whole train split,
@@ -678,6 +758,97 @@ def verdict(pair: Dict[str, Any], baseline: str) -> Dict[str, Any]:
     return v
 
 
+def _finite(x: Any) -> bool:
+    return x is not None and isinstance(x, (int, float)) and math.isfinite(float(x))
+
+
+def unit_lower_95(pair: Dict[str, Any]) -> Optional[float]:
+    """The A2 rule's 95% lower bound on one unit's paired delta (challenger -
+    served): fold-clustered when the unit spans at least two folds, per match
+    otherwise. None when neither SE exists (too few rows)."""
+    n_folds = pair.get("n_folds") or 0
+    if n_folds >= 2 and _finite(pair.get("delta_cluster")) and _finite(pair.get("se_cluster")):
+        return float(pair["delta_cluster"]) - UNIT_Z * float(pair["se_cluster"])
+    if _finite(pair.get("delta")) and _finite(pair.get("se")):
+        return float(pair["delta"]) - UNIT_Z * float(pair["se"])
+    return None
+
+
+def unit_regression(unit: str, pair: Dict[str, Any]) -> Dict[str, Any]:
+    """One unit's A2 reading: the pre-registered bound (unit_lower_95) with
+    the delta that bound is built on, plus two bounds that say how much to
+    trust it. A fold-clustered SE from a handful of folds is itself noisy, so
+    a clustered z bound can sit above zero while the per-match bound and the
+    t(n_folds-1) clustered bound both include it; `robust` is True only when
+    every bound that exists is above zero. The decision uses lower_95 alone,
+    as pre-registered; the other two are reported, never decided on."""
+    n_folds = int(pair.get("n_folds") or 0)
+    clustered = n_folds >= 2 and _finite(pair.get("delta_cluster")) and _finite(pair.get("se_cluster"))
+    per_match = None
+    if _finite(pair.get("delta")) and _finite(pair.get("se")):
+        per_match = float(pair["delta"]) - UNIT_Z * float(pair["se"])
+    cluster_t = None
+    if clustered:
+        from scipy.stats import t as student_t
+
+        cluster_t = float(pair["delta_cluster"]) - float(student_t.ppf(0.975, n_folds - 1)) * float(pair["se_cluster"])
+    lower = unit_lower_95(pair)
+    bounds = [b for b in (lower, per_match, cluster_t) if b is not None]
+    return {
+        "unit": unit,
+        "n": pair.get("n"),
+        "n_folds": n_folds,
+        "basis": f"fold-clustered over {n_folds} folds, z={UNIT_Z}" if clustered else f"per match, z={UNIT_Z}",
+        "delta_used": pair.get("delta_cluster") if clustered else pair.get("delta"),
+        "lower_95": lower,
+        "delta_per_match": pair.get("delta"),
+        "lower_95_per_match": per_match,
+        "lower_95_cluster_t": cluster_t,
+        "robust": bool(bounds) and all(b > 0 for b in bounds),
+    }
+
+
+def convergence_decision(report: Dict[str, Any], arm: str = CONVERGED) -> Dict[str, Any]:
+    """The pre-registered decision for the converged-Poisson arm (docstring):
+    SHIP only when verdict() is ship_strict AND no blocking unit (stratum)
+    regresses, a unit regressing only when its 95% lower bound is above zero.
+    Each regressing unit also says whether that reading is robust
+    (unit_regression)."""
+    v = report["verdicts_vs_served"][arm]
+    regressed = []
+    for unit, block in report["strata"].items():
+        pair = block.get(arm)
+        if not pair:
+            continue
+        lower = unit_lower_95(pair)
+        if lower is not None and lower > 0:
+            regressed.append(unit_regression(unit, pair))
+    ship = bool(v["ship_strict"]) and not regressed
+    if ship:
+        line = f"SHIP: {v['line']}; no blocking unit regresses"
+    else:
+        reasons = []
+        if not v["ship_strict"]:
+            reasons.append(f"the gate is not met ({v['line']})")
+        if regressed:
+            reasons.append(
+                "blocking unit(s) regress under the pre-registered bound: "
+                + ", ".join(_unit_text(r) for r in regressed)
+            )
+        line = "DO-NOT-SHIP: " + "; ".join(reasons)
+    return {"arm": arm, "ship": ship, "ship_strict": bool(v["ship_strict"]), "units_regressed": regressed, "line": line}
+
+
+def _unit_text(r: Dict[str, Any]) -> str:
+    text = f"{r['unit']} (delta {_f(r['delta_used'], '+.6f')}, lower {_f(r['lower_95'], '+.6f')}, {r['basis']}"
+    if not r["robust"]:
+        text += (
+            f"; NOT robust: per-match lower {_f(r['lower_95_per_match'], '+.6f')}, "
+            f"t({max(r['n_folds'] - 1, 0)}) clustered lower {_f(r['lower_95_cluster_t'], '+.6f')}"
+        )
+    return text + ")"
+
+
 # ── Model plumbing (needs ml-models + api on the path) ───────────────
 
 
@@ -735,10 +906,16 @@ def member_fingerprint(model_path: str, member: str) -> Dict[str, Any]:
     }
 
 
-def fit_member(name: str, fit_df: pd.DataFrame, tmpdir: str, tag: str) -> Tuple[Any, Dict[str, Any]]:
+def fit_member(
+    name: str, fit_df: pd.DataFrame, tmpdir: str, tag: str, hyperparameters: Optional[Dict[str, Any]] = None
+) -> Tuple[Any, Dict[str, Any]]:
     """Fit one scoreline member with the trainer's class, config and frame
     columns, then round-trip it through save() and the serving class's
-    load() so serialisation cannot flatter the refit."""
+    load() so serialisation cannot flatter the refit. `hyperparameters`
+    overrides config keys (the converged arm's gauge); the serving load uses
+    the plain production config, as the API would."""
+    from dataclasses import replace
+
     from predictors.model_config import DIXON_COLES_CONFIG, POISSON_CONFIG  # type: ignore
     from predictors.poisson_models import DixonColesPredictor, PoissonMatchPredictor  # type: ignore
 
@@ -746,13 +923,84 @@ def fit_member(name: str, fit_df: pd.DataFrame, tmpdir: str, tag: str) -> Tuple[
         POISSON: (PoissonMatchPredictor, POISSON_CONFIG),
         DIXON_COLES: (DixonColesPredictor, DIXON_COLES_CONFIG),
     }[name]
-    model = cls(cfg)
+    fit_cfg = replace(cfg, hyperparameters={**cfg.hyperparameters, **hyperparameters}) if hyperparameters else cfg
+    model = cls(fit_cfg)
     result = model.train(fit_df[list(MEMBER_FIT_COLUMNS)].copy())
     path = os.path.join(tmpdir, f"{name}_{tag}.bin")
     model.save(path)
     served = cls(cfg)
     served.load(path)
     return served, result
+
+
+def strength_gap(a: Any, b: Any) -> float:
+    """max |difference| over every team's attack and defense; inf when the two
+    fits do not hold the same teams."""
+    if set(a.team_attack) != set(b.team_attack) or set(a.team_defense) != set(b.team_defense):
+        return math.inf
+    gaps = [abs(float(a.team_attack[t]) - float(b.team_attack[t])) for t in a.team_attack]
+    gaps += [abs(float(a.team_defense[t]) - float(b.team_defense[t])) for t in a.team_defense]
+    return max(gaps) if gaps else 0.0
+
+
+def served_member_split(
+    frame: pd.DataFrame, seen_ids: set, incumbent_rows: int, served_poisson: Any, tmpdir: str
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """The served Poisson member's exact train split, rebuilt as the trainer
+    built it, and PROVEN by refitting: the incumbent's train+val rows (its
+    seen ids) in kickoff order, the first int(incumbent_rows x TRAIN_RATIO).
+
+    The trainer's sort is not stable, so rows sharing the boundary kickoff
+    may fall on either side. Every assignment of those rows is tried with the
+    PRODUCTION config, and the one whose fit reproduces the served artifact to
+    SPLIT_ATOL wins. No reproduction, or too many assignments to try, fails
+    the run: the converged arm must be fitted on exactly what served saw."""
+    seen_rows = frame[frame["match_id"].isin(seen_ids)].sort_values("match_date", kind="stable")
+    seen_rows = seen_rows.reset_index(drop=True)
+    n_fit = int(int(incumbent_rows) * TRAIN_RATIO)
+    if not 0 < n_fit < len(seen_rows):
+        raise RuntimeError(f"train split of {n_fit} rows does not fit inside {len(seen_rows)} seen rows")
+    boundary = seen_rows["match_date"].iloc[n_fit - 1]
+    ties = [int(i) for i in seen_rows.index[seen_rows["match_date"] == boundary]]
+    k = sum(1 for i in ties if i < n_fit)
+    n_assign = math.comb(len(ties), k)
+    if n_assign > MAX_TIE_ASSIGNMENTS:
+        raise RuntimeError(f"{n_assign} boundary assignments ({len(ties)} tied rows) exceed {MAX_TIE_ASSIGNMENTS}")
+    head = seen_rows.iloc[: min(ties)]
+    best = math.inf
+    for tried, combo in enumerate(itertools.combinations(ties, k), start=1):
+        candidate = pd.concat([head, seen_rows.loc[list(combo)]])
+        refit, _ = fit_member(POISSON, candidate, tmpdir, f"split{tried}")
+        gap = strength_gap(refit, served_poisson)
+        best = min(best, gap)
+        if gap <= SPLIT_ATOL:
+            info = {
+                "incumbent_rows": int(incumbent_rows),
+                "seen_rows": int(len(seen_rows)),
+                "n_fit": n_fit,
+                "fit_newest": str(candidate["match_date"].max()),
+                "boundary_tied_rows": len(ties),
+                "boundary_rows_in_train": k,
+                "assignments_tried": tried,
+                "reproduction_max_abs": gap,
+            }
+            return candidate, info
+    raise RuntimeError(
+        f"no boundary assignment of {len(ties)} tied rows reproduces the served Poisson member "
+        f"(closest max |d| {best:.3g} > {SPLIT_ATOL}) — wrong seen ids, wrong fingerprint or a changed corpus"
+    )
+
+
+def load_incumbent_rows(model_path: str) -> int:
+    """The incumbent's frame size from its held_out_metrics.json fingerprint:
+    the number the trainer's int(rows x 0.7) split was taken of."""
+    meta_path = Path(model_path) / ENSEMBLE_NAME / "held_out_metrics.json"
+    if not meta_path.exists():
+        raise RuntimeError(f"{meta_path} is missing — cannot rebuild the served member's train split")
+    rows = (json.loads(meta_path.read_text()).get("fingerprint") or {}).get("rows")
+    if not rows:
+        raise RuntimeError(f"{meta_path} carries no fingerprint rows")
+    return int(rows)
 
 
 def member_proba(model: Any, ev: pd.DataFrame) -> np.ndarray:
@@ -844,7 +1092,15 @@ def load_seen_ids(model_path: str) -> set:
     if not path.exists():
         raise RuntimeError(f"{path} is missing — without the incumbent's train+val ids there is no honest eval window")
     with gzip.open(path, "rt", encoding="utf-8") as fh:
-        return set(str(i) for i in json.load(fh)["match_ids"])
+        doc = json.load(fh)
+    import modal_bundles  # the gate's own provenance check (scripts/modal_bundles.py)
+
+    model = modal_bundles.newest_model_bin(path.parent)
+    ok, reason = modal_bundles.seen_ids_provenance(doc, model.read_bytes() if model is not None else None)
+    if ok is False:
+        raise RuntimeError(f"{path} {reason} — these are another artifact's ids; there is no honest eval window")
+    logger.info("seen ids: %s", reason)
+    return set(str(i) for i in doc["match_ids"])
 
 
 def served_fit_slice(frame: pd.DataFrame, model_path: str, member_teams: set) -> Dict[str, Any]:
@@ -973,6 +1229,17 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         for m in SCORELINE_MEMBERS:
             pretest[m], res = fit_member(m, pretest_rows, tmp, "pretest")
             fits.append(_fit_record("pretest", m, pretest_rows, res))
+        # The pre-registered converged arm: the served Poisson's own split,
+        # proven by reproducing the artifact, refitted with the per-component
+        # gauge. The Dixon-Coles member stays the served one.
+        split_df, split_info = served_member_split(
+            frame, seen_ids, load_incumbent_rows(args.model_path), served_members[POISSON], tmp
+        )
+        converged_poisson, res = fit_member(POISSON, split_df, tmp, "converged", CONVERGED_HYPERPARAMETERS)
+        fits.append(_fit_record("converged", POISSON, split_df, res))
+        if not res.get("converged"):
+            raise RuntimeError(f"the converged arm's Poisson fit did not converge: {res.get('fit_diagnostics')}")
+        converged = {POISSON: converged_poisson, DIXON_COLES: served_members[DIXON_COLES]}
         for fold in folds:
             fit_df, _ = ft.split_fold(frame, fold)
             ev = eval_df[(eval_df["match_date"] >= fold.eval_start) & (eval_df["match_date"] < fold.eval_end)]
@@ -988,7 +1255,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             for m in SCORELINE_MEMBERS:
                 refit[m], res = fit_member(m, fit_df, tmp, fold.label)
                 fits.append(_fit_record(fold.label, m, fit_df, res, fold))
-            arm_members = {"served": served_members, "refit": refit, "refit_pretest": pretest}
+            arm_members = {"served": served_members, "refit": refit, "refit_pretest": pretest, CONVERGED: converged}
             lp = {m: learned[m][idx] for m in LEARNED_MEMBERS}
             y = ev["outcome"].to_numpy(dtype=int)
             c.add("y", y)
@@ -1018,6 +1285,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 c.add(f"q::learned::{m}", lp[m])
             dc_for = {"served": served_members[DIXON_COLES], "refit": refit[DIXON_COLES]}
             dc_for.update({"refit_pretest": pretest[DIXON_COLES], "drop": served_members[DIXON_COLES]})
+            dc_for[CONVERGED] = served_members[DIXON_COLES]
             for arm, dc in dc_for.items():
                 over, btts = derived_markets(dc, ev, p_arm[arm])
                 c.add(f"over25::{arm}", over)
@@ -1034,6 +1302,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             "scoreline_member_weight": member_weight,
             "member_fingerprints": fingerprints,
             "served_fit_slice": fit_slice,
+            "converged_arm_split": split_info,
             "seen_ids": len(seen_ids),
             "seen_cutoff": str(seen_cutoff),
             "unseen_rows_inside_seen_span": n_late,
@@ -1104,7 +1373,7 @@ def build_report(s: Dict[str, np.ndarray], meta: Dict[str, Any], out_dir: Option
     known = s["known::served"]
     espn = s["espn_era"].astype(bool)
     split = s["identity_split"].astype(bool)
-    challengers = list(PRIMARY_CHALLENGERS) + list(SECONDARY_CHALLENGERS)
+    challengers = list(PRIMARY_CHALLENGERS) + list(SECONDARY_CHALLENGERS) + list(CONVERGENCE_CHALLENGERS)
     strata = {
         "served_knows_both": known == 2,
         "served_knows_one": known == 1,
@@ -1175,6 +1444,11 @@ def build_report(s: Dict[str, np.ndarray], meta: Dict[str, Any], out_dir: Option
             for arm in MEMBER_ARMS
         },
     }
+    report["convergence_decision"] = convergence_decision(report)
+    report["bound"]["converged_abs_shift_mean"] = float(
+        np.abs(s[f"p::{CONVERGED}"] - s["p::served"]).sum(axis=1).mean()
+    )
+    report["bound"]["converged_abs_shift_max"] = float(np.abs(s[f"p::{CONVERGED}"] - s["p::served"]).max())
     if "y_over25" in s and "y_btts" in s:
         report["derived_info"] = _derived_info(s, s["y_over25"], s["y_btts"], folds_arr)
     if out_dir:
@@ -1221,7 +1495,7 @@ def _derived_info(s, y_over, y_btts, folds_arr) -> Dict[str, Any]:
             "mean_pred": {a: float(np.mean(s[f"{market}::{a}"])) for a in ARMS},
             "realised": float(np.mean(truth)),
         }
-        for a in ("refit", "refit_pretest", "drop"):
+        for a in ("refit", "refit_pretest", "drop", CONVERGED):
             p = ft.paired_delta(sc[a], sc["served"], folds_arr)
             p["upper_95_cluster_t"] = ht.t_upper(p["delta_cluster"], p["se_cluster"], p["n_folds"])
             block[f"{a} - served"] = p
@@ -1314,10 +1588,14 @@ def format_report(r: Dict[str, Any]) -> str:
     L.append(
         f"  refit moves the served 1x2 by mean L1 {b['refit_abs_shift_mean']:.4f} (p99 {b['refit_abs_shift_p99']:.4f})"
     )
+    L.append(
+        f"  {CONVERGED} moves the served 1x2 by mean L1 {b['converged_abs_shift_mean']:.5f} "
+        f"(max |dp| {b['converged_abs_shift_max']:.5f})"
+    )
     L += ["", "strata (challenger - served):"]
     for name, blk in r["strata"].items():
         L.append(f"  [{name}] n={blk['n']} served Brier {_f(blk['brier_served'], '.5f')}")
-        for a in list(PRIMARY_CHALLENGERS) + list(SECONDARY_CHALLENGERS):
+        for a in list(PRIMARY_CHALLENGERS) + list(SECONDARY_CHALLENGERS) + list(CONVERGENCE_CHALLENGERS):
             if a in blk:
                 L.append(_pair_line(f"    {a}", blk[a]))
     L += ["", "per-fold delta vs served:"]
@@ -1354,17 +1632,26 @@ def format_report(r: Dict[str, Any]) -> str:
                 f"  {market}: realised {blk['realised']:.4f}; "
                 + ", ".join(f"{a} {blk['brier'][a]:.5f} (pred {blk['mean_pred'][a]:.4f})" for a in ARMS)
             )
-            for a in ("refit", "refit_pretest", "drop"):
+            for a in ("refit", "refit_pretest", "drop", CONVERGED):
                 L.append(_pair_line(f"    {a} - served", blk[f"{a} - served"]))
     unconv: Dict[str, int] = {}
     for fr in m["fits"]:
         if fr.get("converged_at") is None:
             unconv[fr["member"]] = unconv.get(fr["member"], 0) + 1
-    L += ["", f"fits that did not converge (per member, of {len(m['fits']) // 2} each): {unconv or 'none'}"]
+    L += ["", f"fits that did not converge (per member, of {len(m['fits'])} fits): {unconv or 'none'}"]
+    if m.get("converged_arm_split"):
+        L.append(f"{CONVERGED} split (rebuilt and proven by reproducing the served member): {m['converged_arm_split']}")
     L += ["", "VERDICTS (§4.3 on the primary readout; 'strict' also needs the t(n_folds-1) clustered bound < 0):"]
     for a, v in r["verdicts_vs_served"].items():
-        tag = "secondary" if a in SECONDARY_CHALLENGERS else "primary"
-        L.append(f"  {a:<15} [{tag}] strict={'SHIP' if v['ship_strict'] else 'no'}  {v['line']}")
+        tag = (
+            "secondary"
+            if a in SECONDARY_CHALLENGERS
+            else "pre-registered" if a in CONVERGENCE_CHALLENGERS else "primary"
+        )
+        L.append(f"  {a:<17} [{tag}] strict={'SHIP' if v['ship_strict'] else 'no'}  {v['line']}")
+    cd = r.get("convergence_decision")
+    if cd:
+        L += ["", f"PRE-REGISTERED DECISION ({cd['arm']}: gate + A2 blocking units): {cd['line']}"]
     return "\n".join(L)
 
 
