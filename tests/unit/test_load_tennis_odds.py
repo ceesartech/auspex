@@ -257,7 +257,7 @@ def test_bytes_that_are_neither_encoding_refuse_the_whole_run(tmp_path, caplog):
         tmp_path / "wta_2024.xlsx",
         [["WTA", "Date", "Winner", "Loser", "AvgW", "AvgL"], [1, 45292, "Swiatek I.", "Gauff C.", 1.4, 3.0]],
     )
-    with caplog.at_level("ERROR"), pytest.raises(lto.text_encoding.UndecodableText) as exc:
+    with caplog.at_level("ERROR"), pytest.raises(lto.RefusedFiles) as exc:
         lto.load_td_files(tmp_path)
     message = str(exc.value)
     assert "1 of 3 file(s) refused, nothing loaded" in message
@@ -265,15 +265,93 @@ def test_bytes_that_are_neither_encoding_refuse_the_whole_run(tmp_path, caplog):
     assert any("REFUSED atp_2024.csv" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
 
 
-def test_main_exits_3_on_a_refused_file_before_touching_the_database(tmp_path, monkeypatch):
-    (tmp_path / "atp_2024.csv").write_bytes(
-        CSV_HEADER.encode() + b"1,Do\x81ha,Q,2024-01-02,A B.,C D.,,1.6,2.4,1.6,2.3\r\n"
+def test_a_utf8_file_with_one_stray_windows_1252_byte_is_refused_not_garbled(tmp_path, caplog):
+    """One cp1252 byte makes the whole UTF-8 file invalid UTF-8, so it decodes
+    as Windows-1252, and every real UTF-8 accent becomes 'Ã©'. The football
+    loaders refuse such a file on looks_mojibake; so does this one."""
+    raw = (CSV_HEADER + CSV_ROW).encode(
+        "utf-8"
+    ) + "1,Doha,Qatar Open,2024-01-02,Sinner J.,Medvedev D.,Completed,1.6,2.4,1.6,2.3\r\n".encode("cp1252").replace(
+        b"Doha", b"Doh\xe2"
     )
+    (tmp_path / "atp_2024.csv").write_bytes(raw)
+    table, encoding = lto.read_csv_rows(tmp_path / "atp_2024.csv")
+    assert encoding == "cp1252" and table[1][4] == "PÃ©rez D."  # what used to flow on to matching
+    with caplog.at_level("ERROR"), pytest.raises(lto.RefusedFiles) as exc:
+        lto.load_td_files(tmp_path)
+    assert "atp_2024.csv has Winner/Loser/Tournament text that looks mis-decoded" in str(exc.value)
+    assert "PÃ©rez D." in str(exc.value) and "MÃ¼ller A." in str(exc.value)
+    assert any(r.levelname == "ERROR" and "REFUSED atp_2024.csv" in r.getMessage() for r in caplog.records)
+
+
+def test_a_mis_decoded_name_in_a_workbook_is_refused(tmp_path):
+    _write_xlsx(
+        tmp_path / "wta_2024.xlsx",
+        [
+            ["WTA", "Tournament", "Date", "Winner", "Loser", "AvgW", "AvgL"],
+            [1, "Brisbane", 45292, "PÃ©rez D.", "Gauff C.", 1.4, 3.0],
+        ],
+    )
+    with pytest.raises(lto.RefusedFiles, match="wta_2024.xlsx has Winner/Loser/Tournament text"):
+        lto.load_td_files(tmp_path)
+    # Real accents are fine; only the marks of a wrong decode refuse.
+    assert (
+        lto.mis_decoded_cells([["ATP", "Winner", "Loser", "Location"], [1, "Pérez D.", "Müller A.", "MontrÃ©al"]]) == []
+    )
+
+
+def _zip_with(path: Path, parts: dict) -> None:
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, body in parts.items():
+            zf.writestr(name, body)
+
+
+@pytest.mark.parametrize(
+    "label,write,error",
+    [
+        (
+            "not a zip at all (a firewall page saved as .xlsx)",
+            lambda path: path.write_bytes(b"<html>Sorry, you have been blocked</html>"),
+            "BadZipFile",
+        ),
+        (
+            "malformed sheet XML",
+            lambda path: _zip_with(path, {"xl/worksheets/sheet1.xml": "<worksheet><sheetData>"}),
+            "ParseError",
+        ),
+        ("no worksheet part", lambda path: _zip_with(path, {"xl/other.xml": "<x/>"}), "KeyError"),
+    ],
+)
+def test_an_unreadable_workbook_is_refused_not_a_traceback(tmp_path, caplog, label, write, error):
+    write(tmp_path / "atp_2024.xlsx")
+    (tmp_path / "atp_2023.csv").write_bytes(_csv_bytes("utf-8"))
+    with caplog.at_level("WARNING"), pytest.raises(lto.RefusedFiles) as exc:
+        lto.load_td_files(tmp_path)
+    assert "1 of 2 file(s) refused" in str(exc.value), label
+    assert f"atp_2024.xlsx: not a readable .xlsx workbook ({error}" in str(exc.value), label
+    if error != "BadZipFile":  # the sheet-list fallback is no longer silent
+        assert any(
+            r.levelname == "WARNING" and "reading xl/worksheets/sheet1.xml" in r.getMessage() for r in caplog.records
+        )
+
+
+def test_a_sheet_without_the_columns_it_needs_is_refused(tmp_path):
+    _write_xlsx(tmp_path / "odd.xlsx", [["Foo", "Date", "Winner", "Loser"], ["x", 45292, "A B.", "C D."]])
+    with pytest.raises(lto.RefusedFiles, match="neither an 'ATP' nor a 'WTA' column"):
+        lto.load_td_files(tmp_path)
+
+
+def test_main_exits_3_on_an_unreadable_workbook(tmp_path, monkeypatch):
+    (tmp_path / "atp_2024.xlsx").write_bytes(b"not a workbook")
+    _no_database(monkeypatch)
+    assert lto.main(["--files-dir", str(tmp_path), "--database-url", "postgresql:///unused", "--dry-run"]) == 3
+
+
+def _no_database(monkeypatch):
+    import types
 
     def no_db(*_a, **_k):
         raise AssertionError("connected to the database after a refused file")
-
-    import types
 
     fake = types.ModuleType("psycopg2")
     fake.connect = no_db  # type: ignore[attr-defined]
@@ -281,6 +359,13 @@ def test_main_exits_3_on_a_refused_file_before_touching_the_database(tmp_path, m
     extras.RealDictCursor = object  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "psycopg2", fake)
     monkeypatch.setitem(sys.modules, "psycopg2.extras", extras)
+
+
+def test_main_exits_3_on_a_refused_file_before_touching_the_database(tmp_path, monkeypatch):
+    (tmp_path / "atp_2024.csv").write_bytes(
+        CSV_HEADER.encode() + b"1,Do\x81ha,Q,2024-01-02,A B.,C D.,,1.6,2.4,1.6,2.3\r\n"
+    )
+    _no_database(monkeypatch)
     assert lto.main(["--files-dir", str(tmp_path), "--database-url", "postgresql:///unused", "--dry-run"]) == 3
 
 

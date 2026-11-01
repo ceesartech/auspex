@@ -16,9 +16,19 @@ any file name works because the tour is read from the header ('ATP' or 'WTA'
 column) and the year from the dates. `--download` tries a plain, honestly
 identified fetch first and fails loudly with these instructions on a block.
 A .csv export is decoded strictly (scripts/text_encoding.decode_csv_bytes:
-UTF-8 with any byte-order mark dropped, else Windows-1252). A file that is
-neither stops the run with exit 3 before it touches the database. The .xlsx
-workbooks go through a strict XML parser.
+UTF-8 with any byte-order mark dropped, else Windows-1252). The .xlsx
+workbooks go through a strict XML parser. A file is REFUSED, as the
+football-data loaders refuse one, when:
+  * it is a .csv that is neither UTF-8 nor Windows-1252;
+  * it is a .xlsx that is not a readable workbook (not a zip, malformed XML,
+    a missing part);
+  * its header has no ATP/WTA, Date, Winner or Loser column;
+  * a Winner, Loser or Tournament cell looks mis-decoded
+    (text_encoding.looks_mojibake): a UTF-8 file with one stray Windows-1252
+    byte decodes whole as Windows-1252 and turns 'Pérez' into 'PÃ©rez', which
+    would then quietly fail to match ESPN's name.
+Every refused file is logged at ERROR; once all files are read the run stops
+with exit 3, before it touches the database, and nothing is written.
 
 Matching (the hard part — ESPN and tennis-data name players differently):
   * tennis-data names a player 'Surname I.' ('Auger-Aliassime F.',
@@ -224,6 +234,11 @@ def _col_index(ref: str) -> int:
     return idx - 1
 
 
+class RefusedFiles(ValueError):
+    """One or more source files were refused (see the module docstring); the
+    run loads nothing."""
+
+
 def _first_sheet_path(zf: zipfile.ZipFile) -> str:
     try:
         wb = ET.fromstring(zf.read("xl/workbook.xml"))
@@ -235,8 +250,15 @@ def _first_sheet_path(zf: zipfile.ZipFile) -> str:
                 target = rel.get("Target", "")
                 target = target.lstrip("/")
                 return target if target.startswith("xl/") else f"xl/{target}"
-    except (KeyError, ET.ParseError, AttributeError):
-        pass
+    except (KeyError, ET.ParseError, AttributeError) as exc:
+        logger.warning(
+            "%s: cannot read the workbook's sheet list (%s: %s); reading xl/worksheets/sheet1.xml",
+            zf.filename,
+            type(exc).__name__,
+            exc,
+        )
+        return "xl/worksheets/sheet1.xml"
+    logger.warning("%s: the workbook names no first sheet; reading xl/worksheets/sheet1.xml", zf.filename)
     return "xl/worksheets/sheet1.xml"
 
 
@@ -409,40 +431,82 @@ def read_csv_rows(path: str | Path) -> tuple[list[list], str]:
     return [list(r) for r in csv.reader(io.StringIO(text, newline=""))], encoding
 
 
+# The text columns a row is matched or reported on; a mis-decoded cell in any
+# of them refuses the file.
+TEXT_COLUMNS = ("Winner", "Loser", "Tournament")
+# Malformed-workbook errors read_xlsx_rows can raise: not a zip, bad XML, a
+# missing part, a shared-string index that is not a number or out of range.
+XLSX_ERRORS = (zipfile.BadZipFile, ET.ParseError, KeyError, ValueError, IndexError)
+
+
+def mis_decoded_cells(table: list[list]) -> list[str]:
+    """The distinct Winner / Loser / Tournament cells of a sheet (header row
+    first) that look mis-decoded (text_encoding.looks_mojibake), sorted."""
+    if not table:
+        return []
+    header = [str(h).strip() if h is not None else "" for h in table[0]]
+    cols = [i for i, h in enumerate(header) if h in TEXT_COLUMNS]
+    found = {
+        str(r[i])
+        for r in table[1:]
+        for i in cols
+        if i < len(r) and r[i] is not None and text_encoding.looks_mojibake(str(r[i]))
+    }
+    return sorted(found)
+
+
 def load_td_files(files_dir: str | Path, years: Optional[set[int]] = None) -> tuple[list[TdRow], dict]:
     """Read every .xlsx / .csv under files_dir. Returns rows (optionally
     filtered to `years`) and a per-file summary.
 
-    A .csv that is neither UTF-8 nor Windows-1252 is refused: every such file
-    is logged at ERROR, then UndecodableText is raised listing them all, so the
-    run stops before it connects to the database and nothing is written."""
+    A file that cannot be read honestly is refused (module docstring): every
+    such file is logged at ERROR, then RefusedFiles is raised listing them
+    all, so the run stops before it connects to the database and nothing is
+    written."""
     rows: list[TdRow] = []
     summary: dict = {}
     refused: list[str] = []
     paths = sorted(p for p in Path(files_dir).rglob("*") if p.suffix.lower() in (".xlsx", ".csv"))
     if not paths:
         raise FileNotFoundError(f"no .xlsx/.csv files under {files_dir}. {DOWNLOAD_HELP}")
+
+    def refuse(message: str) -> None:
+        logger.error("REFUSED %s", message)
+        refused.append(message)
+
     for p in paths:
         if p.suffix.lower() == ".csv":
             try:
                 table, encoding = read_csv_rows(p)
             except text_encoding.UndecodableText as exc:
-                logger.error("REFUSED %s", exc)
-                refused.append(str(exc))
+                refuse(str(exc))
                 continue
             logger.info("%s: decoded as %s", p.name, encoding)
         else:
-            table = read_xlsx_rows(p)
-        file_rows, skips = rows_from_table(table, p.name)
+            try:
+                table = read_xlsx_rows(p)
+            except XLSX_ERRORS as exc:
+                refuse(f"{p.name}: not a readable .xlsx workbook ({type(exc).__name__}: {exc}) — not loaded")
+                continue
+        try:
+            file_rows, skips = rows_from_table(table, p.name)
+        except ValueError as exc:
+            refuse(f"{exc} — not loaded")
+            continue
+        garbled = mis_decoded_cells(table)
+        if garbled:
+            refuse(
+                f"{p.name} has Winner/Loser/Tournament text that looks mis-decoded: {garbled[:5]} — not loaded "
+                "(a name like that cannot match ESPN's and would only inflate the unmatched count)"
+            )
+            continue
         if years:
             file_rows = [r for r in file_rows if r.day.year in years]
         rows.extend(file_rows)
         summary[p.name] = {"rows_with_odds": len(file_rows), "skipped": dict(skips)}
         logger.info("%s: %d rows with odds (%s)", p.name, len(file_rows), dict(skips))
     if refused:
-        raise text_encoding.UndecodableText(
-            f"{len(refused)} of {len(paths)} file(s) refused, nothing loaded: " + " | ".join(refused)
-        )
+        raise RefusedFiles(f"{len(refused)} of {len(paths)} file(s) refused, nothing loaded: " + " | ".join(refused))
     return rows, summary
 
 
@@ -895,7 +959,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
     try:
         summary = run(args)
-    except text_encoding.UndecodableText as exc:
+    except (RefusedFiles, text_encoding.UndecodableText) as exc:
         # Exit 3, as the football-data loaders do for a refused file.
         logger.error("load_tennis_odds stopped before touching the database: %s", exc)
         return 3
