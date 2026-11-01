@@ -94,8 +94,8 @@ DEFAULT_DIXON_COLES_TIME_DECAY = 0.00095
 
 # How the attack/defense scale is pinned inside the iterative MLE. "global"
 # (production, every config) divides attack by its mean over ALL teams.
-# "per_component" divides it by its mean within each connected component of
-# the team graph. That is an ablation for scripts/ab_soccer_ensemble_members.py
+# "per_component" divides it by its mean within each scale component (see
+# scale_components). That is an ablation for scripts/ab_soccer_ensemble_members.py
 # and nothing in production sets it; see PoissonMatchPredictor.train.
 GAUGES = ("global", "per_component")
 
@@ -105,25 +105,40 @@ GAUGES = ("global", "per_component")
 PERIOD_TWO_RATIO = 0.01
 
 
-def team_graph_components(home_idx: np.ndarray, away_idx: np.ndarray, n_teams: int) -> Tuple[int, np.ndarray]:
-    """(count, label per team) of the connected components of the graph whose
-    nodes are teams and whose edges are the matches between them.
+def scale_components(home_idx: np.ndarray, away_idx: np.ndarray, n_teams: int) -> Tuple[int, np.ndarray]:
+    """(count, label per team) of the free scales of the attack/defense model.
 
-    Teams in different components never meet in the data, so the likelihood
-    cannot compare their strengths: each component carries its own free scale
-    (attack -> c*attack, defense -> defense/c inside it).
+    The likelihood only ever sees products: a home team's attack times the
+    away team's defense, and the away team's attack times the home team's
+    defense. So the scales live on a graph with 2 x n_teams nodes, one
+    attack node and one defense node per team, and an edge from attack_h to
+    defense_a and from attack_a to defense_h for every match. Each connected
+    component of that graph carries exactly one free scale (multiply every
+    attack in it by c and every defense in it by 1/c, and no expected goal
+    changes). The label returned for a team is the component of its ATTACK
+    node, renumbered 0..count-1; count is the number of free scales.
+
+    For a league in which some three teams form a cycle of fixtures (every
+    round robin) this is one component per league, the same as counting
+    connected components of the team graph: the soccer train split has 27.
+    It differs when a group of teams only ever meets in a two-colourable
+    pattern, two teams that only play each other being the smallest case:
+    that group carries two free scales, not one.
     """
     if n_teams == 0:
         return 0, np.zeros(0, dtype=np.int64)
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
 
-    graph = coo_matrix(
-        (np.ones(len(home_idx), dtype=np.float64), (np.asarray(home_idx), np.asarray(away_idx))),
-        shape=(n_teams, n_teams),
-    )
-    count, labels = connected_components(graph, directed=False)
-    return int(count), labels.astype(np.int64)
+    home = np.asarray(home_idx, dtype=np.int64)
+    away = np.asarray(away_idx, dtype=np.int64)
+    rows = np.concatenate([home, away])  # attack nodes 0..n-1
+    cols = np.concatenate([away, home]) + n_teams  # defense nodes n..2n-1
+    graph = coo_matrix((np.ones(len(rows), dtype=np.float64), (rows, cols)), shape=(2 * n_teams, 2 * n_teams))
+    _, labels = connected_components(graph, directed=False)
+    _, attack_label = np.unique(labels[:n_teams], return_inverse=True)
+    attack_label = np.asarray(attack_label, dtype=np.int64).reshape(-1)
+    return int(attack_label.max()) + 1, attack_label
 
 
 def _league_key(value: Any) -> Optional[str]:
@@ -224,15 +239,15 @@ class PoissonMatchPredictor(BaseModel):
         # result to the gauge fix rather than to "refit on a bigger corpus".
         # Nothing in production sets it; leave it False.
         self.normalise_defense: bool = bool(config.hyperparameters.get("normalise_defense", False))
-        # ABLATION ONLY. "per_component" pins the scale of every connected
-        # component of the team graph instead of one global scale; see train().
+        # ABLATION ONLY. "per_component" pins every free scale (one per
+        # scale_components component) instead of one global scale; see train().
         # It exists so scripts/ab_soccer_ensemble_members.py can score a
         # CONVERGED soccer Poisson member. Nothing in production sets it.
         self.gauge: str = str(config.hyperparameters.get("gauge", "global"))
         if self.gauge not in GAUGES:
             raise ValueError(f"gauge must be one of {GAUGES}, got {self.gauge!r}")
         # How the last fit ended (converged or not, iterations, final changes,
-        # connected components). Set by train(), saved in the artifact, and
+        # free scales as "connected_components"). Set by train(), saved in the artifact, and
         # None for an artifact written before 2026-11.
         self.fit_diagnostics: Optional[Dict[str, Any]] = None
 
@@ -459,20 +474,21 @@ class PoissonMatchPredictor(BaseModel):
         home_idx = df["home_team"].map(team_to_idx).to_numpy(dtype=np.int64)
         away_idx = df["away_team"].map(team_to_idx).to_numpy(dtype=np.int64)
 
-        # CONNECTED COMPONENTS. Normalising attack fixes ONE scale. A team
-        # graph with k components has k: teams in different components never
-        # meet, so nothing in the data ties their scales together. The soccer
-        # train split (football-data domestic leagues 2007-2021, no European
-        # cups) has 27 components, one per country. With the default "global"
-        # gauge the other 26 scales stay free, and the simultaneous
-        # (Jacobi) update below flips each one every iteration: from (a, d)
-        # scaled up inside a component it returns both scaled down, and back.
+        # FREE SCALES. Normalising attack fixes ONE scale. The model has one
+        # per connected component of its attack/defense graph
+        # (scale_components): teams in different leagues never meet, so
+        # nothing in the data ties their scales together. The soccer train
+        # split (football-data domestic leagues 2007-2021, no European cups)
+        # has 27, one per country. With the default "global" gauge the other
+        # 26 stay free, and the simultaneous (Jacobi) update below never
+        # settles them: the attack and defense iterates of a component drift
+        # into different scales and the fit alternates between two states.
         # The 0.001 prior is far too weak to damp that, so the fit never
         # converges; the 1000th iterate is one phase of a 2-cycle in which
         # each league's expected goals swing by up to ~40% between phases.
         # Measured and documented in docs/SYSTEM_AUDIT_AND_ROADMAP.md §4
         # ("Soccer Poisson member: converged fit").
-        n_components, component = team_graph_components(home_idx, away_idx, n_teams)
+        n_components, component = scale_components(home_idx, away_idx, n_teams)
         component_sizes = np.bincount(component, minlength=n_components).astype(np.float64)
 
         # Numerators are constant across iterations — weighted sum of
@@ -570,14 +586,15 @@ class PoissonMatchPredictor(BaseModel):
             cause = ""
             if oscillating and n_components > 1 and self.gauge == "global":
                 cause = (
-                    f" It is a 2-cycle: the global attack normalisation leaves the scales of {n_components - 1} "
-                    f"of the {n_components} components free, and the simultaneous update flips them every "
-                    "iteration, so these parameters are one phase of the cycle, not a near-optimum "
+                    f" It is a 2-cycle: the global attack normalisation leaves {n_components - 1} of the "
+                    f"model's {n_components} free scales unpinned, and the simultaneous update alternates them "
+                    "every iteration, so these parameters are one phase of the cycle, not a near-optimum "
                     "(docs/SYSTEM_AUDIT_AND_ROADMAP.md §4, 'Soccer Poisson member: converged fit')."
                 )
             logger.warning(
                 "Poisson MLE (%s) did not converge in %d iterations: max parameter change %.2e > tol %.2e, "
-                "change over two iterations %s; team graph has %d connected component(s), gauge=%s.%s",
+                "change over two iterations %s; %d free scale(s) (connected components of the attack/defense "
+                "graph), gauge=%s.%s",
                 self.config.name,
                 max_iter,
                 max_change,
@@ -835,7 +852,7 @@ class PoissonMatchPredictor(BaseModel):
             "global_away_baseline": self.global_away_baseline,
             "league_baselines": {k: [v[0], v[1]] for k, v in self.league_baselines.items()},
             # How the fit ended (converged, iterations_run, final changes,
-            # connected components). Metadata only: no reader uses it to
+            # free scales). Metadata only: no reader uses it to
             # predict, so it changes no served probability.
             "fit_diagnostics": self.fit_diagnostics,
             "config": self.config.to_dict(),

@@ -483,13 +483,48 @@ POISSON_LIKE = {"regularization": 0.001, "max_iterations": 400, "convergence_thr
 
 @pytest.mark.unit
 class TestConvergenceDiagnostics:
-    def test_components_are_counted(self):
-        from predictors.poisson_models import team_graph_components
+    def test_free_scales_are_counted_on_the_attack_defense_graph(self):
+        from predictors.poisson_models import scale_components
 
-        count, labels = team_graph_components(np.array([0, 2, 4]), np.array([1, 3, 5]), 7)
-        assert count == 4  # {0,1} {2,3} {4,5} {6}
-        assert labels[0] == labels[1] and labels[2] == labels[3] and labels[0] != labels[2]
-        assert team_graph_components(np.array([], dtype=int), np.array([], dtype=int), 0)[0] == 0
+        # A triangle of fixtures (any round robin has one): one free scale.
+        count, labels = scale_components(np.array([0, 1, 2]), np.array([1, 2, 0]), 3)
+        assert count == 1 and len(set(labels.tolist())) == 1
+        # Two teams that only play each other carry TWO free scales (A's
+        # attack with B's defense, B's attack with A's defense), so three such
+        # pairs plus a team with no fixture are 3 x 2 + 1 = 7.
+        count, labels = scale_components(np.array([0, 2, 4]), np.array([1, 3, 5]), 7)
+        assert count == 7 and len(set(labels.tolist())) == 7
+        # Two triangles that never meet: one scale each, labelled per triangle.
+        count, labels = scale_components(np.array([0, 1, 2, 3, 4, 5]), np.array([1, 2, 0, 4, 5, 3]), 6)
+        assert count == 2 and labels[0] == labels[1] == labels[2] != labels[3] == labels[4] == labels[5]
+        assert scale_components(np.array([], dtype=int), np.array([], dtype=int), 0)[0] == 0
+
+    def test_a_two_colourable_schedule_has_two_scales_and_the_per_component_gauge_pins_both(self):
+        """Eight teams, home i always meets away i+3 (mod 8): ONE connected
+        group of teams, but the fixtures form an even cycle, so attack and
+        defense split into two groups that never touch. Counting the team
+        graph (one component) left a scale free and the fit cycling."""
+        from predictors.poisson_models import scale_components
+
+        rng = np.random.default_rng(36)
+        home = np.tile(np.arange(8), 80)
+        away = (home + 3) % 8
+        df = pd.DataFrame(
+            {
+                "match_date": pd.date_range("2020-01-01", periods=len(home), freq="D"),
+                "league_id": "CYC",
+                "home_team": [f"C{i}" for i in home],
+                "away_team": [f"C{i}" for i in away],
+                "home_score": rng.poisson(1.6, len(home)).astype(float),
+                "away_score": rng.poisson(1.1, len(home)).astype(float),
+            }
+        )
+        assert scale_components(home, away, 8)[0] == 2
+        glob = PoissonMatchPredictor(make_config(**POISSON_LIKE)).train(df)["fit_diagnostics"]
+        assert glob["converged"] is False and glob["period_two_oscillation"] is True
+        assert glob["connected_components"] == 2
+        comp = PoissonMatchPredictor(make_config(gauge="per_component", **POISSON_LIKE)).train(df)
+        assert comp["converged"] is True and comp["fit_diagnostics"]["connected_components"] == 2
 
     def test_disconnected_leagues_never_converge_under_the_global_gauge(self, caplog):
         """The defect: the global normalisation fixes one scale of two, and
@@ -511,7 +546,7 @@ class TestConvergenceDiagnostics:
         fit = per_league_fitted_vs_observed(model, df)
         assert abs(fit["LOW"][0] / fit["LOW"][1] - 1.0) > 0.2
         message = " ".join(r.getMessage() for r in caplog.records if r.levelname == "WARNING")
-        assert "did not converge" in message and "2-cycle" in message and "2 connected component" in message
+        assert "did not converge" in message and "2-cycle" in message and "2 free scale" in message
 
     def test_the_per_component_gauge_converges_to_each_leagues_level(self):
         df = two_disconnected_leagues()
