@@ -212,6 +212,13 @@ RE-GATE — PRE-REGISTERED 2026-11-01, committed before any re-gate run (--regat
                 regular season ends short of 1,000 scored games, the decision
                 waits for the next regular season's games; the rule does not
                 change.
+  Sample        EXACTLY the first 1,000 scorable games by (kickoff, match_id)
+                (decision_sample; amended after review, 2026-11-01, before
+                any game of the window was played): games after the 1,000th
+                are never scored by the re-gate and --end cannot extend the
+                set, so a read at 1,100 or 1,300 games scores the same 1,000
+                and nobody can stop at the first SHIP. --served-sha256 is
+                refused unless it is SERVED_SHA256.
   Units, primary, statistics: as the gate above (regulation_1x2 primary,
                 ab_nhl_dixon_coles.UNITS graded by grading_outcomes, paired
                 per-game deltas with fold-clustered SE and t(n_folds-1)
@@ -236,7 +243,13 @@ RE-GATE — PRE-REGISTERED 2026-11-01, committed before any re-gate run (--regat
   (none after 2026-11-01 had been played), counts only. The 2026-11-01
   gate's own path ran the same way (--mechanics --limit 60: 480 games, 8
   folds, 12 fits, counts only). No delta of either was computed for output.
-  Usage once the n is reached (api container):
+  The review amendment (the pinned first-1,000 sample, the pinned incumbent)
+  re-ran both smokes on a rebuilt replica of the same export: 0 scorable
+  games for the re-gate, 480 games / 8 folds / 12 fits for the 2026-11-01
+  gate, counts only.
+  Usage once the n is reached (api container; copy the JSON out before
+  deleting it — main() writes it before printing so a formatting bug cannot
+  lose the run):
     python /app/scripts/ab_nhl_regulation_ties.py --regate --out-json /tmp/ab_nhl_regate.json
 
 Per-game output for an independent recomputation: --out-rows (CSV: per arm
@@ -460,13 +473,38 @@ def decidable(n_scored: int, mode: GateMode) -> Tuple[bool, str]:
 
 
 def mode_for(args: argparse.Namespace) -> Tuple[GateMode, str]:
-    """(mode, window start). The re-gate's window is pinned: any other
-    --start is refused."""
+    """(mode, window start). The re-gate's window and incumbent are pinned:
+    any other --start, or any --served-sha256 but SERVED_SHA256, is refused
+    (a new incumbent means a new pre-registration, not a flag)."""
     if getattr(args, "regate", False):
         if args.start is not None and args.start != REGATE.start:
             raise RuntimeError(f"the re-gate window is pinned to {REGATE.start}; --start {args.start} refused")
+        sha = getattr(args, "served_sha256", SERVED_SHA256)
+        if sha != SERVED_SHA256:
+            raise RuntimeError(
+                f"the re-gate is pinned to the incumbent dixon_coles_nhl sha256 {SERVED_SHA256[:12]}; --served-sha256 "
+                f"{str(sha)[:12]} refused — re-register the re-gate against a new incumbent"
+            )
         return REGATE, REGATE.start
     return GATE_2026_11_01, args.start or GATE_2026_11_01.start
+
+
+def decision_sample(frame: pd.DataFrame, mode: GateMode, end: str) -> Tuple[Optional[set], str]:
+    """(the match ids the mode may score, the last day to fold). For a mode
+    with min_games: the scorable games kicking off by `end`, and once there
+    are at least min_games of them, EXACTLY the first min_games by (kickoff,
+    match_id), with `end` clipped to the last one's day — so every read after
+    the 1,000th game scores the same 1,000 games (no optional stopping)."""
+    if not mode.min_games:
+        return None, end
+    md = pd.to_datetime(frame["match_date"], utc=True)
+    keep = scorable(frame, mode) & (md < pd.Timestamp(end, tz="UTC") + pd.Timedelta(days=1)).to_numpy()
+    cand = frame.loc[keep, ["match_id", "match_date"]].assign(match_date=md[keep])
+    cand = cand.sort_values(["match_date", "match_id"], kind="stable")
+    if len(cand) >= mode.min_games:
+        cand = cand.head(mode.min_games)
+        end = cand["match_date"].max().strftime("%Y-%m-%d")
+    return set(cand["match_id"].astype(str)), end
 
 
 def load_season_tags(database_url: str) -> pd.DataFrame:
@@ -550,11 +588,14 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         frame = frame.drop_duplicates("match_id", keep="first").reset_index(drop=True)
     frame["season"] = [nhl.season_of(t) for t in frame["match_date"]]
     end = args.end or frame["match_date"].max().strftime("%Y-%m-%d")
+    sample, end = decision_sample(frame, mode, end)
     limit = int(getattr(args, "limit", 0) or 0)
 
     def fold_rows(fold: Any) -> Tuple[pd.DataFrame, pd.DataFrame]:
         fit_df, ev = ft.split_fold(frame, fold)
         ev = ev[scorable(ev, mode)]
+        if sample is not None:
+            ev = ev[ev["match_id"].astype(str).isin(sample)]
         if limit:
             ev = ev.head(limit)
         check_scored(ev, mode)
@@ -585,9 +626,15 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
 
     served_fp = ht.fingerprint(args.served_artifact)
     if served_fp["sha256"] != args.served_sha256:
+        hint = (
+            "production's file is no longer the pinned incumbent: re-register the re-gate (or point "
+            "--served-artifact at a byte-identical backup of the incumbent)"
+            if mode.min_games
+            else "point --served-artifact at the incumbent (or its backup)"
+        )
         raise RuntimeError(
             f"served artifact {args.served_artifact} has sha256 {served_fp['sha256'][:12]}, not the incumbent "
-            f"{args.served_sha256[:12]} — point --served-artifact at the incumbent (or its backup)"
+            f"{args.served_sha256[:12]} — {hint}"
         )
     ppn = serve_module()
     served = ppn._load_hockey_dixon_coles_artifact(args.served_artifact, "served")

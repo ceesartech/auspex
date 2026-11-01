@@ -441,6 +441,40 @@ class TestRegateRules:
         args = gate.parse_args(["--database-url", "x"])
         assert gate.mode_for(args) == (gate.GATE_2026_11_01, gate.DEFAULT_START)
 
+    def test_the_incumbent_is_pinned(self):
+        other = "ab" * 32
+        args = gate.parse_args(["--regate", "--served-sha256", other, "--database-url", "x"])
+        with pytest.raises(RuntimeError, match="re-register"):
+            gate.mode_for(args)
+        args = gate.parse_args(["--regate", "--served-sha256", gate.SERVED_SHA256, "--database-url", "x"])
+        assert gate.mode_for(args)[0] is gate.REGATE
+        # The 2026-11-01 gate keeps its override (its recorded run is unchanged).
+        assert (
+            gate.mode_for(gate.parse_args(["--served-sha256", other, "--database-url", "x"]))[0] is gate.GATE_2026_11_01
+        )
+
+    def test_the_decision_sample_is_the_first_n_by_kickoff(self):
+        md = pd.to_datetime(
+            ["2026-11-01T23:00Z", "2026-11-03T00:00Z", "2026-11-02T01:00Z", "2026-11-02T01:00Z", "2026-11-04T00:00Z"]
+        )
+        frame = pd.DataFrame(
+            {
+                "match_id": ["m0", "m3", "m2", "m1", "m4"],
+                "match_date": md,
+                "season_type": ["regular", "regular", "regular", "regular", "postseason"],
+                "game_type": [None] * 5,
+            }
+        )
+        mode = dataclasses.replace(gate.REGATE, min_games=2)
+        # m1 and m2 tie on kickoff and are taken by match_id; m0 is before the cutoff, m4 postseason.
+        assert gate.decision_sample(frame, mode, "2026-12-31") == ({"m1", "m2"}, "2026-11-02")
+        assert gate.decision_sample(frame, dataclasses.replace(mode, min_games=5), "2026-12-31") == (
+            {"m1", "m2", "m3"},
+            "2026-12-31",
+        )
+        assert gate.decision_sample(frame, mode, "2026-11-01") == (set(), "2026-11-01")
+        assert gate.decision_sample(frame, gate.GATE_2026_11_01, "2026-12-31") == (None, "2026-12-31")
+
     def test_games_on_or_before_2026_11_01_are_never_scorable(self):
         ev = pd.DataFrame(
             {
@@ -466,6 +500,19 @@ class TestRegateRules:
         assert gate.decidable(1, gate.GATE_2026_11_01) == (True, "")
 
 
+def sys_argv_without_out_rows(args) -> list:
+    """The argv of a re-gate run, rebuilt from its parsed args, minus the output files."""
+    return [
+        "--regate",
+        "--served-artifact",
+        args.served_artifact,
+        "--served-sha256",
+        args.served_sha256,
+        "--database-url",
+        args.database_url,
+    ]
+
+
 class TestRegateRun:
     @staticmethod
     def _setup(monkeypatch, tmp_path, extra=()):
@@ -488,6 +535,7 @@ class TestRegateRun:
         path = tmp_path / "served.bin"
         served.save(str(path))
         sha = gate.ht.fingerprint(str(path))["sha256"]
+        monkeypatch.setattr(gate, "SERVED_SHA256", sha)  # the synthetic incumbent stands in for the pinned one
         argv = ["--regate", "--served-artifact", str(path), "--served-sha256", sha, "--database-url", "x", *extra]
         scorable = (md >= "2026-11-02") & ~post
         return gate.parse_args(argv), frame, int(scorable.sum())
@@ -509,27 +557,45 @@ class TestRegateRun:
         assert "COUNTS ONLY" in text and "NO DECISION (reg_diag)" in text
         json.dumps(gate.ht.clean_json(r), allow_nan=False)
 
-    def test_at_the_n_reg_diag_decides_on_regular_season_games_after_the_cutoff(self, monkeypatch, tmp_path):
+    def test_at_the_n_reg_diag_decides_on_exactly_the_first_n_games(self, monkeypatch, tmp_path):
         args, frame, n = self._setup(monkeypatch, tmp_path, extra=["--out-rows", str(tmp_path / "rows.csv")])
-        monkeypatch.setattr(gate, "REGATE", dataclasses.replace(gate.REGATE, min_games=100))
+        monkeypatch.setattr(gate, "REGATE", dataclasses.replace(gate.REGATE, min_games=150))
+        assert n > 150
         r = gate.run(args)
         assert not r.get("counts_only")
-        assert r["n_eval"] == n and r["folds"] == ["2026-11", "2026-12"]
+        assert r["n_eval"] == 150 and r["folds"][0] == "2026-11"
         assert r["decision"]["arm"] == "reg_diag"
         assert set(r["verdicts_vs_served"]) == {"refit_frozen", "reg_diag", "reg_diag_frozen"}
         rows = pd.read_csv(tmp_path / "rows.csv")
         assert (pd.to_datetime(rows["match_date"], utc=True) >= pd.Timestamp("2026-11-02T00:00:00Z")).all()
-        post_ids = set(frame["match_id"]) - set(rows["match_id"])
-        assert post_ids  # the postseason and pre-cutoff games are excluded
-        assert sum(1 for f in r["fits"] if f["arm"] == "reg_diag") == 2  # refitted monthly
+        tags = gate.load_season_tags("x").set_index("match_id")
+        md = pd.to_datetime(frame["match_date"], utc=True)
+        ok = (md >= "2026-11-02") & (tags.loc[frame["match_id"], "season_type"].to_numpy() == "regular")
+        first = frame.loc[ok].assign(md=md[ok]).sort_values(["md", "match_id"]).head(150)["match_id"]
+        assert set(rows["match_id"]) == set(first)  # the first 150 regular-season games by kickoff, nothing later
+        assert sum(1 for f in r["fits"] if f["arm"] == "reg_diag") == len(r["folds"])  # refitted monthly
         assert "DECISION (pre-registered: reg_diag must pass" in gate.format_report(r)
+        # A later read (more games played, a later --end) scores the same sample and reaches the same verdict.
+        later = gate.run(gate.parse_args([*sys_argv_without_out_rows(args), "--end", "2026-12-31"]))
+        assert later["n_eval"] == 150 and later["vs_served"] == r["vs_served"] and later["decision"] == r["decision"]
 
     def test_mechanics_never_reads_a_delta_and_limit_caps_the_folds(self, monkeypatch, tmp_path):
         args, _, n = self._setup(monkeypatch, tmp_path, extra=["--mechanics", "--limit", "60"])
-        monkeypatch.setattr(gate, "REGATE", dataclasses.replace(gate.REGATE, min_games=100))
+        assert n < 300  # the sample cap does not bind: --limit alone caps each fold
+        monkeypatch.setattr(gate, "REGATE", dataclasses.replace(gate.REGATE, min_games=300))
         r = gate.run(args)
         assert r["counts_only"] and r["n_eval"] == 120 and r["folds"] == ["2026-11", "2026-12"]
         assert r["decision"]["reason"] == "mechanics run: no delta read"
+
+    def test_a_changed_incumbent_file_is_refused_with_re_registration(self, monkeypatch, tmp_path):
+        args, _, _ = self._setup(monkeypatch, tmp_path)
+        monkeypatch.setattr(gate, "REGATE", dataclasses.replace(gate.REGATE, min_games=100))
+        path = tmp_path / "served.bin"
+        art = json.loads(path.read_text())
+        art["retrained_at"] = "2027-01-04T04:00:00Z"  # a weekly retrain replaced production's file
+        path.write_text(json.dumps(art))
+        with pytest.raises(RuntimeError, match="re-register"):
+            gate.run(args)
 
     def test_no_scorable_game_yet(self, monkeypatch, tmp_path):
         args, _, _ = self._setup(monkeypatch, tmp_path, extra=["--end", "2026-11-01"])
