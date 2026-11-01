@@ -535,6 +535,54 @@ class TestPredictionService:
         assert predicate in sql and sql.index(predicate) < sql.index("ORDER BY p.prediction_type")
         assert params == {"match_id": params["match_id"], "hidden_pairs": HIDDEN_PREDICTION_PAIRS}
 
+    def test_stored_prediction_fallback_returns_the_headline_market_only(self, mock_db, mock_row, mock_settings):
+        """predict_match's DB fallback (no model produced the headline) used
+        to return the newest row of ANY market and type; precompute writes a
+        match's markets in one transaction (one created_at), so an NHL match
+        could answer for its moneyline with a dixon_coles_nhl correct_score
+        row. It now asks for the headline task's prediction_type (or the
+        pinned market's) and never returns a hidden pair."""
+        from services.prediction_service import HIDDEN_PREDICTION_PAIRS, PredictionService
+
+        predicate = "NOT ((p.model_name || ':' || p.prediction_type) = ANY(:hidden_pairs))"
+        stored = mock_row(predicted_outcome="home", confidence=0.58, probabilities={"home": 0.58, "away": 0.42})
+
+        def fallback_call(sport, **kwargs):
+            match = mock_row(
+                id=uuid.uuid4(),
+                league_name="NHL",
+                sport=sport,
+                home_team="Boston Bruins",
+                away_team="Montreal Canadiens",
+                match_date=datetime(2026, 11, 3, 0, 0),
+                venue=None,
+            )
+            calls = []
+
+            def side_effect(query, params=None):
+                calls.append((str(query), params))
+                result = MagicMock()
+                result.fetchone.return_value = {1: match, 2: mock_row(features={})}.get(len(calls), stored)
+                return result
+
+            mock_db.execute.side_effect = side_effect
+            # No model loaded: every task is skipped and the fallback answers.
+            response = PredictionService(mock_db, models={}).predict_match(match_id=str(match.id), **kwargs)
+            assert response.predicted_outcome == "home" and len(calls) == 3
+            return calls[-1]
+
+        for sport, kwargs, prediction_type in (
+            ("nhl", {}, "moneyline"),
+            ("nhl", {"market": "total"}, "total"),
+            ("soccer", {}, "match_result"),
+            ("lottery", {}, None),  # no TaskSpec: any market, still never a hidden pair
+        ):
+            sql, params = fallback_call(sport, **kwargs)
+            assert "(:prediction_type IS NULL OR p.prediction_type = :prediction_type)" in sql, sport
+            assert predicate in sql and sql.index(predicate) < sql.index("ORDER BY p.created_at DESC LIMIT 1")
+            assert params["prediction_type"] == prediction_type, (sport, kwargs)
+            assert params["hidden_pairs"] == HIDDEN_PREDICTION_PAIRS
+
     def test_maybe_enqueue_alert_below_threshold_is_noop(self, mock_db, mock_settings):
         """Low-confidence picks must NOT enqueue — otherwise the digest
         fills with junk and the user loses trust in the alerts."""

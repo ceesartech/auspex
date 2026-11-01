@@ -857,7 +857,7 @@ class PredictionService:
             # Final fallback: stored prediction from DB so the request
             # still returns something usable while we wait for models
             # to populate.
-            headline_prediction = self._get_stored_prediction(match_id)
+            headline_prediction = self._get_stored_prediction(match_id, headline_task.prediction_type)
             if not headline_prediction:
                 raise ValueError(f"No prediction available for match {match_id}")
 
@@ -1265,20 +1265,33 @@ class PredictionService:
             return result.features
         return {}
 
-    def _get_stored_prediction(self, match_id: str) -> Optional[Dict]:
-        """Get existing prediction from database"""
+    def _get_stored_prediction(self, match_id: str, prediction_type: Optional[str] = None) -> Optional[Dict]:
+        """The newest stored prediction for a match — predict_match's fallback
+        when no model produced the headline. With ``prediction_type`` (the
+        headline task's), only that market: without it the newest row of ANY
+        market won, and precompute writes all of a match's markets in one
+        transaction (one created_at), so an NHL fallback could return e.g. a
+        dixon_coles_nhl correct_score row as the moneyline. Not model_name:
+        the headline row's writer varies (soccer precompute stores model
+        'ensemble', predict_match the task's ensemble_name). HIDDEN pairs
+        are never returned, as on every display query."""
 
         query = text(
-            """
-            SELECT predicted_outcome, confidence, probabilities
-            FROM predictions
-            WHERE match_id = :match_id
-            ORDER BY created_at DESC LIMIT 1
+            f"""
+            SELECT p.predicted_outcome, p.confidence, p.probabilities
+            FROM predictions p
+            WHERE p.match_id = :match_id
+            AND (:prediction_type IS NULL OR p.prediction_type = :prediction_type)
+            AND {_NOT_HIDDEN_SQL}
+            ORDER BY p.created_at DESC LIMIT 1
         """
         )
 
         db = self._require_db()
-        result = db.execute(query, {"match_id": match_id}).fetchone()
+        result = db.execute(
+            query,
+            {"match_id": match_id, "prediction_type": prediction_type, "hidden_pairs": HIDDEN_PREDICTION_PAIRS},
+        ).fetchone()
         if result:
             return {
                 "predicted_label": result.predicted_outcome,
