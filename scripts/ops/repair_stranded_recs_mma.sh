@@ -2,7 +2,8 @@
 # NOT YET APPROVED — run only on explicit operator approval (CLAUDE.md: data
 # repairs need a verified backup first, which step 1 takes).
 # Close out the 21 pending UFC recommendations stranded on 21 bouts still
-# 'scheduled' (kickoffs 2026-06-06 .. 2026-07-19), then retire the stale UFC
+# 'scheduled' (kickoffs 2026-06-06 .. 2026-07-19) — the default run, A — and,
+# in a SEPARATE opt-in run (--retire-stale-rows, B), retire the stale UFC
 # fixture rows.
 #
 # WHY THEY STRANDED (prod 2026-11-01, read only):
@@ -27,7 +28,8 @@
 # Reviewed plan — a local replica of the 2026-11-01T02:42:11Z read-only
 # export of every UFC match, rec, prediction, odds row and snapshot, with
 # this commit's code and ESPN live:
-#   A. scripts/backfill_results.py --sport mma --dates $DATES, one transaction:
+#   A. (default) scripts/backfill_results.py --sport mma --dates $DATES, one
+#      REPEATABLE READ transaction:
 #        PLAN results=56 flipped=44 inserted=0 cancelled=3 stamped=12 rescored=0 other=0
 #             recs_settled=20 recs_voided=1 recs_other=0 recs_left=0 fetch_failed=0 identity_refused=0
 #      44 June rows take ESPN's result (the 20 with recs among them); 3 rows
@@ -37,9 +39,13 @@
 #      settle 20 recs 6W/14L (stake 1,308.51, net -100.80) and void Holland
 #      v Smith ('void: match cancelled'). Each rec's outcome is pinned in
 #      scripts/data/mma_stranded_recs_20261101.csv (bout, ESPN competition,
-#      winner, selection, odds, stake, P&L); the dry run's audit CSV must
-#      carry exactly those outcomes before anything commits. A re-run plans 0.
-#   B. scripts/repair_fixture_orphans.py --sport mma --as-of $AS_OF, after A:
+#      winner, selection, odds, stake, P&L); the apply commits only with
+#      exactly those outcomes (--expect-recs, checked inside the transaction),
+#      and the dry run's audit CSV is checked against them too. A re-run
+#      plans the done plan (DONE_A): results=56 and 0 for every other key.
+#   B. (--retire-stale-rows, only once A is done and verified; a decision of
+#      its own, see below) scripts/repair_fixture_orphans.py --sport mma
+#      --as-of $AS_OF:
 #        PLAN merge_delete=31 merge_cancel=0 delete_no_twin=42 delete_placeholder=4 mark_postponed=0
 #             left=7 blocked_pending_recs=0 list_mismatch=0
 #      31 duplicates merged onto 28 finished twins (strictly pre-game odds,
@@ -50,49 +56,73 @@
 #      rows; 7 left because a rec references them (Holland v Smith's voided
 #      rec, and 6 rows holding the prediction of a rec settled on a twin).
 #      --as-of is fixed, so rows that go stale later never enter this plan.
-# Steps:
-#   0. already done? A dry run of each (A writes inside a transaction it
-#      always rolls back; B only reads): when A plans no write and B plans no
-#      write, this exits 0 without a backup (a re-run after success);
+#      B is opt-in because 9 of its 42 no-twin deletes are bouts that WERE
+#      fought, stored under a second fighter spelling or the other order:
+#      their pre-game odds and predictions go with them (archived first; the
+#      finished row of each bout stays). An MMA fighter-alias merge first
+#      would keep them, and changes B's plan (its pins then refuse). The 21
+#      recs are closed out by A alone.
+# Steps (A: 0-4 and 8; B: 0, 1, 5-8):
+#   0. already done? A's dry run (it writes inside a transaction it always
+#      rolls back) must plan exactly the reviewed plan (not done) or exactly
+#      the done plan above — anything else (ESPN not serving, a partial
+#      plan, other code) aborts before the backup. A done plan is not taken
+#      on trust: the 21 recs must carry their reviewed outcomes in the
+#      database, no UFC rec may be stranded, and the UFC recs created before
+#      AS_OF must all be there — else abort ("A committed but not verified":
+#      a run whose step 4 failed, or that died after its apply committed).
+#      Default run, A done and verified: ALREADY DONE, exit 0 (no backup).
+#      --retire-stale-rows: A must be done and verified; B's dry run (read
+#      only) must plan exactly the reviewed plan or exactly its done plan
+#      (0 writes, left=7, with 7 stale UFC rows and the 49 UFC recs in the
+#      database: ALREADY DONE, exit 0, no backup); anything else aborts;
 #   1. verified backup (B2) — abort if it does not land;
 #   2. T0 = now; before-state + A's dry run (write-once audit CSV) — abort
 #      unless the 21 reviewed recs are all still pending, the plan is exactly
-#      the reviewed one, and the audit CSV's rec outcomes are exactly the
-#      reviewed ones;
-#   3. A's apply, pinned to every key (--expect-plan); any drift rolls back;
+#      the reviewed one, and the rec outcomes are exactly the reviewed ones;
+#   3. A's apply, pinned to every key (--expect-plan) and to every rec's
+#      outcome (--expect-recs); any drift rolls back;
 #   4. A's after-state, EXACT: the 21 recs carry the reviewed status, P&L and
 #      actual_result on a finished (settled) or cancelled (void) row; no
 #      pending UFC rec is left on a stale row; the UFC recs created before T0
-#      are all still there; a fresh dry run plans 0 writes;
+#      are all still there; a fresh dry run plans exactly the done plan;
 #   5. B's before-state + dry run — abort unless the plan is exactly the
 #      reviewed one (every key, left and blocked included);
 #   6. B's apply, pinned (--expect-plan); the archive lands before the
 #      first write;
 #   7. B's after-state: the stale UFC rows (as of AS_OF) fell by exactly
 #      merge_delete + delete_no_twin + delete_placeholder; the UFC recs are
-#      all still there; a fresh dry run plans 0 writes;
+#      all still there; a fresh dry run plans exactly B's done plan (DONE_B);
 #   8. follow-ups (derived data only): compute_features_mma --all-finished
-#      --force (44 new results change fighter histories; twins received
+#      --force (A: 44 new results change fighter histories; B: twins received
 #      prices), then grade the ungraded predictions of finished UFC rows
-#      (those moved onto twins). A failure exits 2; re-run them with
+#      (B: those moved onto twins). A failure exits 2; re-run them with
 #        bash /opt/auspex/scripts/ops/repair_stranded_recs_mma.sh --followups-only
-# When A is already done (a run that stopped after step 4), steps 2-4 are
-# skipped and B runs. Each tool step writes its output to a log file inside
-# the api container and exits with the tool's own status.
+#      (a run that died before them prints ALREADY DONE on a re-run: run
+#      --followups-only then).
+# Each tool step writes its output to a log file inside the api container and
+# exits with the tool's own status.
 # Exit: 0 done (or already done); 1 aborted or an after-state failed; 2 the
 # repair is verified but a follow-up failed.
+# WHEN: not while a UFC card is being fought (Saturday evening US time): the
+# 15-min sweep then writes UFC rows. A's transaction is REPEATABLE READ, so a
+# clash fails the run with a serialization error and nothing written — safe,
+# but a wasted backup.
 # Needs this commit on the VM (scripts/ is bind-mounted: a git pull is
 # enough; the plan pins cancelled=3, which only this commit's fetch_upcoming
-# produces, so older code aborts at step 2).
+# produces, so older code aborts at step 0, before the backup).
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/repair_stranded_recs_mma.sh 2>&1 | tee -a ~/repair_stranded_recs_mma.log
+# and B, once decided:
+#   bash /opt/auspex/scripts/ops/repair_stranded_recs_mma.sh --retire-stale-rows 2>&1 | tee -a ~/repair_stranded_recs_mma.log
 # (AUSPEX_DIR and TMPDIR exist for tests and rehearsals.)
 set -uo pipefail
-FOLLOWUPS_ONLY=""
+MODE=a
 case "${1:-}" in
   "") ;;
-  --followups-only) FOLLOWUPS_ONLY=1 ;;
-  *) echo "usage: $0 [--followups-only]   (see the header)"; exit 2 ;;
+  --retire-stale-rows) MODE=b ;;
+  --followups-only) MODE=followups ;;
+  *) echo "usage: $0 [--retire-stale-rows | --followups-only]   (see the header)"; exit 2 ;;
 esac
 cd "${AUSPEX_DIR:-/opt/auspex}" || { echo "ABORT: cannot cd to ${AUSPEX_DIR:-/opt/auspex} — nothing changed"; exit 1; }
 DC="docker compose"
@@ -115,15 +145,6 @@ plan_num() {  # plan_num <PLAN line> <key>: the count, or "missing"
   v=$(echo "$1" | grep -o " $2=[0-9]*" | cut -d= -f2)
   if [[ "$v" =~ ^[0-9]+$ ]]; then echo "$v"; else echo missing; fi
 }
-sum_keys() {  # sum_keys <PLAN line> <key>...: the sum, or "missing"
-  local line="$1" n=0 k v
-  shift
-  for k in "$@"; do
-    v=$(plan_num "$line" "$k"); [ "$v" = missing ] && { echo missing; return; }
-    n=$((n + v))
-  done
-  echo "$n"
-}
 same_plan() {  # same_plan <PLAN line> <reviewed 'k=v ...'>: every reviewed key has exactly its count
   local k
   for k in $2; do
@@ -137,9 +158,14 @@ REVIEWED=scripts/data/mma_stranded_recs_20261101.csv  # host path; /app/$REVIEWE
 TOOL_A="python /app/scripts/backfill_results.py --sport mma --dates $DATES"
 TOOL_B="python /app/scripts/repair_fixture_orphans.py --sport mma --as-of $AS_OF"
 PLAN_A="results=56 flipped=44 inserted=0 cancelled=3 stamped=12 rescored=0 other=0 recs_settled=20 recs_voided=1 recs_other=0 recs_left=0 fetch_failed=0 identity_refused=0"
+DONE_A="results=56 flipped=0 inserted=0 cancelled=0 stamped=0 rescored=0 other=0 recs_settled=0 recs_voided=0 recs_other=0 recs_left=0 fetch_failed=0 identity_refused=0"
 PLAN_B="merge_delete=31 merge_cancel=0 delete_no_twin=42 delete_placeholder=4 mark_postponed=0 left=7 blocked_pending_recs=0 list_mismatch=0"
-A_WRITES="flipped inserted cancelled stamped rescored other recs_settled recs_voided recs_other"
-B_WRITES="merge_delete merge_cancel delete_no_twin delete_placeholder mark_postponed list_mismatch blocked_pending_recs"
+DONE_B="merge_delete=0 merge_cancel=0 delete_no_twin=0 delete_placeholder=0 mark_postponed=0 left=7 blocked_pending_recs=0 list_mismatch=0"
+# Pinned from the review (prod 2026-11-01, read only): every UFC rec was created before AS_OF (the last one
+# 2026-08-29), and a rec's FKs are NO ACTION, so this count can only fall by a deliberate delete. B leaves the
+# 7 stale rows that hold a rec.
+RECS_BEFORE_AS_OF=49
+STALE_AFTER_B=7
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 APPLY_A_CSV=/app/backups/backfill_results_mma_apply_$STAMP.csv
 APPLY_B_CSV=/app/backups/fixture_orphans_mma_apply_$STAMP.csv
@@ -155,7 +181,7 @@ plan_of() { $DC exec -T api sh -c "grep -oE 'PLAN [a-z_]+=[0-9]+( [a-z_]+=[0-9]+
 run_followups() {
   local rc
   followup_failed=""
-  log "8/8 follow-ups: recompute UFC features (every finished fight), then grade the moved predictions"
+  log "8/8 follow-ups: recompute UFC features (every finished fight), then grade the ungraded predictions of finished UFC rows"
   $DC exec -T api sh -c "python /app/scripts/compute_features_mma.py --all-finished --force > /tmp/stranded_mma_features.log 2>&1; rc=\$?; tail -2 /tmp/stranded_mma_features.log; exit \$rc" </dev/null
   rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -195,7 +221,7 @@ PY
   rc=$?
   tail -3 "$W/grade.log"
   if [ "$rc" -ne 0 ]; then
-    log "ERROR step 8: grading the moved predictions exited $rc (see above)"
+    log "ERROR step 8: grading the predictions exited $rc (see above)"
     followup_failed="${followup_failed:+$followup_failed and }the prediction grading"
   fi
 }
@@ -205,7 +231,7 @@ incomplete() {
   exit 2
 }
 
-if [ -n "$FOLLOWUPS_ONLY" ]; then
+if [ "$MODE" = followups ]; then
   run_followups
   [ -z "$followup_failed" ] || incomplete
   log "FOLLOW-UPS DONE"
@@ -222,22 +248,88 @@ fi
 reviewed_values=$(echo "$reviewed" | awk -F'|' '{printf "%s(%s::uuid, %s, %s::numeric, %s)", (NR > 1 ? ", " : ""), "'\''" $1 "'\''", "'\''" $2 "'\''", $3, "'\''" $4 "'\''"}')
 reviewed_ids=$(echo "$reviewed" | awk -F'|' '{printf "%s%s", (NR > 1 ? ", " : ""), "'\''" $1 "'\''::uuid"}')
 
-log "0/8 already done? (dry runs: A rolls back, B only reads)"
+cat > "$W/reviewed.sql" <<SQLEOF
+SELECT count(*) FROM betting_recommendations br JOIN matches m ON m.id = br.match_id
+  JOIN (VALUES $reviewed_values) AS v(rec_id, status, profit_loss, actual_result) ON v.rec_id = br.id
+ WHERE br.status = v.status AND br.profit_loss = v.profit_loss AND br.actual_result = v.actual_result
+   AND br.settled_at IS NOT NULL
+   AND m.status = CASE WHEN v.status = 'void' THEN 'cancelled' ELSE 'finished' END;
+SQLEOF
+cat > "$W/state_done.sql" <<SQLEOF
+SELECT (SELECT count(*) FROM betting_recommendations br JOIN matches m ON m.id = br.match_id
+          JOIN leagues l ON l.id = m.league_id
+         WHERE l.sport = 'mma' AND br.status IN ('pending', 'placed') AND m.status <> 'finished'
+           AND m.match_date < NOW() - interval '24 hours') AS stranded,
+       (SELECT count(*) FROM betting_recommendations br JOIN matches m ON m.id = br.match_id
+          JOIN leagues l ON l.id = m.league_id
+         WHERE l.sport = 'mma' AND br.created_at < TIMESTAMPTZ '$AS_OF') AS recs;
+SQLEOF
+cat > "$W/state_b.sql" <<SQLEOF
+SELECT (SELECT count(*) FROM matches m JOIN leagues l ON l.id = m.league_id
+         WHERE l.sport = 'mma' AND m.status IN ('scheduled', 'cancelled')
+           AND m.match_date < TIMESTAMPTZ '$AS_OF' - interval '96 hours') AS stale,
+       (SELECT count(*) FROM betting_recommendations br JOIN matches m ON m.id = br.match_id
+          JOIN leagues l ON l.id = m.league_id WHERE l.sport = 'mma') AS recs;
+SQLEOF
+read_state() {  # read_state <sql> <n fields>: the '|'-separated numbers, or empty
+  local s
+  s=$(psql_at "$1" | tr -d '[:space:]')
+  if [[ "$s" =~ ^[0-9]+([|][0-9]+){$(($2 - 1))}$ ]]; then echo "$s"; fi
+}
+# A's committed state, read from the database (never inferred from a 0-write plan alone).
+verify_a_done() {
+  local matched state d_stranded="" d_recs=""
+  matched=$(psql_at "$W/reviewed.sql" | tr -d '[:space:]')
+  state=$(read_state "$W/state_done.sql" 2)
+  [ -n "$state" ] && IFS='|' read -r d_stranded d_recs <<< "$state"
+  log "A's committed state: reviewed recs as reviewed ${matched:-?} (expected 21), UFC recs stranded ${d_stranded:-?} (expected 0), UFC recs created before $AS_OF ${d_recs:-?} (expected $RECS_BEFORE_AS_OF)"
+  [ "$matched" = "21" ] && [ "$d_stranded" = "0" ] && [ "$d_recs" = "$RECS_BEFORE_AS_OF" ]
+}
+not_verified() {
+  log "ABORT at step 0: A looks committed ('$preA') but is not verified — a run whose step 4 failed, or one that died after its apply committed. Inspect the earlier run's /app/backups/backfill_results_mma_apply_*.csv and its backfill_results_mma_*.jsonl.gz archive (the reversal record) before anything else; nothing changed (no backup)"
+  exit 1
+}
+
+log "0/8 already done? (A's dry run rolls back$([ "$MODE" = b ] && echo "; B's only reads"))"
 run_tool stranded_mma_a_pre "$TOOL_A --out-csv /app/backups/backfill_results_mma_precheck_$STAMP.csv"
 preA=$(plan_of stranded_mma_a_pre)
-# shellcheck disable=SC2086  # the key lists are word lists
-writesA=$(sum_keys "$preA" $A_WRITES)
-if [ "$writesA" = "0" ]; then
+if same_plan "$preA" "$PLAN_A"; then
+  a_done=""
+elif same_plan "$preA" "$DONE_A"; then
+  a_done=1
+  verify_a_done || not_verified
+else
+  log "ABORT at step 0: A's pre-check plan ('${preA:-unreadable}') is neither the reviewed plan ($PLAN_A) nor the done plan ($DONE_A) — ESPN not serving a day (fetch_failed), code other than this commit, or UFC rows changed since the review; nothing changed (no backup)"
+  exit 1
+fi
+
+if [ "$MODE" = a ] && [ -n "$a_done" ]; then
+  log "ALREADY DONE: A '$preA' — the 21 recs carry their reviewed outcomes; nothing to write (no backup). If an earlier run stopped before its follow-ups, run --followups-only. Retiring the stale UFC rows is the separate --retire-stale-rows run."
+  exit 0
+fi
+if [ "$MODE" = b ]; then
+  if [ -z "$a_done" ]; then
+    log "ABORT at step 0: A is not done ('$preA') — run this wrapper without --retire-stale-rows first; nothing changed (no backup)"
+    exit 1
+  fi
   run_tool stranded_mma_b_pre "$TOOL_B --out-csv /app/backups/fixture_orphans_mma_precheck_$STAMP.csv"
   preB=$(plan_of stranded_mma_b_pre)
-  # shellcheck disable=SC2086
-  if [ "$(sum_keys "$preB" $B_WRITES)" = "0" ]; then
-    log "ALREADY DONE: A '$preA', B '$preB' — nothing to write (no backup)"
+  if same_plan "$preB" "$DONE_B"; then
+    state=$(read_state "$W/state_b.sql" 2)
+    if [ "$state" != "$STALE_AFTER_B|$RECS_BEFORE_AS_OF" ]; then
+      log "ABORT at step 0: B looks done ('$preB') but the database shows stale UFC rows|UFC recs '${state:-unreadable}', not '$STALE_AFTER_B|$RECS_BEFORE_AS_OF' — inspect /app/backups/fixture_orphans_mma_*; nothing changed (no backup)"
+      exit 1
+    fi
+    log "ALREADY DONE: A '$preA', B '$preB' (stale UFC rows|UFC recs $state) — nothing to write (no backup)"
     exit 0
   fi
-  log "A is done ('$preA'); B is not ('${preB:-unreadable}') — continuing with B"
+  if ! same_plan "$preB" "$PLAN_B"; then
+    log "ABORT at step 0: B's pre-check plan ('${preB:-unreadable}') is neither the reviewed plan ($PLAN_B) nor the done plan ($DONE_B) — a part-applied cleanup, a fighter merge since the review, or other code; nothing changed (no backup)"
+    exit 1
+  fi
+  log "A is done and verified; B is not ('$preB') — continuing with B"
 else
-  log "not done yet (A pre-plan '${preA:-unreadable}') — continuing"
+  log "not done yet (A pre-plan '$preA') — continuing"
 fi
 
 log "1/8 backup"
@@ -252,8 +344,9 @@ done
 if [ -z "$landed" ]; then log "ABORT: backup did not land in B2 within 20 min — nothing changed"; exit 1; fi
 log "backup landed: $landed"
 
-T0=$(date -u +%FT%TZ)
-cat > "$W/state_a.sql" <<SQLEOF
+if [ "$MODE" = a ]; then
+  T0=$(date -u +%FT%TZ)
+  cat > "$W/state_a.sql" <<SQLEOF
 SELECT (SELECT count(*) FROM betting_recommendations br JOIN matches m ON m.id = br.match_id
           JOIN leagues l ON l.id = m.league_id
          WHERE l.sport = 'mma' AND br.status IN ('pending', 'placed') AND m.status <> 'finished'
@@ -263,20 +356,6 @@ SELECT (SELECT count(*) FROM betting_recommendations br JOIN matches m ON m.id =
          WHERE l.sport = 'mma' AND br.created_at < TIMESTAMPTZ '$T0') AS recs,
        (SELECT count(*) FROM betting_recommendations WHERE id IN ($reviewed_ids) AND status = 'pending') AS reviewed_pending;
 SQLEOF
-cat > "$W/reviewed.sql" <<SQLEOF
-SELECT count(*) FROM betting_recommendations br JOIN matches m ON m.id = br.match_id
-  JOIN (VALUES $reviewed_values) AS v(rec_id, status, profit_loss, actual_result) ON v.rec_id = br.id
- WHERE br.status = v.status AND br.profit_loss = v.profit_loss AND br.actual_result = v.actual_result
-   AND br.settled_at IS NOT NULL
-   AND m.status = CASE WHEN v.status = 'void' THEN 'cancelled' ELSE 'finished' END;
-SQLEOF
-read_state() {  # read_state <sql> <n fields>: the '|'-separated numbers, or empty
-  local s
-  s=$(psql_at "$1" | tr -d '[:space:]')
-  if [[ "$s" =~ ^[0-9]+([|][0-9]+){$(($2 - 1))}$ ]]; then echo "$s"; fi
-}
-
-if [ "$writesA" != "0" ]; then
   log "2/8 before-state + A's dry run (as of $T0)"
   state=$(read_state "$W/state_a.sql" 3)
   if [ -z "$state" ]; then log "ABORT at step 2: the before-state query failed — nothing changed"; exit 1; fi
@@ -286,11 +365,11 @@ if [ "$writesA" != "0" ]; then
     log "ABORT at step 2: only $pending0 of the 21 reviewed recs are still pending — something settled them since the review; nothing changed"
     exit 1
   fi
-  run_tool stranded_mma_a_dry "$TOOL_A --out-csv /app/backups/backfill_results_mma_dryrun_$STAMP.csv"
+  run_tool stranded_mma_a_dry "$TOOL_A --expect-recs /app/$REVIEWED --out-csv /app/backups/backfill_results_mma_dryrun_$STAMP.csv"
   rc=$?
   plan=$(plan_of stranded_mma_a_dry)
   if [ "$rc" -ne 0 ] || ! same_plan "$plan" "$PLAN_A"; then
-    log "ABORT at step 2: the dry run failed (exit $rc) or its plan ('$plan') is not the reviewed one ($PLAN_A) — review the dry-run CSV; nothing changed"
+    log "ABORT at step 2: the dry run failed (exit $rc: a plan or a rec outcome not as reviewed, see above) or its plan ('$plan') is not the reviewed one ($PLAN_A) — review the dry-run CSV; nothing changed"
     exit 1
   fi
   CHECK_PY="import csv, json, sys
@@ -310,11 +389,11 @@ print('OK %d' % len(got) if not bad else 'MISMATCH ' + ' '.join(sorted(bad)))"
 
   pin=""
   for k in $PLAN_A; do pin="$pin${pin:+,}$k"; done
-  log "3/8 A's apply (pinned: $pin)"
-  run_tool stranded_mma_a_apply "$TOOL_A --apply --expect-plan $pin --out-csv $APPLY_A_CSV"
+  log "3/8 A's apply (pinned: $pin; every rec's outcome pinned to $REVIEWED)"
+  run_tool stranded_mma_a_apply "$TOOL_A --apply --expect-plan $pin --expect-recs /app/$REVIEWED --out-csv $APPLY_A_CSV"
   rc=$?
   if [ "$rc" -ne 0 ]; then
-    log "ABORT at step 3 (exit $rc; full log /tmp/stranded_mma_a_apply.log in the api container): a plan that differs from the reviewed one rolls back — nothing committed unless the log says APPLIED; inspect before re-running"
+    log "ABORT at step 3 (exit $rc; full log /tmp/stranded_mma_a_apply.log in the api container): a plan or a rec outcome that differs from the reviewed one rolls back — nothing committed unless the log says APPLIED; inspect before re-running (a re-run verifies a committed A from the database before anything else)"
     exit 1
   fi
 
@@ -324,32 +403,28 @@ print('OK %d' % len(got) if not bad else 'MISMATCH ' + ' '.join(sorted(bad)))"
   IFS='|' read -r stranded1 recs1 _ <<< "$state"
   run_tool stranded_mma_a_verify "$TOOL_A --out-csv /app/backups/backfill_results_mma_verify_$STAMP.csv"
   replan=$(plan_of stranded_mma_a_verify)
-  log "after: reviewed recs as reviewed $matched (expected 21), UFC recs stranded ${stranded1:-?} (expected 0), UFC recs created before T0 ${recs1:-?} (expected $recs0), re-plan '$replan' (expected 0 writes)"
-  # shellcheck disable=SC2086
-  if [ "$matched" != "21" ] || [ "${stranded1:-}" != "0" ] || [ "${recs1:-}" != "$recs0" ] || [ "$(sum_keys "$replan" $A_WRITES)" != "0" ]; then
-    log "FAILED after-state at step 4 — inspect (the apply CSV $APPLY_A_CSV and its .jsonl.gz archive are the reversal record)"
+  log "after: reviewed recs as reviewed $matched (expected 21), UFC recs stranded ${stranded1:-?} (expected 0), UFC recs created before T0 ${recs1:-?} (expected $recs0), re-plan '$replan' (expected $DONE_A)"
+  if [ "$matched" != "21" ] || [ "${stranded1:-}" != "0" ] || [ "${recs1:-}" != "$recs0" ] || ! same_plan "$replan" "$DONE_A"; then
+    log "FAILED after-state at step 4 — inspect (the apply CSV $APPLY_A_CSV and its .jsonl.gz archive are the reversal record); a re-run checks A's committed state in the database first and refuses unless it is the reviewed one"
     exit 1
   fi
   log "A done: 20 recs settled (6W/14L), 1 voided (Holland v Smith), no UFC rec stranded"
+  run_followups
+  [ -z "$followup_failed" ] || incomplete
+  log "DONE: the 21 stranded UFC recs are closed out. Retiring the stale UFC rows is the separate --retire-stale-rows run (see the header)."
+  exit 0
 fi
 
-cat > "$W/state_b.sql" <<SQLEOF
-SELECT (SELECT count(*) FROM matches m JOIN leagues l ON l.id = m.league_id
-         WHERE l.sport = 'mma' AND m.status IN ('scheduled', 'cancelled')
-           AND m.match_date < TIMESTAMPTZ '$AS_OF' - interval '96 hours') AS stale,
-       (SELECT count(*) FROM betting_recommendations br JOIN matches m ON m.id = br.match_id
-          JOIN leagues l ON l.id = m.league_id WHERE l.sport = 'mma') AS recs;
-SQLEOF
 log "5/8 B's before-state + dry run (as of $AS_OF)"
 state=$(read_state "$W/state_b.sql" 2)
-if [ -z "$state" ]; then log "ABORT at step 5: the before-state query failed — nothing changed in this step"; exit 1; fi
+if [ -z "$state" ]; then log "ABORT at step 5: the before-state query failed — nothing changed"; exit 1; fi
 IFS='|' read -r stale0 recsb0 <<< "$state"
 log "before: stale UFC rows (as of $AS_OF)=$stale0, UFC recs=$recsb0"
 run_tool stranded_mma_b_dry "$TOOL_B --out-csv /app/backups/fixture_orphans_mma_dryrun_$STAMP.csv"
 rc=$?
 plan=$(plan_of stranded_mma_b_dry)
 if [ "$rc" -ne 0 ] || ! same_plan "$plan" "$PLAN_B"; then
-  log "ABORT at step 5: the dry run failed (exit $rc) or its plan ('$plan') is not the reviewed one ($PLAN_B) — review the dry-run CSV; nothing changed in this step"
+  log "ABORT at step 5: the dry run failed (exit $rc) or its plan ('$plan') is not the reviewed one ($PLAN_B) — review the dry-run CSV; nothing changed"
   exit 1
 fi
 md=$(plan_num "$plan" merge_delete); dn=$(plan_num "$plan" delete_no_twin); dp=$(plan_num "$plan" delete_placeholder)
@@ -359,7 +434,7 @@ log "6/8 B's apply (pinned to the dry run's counts, as of $AS_OF)"
 run_tool stranded_mma_b_apply "$TOOL_B --apply --expect-plan merge_delete=$md,merge_cancel=0,delete_no_twin=$dn,delete_placeholder=$dp,mark_postponed=0 --out-csv $APPLY_B_CSV"
 rc=$?
 if [ "$rc" -ne 0 ]; then
-  log "ABORT at step 6 (exit $rc; full log /tmp/stranded_mma_b_apply.log in the api container): if it refused before 'archived', nothing changed in this step; otherwise the committed batches stand and the archive holds every planned row — inspect before re-running"
+  log "ABORT at step 6 (exit $rc; full log /tmp/stranded_mma_b_apply.log in the api container): if it refused before 'archived', nothing changed; otherwise the committed batches stand and the archive holds every planned row — inspect before re-running"
   exit 1
 fi
 
@@ -369,13 +444,12 @@ IFS='|' read -r stale1 recsb1 <<< "$state"
 run_tool stranded_mma_b_verify "$TOOL_B --out-csv /app/backups/fixture_orphans_mma_verify_$STAMP.csv"
 replan=$(plan_of stranded_mma_b_verify)
 want_stale=$((stale0 - md - dn - dp))
-log "after: stale UFC rows ${stale1:-?} (expected $want_stale), UFC recs ${recsb1:-?} (expected $recsb0), re-plan '$replan' (expected 0 writes)"
-# shellcheck disable=SC2086
-if [ "${stale1:-}" != "$want_stale" ] || [ "${recsb1:-}" != "$recsb0" ] || [ "$(sum_keys "$replan" $B_WRITES)" != "0" ]; then
-  log "FAILED after-state at step 7 — inspect (the archive and audit CSVs are in /app/backups)"
+log "after: stale UFC rows ${stale1:-?} (expected $want_stale), UFC recs ${recsb1:-?} (expected $recsb0), re-plan '$replan' (expected $DONE_B)"
+if [ "${stale1:-}" != "$want_stale" ] || [ "${recsb1:-}" != "$recsb0" ] || ! same_plan "$replan" "$DONE_B"; then
+  log "FAILED after-state at step 7 — inspect (the archive and audit CSVs are in /app/backups); a re-run refuses unless B's dry run plans exactly its done plan with 7 stale UFC rows and the 49 UFC recs in the database"
   exit 1
 fi
 
 run_followups
 [ -z "$followup_failed" ] || incomplete
-log "DONE: the 21 stranded UFC recs are closed out and the stale UFC fixture rows retired"
+log "DONE: the stale UFC fixture rows are retired (the 21 recs were closed out by the default run)"
