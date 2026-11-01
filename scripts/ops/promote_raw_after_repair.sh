@@ -26,9 +26,16 @@
 #                           Hearts 2026-08-01, an ESPN row that holds none
 # and nothing else: no match, team or league inserted or changed, no
 # prediction graded, no rec settled, no raw row refused or duplicated.
+# The checked run is one REPEATABLE READ transaction that sends the database
+# only the rows it changes (promote_raw's docstring): it neither locks the
+# league and team rows the pipeline's soccer sweeps rewrite every 15 min nor
+# fails on them. A serialization error can only come from another session
+# changing a row this run changes, meanwhile: exit 1, nothing written —
+# re-run (the runbook: --from 13).
 #   0. already done? A read-only checked dry run: every PLAN key 0 exits 0
-#      without a backup (its exit 1 — a legacy kickoff left: step 4 has not
-#      run — or 3 — a raw row refused or duplicated — aborts);
+#      without a backup; any non-zero exit aborts here, before a backup (1: a
+#      legacy kickoff left, step 4 has not run, or a refusal; 3: a raw row
+#      refused or duplicated, its ERROR lines printed);
 #   1. verified backup (B2) — abort if it does not land;
 #   2. checked dry run (write-once CSV of every change) — abort unless the
 #      plan is within the reviewed set: match_stats_inserted <= 4,
@@ -99,12 +106,20 @@ log "0/4 already done? (read-only checked dry run)"
 step promote_after_pre --dry-run --out-csv ${B}_precheck_$STAMP.csv
 rc=$?
 pre=$(plan_of promote_after_pre)
-if [ "$rc" -eq 1 ]; then log "ABORT at step 0: promote_raw refused to start (a legacy kickoff is left: runbook step 4 first) — nothing changed"; exit 1; fi
-if [ "$rc" -eq 0 ] && [ "$(values "$pre")" = "$ZERO" ]; then
+case "$rc" in
+  0) ;;
+  1) log "ABORT at step 0: promote_raw refused (a legacy kickoff is left — runbook step 4 first — or the refusal above; full log /tmp/promote_after_pre.log in the api container) — nothing changed"; exit 1 ;;
+  3) log "ABORT at step 0: promote_raw refused or found duplicated raw row(s) (the ERROR lines above; $pre) — outside the reviewed set (refused = duplicates = 0); nothing changed"; exit 1 ;;
+  *) log "ABORT at step 0: the checked dry run failed (exit $rc; full log /tmp/promote_after_pre.log in the api container) — nothing changed"; exit 1 ;;
+esac
+if ! [[ "$(values "$pre")" =~ ^[0-9]+(\ [0-9]+){12}$ ]]; then
+  log "ABORT at step 0: the checked dry run printed no readable PLAN line ('${pre:-unreadable}') — nothing changed"; exit 1
+fi
+if [ "$(values "$pre")" = "$ZERO" ]; then
   log "ALREADY DONE: $pre — nothing to promote (no backup)"
   exit 0
 fi
-log "not done yet (pre-plan '${pre:-unreadable}', exit $rc) — continuing"
+log "not done yet (pre-plan '${pre:-unreadable}') — continuing"
 
 log "1/4 backup"
 before=$(date -u +%s)

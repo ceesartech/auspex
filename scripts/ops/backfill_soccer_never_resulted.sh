@@ -4,37 +4,51 @@
 # Record ESPN's result on the soccer rows repair_fixture_orphans reports as
 # never_resulted (scripts/ops/cleanup_soccer_orphans.sh leaves them alone:
 # real matches whose result never reached the row) and grade them, with
-# scripts/backfill_never_resulted.py — the listed rows only, never a blanket
-# results sweep or grade_completed_matches --days N (the tool's docstring
-# says why). Runbook step 12.
+# scripts/backfill_never_resulted.py — only the rows the rehearsal reviewed
+# for healing (scripts/data/soccer_never_resulted_reviewed.csv, decision
+# 'heal'), never a blanket results sweep or grade_completed_matches --days N
+# (the tool's docstring says why). Runbook step 12.
 #
 # Rehearsed 2026-11-01 on a local replica of a read-only prod export taken
 # 02:42Z, after the runbook's steps 1-11 ran on it through a docker shim,
 # with real ESPN scoreboards (fetched 2026-11-01 ~03:06Z): 42 never_resulted
-# rows; 38 healed (Chile 17, J1 14, Copa Libertadores 4, Belgium, Colombia,
-# Champions League), 3,173 predictions graded on them, 0 recs changed (their
-# 46 recs are all 'void' with a P&L), 3 teams stamped with their ESPN id;
-# 4 refused and left as they are: Coquimbo Unido v O'Higgins 2026-06-15
-# (a fork of the 2026-06-13 row, which owns ESPN 401850590 and is healed;
-# runbook step 12 then re-runs cleanup_soccer_orphans.sh, which merges it),
+# rows. 38 were healed (Chile 17, J1 14, Copa Libertadores 4, Belgium,
+# Colombia, Champions League; 3,173 predictions graded on them, 0 recs
+# changed — their 46 recs are all 'void' with a P&L — 3 teams stamped with
+# their ESPN id): those 38 are the reviewed list's 'heal' rows, each with
+# ESPN's final. The other 4 are its 'leave' rows, never passed to the tool:
+# Coquimbo Unido v O'Higgins 2026-06-15 (a fork of the 2026-06-13 row, which
+# owns ESPN 401850590 and is healed; runbook step 12 then re-runs
+# cleanup_soccer_orphans.sh --after-never-resulted, which merges it),
 # Queretaro v Monterrey 2026-09-05 (not on ESPN's mex.1 scoreboard that
-# weekend), Rayo Vallecano v Athletic Club 2026-10-10 (ESPN 401882849 now
-# says 2026-12-09, abandoned) and Atromitos v AEK 2026-10-17 (ESPN:
-# postponed). Pins: the reviewed bounds below are that plan's; the run
-# applies exactly its own dry run's counts (--expect-plan), with the ESPN
-# scoreboards that dry run fetched (one write-once cache), so ESPN changing
-# between the dry run and the apply cannot change what is written.
+# weekend), Rayo Vallecano v Athletic Club 2026-10-10 (not on ESPN's
+# scoreboard that weekend: re-dated) and Atromitos v AEK 2026-10-17 (ESPN:
+# postponed).
+# The never_resulted class grows: a fixture whose result never arrives joins
+# it 96 h after kickoff (e.g. a Liga MX fixture the results path refuses as
+# identity drift until runbook step 1 has run, once the sweep's 3-day
+# look-back has passed it). Such a row is NOT in the reviewed list: it is
+# listed (LEFT ... NOT in the reviewed list) and left as it is, for a
+# separate review — it neither aborts the step nor gets healed unreviewed.
+# Pins: the bounds below are that plan's; the run applies exactly its own
+# dry run's counts (--expect-plan), with the ESPN scoreboards that dry run
+# fetched (one write-once cache), so ESPN changing between the dry run and
+# the apply cannot change what is written.
 #   0. already done? Read-only: the never_resulted ids (a repair_fixture_orphans
-#      dry run, as of now) and the tool's dry run of them (it fetches ESPN):
-#      none, or nothing to heal, exits 0 without a backup;
+#      dry run, as of now), split into the reviewed 'heal' rows and the rest
+#      (listed, left alone): none of the former exits 0 without a backup;
+#      then the tool's dry run of them (it fetches ESPN): nothing to heal
+#      exits 0 without a backup, but a failed run or any failed ESPN request
+#      aborts here (its rows would be refused, so 'nothing to heal' would not
+#      be the real plan) — re-run later, nothing changed;
 #   1. verified backup (B2) — abort if it does not land;
 #   2. START = now; the never_resulted ids as of START (abort unless the
 #      cleanup is done: nothing to merge, delete or mark, nothing blocked) and
-#      the tool's dry run (ESPN into a new write-once cache) — abort unless
-#      the plan is within the reviewed set: candidates <= 42, heal <= 38,
-#      predictions graded <= 3,173, teams stamped <= 3, and no prediction
-#      re-graded, no rec changed, no listed row already finished, no ESPN
-#      request failed;
+#      the tool's dry run of the reviewed 'heal' rows among them (ESPN into a
+#      new write-once cache) — abort unless the plan is within the reviewed
+#      set: candidates <= 38 and = the rows passed, heal <= 38, predictions
+#      graded <= 3,173, teams stamped <= 3, and no prediction re-graded, no
+#      rec changed, no row already finished, no ESPN request failed;
 #   3. apply, pinned to the dry run's counts (--expect-plan, the same cache):
 #      one transaction, every heal checked in a savepoint (see the tool);
 #   4. after-state, EXPECTED: the healed rows are finished; a re-plan of the
@@ -42,9 +56,9 @@
 #      refuses the same rows; the healed rows hold no open rec and no settled
 #      rec without a P&L; the orphans re-plan (as of START) finds no
 #      never_resulted row that was not one before, and at most the refused
-#      rows left in that class.
-# Records (/app/backups, write-once): the orphans dry-run CSVs, the ids files,
-# the ESPN cache, and per tool run its CSV, <csv>.changes.csv (every
+#      reviewed rows still in that class.
+# Records (/app/backups, write-once): the orphans dry-run CSVs, the ids files
+# (the rows passed to the tool, and every never_resulted row), the ESPN cache, and per tool run its CSV, <csv>.changes.csv (every
 # prediction and rec it changed, old and new values) and
 # <csv>.archive.jsonl.gz (the healed rows, their predictions and recs before).
 # Each tool step writes its output to a log file inside the api container and
@@ -60,7 +74,8 @@
 # for the forks of the rows it healed), 13 promote_raw_after_repair.sh,
 # 14 grade_folded_soccer_rows.sh, 15 compute_features --backfill-finished soccer.
 # It needs steps 1-11 done: the never_resulted class is the cleanup's, and
-# the rows it heals sit on the merged teams.
+# the rows it heals sit on the merged teams (the reviewed ids are the rows as
+# they stand after steps 1-11).
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/backfill_soccer_never_resulted.sh 2>&1 | tee -a ~/backfill_soccer_never_resulted.log
 # (AUSPEX_DIR and TMPDIR exist for tests and rehearsals.)
@@ -86,8 +101,9 @@ plan_num() {  # plan_num <PLAN line> <key>: the count, or "missing"
   v=$(echo "$1" | grep -o " $2=[0-9]*" | cut -d= -f2)
   if [[ "$v" =~ ^[0-9]+$ ]]; then echo "$v"; else echo missing; fi
 }
-# The reviewed set (rehearsal of 2026-11-01, see the header).
-MAX_CANDIDATES=42
+# The reviewed set (rehearsal of 2026-11-01, see the header): its 'heal' rows are the only ones passed to the tool.
+REVIEWED=/app/scripts/data/soccer_never_resulted_reviewed.csv
+MAX_CANDIDATES=38
 MAX_HEAL=38
 MAX_GRADED=3173
 MAX_TEAMS_STAMPED=3
@@ -97,23 +113,43 @@ KEEP="listed row|PLAN|refused [0-9]|recs |DRY-RUN|Committed|REFUSED|ERROR|Traceb
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 B=/app/backups/never_resulted
 
-# never_resulted_ids <as-of> <label>: a repair_fixture_orphans dry run as of <as-of>; writes the never_resulted ids
-# to $B_ids_<label>_$STAMP.txt (write-once) and sets IDS (that path), N_IDS and ORPHAN_PLAN. 1 when the dry run or
-# the CSV cannot be read.
+# never_resulted_ids <as-of> <label>: a repair_fixture_orphans dry run as of <as-of>. Writes (write-once) the
+# never_resulted ids the reviewed list marks 'heal' to $B_ids_<label>_$STAMP.txt and every never_resulted id to
+# $B_all_<label>_$STAMP.txt, lists the others (LEFT: reviewed and left alone, or not in the reviewed list), and sets
+# IDS / ALL (those paths), N_IDS / N_ALL and ORPHAN_PLAN. 1 when the dry run, its CSV or the list cannot be read.
+SPLIT_PY="import csv, sys
+orphans, reviewed, ids_out, all_out = sys.argv[1:5]
+decision = {r['match_id']: (r['decision'], r['evidence']) for r in csv.DictReader(open(reviewed))}
+bad = sorted(m for m, d in decision.items() if d[0] not in ('heal', 'leave'))
+if bad:
+    sys.exit('reviewed list: a decision other than heal/leave on ' + ', '.join(bad[:3]))
+rows = [r for r in csv.DictReader(open(orphans)) if r['action'] == 'leave' and r['reason'] == 'never_resulted']
+ids = [r['match_id'] for r in rows if decision.get(r['match_id'], ('',))[0] == 'heal']
+open(ids_out, 'x').write(''.join(i + chr(10) for i in ids))
+open(all_out, 'x').write(''.join(r['match_id'] + chr(10) for r in rows))
+for r in rows:
+    d = decision.get(r['match_id'])
+    if d is None or d[0] != 'heal':
+        why = 'reviewed, left alone: ' + d[1] if d else 'NOT in the reviewed list: left as it is, for a separate review'
+        print('LEFT ' + r['match_id'] + ' ' + r['match_date'][:16] + ' ' + r['home'] + ' v ' + r['away'] + ' - ' + why)
+print('COUNTS %d %d' % (len(ids), len(rows)))"
 never_resulted_ids() {
-  local at="$1" label="$2" csv rc
+  local at="$1" label="$2" csv rc out counts
   csv=${B}_orphans_${label}_$STAMP.csv
   IDS=${B}_ids_${label}_$STAMP.txt
+  ALL=${B}_all_${label}_$STAMP.txt
   $DC exec -T api sh -c "$ORPHANS --as-of $at --out-csv $csv > /tmp/never_resulted_orphans_$label.log 2>&1; echo \"orphans dry run exit \$?\""
   ORPHAN_PLAN=$($DC exec -T api sh -c "grep -o 'PLAN .*' /tmp/never_resulted_orphans_$label.log | tail -1")
-  IDS_PY="import csv, sys; ids = [r['match_id'] for r in csv.DictReader(open(sys.argv[1])) if r['action'] == 'leave' and r['reason'] == 'never_resulted']; open(sys.argv[2], 'x').write(''.join(i + chr(10) for i in ids)); print(len(ids))"
-  N_IDS=$($DC exec -T api python -c "$IDS_PY" "$csv" "$IDS" </dev/null)
+  out=$($DC exec -T api python -c "$SPLIT_PY" "$csv" "$REVIEWED" "$IDS" "$ALL" </dev/null)
   rc=$?
-  if [ "$rc" -ne 0 ] || ! [[ "$N_IDS" =~ ^[0-9]+$ ]] || [ -z "$ORPHAN_PLAN" ]; then
-    log "could not read the never_resulted rows from $csv (exit $rc, got '$N_IDS'; orphans plan '${ORPHAN_PLAN:-unreadable}')"
+  counts=$(echo "$out" | grep '^COUNTS ' | tail -1)
+  N_IDS=$(echo "$counts" | cut -d' ' -f2); N_ALL=$(echo "$counts" | cut -d' ' -f3)
+  if [ "$rc" -ne 0 ] || ! [[ "$N_IDS $N_ALL" =~ ^[0-9]+\ [0-9]+$ ]] || [ -z "$ORPHAN_PLAN" ]; then
+    log "could not read the never_resulted rows from $csv with $REVIEWED (exit $rc, got '$counts'; orphans plan '${ORPHAN_PLAN:-unreadable}')"
     return 1
   fi
-  log "$N_IDS never_resulted row(s) as of $at ($ORPHAN_PLAN) -> $IDS"
+  log "$N_ALL never_resulted row(s) as of $at ($ORPHAN_PLAN): $N_IDS of the reviewed 'heal' rows -> $IDS; $((N_ALL - N_IDS)) left alone:"
+  echo "$out" | grep '^LEFT ' | sed 's/^LEFT /  /'
 }
 tool() {  # tool <log name> <args...>: the tool in the api container; exits with its status
   local name="$1"; shift
@@ -121,21 +157,30 @@ tool() {  # tool <log name> <args...>: the tool in the api container; exits with
 }
 plan_of() { $DC exec -T api sh -c "grep -o 'PLAN .*' /tmp/$1.log | tail -1 | sed 's/ (audit CSV.*//'"; }
 
-log "0/4 already done? (read-only: the never_resulted rows, and the tool's dry run of them)"
+log "0/4 already done? (read-only: the never_resulted rows, and the tool's dry run of the reviewed ones)"
 PRE_AT=$(date -u +%FT%TZ)
 never_resulted_ids "$PRE_AT" precheck || { log "ABORT at step 0 — nothing changed"; exit 1; }
 if [ "$N_IDS" = "0" ]; then
-  log "ALREADY DONE: no never_resulted soccer row left — nothing to do (no backup)"
+  log "ALREADY DONE: none of the reviewed never_resulted rows is left to heal ($N_ALL never_resulted row(s) left alone, listed above) — nothing to do (no backup)"
   exit 0
 fi
 tool nr_pre --match-ids-file "$IDS" --as-of "$PRE_AT" --espn-cache ${B}_espn_precheck_$STAMP.json --out-csv ${B}_precheck_$STAMP.csv
 rc=$?
 pre=$(plan_of nr_pre)
-if [ "$rc" -eq 0 ] && [ "$(plan_num "$pre" heal)" = "0" ]; then
-  log "ALREADY DONE: nothing to heal ($pre) — the rows left are refused, reasons above; nothing to do (no backup)"
+pre_heal=$(plan_num "$pre" heal); pre_failed=$(plan_num "$pre" espn_failed)
+if [ "$rc" -ne 0 ] || ! [[ "$pre_heal $pre_failed" =~ ^[0-9]+\ [0-9]+$ ]]; then
+  log "ABORT at step 0: the tool's read-only dry run failed or printed no readable PLAN line (exit $rc, '${pre:-unreadable}'; full log /tmp/nr_pre.log in the api container) — nothing changed"
+  exit 1
+fi
+if [ "$pre_failed" -ne 0 ]; then
+  log "ABORT at step 0: $pre_failed ESPN request(s) failed ($pre) — the rows near those days are refused, so this is not the real plan; re-run later — nothing changed"
+  exit 1
+fi
+if [ "$pre_heal" = "0" ]; then
+  log "ALREADY DONE: nothing to heal ($pre) — the rows passed are refused, reasons above; nothing to do (no backup)"
   exit 0
 fi
-log "not done yet (pre-plan '${pre:-unreadable}', tool exit $rc) — continuing"
+log "not done yet (pre-plan '$pre') — continuing"
 
 log "1/4 backup"
 before=$(date -u +%s)
@@ -154,7 +199,9 @@ CACHE=${B}_espn_$STAMP.json
 log "2/4 the never_resulted rows and the dry run (as of $START)"
 never_resulted_ids "$START" dryrun || { log "ABORT at step 2 — nothing changed"; exit 1; }
 DRY_IDS=$IDS
+DRY_ALL=$ALL
 n0=$N_IDS
+if [ "$n0" = "0" ]; then log "DONE: none of the reviewed never_resulted rows is left to heal as of $START — no write"; exit 0; fi
 busy="$(plan_num "$ORPHAN_PLAN" merge_delete) $(plan_num "$ORPHAN_PLAN" merge_cancel) $(plan_num "$ORPHAN_PLAN" delete_placeholder) $(plan_num "$ORPHAN_PLAN" mark_postponed) $(plan_num "$ORPHAN_PLAN" blocked_pending_recs) $(plan_num "$ORPHAN_PLAN" list_mismatch)"
 if [ "$busy" != "0 0 0 0 0 0" ]; then
   log "ABORT at step 2: the soccer orphan cleanup is not done ($ORPHAN_PLAN) — run scripts/ops/cleanup_soccer_orphans.sh (runbook step 7) first; nothing changed"
@@ -172,7 +219,7 @@ if [ "$rc" -ne 0 ] || ! [[ "$cand $heal $done_ $refuse $graded $regraded $recs $
 fi
 if [ "$cand" -gt "$MAX_CANDIDATES" ] || [ "$heal" -gt "$MAX_HEAL" ] || [ "$graded" -gt "$MAX_GRADED" ] || [ "$stamped" -gt "$MAX_TEAMS_STAMPED" ] \
    || [ "$regraded" -ne 0 ] || [ "$recs" -ne 0 ] || [ "$done_" -ne 0 ] || [ "$failed" -ne 0 ] || [ "$cand" -ne "$n0" ]; then
-  log "ABORT at step 2: plan ($plan) is outside the reviewed set (candidates <= $MAX_CANDIDATES and = the $n0 listed, heal <= $MAX_HEAL, predictions_graded <= $MAX_GRADED, teams_stamped <= $MAX_TEAMS_STAMPED, predictions_regraded = recs_changed = done = espn_failed = 0) — review ${B}_dryrun_$STAMP.csv and its .changes.csv; nothing changed"
+  log "ABORT at step 2: plan ($plan) is outside the reviewed set (candidates <= $MAX_CANDIDATES and = the $n0 passed, heal <= $MAX_HEAL, predictions_graded <= $MAX_GRADED, teams_stamped <= $MAX_TEAMS_STAMPED, predictions_regraded = recs_changed = done = espn_failed = 0) — review ${B}_dryrun_$STAMP.csv and its .changes.csv; nothing changed"
   exit 1
 fi
 if [ "$heal" -eq 0 ]; then
@@ -212,11 +259,11 @@ SQLEOF
 fi
 never_resulted_ids "$START" verify || { log "FAILED after-state: the orphans re-plan could not be read — inspect"; exit 1; }
 NEW_PY="import sys; before = set(open(sys.argv[1]).read().split()); after = set(open(sys.argv[2]).read().split()); print(len(after - before))"
-new_rows=$($DC exec -T api python -c "$NEW_PY" "$DRY_IDS" "$IDS" </dev/null)
-log "after: healed rows finished|open-or-unpaid recs on them = $state (expected $heal|0); re-plan heal/done/refuse '$v' (expected '0 $heal $refuse', exit $vrc); never_resulted rows now $N_IDS (at most the $refuse refused), new ones $new_rows (expected 0)"
+new_rows=$($DC exec -T api python -c "$NEW_PY" "$DRY_ALL" "$ALL" </dev/null)
+log "after: healed rows finished|open-or-unpaid recs on them = $state (expected $heal|0); re-plan heal/done/refuse '$v' (expected '0 $heal $refuse', exit $vrc); reviewed rows still never_resulted $N_IDS (at most the $refuse refused), never_resulted rows now $N_ALL, new ones $new_rows (expected 0)"
 if [ "$n_healed" != "$heal" ] || [ "$state" != "$heal|0" ] || [ "$vrc" -ne 0 ] || [ "$v" != "0 $heal $refuse" ] \
    || [ "$new_rows" != "0" ] || ! [ "$N_IDS" -le "$refuse" ] 2>/dev/null; then
   log "FAILED after-state — inspect (the apply CSV, its .changes.csv and .archive.jsonl.gz are in /app/backups)"
   exit 1
 fi
-log "DONE: $heal never_resulted row(s) healed and graded ($graded predictions); $refuse refused and left as they are (reasons in $APPLY_CSV)"
+log "DONE: $heal never_resulted row(s) healed and graded ($graded predictions); $refuse refused and left as they are (reasons in $APPLY_CSV); $((N_ALL - N_IDS)) never_resulted row(s) outside the reviewed 'heal' rows left alone (listed above)"

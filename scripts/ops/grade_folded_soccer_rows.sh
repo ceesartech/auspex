@@ -22,7 +22,8 @@
 # team_total, total_goals, win_to_nil and winning_margin, 42 each), 0
 # re-graded, 0 recs changed.
 #   0. already done? A read-only dry run of the folded rows: nothing graded,
-#      re-graded or changed exits 0 without a backup;
+#      re-graded or changed exits 0 without a backup (a failed dry run aborts
+#      here, before a backup);
 #   1. verified backup (B2) — abort if it does not land;
 #   2. dry run (write-once CSV of every change, old and new values) — abort
 #      unless within the reviewed set: matches <= 26, predictions graded <=
@@ -107,11 +108,16 @@ log "$n folded row(s) -> $IDS"
 step grade_folded_pre --match-ids-file "$IDS" --out-csv ${B}_precheck_$STAMP.csv
 rc=$?
 pre=$(plan_of grade_folded_pre)
-if [ "$rc" -eq 0 ] && [ "$(plan_num "$pre" predictions_graded) $(plan_num "$pre" predictions_regraded) $(plan_num "$pre" recs_changed)" = "0 0 0" ]; then
+pre_vals="$(plan_num "$pre" predictions_graded) $(plan_num "$pre" predictions_regraded) $(plan_num "$pre" recs_changed)"
+if [ "$rc" -ne 0 ] || ! [[ "$pre_vals" =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]]; then
+  log "ABORT at step 0: the read-only dry run failed or printed no readable PLAN line (exit $rc, '${pre:-unreadable}'; full log /tmp/grade_folded_pre.log in the api container) — nothing changed"
+  exit 1
+fi
+if [ "$(plan_num "$pre" predictions_graded) $(plan_num "$pre" predictions_regraded) $(plan_num "$pre" recs_changed)" = "0 0 0" ]; then
   log "ALREADY DONE: $pre — nothing left to grade on the folded rows (no backup)"
   exit 0
 fi
-log "not done yet (pre-plan '${pre:-unreadable}', exit $rc) — continuing"
+log "not done yet (pre-plan '${pre:-unreadable}') — continuing"
 
 log "1/4 backup"
 before=$(date -u +%s)
