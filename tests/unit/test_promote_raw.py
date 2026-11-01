@@ -1108,7 +1108,7 @@ class TestCheckedMode:
         assert pr.plan_line(counts) == (
             "PLAN matches_inserted=0 matches_changed=0 match_stats_inserted=4 match_stats_changed=0 odds_inserted=13 "
             "teams_inserted=0 teams_changed=0 leagues_inserted=0 leagues_changed=0 predictions_changed=0 "
-            "recs_changed=0 refused=2 duplicates=1"
+            "recs_changed=0 refused=2 duplicates=1 refused_raw=0"
         )
         assert len(rows) == 17 and rows[0] == {
             "plan_key": "match_stats_inserted",
@@ -1203,6 +1203,165 @@ class TestCheckedMode:
         monkeypatch.setattr(pr, "promote_checked", refuse)
         assert pr.main(["--database-url", "x", "--dry-run", "--out-csv", "d.csv"]) == 1
         assert "Refusing to promote — nothing written" in caplog.text
+
+
+class TestCheckedModeWithTheScreen:
+    """Checked mode and screen_raw_rows together (2026-11-01 integration): the screen runs inside promote_rows
+    before any league or team is written, the rows it refuses are the PLAN key refused_raw (pinned like every other
+    key: a screened row the pin does not expect refuses the apply), and the exit status is the plain run's 3 —
+    the dry run wrote nothing; the apply committed only at a pin that expected them."""
+
+    GARBLED = "Preußen Münster".encode("utf-8").decode("latin-1")
+    ROWS = [
+        {**NORMAL, "league": "D2", "HomeTeam": GARBLED, "AwayTeam": "Holstein Kiel"},
+        {**NORMAL, "league": "SP1", "Div": "SC1", "HomeTeam": "Ayr", "AwayTeam": "Arbroath"},
+        {**NORMAL, "league": "SC1", "Div": "SC1", "HomeTeam": "Morton", "AwayTeam": "Partick"},
+    ]
+    PIN = {k: 0 for k in pr.PLAN_KEYS}
+
+    class _Cur:
+        """The raw scan returns the rows; the snapshot DDL and every read-back query find nothing changed."""
+
+        def __init__(self, rows):
+            self.rows, self.sql, self.executed = rows, "", []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            self.sql = " ".join(sql.split())
+            self.executed.append(self.sql)
+
+        def fetchall(self):
+            return list(self.rows) if self.sql == "SELECT * FROM raw_football_data" else []
+
+    class _Conn:
+        def __init__(self, cur):
+            self.cur, self.isolation, self.commits, self.rollbacks, self.closed = cur, None, 0, 0, False
+
+        def set_session(self, isolation_level=None):
+            self.isolation = isolation_level
+
+        def cursor(self, cursor_factory=None):
+            return self.cur
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+
+        def close(self):
+            self.closed = True
+
+    @pytest.fixture
+    def checked(self, monkeypatch):
+        """promote_checked over ROWS with the real promote_rows, screen and read_changes; the writers are faked and
+        record the order of events."""
+        cur = self._Cur(self.ROWS)
+        conn = self._Conn(cur)
+        seen: dict = {"leagues": set(), "teams": {}, "matches": [], "events": []}
+
+        def leagues(c, codes):
+            seen["events"].append("leagues")
+            seen["leagues"] |= set(codes)
+            return {code: f"lg-{code}" for code in codes}
+
+        def teams(c, names, by_team):
+            seen["events"].append("teams")
+            seen["teams"].update(by_team)
+            return {pr.normalize_team_name(n): f"t-{n}" for n in names}
+
+        real_screen = pr.screen_raw_rows
+
+        def screen(rows):
+            seen["events"].append("screen")
+            return real_screen(rows)
+
+        monkeypatch.setattr(pr.psycopg2, "connect", lambda url: conn)
+        monkeypatch.setattr(pr, "screen_raw_rows", screen)
+        monkeypatch.setattr(pr, "upsert_leagues", leagues)
+        monkeypatch.setattr(pr, "upsert_teams", teams)
+        monkeypatch.setattr(pr, "check_legacy_kickoffs", lambda c, rows, league_ids, team_ids: None)
+        monkeypatch.setattr(pr, "find_existing_matches", lambda *a: [])
+        monkeypatch.setattr(pr, "find_alias_slot_rows", lambda *a: [])
+        monkeypatch.setattr(pr, "insert_match", lambda c, **kw: seen["matches"].append(kw) or "m-1")
+        monkeypatch.setattr(pr, "insert_match_stats", lambda *a, **kw: None)
+        monkeypatch.setattr(pr, "insert_odds", lambda *a, **kw: 0)
+        return conn, seen
+
+    def test_refused_raw_is_a_plan_key_read_from_the_screen(self):
+        counts, _ = pr.read_changes(TestCheckedMode._Cur({}), pr.Promotion(refused_raw=68))
+        assert pr.PLAN_KEYS[-1] == "refused_raw" and counts["refused_raw"] == 68
+        assert pr.plan_line(counts).endswith(" refused=0 duplicates=0 refused_raw=68")
+        assert pr.parse_expect_plan(",".join(f"{k}={v}" for k, v in counts.items()))["refused_raw"] == 68
+        with pytest.raises(pr.PlanRefused, match="missing refused_raw"):
+            pr.parse_expect_plan(",".join(f"{k}=0" for k in pr.PLAN_KEYS if k != "refused_raw"))
+
+    def test_a_dry_run_screens_before_any_league_or_team_and_counts_the_refusals(self, checked, tmp_path, caplog):
+        conn, seen = checked
+        with caplog.at_level(logging.INFO, logger="promote_raw"):
+            stats, counts = pr.promote_checked("x", apply=False, expected=None, out_csv=str(tmp_path / "d.csv"))
+        assert seen["events"] == ["screen", "leagues", "teams"]
+        assert counts["refused_raw"] == stats.refused_raw == 2 and stats.matches == 1
+        assert seen["leagues"] == {"SC1"} and set(seen["teams"]) == {"Morton", "Partick"}  # refused rows decide none
+        assert [m["home_id"] for m in seen["matches"]] == ["t-Morton"]
+        assert conn.isolation == "REPEATABLE READ" and (conn.commits, conn.rollbacks, conn.closed) == (0, 1, True)
+        assert "PLAN matches_inserted=0" in caplog.text and " refused_raw=2" in caplog.text
+        assert "refused=0 duplicates=0 refused_raw=2; audit CSV" in caplog.text  # the checked run's summary line
+        assert "REFUSED 1 raw row(s) of D2 2526 — a team name looks mis-decoded" in caplog.text
+        assert "REFUSED 1 raw row(s) of SP1 2526 — Div names another division" in caplog.text
+
+    def test_an_apply_whose_pin_does_not_expect_the_screened_rows_rolls_back(self, checked, tmp_path):
+        conn, _ = checked
+        with pytest.raises(pr.PlanRefused, match=r"'refused_raw': \(0, 2\)"):
+            pr.promote_checked("x", apply=True, expected=self.PIN, out_csv=str(tmp_path / "a.csv"))
+        assert (conn.commits, conn.rollbacks, conn.closed) == (0, 1, True)
+        assert (tmp_path / "a.csv").exists()  # the record is written before the decision, as for any drift
+
+    def test_an_apply_pinned_to_the_screened_rows_commits(self, checked, tmp_path):
+        conn, _ = checked
+        _stats, counts = pr.promote_checked(
+            "x", apply=True, expected={**self.PIN, "refused_raw": 2}, out_csv=str(tmp_path / "a.csv")
+        )
+        assert counts["refused_raw"] == 2 and (conn.commits, conn.rollbacks) == (1, 0)
+
+    def test_main_exits_3_on_screened_rows_in_both_checked_modes(self, checked, tmp_path, caplog):
+        conn, _ = checked
+        with caplog.at_level(logging.ERROR, logger="promote_raw"):
+            rc = pr.main(["--database-url", "x", "--dry-run", "--out-csv", str(tmp_path / "d.csv")])
+        assert rc == pr.REFUSED_EXIT_CODE and conn.commits == 0
+        assert "screened out 2" in caplog.text and "nothing written (dry run)" in caplog.text
+        caplog.clear()
+        pin = ",".join(f"{k}={2 if k == 'refused_raw' else 0}" for k in pr.PLAN_KEYS)
+        argv = ["--database-url", "x", "--apply", "--expect-plan", pin, "--out-csv", str(tmp_path / "a.csv")]
+        with caplog.at_level(logging.ERROR, logger="promote_raw"):
+            rc = pr.main(argv)
+        assert rc == pr.REFUSED_EXIT_CODE and conn.commits == 1
+        assert "the --apply committed at a pin that expects them" in caplog.text
+
+    def test_main_exits_1_when_the_apply_did_not_expect_the_screened_rows(self, checked, tmp_path, caplog):
+        conn, _ = checked
+        pin = ",".join(f"{k}=0" for k in pr.PLAN_KEYS)
+        argv = ["--database-url", "x", "--apply", "--expect-plan", pin, "--out-csv", str(tmp_path / "a.csv")]
+        with caplog.at_level(logging.ERROR, logger="promote_raw"):
+            rc = pr.main(argv)
+        assert rc == 1 and conn.commits == 0 and "drifted" in caplog.text
+
+    def test_main_exits_0_when_nothing_was_refused(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(pr, "promote_checked", lambda *a, **k: (pr.Promotion(matches=3), Counter()))
+        assert pr.main(["--database-url", "x", "--dry-run", "--out-csv", str(tmp_path / "d.csv")]) == 0
+        pin = ",".join(f"{k}=0" for k in pr.PLAN_KEYS)
+        assert pr.main(["--database-url", "x", "--apply", "--expect-plan", pin, "--out-csv", "a.csv"]) == 0
+
+    def test_the_plain_run_carries_unchanged_and_refused_raw_in_its_completion_line(self, monkeypatch, caplog):
+        monkeypatch.setattr(pr, "promote", lambda url, batch_size: pr.Promotion(matches=5, unchanged=4))
+        with caplog.at_level(logging.INFO, logger="promote_raw"):
+            assert pr.main(["--database-url", "postgres://fake"]) == 0
+        assert "unchanged=4 " in caplog.text and "refused_raw=0" in caplog.text
 
 
 # ── a re-run sends only what changes: unchanged leagues, teams and match_stats are neither rewritten nor locked ──

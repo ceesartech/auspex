@@ -37,14 +37,20 @@ or merges them.
 A raw row is never promoted, and never decides a team's league, when its
 league code is not in LEAGUE_MAP, when its Div (football-data's own division
 code) names another division than the code it was loaded under, or when a
-team name looks mojibake (screen_raw_rows): each is logged at ERROR and the
-run exits 3 once everything else is committed. Until 2026-11-01 an unknown
-code was a warning and the rest was promoted as filed: ten Scottish fixtures
-loaded as SP1/SP2 2026-27 (their Div was hidden by a byte-order mark) became
-La Liga / La Liga 2 rows and set twenty clubs' league to Spain, and
-'PreuÃ\\x9fen MÃ¼nster' became a team (scripts/ops/repair_soccer_labels.sh
-repairs both; the loaders now refuse such files,
-load_football_data.parse_csv).
+team name looks mojibake (screen_raw_rows, before any league or team is
+written): each is logged at ERROR, counted (refused_raw), and the run exits
+3 once everything else is committed. Until 2026-11-01 an unknown code was a
+warning and the rest was promoted as filed: ten Scottish fixtures loaded as
+SP1/SP2 2026-27 (their Div was hidden by a byte-order mark) became La Liga /
+La Liga 2 rows and set twenty clubs' league to Spain, and 'PreuÃ\\x9fen
+MÃ¼nster' became a team (scripts/ops/repair_soccer_labels.sh repairs both;
+the loaders now refuse such files, load_football_data.parse_csv). The screen
+catches the 68 mis-decoded Preussen Muenster rows, but not those ten: their
+Div is NULL (the byte-order mark hid it at load time), so nothing in the row
+contradicts its SP1/SP2 code until the repair relabels it. Until the repair
+has run, a run therefore commits everything else and exits 3 on the 68
+(the soccer repair runbook runs the repair, step 13, before its promote_raw
+step, 14).
 
 A re-run writes only what changes: a matches row whose status, scores and
 half-time already equal football-data's is not updated (until 2026-11-01
@@ -58,9 +64,10 @@ session changed after the snapshot: the pipeline's ensure_league rewrites
 the football-data league rows on every soccer sweep). An existing team
 keeps its league: only a missing one is filled (as fetch_upcoming's
 INSERT_TEAM_SQL does). The league a raw name is first seen under in one
-run is arbitrary (an unordered scan), and five Scottish Championship rows
-football-data filed as SP1 would otherwise re-file their clubs under La
-Liga on every run.
+run is arbitrary (an unordered scan), and the five Scottish Championship
+rows football-data filed as SP1 (above: the screen cannot see them) would
+otherwise re-file their clubs under La Liga on every run, and after the
+repair move the six established clubs from SC1/SC2 to SC0.
 
 CHECKED MODE (--dry-run, or --apply --expect-plan): the whole run is one
 REPEATABLE READ transaction, and what it changed is read back before the
@@ -68,18 +75,27 @@ end (rows created or updated in this transaction, and match_stats compared
 with a snapshot taken first): the PLAN line counts matches, match_stats,
 odds, teams and leagues inserted or changed, the predictions and
 recommendations the outcome trigger graded or settled (a scheduled row
-finished), and the raw rows refused or found duplicated. --dry-run then rolls
-everything back; --apply commits only when every PLAN key equals
---expect-plan (the reviewed dry run's counts), otherwise it rolls back and
-exits 1. Every inserted or changed row goes to a write-once CSV (--out-csv)
-first, its old values beside the new: the reversal record.
-scripts/ops/promote_raw_after_repair.sh (runbook step 13) drives it.
+finished), the raw rows refused or found duplicated, and the raw rows the
+screen refused (refused_raw). --dry-run then rolls everything back;
+--apply commits only when every PLAN key equals --expect-plan (the reviewed
+dry run's counts: a screened row the pin does not expect refuses the apply
+like any other drift), otherwise it rolls back and exits 1. Every inserted
+or changed row goes to a write-once CSV (--out-csv) first, its old values
+beside the new: the reversal record.
+scripts/ops/promote_raw_after_repair.sh (runbook step 14) drives it.
+
+EXIT STATUS: 0 done; 1 nothing written (a legacy kickoff left, a checked
+run rolled back or refused); 2 a usage error; 3 raw rows were refused,
+found duplicated or screened out (refused, duplicates, refused_raw > 0) —
+in a plain run and a checked --apply everything else IS committed (a
+checked apply only at a pin that expected those counts), and a checked
+--dry-run wrote nothing; the run exits 3 until they are resolved.
 
 Usage (inside the api container or anywhere DATABASE_URL is set):
     python /app/scripts/promote_raw.py
     python /app/scripts/promote_raw.py --database-url postgres://...
     python /app/scripts/promote_raw.py --dry-run --out-csv /app/backups/promote_raw_dry.csv
-    python /app/scripts/promote_raw.py --apply --expect-plan matches_inserted=0,...,duplicates=0 \\
+    python /app/scripts/promote_raw.py --apply --expect-plan matches_inserted=0,...,refused_raw=0 \\
         --out-csv /app/backups/promote_raw_apply.csv
 """
 
@@ -1235,6 +1251,7 @@ PLAN_KEYS = (
     "recs_changed",
     "refused",
     "duplicates",
+    "refused_raw",
 )
 
 # Taken first, in the same REPEATABLE READ transaction: the soccer rows a run can update, with the values it can
@@ -1414,7 +1431,7 @@ def plan_line(counts: Counter) -> str:
 
 def read_changes(cur, stats: Promotion) -> tuple[Counter, list[dict]]:
     """The PLAN counts and the CSV rows of what this transaction changed (CHECKED_CHANGES_SQL), plus the raw rows
-    promote_rows refused or found duplicated."""
+    promote_rows refused or found duplicated, and the ones its screen refused (screen_raw_rows: refused_raw)."""
     counts: Counter = Counter({k: 0 for k in PLAN_KEYS})
     rows: list[dict] = []
     for key, table, sql in CHECKED_CHANGES_SQL:
@@ -1424,6 +1441,7 @@ def read_changes(cur, stats: Promotion) -> tuple[Counter, list[dict]]:
         rows += [{"plan_key": key, "table": table, "key": r["key"], "old": r["old"], "new": r["new"]} for r in found]
     counts["refused"] = stats.refused
     counts["duplicates"] = stats.duplicates
+    counts["refused_raw"] = stats.refused_raw
     return counts, rows
 
 
@@ -1458,7 +1476,7 @@ def promote_checked(
         write_changes_csv(out_csv, rows)
         logger.info(
             "Checked run: leagues=%d teams=%d matches=%d (unchanged %d) merged=%d skipped_no_result=%d ht_dropped=%d "
-            "left_cancelled=%d ht_conflicts=%d; audit CSV %s",
+            "left_cancelled=%d ht_conflicts=%d refused=%d duplicates=%d refused_raw=%d; audit CSV %s",
             stats.leagues,
             stats.teams,
             stats.matches,
@@ -1468,6 +1486,9 @@ def promote_checked(
             stats.ht_dropped,
             stats.left_cancelled,
             stats.ht_conflicts,
+            stats.refused,
+            stats.duplicates,
+            stats.refused_raw,
             out_csv,
         )
         logger.info("%s", plan_line(counts))
@@ -1519,12 +1540,21 @@ def main_checked(args: argparse.Namespace) -> int:
     except PlanRefused as e:
         logger.error("REFUSED: %s", e)
         return 1
-    if not args.apply and (stats.refused or stats.duplicates):
+    if stats.refused or stats.duplicates or stats.refused_raw:
+        # The plain run's exit 3, in both checked modes (module docstring, EXIT STATUS): the dry run wrote nothing;
+        # the apply committed, but only because its pin expected exactly these counts.
+        done = (
+            "the --apply committed at a pin that expects them; everything else is committed"
+            if args.apply
+            else "nothing written (dry run); a checked --apply commits only when they are pinned too"
+        )
         logger.error(
-            "REFUSED %d raw row(s) and found %d duplicate(s) (ERROR lines above); a checked --apply commits only "
-            "when they are pinned too; exiting %d",
+            "REFUSED %d raw row(s), screened out %d and found %d duplicate(s) (ERROR lines above): %s; exiting %d "
+            "until they are resolved",
             stats.refused,
+            stats.refused_raw,
             stats.duplicates,
+            done,
             REFUSED_EXIT_CODE,
         )
         return REFUSED_EXIT_CODE

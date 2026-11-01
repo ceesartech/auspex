@@ -87,7 +87,7 @@ plan_num() {  # plan_num <PLAN line> <key>: the count, or "missing"
   v=$(echo "$1" | grep -o " $2=[0-9]*" | cut -d= -f2)
   if [[ "$v" =~ ^[0-9]+$ ]]; then echo "$v"; else echo missing; fi
 }
-KEYS="matches_inserted matches_changed match_stats_inserted match_stats_changed odds_inserted teams_inserted teams_changed leagues_inserted leagues_changed predictions_changed recs_changed refused duplicates"
+KEYS="matches_inserted matches_changed match_stats_inserted match_stats_changed odds_inserted teams_inserted teams_changed leagues_inserted leagues_changed predictions_changed recs_changed refused duplicates refused_raw"
 # The reviewed set (rehearsal of 2026-11-01, see the header): these may be up to their bound, every other key 0.
 MAX_MATCH_STATS_INSERTED=4
 MAX_ODDS_INSERTED=13
@@ -114,10 +114,10 @@ pre=$(plan_of promote_after_pre)
 case "$rc" in
   0) ;;
   1) log "ABORT at step 0: promote_raw refused (a legacy kickoff is left — runbook step 4 first — or the refusal above; full log /tmp/promote_after_pre.log in the api container) — nothing changed"; exit 1 ;;
-  3) log "ABORT at step 0: promote_raw refused or found duplicated raw row(s) (the ERROR lines above; $pre) — outside the reviewed set (refused = duplicates = 0); nothing changed"; exit 1 ;;
+  3) log "ABORT at step 0: promote_raw refused, found duplicated or screened out raw row(s) (the ERROR lines above; $pre) — outside the reviewed set (refused = duplicates = refused_raw = 0; screened-out mis-decoded rows mean scripts/ops/repair_soccer_labels.sh, runbook step 13, has not run); nothing changed"; exit 1 ;;
   *) log "ABORT at step 0: the checked dry run failed (exit $rc; full log /tmp/promote_after_pre.log in the api container) — nothing changed"; exit 1 ;;
 esac
-if ! [[ "$(values "$pre")" =~ ^[0-9]+(\ [0-9]+){12}$ ]]; then
+if ! [[ "$(values "$pre")" =~ ^[0-9]+(\ [0-9]+){13}$ ]]; then
   log "ABORT at step 0: the checked dry run printed no readable PLAN line ('${pre:-unreadable}') — nothing changed"; exit 1
 fi
 if [ "$(values "$pre")" = "$ZERO" ]; then
@@ -143,7 +143,7 @@ step promote_after_dry --dry-run --out-csv ${B}_dryrun_$STAMP.csv
 rc=$?
 plan=$(plan_of promote_after_dry)
 vals=$(values "$plan")
-if [ "$rc" -ne 0 ] || ! [[ "$vals" =~ ^[0-9]+(\ [0-9]+){12}$ ]]; then
+if [ "$rc" -ne 0 ] || ! [[ "$vals" =~ ^[0-9]+(\ [0-9]+){13}$ ]]; then
   log "ABORT at step 2: the dry run failed or printed no readable PLAN line (exit $rc, '$plan'; full log /tmp/promote_after_dry.log in the api container) — nothing changed"
   exit 1
 fi
@@ -156,7 +156,7 @@ for k in $KEYS; do
 done
 others=${others# }
 if [ "$(plan_num "$plan" match_stats_inserted)" -gt "$MAX_MATCH_STATS_INSERTED" ] || [ "$(plan_num "$plan" odds_inserted)" -gt "$MAX_ODDS_INSERTED" ] \
-   || [ "$others" != "0 0 0 0 0 0 0 0 0 0 0" ]; then
+   || [ "$others" != "0 0 0 0 0 0 0 0 0 0 0 0" ]; then
   log "ABORT at step 2: plan ($plan) is outside the reviewed set (match_stats_inserted <= $MAX_MATCH_STATS_INSERTED, odds_inserted <= $MAX_ODDS_INSERTED, every other key 0) — review ${B}_dryrun_$STAMP.csv; nothing changed"
   exit 1
 fi

@@ -305,7 +305,7 @@ def test_the_reviewed_list_is_the_rehearsals_38_heals_and_4_left_alone():
 
 KEYS = (
     "matches_inserted matches_changed match_stats_inserted match_stats_changed odds_inserted teams_inserted "
-    "teams_changed leagues_inserted leagues_changed predictions_changed recs_changed refused duplicates"
+    "teams_changed leagues_inserted leagues_changed predictions_changed recs_changed refused duplicates refused_raw"
 ).split()
 
 
@@ -347,11 +347,15 @@ def test_promote_refusing_to_start_aborts(tmp_path):
 @pytest.mark.parametrize(
     "kw, why",
     [
-        ({"pre_rc": 3, "pre_plan": _promote_plan(match_stats_inserted=4, refused=1)}, "refused or found duplicated"),
+        ({"pre_rc": 3, "pre_plan": _promote_plan(match_stats_inserted=4, refused=1)}, "refused, found duplicated"),
+        # the 68 mis-decoded Preussen Muenster rows before the labels repair (runbook step 13) has run
+        ({"pre_rc": 3, "pre_plan": _promote_plan(match_stats_inserted=4, refused_raw=68)}, "repair_soccer_labels.sh"),
         ({"pre_rc": 2}, "the checked dry run failed (exit 2"),
         ({"pre_plan": ""}, "no readable PLAN line"),
+        # a PLAN line without refused_raw (a promote_raw older than the wrapper) is not read as 0
+        ({"pre_plan": PR_PLAN.replace(" refused_raw=0", "")}, "no readable PLAN line"),
     ],
-    ids=["refused-row", "failed", "unreadable"],
+    ids=["refused-row", "screened-rows", "failed", "unreadable", "no-refused-raw-key"],
 )
 def test_promote_precheck_that_cannot_be_applied_aborts_before_the_backup(tmp_path, kw, why):
     """A refused or duplicated raw row (exit 3) is outside the reviewed set anyway: no 20-minute backup for it."""
@@ -385,9 +389,11 @@ def test_promote_full_run_pins_every_key(tmp_path):
         _promote_plan(match_stats_inserted=4, recs_changed=1),
         _promote_plan(match_stats_inserted=4, teams_inserted=1),
         _promote_plan(match_stats_inserted=4, refused=1),
+        _promote_plan(match_stats_inserted=4, refused_raw=1),
+        PR_PLAN.replace(" refused_raw=0", ""),
         "",
     ],
-    ids=["stats", "odds", "matches", "recs", "teams", "refused", "unreadable"],
+    ids=["stats", "odds", "matches", "recs", "teams", "refused", "refused-raw", "no-refused-raw-key", "unreadable"],
 )
 def test_promote_plan_outside_the_reviewed_set_aborts_before_any_write(tmp_path, plan):
     rc, out, calls, _ = _run(tmp_path, "promote_raw_after_repair.sh", _pr_rules(dry_plan=plan))
