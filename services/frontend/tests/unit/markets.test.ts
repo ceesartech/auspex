@@ -3,10 +3,10 @@ import { HIDDEN_SOCCER_MARKETS, marketOptionsBySport } from '@/lib/markets';
 describe('market dropdown options', () => {
   const soccerValues = marketOptionsBySport.soccer.map((o) => o.value);
 
-  it('hides odd_even, the soccer market that lost to a per-league constant', () => {
+  it('hides odd_even (lost to a per-league constant) and btts (operator decision)', () => {
     // services/api prediction_service.HIDDEN_PREDICTION_PAIRS holds 'ensemble:odd_even';
     // an api unit test checks this list against it.
-    expect(HIDDEN_SOCCER_MARKETS).toEqual(['odd_even']);
+    expect(HIDDEN_SOCCER_MARKETS).toEqual(['btts', 'odd_even']);
   });
 
   it('never offers a hidden soccer market', () => {
@@ -15,11 +15,10 @@ describe('market dropdown options', () => {
     }
   });
 
-  it('keeps every other soccer market, btts included', () => {
+  it('keeps every other soccer market', () => {
     expect(soccerValues).toEqual([
       '',
       'over_under',
-      'btts',
       'asian_handicap',
       'correct_score',
       'double_chance',

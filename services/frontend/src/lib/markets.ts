@@ -36,10 +36,11 @@ export interface MarketOption {
 // services/api/src/services/prediction_service.py (the frontend cannot
 // import Python; an api unit test fails if the two lists differ). odd_even
 // lost to a simple per-league constant on 2026-11-01
-// (scripts/ab_soccer_derived_vs_constant.py). Offering a hidden market would
+// (scripts/ab_soccer_derived_vs_constant.py); btts is hidden by operator
+// decision (it lost in the live regime only). Offering a hidden market would
 // always return an empty list, so the dropdown leaves it out. Remove an entry
 // here and in the API together.
-export const HIDDEN_SOCCER_MARKETS: readonly string[] = ['odd_even'];
+export const HIDDEN_SOCCER_MARKETS: readonly string[] = ['btts', 'odd_even'];
 
 // Every soccer market the precompute job writes, in display order.
 const SOCCER_MARKET_CATALOGUE: MarketOption[] = [

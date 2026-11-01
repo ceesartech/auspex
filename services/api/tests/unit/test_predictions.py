@@ -475,7 +475,7 @@ class TestPredictionService:
         did not. Soccer (scripts/ab_soccer_derived_vs_constant.py): of the 14
         full-time derived types only odd_even lost to the per-league constant
         in both O/U-anchor regimes. btts lost in the live regime only and
-        stays visible; soccer's same-named over_under / correct_score /
+        is hidden by operator decision; soccer's same-named over_under / correct_score /
         double_chance beat or tie their constant and stay visible."""
         from services.prediction_service import HIDDEN_PREDICTION_PAIRS
 
@@ -485,11 +485,11 @@ class TestPredictionService:
             "dixon_coles_nhl:over_under",
             "dixon_coles_nhl:regulation_1x2",
             "dixon_coles_nhl:total_goals",
+            "ensemble:btts",
             "ensemble:odd_even",
         ]
         soccer_full_time_derived = (
             "over_under",
-            "btts",
             "correct_score",
             "double_chance",
             "draw_no_bet",

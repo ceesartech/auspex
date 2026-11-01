@@ -394,9 +394,11 @@ HEADLINE_PAIRS: List[str] = sorted(
 # +0.00010. btts loses in the live regime only (per-match +0.00131 +/-
 # 0.00030, clustered +0.00139 +/- 0.00033, lower +0.00072; proxy per-match
 # -0.00027 +/- 0.00034, clustered +0.00006 +/- 0.00036, t(30) [-0.00067,
-# +0.00079]), so this rule keeps it visible; hiding it is an open operator
-# decision (see the script's POST-RUN NOTE). over_under and total_goals tie
-# the constant; every other type beats it.
+# +0.00079]), so this rule keeps it. It is hidden by decision (2026-11-01,
+# the operator's instruction to close the BTTS open item): under the
+# harness's either-regime A2 convention it hides, and at production's 16-29%
+# anchoring it loses by more than odd_even (the script's POST-RUN NOTE).
+# over_under and total_goals tie the constant; every other type beats it.
 HIDDEN_NHL_DIXON_COLES_TYPES: Tuple[str, ...] = (
     "regulation_1x2",
     "double_chance",
@@ -404,7 +406,7 @@ HIDDEN_NHL_DIXON_COLES_TYPES: Tuple[str, ...] = (
     "over_under",
     "correct_score",
 )
-HIDDEN_SOCCER_DERIVED_TYPES: Tuple[str, ...] = ("odd_even",)
+HIDDEN_SOCCER_DERIVED_TYPES: Tuple[str, ...] = ("btts", "odd_even")
 HIDDEN_PREDICTION_PAIRS: List[str] = sorted(
     [f"dixon_coles_nhl:{t}" for t in HIDDEN_NHL_DIXON_COLES_TYPES]
     + [f"ensemble:{t}" for t in HIDDEN_SOCCER_DERIVED_TYPES]
