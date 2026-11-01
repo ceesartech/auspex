@@ -10,6 +10,7 @@ run B (read only, never a backup)."""
 from __future__ import annotations
 
 import importlib.util
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -113,7 +114,8 @@ def test_a_clean_run_pins_the_plan_applies_it_and_runs_the_follow_ups(tmp_path):
     (apply,) = _applies(calls)
     (dry,) = [c for c in calls if "/tmp/merge_mma_dry.log" in c and "merge_mma_fighters.py" in c]
     plan_file = dry.split("--plan-out ")[1].split()[0]
-    assert plan_file.startswith("/app/backups/merge_mma_fighters_dryrun_") and plan_file.endswith(".plan.json")
+    # stamped to the second and the process id: two runs started within one second write different files
+    assert re.fullmatch(r"/app/backups/merge_mma_fighters_dryrun_\d{8}T\d{6}Z_\d+\.plan\.json", plan_file), plan_file
     assert f"--expect-plan {plan_file}" in apply and "--archive /app/backups/merge_mma_fighters_apply_" in apply
     (check,) = [c for c in calls if "--check-after" in c]
     assert f"--check-after {plan_file}" in check and "--after-later-steps" not in check  # strict right after

@@ -190,7 +190,7 @@ DONE_B="merge_delete=0 merge_cancel=0 delete_no_twin=0 delete_placeholder=0 mark
 # 7 stale rows that hold a rec.
 RECS_BEFORE_AS_OF=49
 STALE_AFTER_B=7
-STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)_$$  # the process id too: two runs within one second must not collide on write-once files
 APPLY_A_CSV=/app/backups/backfill_results_mma_apply_$STAMP.csv
 APPLY_B_CSV=/app/backups/fixture_orphans_mma_apply_$STAMP.csv
 

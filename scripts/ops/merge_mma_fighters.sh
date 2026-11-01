@@ -120,7 +120,9 @@ TOOL="python /app/scripts/merge_mma_fighters.py"
 PLAN_M="pairs_merge=9 pairs_done=0 pairs_refuse=0 folds=9 folds_reversed=2 folds_done=0 folds_refuse=0 repoints=11 left_rec_held=0 odds_moved=32 snapshots_moved=51 predictions_moved=15 predictions_dropped=8 espn_ids_adopted=2 athlete_ids_stamped=9 nfc_renamed=1 nfc_refuse=0"
 DONE_M="pairs_merge=0 pairs_done=9 pairs_refuse=0 folds=0 folds_reversed=0 folds_done=1 folds_refuse=0 repoints=0 left_rec_held=0 odds_moved=0 snapshots_moved=0 predictions_moved=0 predictions_dropped=0 espn_ids_adopted=0 athlete_ids_stamped=0 nfc_renamed=0 nfc_refuse=0"
 STATE_FILE=/app/backups/merge_mma_fighters_last_apply.env
-STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+# The process id too: the audit files are write-once, and run B calls this script (--verify) moments before an
+# operator may run it, so two runs can start within one second.
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)_$$
 PLAN_FILE=/app/backups/merge_mma_fighters_dryrun_$STAMP.plan.json
 
 # run_tool <log name> <command>: the command in the api container; prints its summary lines and exit
