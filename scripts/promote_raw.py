@@ -34,6 +34,18 @@ kickoff (football-data's UK time read as UTC, before 2026-10-31) is left
 (check_legacy_kickoffs): scripts/ops/repair_football_data_kickoffs.sh moves
 or merges them.
 
+A raw row is never promoted, and never decides a team's league, when its
+league code is not in LEAGUE_MAP, when its Div (football-data's own division
+code) names another division than the code it was loaded under, or when a
+team name looks mojibake (screen_raw_rows): each is logged at ERROR and the
+run exits 3 once everything else is committed. Until 2026-11-01 an unknown
+code was a warning and the rest was promoted as filed: ten Scottish fixtures
+loaded as SP1/SP2 2026-27 (their Div was hidden by a byte-order mark) became
+La Liga / La Liga 2 rows and set twenty clubs' league to Spain, and
+'PreuÃ\\x9fen MÃ¼nster' became a team (scripts/ops/repair_soccer_labels.sh
+repairs both; the loaders now refuse such files,
+load_football_data.parse_csv).
+
 Usage (inside the api container or anywhere DATABASE_URL is set):
     python /app/scripts/promote_raw.py
     python /app/scripts/promote_raw.py --database-url postgres://...
@@ -57,6 +69,7 @@ from psycopg2.extras import Json, RealDictCursor, execute_values
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import soccer_seasons  # noqa: E402
 import team_identity  # noqa: E402
+import text_encoding  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("promote_raw")
@@ -84,6 +97,8 @@ LEAGUE_MAP: dict[str, tuple[str, str]] = {
     "P1": ("Primeira Liga", "Portugal"),
     "SC0": ("Premiership", "Scotland"),
     "SC1": ("Championship", "Scotland"),
+    "SC2": ("League One", "Scotland"),
+    "SC3": ("League Two", "Scotland"),
     "T1": ("Süper Lig", "Turkey"),
     "G1": ("Super League", "Greece"),
     # ── Summer / non-European leagues (from load_football_data_extra.py) ──
@@ -235,6 +250,7 @@ class Promotion:
     refused: int = 0  # not written: an ESPN row's score disagrees, a stale fixture row, or ambiguous
     duplicates: int = 0  # written onto an ESPN row while football-data's own finished row for the pair sits beside it
     ht_conflicts: int = 0  # an ESPN row kept its half-time where football-data's differs
+    refused_raw: int = 0  # raw rows screened out before anything (screen_raw_rows): unknown code, wrong Div, mojibake
 
 
 @dataclass(frozen=True)
@@ -353,12 +369,69 @@ def check_legacy_kickoffs(cur, rows: list[dict], league_ids: dict[str, str], tea
         )
 
 
+RAW_UNKNOWN_LEAGUE = "unknown_league"
+RAW_DIV_MISMATCH = "div_mismatch"
+RAW_MOJIBAKE = "mojibake_name"
+RAW_PROBLEM_TEXT = {
+    RAW_UNKNOWN_LEAGUE: "league code not in promote_raw.LEAGUE_MAP",
+    RAW_DIV_MISMATCH: "Div names another division: the file held another league",
+    RAW_MOJIBAKE: "a team name looks mis-decoded (scripts/ops/repair_soccer_labels.sh)",
+}
+
+
+def raw_row_problem(row: dict) -> str | None:
+    """Why a raw row must not be promoted, or None. RAW_UNKNOWN_LEAGUE: its
+    code is not in LEAGUE_MAP (nothing says which league it is).
+    RAW_DIV_MISMATCH: its Div — football-data's division code, read since
+    2026-11-01 (a byte-order mark hid it on the newer files) — names another
+    division: the file at that URL held another league. RAW_MOJIBAKE: a team
+    name looks mis-decoded (text_encoding.looks_mojibake) and would mint a
+    twin of the club. Pure."""
+    code = row.get("league")
+    if code not in LEAGUE_MAP:
+        return RAW_UNKNOWN_LEAGUE
+    div = (row.get("Div") or "").strip()
+    if div and div != code:
+        return RAW_DIV_MISMATCH
+    if any(text_encoding.looks_mojibake(row.get(col)) for col in ("HomeTeam", "AwayTeam")):
+        return RAW_MOJIBAKE
+    return None
+
+
+def screen_raw_rows(rows: list[dict]) -> tuple[list[dict], list[tuple[str, dict]]]:
+    """(the rows promote() may use, [(problem, row)] for the ones it refuses);
+    each (problem, league, season) group is logged at ERROR with its count and
+    a sample (raw_row_problem)."""
+    keep: list[dict] = []
+    groups: dict[tuple[str, str, str], list[dict]] = {}
+    refused: list[tuple[str, dict]] = []
+    for r in rows:
+        problem = raw_row_problem(r)
+        if problem is None:
+            keep.append(r)
+            continue
+        refused.append((problem, r))
+        groups.setdefault((problem, str(r.get("league")), str(r.get("season"))), []).append(r)
+    for (problem, code, season), group in sorted(groups.items()):
+        logger.error(
+            "REFUSED %d raw row(s) of %s %s — %s: not promoted, and they decide no team's league (e.g. %s, Div %r)",
+            len(group),
+            code,
+            season,
+            RAW_PROBLEM_TEXT[problem],
+            fixture_label(group[0]),
+            group[0].get("Div"),
+        )
+    return keep, refused
+
+
 def upsert_leagues(cur, codes: set[str]) -> dict[str, str]:
-    """Insert leagues for each code; return {code: league_id}."""
+    """Insert leagues for each code; return {code: league_id}. promote()
+    passes LEAGUE_MAP codes only (screen_raw_rows refuses the rest)."""
     rows = []
     for code in codes:
         if code not in LEAGUE_MAP:
-            logger.warning("unknown league code %s — skipping", code)
+            logger.error("unknown league code %s — no league for it", code)
             continue
         name, country = LEAGUE_MAP[code]
         rows.append((name, country, "soccer", code))
@@ -958,6 +1031,8 @@ def promote(database_url: str, *, batch_size: int = 1000) -> Promotion:
             if not rows:
                 logger.info("raw_football_data is empty — nothing to promote")
                 return stats
+            rows, refused_raw = screen_raw_rows(rows)
+            stats.refused_raw = len(refused_raw)
 
             league_codes = {r["league"] for r in rows if r.get("league")}
             league_ids = upsert_leagues(cur, league_codes)
@@ -1071,8 +1146,8 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Refusing to promote — nothing written: %s", e)
         return 1
     logger.info(
-        "Promotion complete: leagues=%d teams=%d matches=%d match_stats=%d odds=%d "
-        "skipped_no_result=%d ht_dropped=%d left_cancelled=%d merged=%d refused=%d duplicates=%d ht_conflicts=%d",
+        "Promotion complete: leagues=%d teams=%d matches=%d match_stats=%d odds=%d skipped_no_result=%d "
+        "ht_dropped=%d left_cancelled=%d merged=%d refused=%d duplicates=%d ht_conflicts=%d refused_raw=%d",
         stats.leagues,
         stats.teams,
         stats.matches,
@@ -1085,14 +1160,17 @@ def main(argv: list[str] | None = None) -> int:
         stats.refused,
         stats.duplicates,
         stats.ht_conflicts,
+        stats.refused_raw,
     )
-    if stats.refused or stats.duplicates:
+    if stats.refused or stats.duplicates or stats.refused_raw:
         logger.error(
-            "REFUSED %d raw row(s) and found %d duplicate(s) (ERROR lines above): an existing row's score "
-            "disagrees, it is a stale fixture row or ambiguous, the match sits under other team ids (alias slot), "
-            "or football-data's own row sits beside the ESPN row. Everything else is committed; exiting %d until "
-            "they are resolved.",
+            "REFUSED %d raw row(s), screened out %d and found %d duplicate(s) (ERROR lines above): an existing "
+            "row's score disagrees, it is a stale fixture row or ambiguous, the match sits under other team ids "
+            "(alias slot), or football-data's own row sits beside the ESPN row; screened out: an unknown league "
+            "code, a Div naming another division, or a mis-decoded team name. Everything else is committed; "
+            "exiting %d until they are resolved.",
             stats.refused,
+            stats.refused_raw,
             stats.duplicates,
             REFUSED_EXIT_CODE,
         )

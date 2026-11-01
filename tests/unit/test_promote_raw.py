@@ -371,6 +371,69 @@ class TestPromote:
         assert "Refusing to promote — nothing written: 63768 raw row(s)" in caplog.text
 
 
+class TestScreenRawRows:
+    """Rows promote_raw refuses before anything (2026-11-01): an unknown league code (was a warning), a Div that
+    names another division (2026-08-06: SC1/SC2 served at the SP1/SP2 URLs), a mis-decoded team name (the
+    latin-1 read of a UTF-8 file: 'PreuÃ\\x9fen MÃ¼nster'). They are not promoted and decide no team's league."""
+
+    GARBLED = "Preußen Münster".encode("utf-8").decode("latin-1")
+
+    def test_each_problem_is_named(self):
+        assert pr.raw_row_problem(NORMAL) is None
+        assert pr.raw_row_problem({**NORMAL, "Div": "F2"}) is None
+        assert pr.raw_row_problem({**NORMAL, "league": "XX9"}) == pr.RAW_UNKNOWN_LEAGUE
+        assert pr.raw_row_problem({**NORMAL, "league": "SP1", "Div": "SC1"}) == pr.RAW_DIV_MISMATCH
+        assert pr.raw_row_problem({**NORMAL, "league": "D2", "HomeTeam": self.GARBLED}) == pr.RAW_MOJIBAKE
+
+    def test_the_scottish_lower_divisions_have_leagues(self):
+        assert pr.LEAGUE_MAP["SC1"] == ("Championship", "Scotland")
+        assert pr.LEAGUE_MAP["SC2"] == ("League One", "Scotland")
+        assert pr.LEAGUE_MAP["SC3"] == ("League Two", "Scotland")
+
+    def test_refused_rows_are_not_promoted_and_decide_no_teams_league(self, monkeypatch, caplog):
+        leagues_by_team: dict = {}
+        league_codes: set = set()
+        calls: list = []
+
+        def teams(cur, names, by_team):
+            leagues_by_team.update(by_team)
+            return {pr.normalize_team_name(n): f"t-{n}" for n in names}
+
+        def leagues(cur, codes):
+            league_codes.update(codes)
+            return {c: f"lg-{c}" for c in codes}
+
+        rows = [
+            {**NORMAL, "league": "SP1", "Div": "SC1", "HomeTeam": "Ayr", "AwayTeam": "Arbroath"},
+            {**NORMAL, "league": "D2", "HomeTeam": self.GARBLED, "AwayTeam": "Holstein Kiel"},
+            {**NORMAL, "league": "XX9", "HomeTeam": "Nowhere", "AwayTeam": "Somewhere"},
+            {**NORMAL, "league": "SC1", "Div": "SC1", "HomeTeam": "Morton", "AwayTeam": "Partick"},
+        ]
+        monkeypatch.setattr(pr.psycopg2, "connect", lambda url: _FakeConn(rows))
+        monkeypatch.setattr(pr, "check_legacy_kickoffs", lambda cur, rows, league_ids, team_ids: None)
+        monkeypatch.setattr(pr, "find_existing_matches", lambda *a: [])
+        monkeypatch.setattr(pr, "find_alias_slot_rows", lambda *a: [])
+        monkeypatch.setattr(pr, "upsert_leagues", leagues)
+        monkeypatch.setattr(pr, "upsert_teams", teams)
+        monkeypatch.setattr(pr, "insert_match", lambda cur, **kw: calls.append(kw) or "m-1")
+        monkeypatch.setattr(pr, "insert_match_stats", lambda *a, **kw: None)
+        monkeypatch.setattr(pr, "insert_odds", lambda *a, **kw: 0)
+        with caplog.at_level(logging.ERROR, logger="promote_raw"):
+            stats = pr.promote("postgres://fake")
+        assert stats.refused_raw == 3 and stats.matches == 1
+        assert [c["home_id"] for c in calls] == ["t-Morton"]
+        assert set(leagues_by_team) == {"Morton", "Partick"} and league_codes == {"SC1"}
+        assert "REFUSED 1 raw row(s) of SP1 2526 — Div names another division" in caplog.text
+        assert "REFUSED 1 raw row(s) of D2 2526 — a team name looks mis-decoded" in caplog.text
+        assert "REFUSED 1 raw row(s) of XX9 2526 — league code not in promote_raw.LEAGUE_MAP" in caplog.text
+
+    def test_main_exits_3_when_rows_were_screened_out(self, monkeypatch, caplog):
+        monkeypatch.setattr(pr, "promote", lambda url, batch_size: pr.Promotion(matches=5, refused_raw=68))
+        with caplog.at_level(logging.ERROR, logger="promote_raw"):
+            assert pr.main(["--database-url", "postgres://fake"]) == pr.REFUSED_EXIT_CODE
+        assert "screened out 68" in caplog.text
+
+
 UTC = timezone.utc
 
 

@@ -44,6 +44,16 @@ Usage:
     python scripts/load_football_data_extra.py --output data/raw/extra/
 
 Run after load_football_data.py + before promote_raw.py.
+
+A file is refused — logged at ERROR, nothing of it written, and the run exits
+3 once the other files are written — when it is neither UTF-8 nor
+Windows-1252 (every /new/ file is UTF-8 with a byte-order mark; it was read
+as latin-1 until 2026-11-01), when its Country column is missing or a row
+names another country than the one requested (the per-season files' Div
+check, load_football_data.parse_csv: on 2026-08-06 football-data served
+Scottish divisions at the 2026-27 SP1/SP2 URLs), or when a team name looks
+mojibake (text_encoding.looks_mojibake). An unknown country code is refused
+before anything is fetched (exit 2).
 """
 
 from __future__ import annotations
@@ -57,6 +67,9 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import text_encoding  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("load_football_data_extra")
@@ -135,6 +148,50 @@ KEEP_COLUMNS = [
 ]
 
 
+class RefusedFile(RuntimeError):
+    """A /new/ country file that is not loaded at all (see the module docstring)."""
+
+
+# main()'s exit code when a file was refused (everything else written).
+REFUSED_EXIT_CODE = 3
+
+
+def parse_country_csv(raw: bytes, code: str, source: str) -> pd.DataFrame:
+    """The rows of one /new/ country file, checked: decoded strictly, every
+    row's Country equal to COUNTRY_MAP's country for `code`, no team name that
+    looks mojibake. Raises RefusedFile."""
+    try:
+        text, encoding = text_encoding.decode_csv_bytes(raw, source)
+    except text_encoding.UndecodableText as exc:
+        raise RefusedFile(str(exc)) from None
+    df = pd.read_csv(StringIO(text))
+    df.columns = [c.strip() for c in df.columns]
+    want = COUNTRY_MAP[code][2]
+    if "Country" not in df.columns:
+        raise RefusedFile(
+            f"{source} ({encoding}) has no Country column (header starts {list(df.columns[:3])}) — nothing says "
+            f"which country it holds, so it is not loaded as {want}"
+        )
+    teams = [c for c in ("Home", "Away") if c in df.columns]
+    if teams:
+        df = df.dropna(subset=teams, how="all")
+    countries = df["Country"].fillna("").astype(str).str.strip()
+    wrong = sorted(set(countries[countries != want]))
+    if wrong:
+        raise RefusedFile(
+            f"{source} was fetched as {code} ({want}) but {int((countries != want).sum())} of its {len(df)} row(s) "
+            f"name {wrong} — football-data served another country's file at that URL; not loaded"
+        )
+    names = pd.concat([df[c] for c in teams]).dropna().astype(str) if teams else pd.Series(dtype=str)
+    garbled = sorted({n for n in names if text_encoding.looks_mojibake(n)})
+    if garbled:
+        raise RefusedFile(
+            f"{source} ({encoding}) has team name(s) that look mis-decoded: {garbled[:5]} — not loaded (a name like "
+            "that would mint a twin of the club)"
+        )
+    return df
+
+
 def fetch_country(code: str) -> pd.DataFrame:
     url = f"{BASE_URL}/{code}.csv"
     logger.info("Fetching %s", url)
@@ -142,10 +199,7 @@ def fetch_country(code: str) -> pd.DataFrame:
     if r.status_code == 404:
         raise FileNotFoundError(f"No file for {code} (HTTP 404)")
     r.raise_for_status()
-    text = r.content.decode("latin-1")
-    df = pd.read_csv(StringIO(text))
-    df.columns = [c.strip() for c in df.columns]
-    return df
+    return parse_country_csv(r.content, code, url)
 
 
 def normalize(df: pd.DataFrame, country: str) -> pd.DataFrame:
@@ -174,16 +228,23 @@ def normalize(df: pd.DataFrame, country: str) -> pd.DataFrame:
     return df[keep]
 
 
-def load_all(countries: list[str]) -> list[pd.DataFrame]:
+def load_all(countries: list[str], refused: list[str] | None = None) -> list[pd.DataFrame]:
+    """The country files of `countries` (all of them in COUNTRY_MAP: main
+    refuses an unknown code first); each file refused (RefusedFile) is logged
+    at ERROR and appended to `refused`."""
     out: list[pd.DataFrame] = []
     for code in countries:
         if code not in COUNTRY_MAP:
-            logger.warning("Unknown country code: %s — skipping", code)
-            continue
+            raise ValueError(f"unknown country code {code!r} (COUNTRY_MAP has {sorted(COUNTRY_MAP)})")
         try:
             df = fetch_country(code)
         except FileNotFoundError:
             logger.warning("No data for %s", code)
+            continue
+        except RefusedFile as e:
+            logger.error("REFUSED %s: %s", code, e)
+            if refused is not None:
+                refused.append(code)
             continue
         df = normalize(df, code)
         if df.empty:
@@ -253,10 +314,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     codes = [c.strip().upper() for c in args.countries.split(",") if c.strip()]
-    frames = load_all(codes)
+    unknown = sorted(set(codes) - set(COUNTRY_MAP))
+    if unknown:
+        logger.error("Unknown country code(s) %s (COUNTRY_MAP has %s) — nothing fetched", unknown, sorted(COUNTRY_MAP))
+        return 2
+    refused: list[str] = []
+    frames = load_all(codes, refused)
     if not frames:
-        logger.error("No data loaded for countries=%s", codes)
-        return 1
+        logger.error("No data loaded for countries=%s (refused: %s)", codes, refused or "none")
+        return REFUSED_EXIT_CODE if refused else 1
 
     total = sum(len(df) for df in frames)
     logger.info("Loaded %d total rows across %d countries", total, len(frames))
@@ -270,6 +336,14 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("Inserted %d new rows into raw_football_data", inserted)
     else:
         logger.info("--database-url not set; skipped DB write")
+    if refused:
+        logger.error(
+            "REFUSED %d file(s) (ERROR lines above): %s — everything else is loaded; exiting %d",
+            len(refused),
+            ", ".join(refused),
+            REFUSED_EXIT_CODE,
+        )
+        return REFUSED_EXIT_CODE
     return 0
 
 

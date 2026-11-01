@@ -32,8 +32,30 @@ League codes (from football-data.co.uk):
     B1  Belgian First Division A
     P1  Portuguese Primeira Liga
     SC0 Scottish Premiership
+    SC1 Scottish Championship
+    SC2 Scottish League One
+    SC3 Scottish League Two
     T1  Turkish Super Lig
     G1  Greek Super League
+
+A code promote_raw.LEAGUE_MAP has no league for is refused before anything
+is fetched (exit 2): promote_raw could not file its rows.
+
+A file is refused — logged at ERROR, nothing of it written, and the run exits
+3 once the other files are written — when (2026-11-01):
+  * it is neither UTF-8 nor Windows-1252 (text_encoding.decode_csv_bytes; it
+    was read as latin-1, which never fails: 'Preußen Münster' became
+    'PreuÃ\\x9fen MÃ¼nster', and the UTF-8 byte-order mark hid the Div column
+    of every file from 2024-25 on);
+  * it has no Div column, or a row's Div is not the code it was fetched as:
+    on 2026-08-06 football-data served the Scottish Championship and League
+    One at the 2026-27 SP1 and SP2 URLs, and ten Scottish fixtures were filed
+    under La Liga / La Liga 2 (scripts/ops/repair_soccer_labels.sh repairs
+    them);
+  * a team name looks mojibake (text_encoding.looks_mojibake): text decoded
+    wrongly before football-data published it, which would mint a twin club.
+A season football-data does not have (HTTP 404) is skipped with a warning, as
+before.
 """
 
 from __future__ import annotations
@@ -50,6 +72,9 @@ from typing import Iterable
 
 import pandas as pd
 import requests
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import text_encoding  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -126,6 +151,48 @@ def season_code(year_end: int) -> str:
     return f"{start:02d}{end:02d}"
 
 
+class RefusedFile(RuntimeError):
+    """A football-data file that is not loaded at all (see the module docstring)."""
+
+
+def parse_csv(raw: bytes, league: str, season: str, source: str) -> pd.DataFrame:
+    """The rows of one season file, checked: decoded strictly, every row's Div
+    equal to `league`, no team name that looks mojibake. Raises RefusedFile."""
+    try:
+        text, encoding = text_encoding.decode_csv_bytes(raw, source)
+    except text_encoding.UndecodableText as exc:
+        raise RefusedFile(str(exc)) from None
+    # Older season files carry ragged rows (stray commas -> more fields
+    # than the header); skip those lines rather than dying — one bad row
+    # in one of 300+ files must not kill a whole backfill sweep.
+    df = pd.read_csv(StringIO(text), on_bad_lines="skip")
+    df.columns = [c.strip() for c in df.columns]
+    if "Div" not in df.columns:
+        raise RefusedFile(
+            f"{source} ({encoding}) has no Div column (header starts {list(df.columns[:3])}) — nothing says which "
+            f"division it holds, so it is not loaded as {league}"
+        )
+    keep = [c for c in CORE_COLUMNS + ODDS_COLUMNS if c in df.columns]
+    df = df[keep].dropna(subset=["Date", "HomeTeam", "AwayTeam"])
+    divs = df["Div"].fillna("").astype(str).str.strip()
+    wrong = sorted(set(divs[divs != league]))
+    if wrong:
+        raise RefusedFile(
+            f"{source} was fetched as {league} {season} but {int((divs != league).sum())} of its {len(df)} row(s) "
+            f"name division(s) {wrong} — football-data served another division's file at that URL; not loaded"
+        )
+    names = pd.concat([df["HomeTeam"], df["AwayTeam"]]).astype(str)
+    garbled = sorted({n for n in names if text_encoding.looks_mojibake(n)})
+    if garbled:
+        raise RefusedFile(
+            f"{source} ({encoding}) has team name(s) that look mis-decoded: {garbled[:5]} — not loaded (a name like "
+            "that would mint a twin of the club)"
+        )
+    df["league"] = league
+    df["season"] = season
+    return df
+
+
 def fetch_csv(league: str, season: str) -> pd.DataFrame:
     url = f"{BASE_URL}/{season}/{league}.csv"
     logger.info("Fetching %s", url)
@@ -133,25 +200,17 @@ def fetch_csv(league: str, season: str) -> pd.DataFrame:
     if resp.status_code == 404:
         raise FileNotFoundError(f"No data for {league} {season} (HTTP 404)")
     resp.raise_for_status()
-    # Some seasons have stray bytes; latin-1 decodes everything.
-    text = resp.content.decode("latin-1")
-    # Older season files carry ragged rows (stray commas -> more fields
-    # than the header); skip those lines rather than dying — one bad row
-    # in one of 300+ files must not kill a whole backfill sweep.
-    df = pd.read_csv(StringIO(text), on_bad_lines="skip")
-    df.columns = [c.strip() for c in df.columns]
-    keep = [c for c in CORE_COLUMNS + ODDS_COLUMNS if c in df.columns]
-    df = df[keep].dropna(subset=["Date", "HomeTeam", "AwayTeam"])
-    df["league"] = league
-    df["season"] = season
-    return df
+    return parse_csv(resp.content, league, season, url)
 
 
 def load_seasons(
     leagues: Iterable[str],
     n_seasons: int,
     end_year: int | None = None,
+    refused: list[str] | None = None,
 ) -> list[pd.DataFrame]:
+    """The season files of `leagues`; each file refused (RefusedFile) is
+    logged at ERROR and appended to `refused` as 'league season'."""
     end_year = end_year or datetime.utcnow().year + (1 if datetime.utcnow().month >= 8 else 0)
     out: list[pd.DataFrame] = []
     for league in leagues:
@@ -161,6 +220,11 @@ def load_seasons(
                 df = fetch_csv(league, season)
             except FileNotFoundError:
                 logger.warning("Skipping missing %s %s", league, season)
+                continue
+            except RefusedFile as e:
+                logger.error("REFUSED %s %s: %s", league, season, e)
+                if refused is not None:
+                    refused.append(f"{league} {season}")
                 continue
             except Exception as e:
                 # Malformed file (parser errors etc.) — skip loudly, keep
@@ -232,13 +296,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+# main()'s exit code when a file was refused (everything else written), as
+# promote_raw exits on a refused raw row.
+REFUSED_EXIT_CODE = 3
+
+
+def unknown_league_codes(leagues: Iterable[str]) -> list[str]:
+    """The codes promote_raw.LEAGUE_MAP has no league for (their rows could not be promoted)."""
+    import promote_raw  # it imports psycopg2: the CSV-only path needs that installed too
+
+    return sorted(set(leagues) - set(promote_raw.LEAGUE_MAP))
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     leagues = [s.strip() for s in args.leagues.split(",") if s.strip()]
-    frames = load_seasons(leagues, args.seasons, args.end_year)
+    unknown = unknown_league_codes(leagues)
+    if unknown:
+        logger.error(
+            "Unknown league code(s) %s: promote_raw.LEAGUE_MAP has no league for them — add them there first; "
+            "nothing fetched",
+            unknown,
+        )
+        return 2
+    refused: list[str] = []
+    frames = load_seasons(leagues, args.seasons, args.end_year, refused)
     if not frames:
-        logger.error("No data loaded for leagues=%s seasons=%d", leagues, args.seasons)
-        return 1
+        logger.error("No data loaded for leagues=%s seasons=%d (refused: %s)", leagues, args.seasons, refused or "none")
+        return REFUSED_EXIT_CODE if refused else 1
     total = sum(len(df) for df in frames)
     logger.info("Loaded %d total rows across %d season-files", total, len(frames))
 
@@ -252,6 +337,14 @@ def main(argv: list[str] | None = None) -> int:
     else:
         logger.info("--database-url not set; skipped DB load")
 
+    if refused:
+        logger.error(
+            "REFUSED %d file(s) (ERROR lines above): %s — everything else is loaded; exiting %d",
+            len(refused),
+            ", ".join(refused),
+            REFUSED_EXIT_CODE,
+        )
+        return REFUSED_EXIT_CODE
     return 0
 
 
