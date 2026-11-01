@@ -21,6 +21,7 @@
 # the runbook's step 4 moves these rows' kickoffs (an hour earlier: 15:00Z ->
 # 14:00Z on 2026-08-01), and as the soccer repair runbook's step 13 on a
 # replica of a 06:48:46Z export after its steps 1-12, through the docker shim
+# (and again on an 08:24:28Z export)
 # (cross_country_after 0 there; VERIFY rows=122 now_new=122; a re-run after
 # step 14's promote_raw still ALREADY DONE) — the same counts each time:
 #   create_league  2   SC1 Championship, SC2 League One (Scotland): the row

@@ -29,7 +29,17 @@
 # predictions_regraded=0 recs_changed=0 teams_stamped=3 espn_failed=0; after:
 # 3 never_resulted rows (the fork has a finished twin now), 0 new. The same
 # again on a 06:48:46Z export (ESPN fetched ~07:07Z) as runbook step 12 of
-# sixteen.
+# sixteen, and on an 08:24:28Z export (ESPN fetched ~08:29Z) with the
+# PENDING listing, the step-0 cleanup check and the per-case ceilings below:
+# the same 42 / 38 / 3,173 / 3 and 3 left, Guadalajara v Atlante PENDING.
+# Its late path, on that replica after all sixteen steps with the bash and
+# Python clocks moved forward (Postgres on the real clock; the orphans tool
+# refuses an --as-of in the future, so moving the bash clock alone aborts
+# this step at step 0, nothing changed): as of 2026-11-04 12:00Z ALREADY
+# DONE, Guadalajara v Atlante and Santos v Necaxa PENDING; as of 11-05
+# 03:00Z Guadalajara v Atlante passed alone and healed — PLAN candidates=1
+# heal=1 predictions_graded=76 teams_stamped=0, bounds 39 / 39 / 3,249 —
+# with one backup, the re-plan '0 1 0', 3 never_resulted rows left.
 # The never_resulted class grows: a fixture whose result never arrives joins
 # it 96 h after kickoff (e.g. a Liga MX fixture the results path refuses as
 # identity drift until runbook step 1 has run, once the sweep's 3-day

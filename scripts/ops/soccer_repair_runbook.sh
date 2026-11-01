@@ -130,7 +130,21 @@
 # equal in counts: new uuids and timestamps);
 # --from 12 and --from 13 refused (no pause, no backup) on a state file
 # without step 11; and promote_raw's checked dry run before step 13:
-# refused_raw 68, exit 3 (why the labels repair comes first):
+# refused_raw 68, exit 3 (why the labels repair comes first). Again on an
+# 08:24:28Z export (ESPN fetched ~08:29Z), step 12 with its PENDING listing,
+# step-0 cleanup check and per-case ceilings: the 11-step runbook (d592a4d),
+# --from 12 and the full re-run gave every count above (step 12 listed
+# Guadalajara v Atlante PENDING; backups 9 -> 14 -> 14, fingerprint
+# unchanged), --from 12 / 13 refused on a state file without step 11. Then
+# the late recovery on that replica with the bash and Python clocks moved
+# forward (Postgres on the real clock): --only 12 as of 2026-11-04 12:00Z
+# read ALREADY DONE and listed Guadalajara v Atlante and Santos v Necaxa
+# PENDING (with the replica's 109 later fixtures no sweep finishes there);
+# --only 12 as of 11-05 03:00Z healed Guadalajara v Atlante (candidates 1,
+# heal 1, 76 graded, 0 stamped, inside the late bounds 39 / 39 / 3,249;
+# one backup; the cleanup re-run ALREADY DONE), kept the retrain DAGs paused
+# with an ALERT, and --only 16 adopted and unpaused them; a full re-run on
+# the real clock then only read (backups 15 -> 15, fingerprint unchanged):
 # 12 scripts/ops/backfill_soccer_never_resulted.sh, then
 #    scripts/ops/cleanup_soccer_orphans.sh --after-never-resulted
 #    The cleanup's never_resulted rows (42): ESPN's result recorded, through

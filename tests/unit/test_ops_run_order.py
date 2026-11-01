@@ -100,7 +100,7 @@ def test_each_run_order_header_names_the_runbooks_order(path):
 def test_the_runbook_header_describes_steps_12_to_16_in_order():
     text = RUNBOOK.read_text()
     start = text.index("# Steps 12-16")
-    block = text[start : start + 6000]
+    block = text[start : text.index("# Before step 1 (read-only) it REFUSES TO START", start)]  # the steps 12-16 block
     pos = 0
     for _name, pat in NEW_STEPS:
         m = re.compile(pat).search(block, pos)

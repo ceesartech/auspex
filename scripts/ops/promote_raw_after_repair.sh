@@ -26,11 +26,12 @@
 #                           Hearts 2026-08-01, an ESPN row that holds none
 # and nothing else: no match, team or league inserted or changed, no
 # prediction graded, no rec settled, no raw row refused or duplicated.
-# Again on a 06:48:46Z export after steps 1-13 (the labels repair, step 13,
-# included): the same plan, refused_raw=0 (the PLAN key since 2026-11-01:
-# raw rows promote_raw's screen refuses); the same dry run before step 13
-# screens out the 68 mis-decoded Preussen Muenster rows (refused_raw=68)
-# and exits 3, which step 0 here aborts on before any backup.
+# Again on 06:48:46Z and 08:24:28Z exports after steps 1-13 (the labels
+# repair, step 13, included): the same plan, refused_raw=0 (the PLAN key
+# since 2026-11-01: raw rows promote_raw's screen refuses); on both, the
+# same dry run before step 13 screens out the 68 mis-decoded Preussen
+# Muenster rows (refused_raw=68) and exits 3, which step 0 here aborts on
+# before any backup.
 # The checked run is one REPEATABLE READ transaction that sends the database
 # only the rows it changes (promote_raw's docstring): it neither locks the
 # league and team rows the pipeline's soccer sweeps rewrite every 15 min nor
