@@ -205,7 +205,11 @@ def _load_hockey_dixon_coles_artifact(path: str, label: str = "NHL Dixon-Coles")
     path does, or None (logged) when it is missing or unloadable. An artifact
     carrying a regulation structure (predictors.hockey_regulation) must carry
     a VALID one: a malformed structure is refused here, loudly, rather than
-    served as the legacy single-matrix model it is not."""
+    served as the legacy single-matrix model it is not. So is a structure on
+    an artifact whose rho is not 0: the structure's margin factors are fitted
+    on the untilted Poisson grid (fit_structure, rho 0), and hockey_dc_matrices
+    would tilt a rho-adjusted grid the fit never produced. The trainer's
+    regulation_fit_refusal never writes one; this catches a hand-edited file."""
     from pathlib import Path
 
     if not Path(path).exists():
@@ -225,9 +229,23 @@ def _load_hockey_dixon_coles_artifact(path: str, label: str = "NHL Dixon-Coles")
         logger.warning("Hockey model load failed at %s: %s", path, e)
         return None
     try:
-        structure_of(model)
+        structure = structure_of(model)
     except ValueError as e:
         logger.error("%s at %s carries a malformed regulation structure (%s) — refusing to serve it", label, path, e)
+        return None
+    rho = getattr(model, "rho", 0.0)
+    try:
+        rho_is_zero = float(rho or 0.0) == 0.0
+    except (TypeError, ValueError):
+        rho_is_zero = False
+    if structure is not None and not rho_is_zero:
+        logger.error(
+            "%s at %s carries a regulation structure with rho %r — the structure is fitted on the rho-0 Poisson grid; "
+            "refusing to serve it",
+            label,
+            path,
+            rho,
+        )
         return None
     return model
 

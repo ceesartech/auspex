@@ -202,6 +202,31 @@ class TestServePath:
             assert ppn._load_hockey_dixon_coles_artifact(str(path)) is None
         assert "malformed regulation structure" in caplog.text
 
+    def test_a_structure_on_a_nonzero_rho_artifact_is_refused_loudly(self, tmp_path, caplog):
+        """fit_structure fits the margin factors on the rho-0 Poisson grid;
+        hockey_dc_matrices builds the grid with the artifact's rho. A
+        structured artifact with rho != 0 (only a hand edit makes one: the
+        trainer refuses it) would serve a regulation matrix the fit never
+        produced. A legacy artifact keeps whatever rho it has."""
+        frame = nhl_frame("2023-10-01", "2024-01-31")
+        model, _, refusal = trainer.fit_regulation_model(frame, _cfg(), (0,))
+        assert refusal is None
+        path = tmp_path / "structured.bin"
+        model.save(str(path))
+        assert ppn._load_hockey_dixon_coles_artifact(str(path)) is not None
+        data = json.loads(path.read_text())
+        for rho in (-0.1, float("nan"), "x"):
+            path.write_text(json.dumps({**data, "rho": rho}))
+            caplog.clear()
+            with caplog.at_level("ERROR"):
+                assert ppn._load_hockey_dixon_coles_artifact(str(path)) is None, rho
+            assert "regulation structure with rho" in caplog.text
+        legacy = {k: v for k, v in data.items() if k != "regulation_structure"}
+        path.write_text(json.dumps({**legacy, "rho": -0.1}))
+        served = ppn._load_hockey_dixon_coles_artifact(str(path))
+        assert served is not None and served.rho == -0.1
+        assert not ppn.hockey_dc_matrices(served, "T0", "T1")[2]
+
     def test_a_missing_artifact_disables_the_markets(self, tmp_path):
         assert ppn._load_hockey_dixon_coles_artifact(str(tmp_path / "absent.bin")) is None
 
@@ -226,6 +251,36 @@ class TestDecision:
         assert not r["ship"] and "fails ship_strict" in r["reason"]
         r = gate.decide({}, {}, {gate.DECIDING_ARM: {"reason": "refused"}})
         assert not r["ship"] and "disqualified: refused" in r["reason"]
+
+    @staticmethod
+    def _pair(delta, se_cluster, n_folds=8):
+        """run()'s pair() output for one comparison: per-match SE 0.002, the
+        clustered delta equal to the per-match one."""
+        return {
+            "delta": delta,
+            "se": 0.002,
+            "delta_cluster": delta,
+            "se_cluster": se_cluster,
+            "n_folds": n_folds,
+            "upper_95_cluster_t": gate.ht.t_upper(delta, se_cluster, n_folds),
+        }
+
+    def test_ship_strict_needs_the_t_bound_below_zero(self):
+        """Rule (a): ship_verdict's SHIP (threshold + per-match and clustered
+        z=2 bounds) is not enough. At 8 folds the t(7) multiplier (2.36) is
+        wider than z=2, and a delta whose t bound crosses 0 fails."""
+        between = self._pair(-0.010, 0.0045)  # z=2 clustered upper -0.0010, t(7) upper +0.0006
+        assert between["delta_cluster"] + 2 * between["se_cluster"] < 0 < between["upper_95_cluster_t"]
+        v = gate.strict_verdict(between, "served")
+        assert v["ship"] and not v["ship_strict"]
+        assert v["upper_95_cluster_t"] == between["upper_95_cluster_t"] and v["baseline"] == "served"
+
+        v = gate.strict_verdict(self._pair(-0.010, 0.0030), "served")  # t(7) upper -0.0029
+        assert v["ship"] and v["ship_strict"]
+        v = gate.strict_verdict(self._pair(-0.004, 0.0010), "served")  # every bound < 0, threshold missed
+        assert v["upper_95_cluster_t"] < 0 and not v["ship"] and not v["ship_strict"]
+        v = gate.strict_verdict(self._pair(-0.010, 0.0030, n_folds=1), "served")  # no t bound
+        assert v["upper_95_cluster_t"] is None and not v["ship_strict"]
 
     def test_blocking_regressions_read_the_lower_bound(self):
         per_unit = {u: {"delta": -0.001, "lower_95_cluster_t": -0.002} for u in gate.UNIT_NAMES}
@@ -296,6 +351,10 @@ class TestSyntheticRun:
             assert r["vs_served"][arm]["regulation_1x2"]["n"] == n
             assert r["vs_served"][arm]["regulation_1x2"]["n_folds"] == 4
         assert set(r["verdicts_vs_served"]) == set(gate.CHALLENGERS)
+        for arm in gate.CHALLENGERS:  # each verdict is rule (a) on the reported pair, t bound included
+            v = r["verdicts_vs_served"][arm]
+            assert v == gate.strict_verdict(r["vs_served"][arm]["regulation_1x2"], "served")
+            assert v["upper_95_cluster_t"] == r["vs_served"][arm]["regulation_1x2"]["upper_95_cluster_t"]
         # The tilted truth: the structured arms put far more mass on regulation ties than served.
         cal = r["calibration"]
         assert cal["reg_margin_frozen"]["regulation_pred"]["draw"] > cal["served"]["regulation_pred"]["draw"] + 0.03

@@ -167,6 +167,11 @@ replica of the 02:37Z export; 8 folds 2025-10..2026-10, n=1,611)
   the previous gate: regulation_1x2 -0.031 +/- 0.042 — no information.
   Per-game rows / grids / JSON / log: the closeout scratch dir
   closeout/nhl_regtie/gate/ (ab_nhl_regtie_rows.csv recomputes every delta).
+  Post-review refactor (no amendment): rule (a)'s ship_strict moved out of
+  run() into the pure strict_verdict(), logic unchanged, so a test pins its
+  t(n_folds-1) half; the serve loader also refuses a structured artifact
+  with rho != 0 (none of these arms is one). Re-run on the same export:
+  JSON, per-game rows and grids identical to the recorded run.
 
 Per-game output for an independent recomputation: --out-rows (CSV: per arm
 the regulation and over-line probabilities and every unit's per-game Brier),
@@ -252,6 +257,27 @@ def decide(
     else:
         reason = f"{PRIMARY} passes, but {len(regs)} unit(s) regress: {', '.join(regs)}"
     return {"arm": arm, "ship": ship, "primary_pass": primary_pass, "regressions": regs, "reason": reason}
+
+
+def strict_verdict(p: Dict[str, Any], baseline: str) -> Dict[str, Any]:
+    """ft.ship_verdict on one paired comparison (run()'s pair() output) plus
+    rule (a)'s ship_strict: that verdict's SHIP (dBrier <= -0.005, per-match
+    AND fold-clustered z=2 upper bounds < 0) AND the fold-clustered
+    t(n_folds-1) 95% upper bound < 0. The t bound is the stricter one at few
+    folds (multiplier 2.36 at 8 folds against z=2), so a SHIP on the z=2
+    bounds alone is not a pass; no t bound (fewer than 2 folds) never ships."""
+    v = ft.ship_verdict(
+        p["delta"],
+        p["se"],
+        baseline,
+        delta_cluster=p["delta_cluster"],
+        se_cluster=p["se_cluster"],
+        n_folds=p["n_folds"],
+    )
+    t_upper = p["upper_95_cluster_t"]
+    v["upper_95_cluster_t"] = t_upper
+    v["ship_strict"] = bool(v["ship"] and t_upper is not None and t_upper < 0)
+    return v
 
 
 def blocking_regressions(per_unit: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
@@ -535,13 +561,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         return out
 
     def verdict(a: str, b: str, mask: Optional[np.ndarray] = None) -> Dict[str, Any]:
-        p = pair(a, b, mask=mask)
-        v = ft.ship_verdict(
-            p["delta"], p["se"], b, delta_cluster=p["delta_cluster"], se_cluster=p["se_cluster"], n_folds=p["n_folds"]
-        )
-        v["upper_95_cluster_t"] = p["upper_95_cluster_t"]
-        v["ship_strict"] = bool(v["ship"] and p["upper_95_cluster_t"] is not None and p["upper_95_cluster_t"] < 0)
-        return v
+        return strict_verdict(pair(a, b, mask=mask), b)
 
     def calibration(a: str, mask: np.ndarray) -> Dict[str, Any]:
         pr = np.vstack(p_reg[a])
