@@ -48,9 +48,12 @@ PART A — BRIER (context, post hoc; live regime; refit - served)
   * a goal-difference ranked probability score (RPS) over the 7 ordered
     margin classes <=-3, -2, -1, 0, +1, +2, >=+3 — exactly the information
     every AH line in +-2 reads — normalised by K-1 = 6;
-  * the "shift ceiling": E[sum_k (p_refit,k - p_served,k)^2], which is the
-    Brier gain refit would earn if its own probabilities were the truth. A
-    -0.005 gain needs a root-mean-square shift of about 0.07 per class.
+  * the scaled-shape bound: the in-sample best rescaling k of refit's
+    correction (serve served + k (refit - served)) and its Brier gain, the
+    most any shape along the refit's direction could gain on this window.
+    [Amended after the run: this line first described a "shift ceiling",
+    E[sum (p_refit - p_served)^2], as a bound. It is the gain refit would earn
+    if it were the truth, not a ceiling: the measured gain exceeded it.]
   Re-derived matrices must reproduce scores.npz's AH Briers to 1e-12 (the run
   aborts otherwise).
 
@@ -142,6 +145,103 @@ THE RUN (fixed with this design, committed before the full run)
   lines, no P/L, CLV or Brier delta. (The 600-match smoke printed per-arm rec
   counts on its first 146 eligible matches, June-July 2026: served 8, refit
   9, stored 7, refit_on_stored 8.)
+
+RESULT (2026-11-01; the run above, on the replica of the 21:09:21Z export)
+  Inputs. The FT gate re-run reproduced the recorded gate exactly: n = 25,604,
+  31 folds, live refit - served on over_2.5 -0.00375 (clustered -0.00358 +/-
+  0.00044), every AH unit to the digit, live check 371/371 stored predictions
+  of the current incumbent re-derived (1x2-only 2.8e-17, 69 anchored 5.0e-7).
+  AH odds exist from 2026-05-30 06:00Z (first row created; 1,984 finished
+  matches with pre-match AH rows to 2026-10-31, six US books); production's
+  first AH rec was written 2026-06-11; odds_snapshots start 2026-07-13.
+  1,113 of the 1,984 fail the eligibility gate at the tick (a team with < 10
+  finished matches), leaving 871 (Jul 46, Aug 171, Sep 196, Oct 458 a month).
+  PART A — Brier, refit - served (live regime, n = 25,604, 31 folds; the
+  re-derived matrices reproduce scores.npz to 1.1e-15):
+    best single line (ah_-2, chosen after reading)  -0.00212 +/- 0.00023
+        (clustered -0.00211 +/- 0.00028, t upper bound -0.00154)
+    pooled shaped lines (mean of 12)                -0.00112 +/- 0.00012
+        (clustered -0.00110 +/- 0.00015, t upper bound -0.00079)
+    goal-difference RPS (7 classes)                 -0.00047 +/- 0.00004
+        (clustered -0.00047 +/- 0.00005; served RPS 0.1329)
+    goal-difference 7-way Brier                     -0.00188 +/- 0.00023
+  Every one fails the -0.005 house gate by a wide margin, clear of noise in
+  the wrong direction for a ship: the effect is real but 2.4-10.6x too small.
+  Why: after the IPF the 1x2 pins every region mass, so a Dixon-Coles shape
+  can only move mass between margins inside a region; the refit moves the
+  shaped lines by 0.007-0.020 per class (RMS) and the goal-difference classes
+  by 0.015. Even the in-sample best rescaling of that correction (served +
+  k (refit - served), k fitted on the scored rows) gains only 0.00230 on
+  ah_-2 (k 1.39), 0.00118 pooled (k 1.28), 0.00051 on the RPS (k 1.38):
+  under half the gate on the best line, about a quarter pooled.
+  Choosing asian_handicap, a single line, a pooling or a score after the
+  gate's per-unit results were read is post hoc; none of these numbers can
+  ship anything.
+  PART B — money. served vs refit, every eligible match with pre-match AH
+  odds (871 matches, 170 with a rec in either arm; today's logic throughout):
+    served  142 recs, stake 3,240.09, P/L -296.27 (ROI -9.1%), flat -13.35
+            (-9.4%), fair-close CLV -3.23% per rec
+    refit   154 recs, stake 3,504.41, P/L -136.16 (ROI -3.9%), flat -5.58
+            (-3.6%), fair-close CLV -3.21% per rec
+    overlap 120 identical recs (108 at the same price and stake), 0 on a
+            moved line; served-only 22 recs (-38% ROI), refit-only 34 (-4%)
+    refit - served: ROI +5.3 pts (bootstrap SE 4.7, 95% [-3.9, +14.6]); flat
+            ROI +5.8 pts (SE 4.5); total P/L +160 (SE 162); fair-close CLV
+            +0.0002 per rec (SE 0.0007, 95% [-0.0012, +0.0017])
+  The production-faithful pair, stored vs refit_on_stored (871 matches):
+    147 vs 155 recs, ROI -5.8% vs -5.3% (difference +0.4 pts, SE 4.9), CLV
+    -3.25% vs -3.22% (difference +0.0003, SE 0.0008); 120 identical recs.
+  From 2026-09-05 (647 matches): served vs refit ROI -12.0% vs -6.4% (+5.5
+  pts, SE 5.1); stored vs refit_on_stored -7.0% vs -6.8% (+0.15 pts, SE 5.1).
+  Same-book CLV is exactly 0 for every arm: the replay prices at the last
+  tick, and no AH price moved in the final 14 minutes. Fair-close CLV of
+  EVERY fresh best quote at the tick (a random side at the best price) is
+  -3.59% (n = 1,360): the AH recs of either arm are ~0.35 pts better than a
+  random pick and still 3.2% worse than the closing consensus, and the refit
+  does not change that. The money differences are inside the noise and the
+  closing-value difference is zero.
+  PART C — reproduction, 2026-09-05..2026-10-31: the stored arm reproduces
+  all 140 production AH recs on 134 matches and nothing else (recall 1.000,
+  precision 1.000): 140/140 the same price and the same stake; the book
+  differs on 54, every one a book tied at the same price at the tick
+  (best_odds' SQL picks among ties arbitrarily). Production's own settled
+  P/L on them, -249.81, equals the replay's settlement to rounding (-249.84;
+  ad hoc check). The served arm (today's artifact and 1x2 incumbent)
+  reproduces 107 of the 140 (recall 0.76, precision 0.81), every one at the
+  same price, 70 at the same stake: that gap is input drift, not the replay
+  (the stored AH probabilities differ from the served arm's by a median
+  0.021, p90 0.061, on the shaped lines, because each week's 1x2 ensemble and
+  artifact differ from the 2026-11-01 ones).
+  PART D — power, from this window's per-match SDs (80%, two-sided 5%):
+    Brier pooled shaped lines   2,241 matches to show -0.00112 is non-zero
+                                (~2.4-2.7 months at 820-935 matches a month
+                                with a stored AH row); the -0.005 gate is
+                                unreachable at this effect size at ANY n
+    Brier ah_-2 / GD RPS        2,394 / 1,687 matches, same caveat
+    money, stake P/L            6,934 eligible AH-odds matches (15 months at
+                                October's 458, 25 at the Aug-Oct 275) for
+                                the measured +0.18 a match; flat P/L 5,146
+    fair-close CLV              no effect to detect (-0.0004 a match); the
+                                production-faithful P/L difference is +0.006
+                                a match, i.e. never
+  ANSWER. A streamlined AH-only deployment is buildable (design in scripts/
+  ab_soccer_ah_forward_gate.py) but this window gives no case for it: the
+  Brier gain is real and too small for the house gate, and the replayed
+  recommendations make the same bets 80% of the time with the same closing
+  value; the P/L gap in the window pair is noise, and it vanishes in the
+  production-faithful pair.
+
+AMENDMENTS AFTER THE RUN (none changes a money, CLV, reproduction or Brier
+delta; the full run was re-run after them and every one of those numbers is
+identical, compared field by field)
+  1. Part A's "shift ceiling" readout was mis-described as a bound (the
+     measured gain exceeded it). It is replaced by the scaled-shape bound
+     (shape_moments / scaled_shape).
+  2. Part B also reports the fair-close CLV of every fresh best quote at the
+     tick (the random-side baseline); recs record the books tied at their
+     price, and Part C counts the book mismatches that are such ties.
+  3. The monthly volume query truncates match_date in UTC explicitly (it had
+     used the session time zone; the recorded run's session was UTC).
 
 Read-only: SELECTs only. Usage (local replica):
     python scripts/ab_soccer_ah_recs_replay.py --ftdc-dir <ft gate --out-dir> \\
@@ -274,7 +374,8 @@ STORED_SQL = """
 
 # The forward Brier gate's population: finished matches with a stored AH row.
 STORED_AH_PER_MONTH_SQL = """
-    SELECT to_char(date_trunc('month', m.match_date), 'YYYY-MM') AS month, count(DISTINCT p.match_id) AS n
+    SELECT to_char(date_trunc('month', m.match_date AT TIME ZONE 'UTC'), 'YYYY-MM') AS month,
+           count(DISTINCT p.match_id) AS n
     FROM predictions p
     JOIN matches m ON m.id = p.match_id
     JOIN leagues l ON l.id = m.league_id AND l.sport = 'soccer'
@@ -432,6 +533,19 @@ def price_ties(state: Sequence[Quote], max_age_hours: float = rec_gating.MAX_ODD
     return sum(1 for v in by_key.values() if len(v) > 1 and sorted(v)[-1] == sorted(v)[-2])
 
 
+def tied_books(state: Sequence[Quote], best: Quote, max_age_hours: float = rec_gating.MAX_ODDS_AGE_HOURS) -> List[str]:
+    """Every fresh book quoting `best`'s selection and line at exactly its
+    price: best_odds' SQL picks among them arbitrarily."""
+    return sorted(
+        q.bookmaker
+        for q in state
+        if q.selection == best.selection
+        and abs(q.line - best.line) < 1e-9
+        and q.odds == best.odds
+        and is_fresh(q, max_age_hours)
+    )
+
+
 def consensus_prob(
     state: Sequence[Quote],
     selection: str,
@@ -544,6 +658,7 @@ def replay_match(
                 kelly_stake=round(bankroll * f, 2),
                 stake=rec_gating.cap_stake(bankroll * f * 0.25, bankroll),
                 age_hours=q.age_hours,
+                extra={"tie_books": tied_books(state, q, max_age_hours)},
             )
         )
     return recs, suppressed
@@ -778,6 +893,34 @@ def handicap_probs(P: np.ndarray, line: float, weights: Optional[Dict[str, np.nd
     return np.einsum("rij,kij->rk", np.asarray(P, dtype=float), w)
 
 
+def shape_moments(served: np.ndarray, refit: np.ndarray, y: np.ndarray) -> Tuple[float, float]:
+    """(E[sum_k d^2], E[sum_k d (served - y)]) with d = refit - served, over
+    the rows (m, k) where y is finite."""
+    ok = np.isfinite(y).all(axis=1)
+    d = np.asarray(refit, dtype=float)[ok] - np.asarray(served, dtype=float)[ok]
+    r = np.asarray(served, dtype=float)[ok] - np.asarray(y, dtype=float)[ok]
+    return float(np.mean(np.sum(d * d, axis=1))), float(np.mean(np.sum(d * r, axis=1)))
+
+
+def scaled_shape(parts: Sequence[Tuple[float, float]]) -> Dict[str, Optional[float]]:
+    """The in-sample best rescaling of refit's correction: serve
+    served + k (refit - served) for one k. Brier(k) - Brier(0) = 2k E[d r] +
+    k^2 E[d^2] (a mean over `parts` for a pooled score), so the best k is
+    -E[d r] / E[d^2] and its gain E[d r]^2 / E[d^2]. That is the most any
+    shape along the refit's direction could gain on this window, fitted on
+    the scored rows themselves (an optimistic bound, never a model)."""
+    e_dd = float(np.mean([p[0] for p in parts]))
+    e_dr = float(np.mean([p[1] for p in parts]))
+    if e_dd <= 0:
+        return {"e_d2": e_dd, "gain_at_refit": None, "best_k": None, "gain_at_best_k": None}
+    return {
+        "e_d2": e_dd,
+        "gain_at_refit": -(2.0 * e_dr + e_dd),
+        "best_k": -e_dr / e_dd,
+        "gain_at_best_k": e_dr * e_dr / e_dd,
+    }
+
+
 # ── Data ─────────────────────────────────────────────────────────────
 
 
@@ -896,7 +1039,7 @@ def _anchor(v: Any) -> Optional[float]:
 
 def brier_part(pm: pd.DataFrame, scores: Dict[str, np.ndarray], mechanics: bool, limit: int = 0) -> Dict[str, Any]:
     """AH Brier readouts (refit - served, live regime) from the gate's outputs,
-    plus the GD RPS and the shift ceiling from re-derived matrices."""
+    plus the GD RPS and the scaled-shape bound from re-derived matrices."""
     folds = np.asarray(scores["fold"]).astype(str)
     idx = np.arange(len(pm)) if not limit else np.arange(min(limit, len(pm)))
     weights = ftdc.unit_weights()
@@ -949,22 +1092,21 @@ def brier_part(pm: pd.DataFrame, scores: Dict[str, np.ndarray], mechanics: bool,
     out["gd_brier_7way"] = ftdc.pair(
         ftdc.brier_rows(gd["refit"], np.eye(7)[cls]), ftdc.brier_rows(gd["served"], np.eye(7)[cls]), f
     )
-    shift = {}
+    parts: Dict[str, Tuple[float, float]] = {}
     for u in ALL_AH_UNITS:
         ps = np.einsum("rij,kij->rk", mats["served"], weights[u])
         pr = np.einsum("rij,kij->rk", mats["refit"], weights[u])
-        shift[u] = {
-            "mean_sq_shift": float(np.mean(np.sum((pr - ps) ** 2, axis=1))),
-            "rms_per_class": float(np.sqrt(np.mean((pr - ps) ** 2))),
-            "max_abs": float(np.max(np.abs(pr - ps))),
-        }
-    shift["gd_7way"] = {
-        "mean_sq_shift": float(np.mean(np.sum((gd["refit"] - gd["served"]) ** 2, axis=1))),
-        "rms_per_class": float(np.sqrt(np.mean((gd["refit"] - gd["served"]) ** 2))),
-        "max_abs": float(np.max(np.abs(gd["refit"] - gd["served"]))),
-    }
-    out["shift_ceiling"] = shift
+        parts[u] = shape_moments(ps, pr, truth[u])
+    cum = {arm: np.cumsum(gd[arm], axis=1)[:, :-1] for arm in gd}
+    cum_y = np.cumsum(np.eye(7)[cls], axis=1)[:, :-1]
+    e_dd, e_dr = shape_moments(cum["served"], cum["refit"], cum_y)
     best = min(SHAPED_UNITS, key=lambda u: out["units"][u]["delta"])
+    out["scaled_shape_bound"] = {
+        "best_single_line": scaled_shape([parts[best]]),
+        "pooled_shaped_mean": scaled_shape([parts[u] for u in SHAPED_UNITS]),
+        "gd_rps": scaled_shape([(e_dd / 6.0, e_dr / 6.0)]),
+        **{u: scaled_shape([parts[u]]) for u in SHAPED_UNITS},
+    }
     out["best_single_line"] = {"unit": best, **out["units"][best]}
     out["best_single_line"]["sd_per_match"] = per_match_diff(b("refit", best) - b("served", best))["sd"]
     out["verdicts"] = {
@@ -1039,6 +1181,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         "price_ties": 0,
     }
     stored_vs_served_ah: List[float] = []
+    baseline_clv: List[Tuple[bool, float]] = []
     shaped_keys = [f"{ftdc.fmt_line(x)}_{s}" for x in SHAPED_LINES for s in ("home", "away", "push")]
     for mid in cand:
         mrow = matches.loc[mid]
@@ -1056,6 +1199,10 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         state = quote_state(rows, snaps, tick, state_drops)
         close_state = quote_state(rows, snaps, ko - pd.Timedelta(microseconds=1))
         counts["price_ties"] += price_ties(state)
+        for q in best_quotes(state):
+            p_close_q = consensus_prob(close_state, q.selection, q.line) if is_fresh(q) else None
+            if p_close_q is not None:
+                baseline_clv.append((ko >= REPRO_START, q.odds * p_close_q - 1.0))
         meta = mrow["metadata"] if isinstance(mrow["metadata"], dict) else {}
         arm_probs: Dict[str, Dict[str, float]] = {}
         g = pm_by.loc[mid] if mid in pm_by.index else None
@@ -1119,6 +1266,10 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     )
     report["replay"] = counts
     report["suppressed"] = suppressed
+    report["clv_fair_baseline"] = {
+        name: per_match_diff(np.array([v for since, v in baseline_clv if keep(since)]))
+        for name, keep in (("all", lambda x: True), ("from_repro_start", lambda x: x))
+    }
     by_month: Dict[str, int] = {}
     for mid, st_ in status.items():
         if st_ == "eligible":
@@ -1249,6 +1400,12 @@ def reproduction(
             "both_same_price": sum(1 for k in both if abs(po[k] - mine[k].odds) < 1e-9),
             "both_price_within_0.05": sum(1 for k in both if abs(po[k] - mine[k].odds) <= 0.05 + 1e-12),
             "both_same_book": sum(1 for k in both if str(prod_in[k].bookmaker) == mine[k].bookmaker),
+            "both_other_book_tied_at_the_price": sum(
+                1
+                for k in both
+                if str(prod_in[k].bookmaker) != mine[k].bookmaker
+                and str(prod_in[k].bookmaker) in mine[k].extra.get("tie_books", [])
+            ),
             "both_same_stake": sum(1 for k in both if abs(float(prod_in[k].stake) - mine[k].stake) < 0.005),
             "recall": len(both) / len(prod_in) if prod_in else None,
             "precision": len(both) / len(mine) if mine else None,
@@ -1359,12 +1516,20 @@ def format_report(r: Dict[str, Any]) -> str:
         L.append(ftdc._pair_line(name, br[name]))
     for name, v in br["verdicts"].items():
         L.append(f"  house gate on {name}: {'PASS' if v['ship_strict'] else 'FAIL'} — {v['line']}")
-    L.append("  shift ceiling (Brier gain refit would earn if it were the truth; rms shift per class):")
-    for u, s in br["shift_ceiling"].items():
+    L.append(
+        "  scaled-shape bound (in-sample best k for served + k*(refit - served); gain = Brier reduction vs served):"
+    )
+    for name, v in br["scaled_shape_bound"].items():
         L.append(
-            f"    {u:<12} E[sum (dp)^2] {s['mean_sq_shift']:.5f}  rms {s['rms_per_class']:.4f}  max {s['max_abs']:.3f}"
+            f"    {name:<20} E[sum d^2] {_f(v['e_d2'], '.5f')}  gain at refit {_f(v['gain_at_refit'])}  best k "
+            f"{_f(v['best_k'], '.2f')}  gain at best k {_f(v['gain_at_best_k'])}"
         )
     L += ["", "PART B — money (replayed at the last tick; settled by grading_outcomes):"]
+    for name, v in r["clv_fair_baseline"].items():
+        L.append(
+            f"  fair-close CLV of EVERY fresh best quote (a random side at the best price) [{name}]: n={v['n']} "
+            f"mean {_f(v['mean'], '+.4f')} sd {_f(v['sd'], '.4f')}"
+        )
     for arm, m in r["money"].items():
         L.append(_money_line(arm, m))
     for name, p in r["pairs"].items():
@@ -1415,7 +1580,8 @@ def format_report(r: Dict[str, Any]) -> str:
             f"  {name:<7} production recs in pool {v['production_recs_in_pool']}, replay {v['replay_recs']}, both "
             f"{v['both']} (recall {_f(v['recall'], '.3f')}, precision {_f(v['precision'], '.3f')}); of both: same "
             f"price {v['both_same_price']}, within 0.05 {v['both_price_within_0.05']}, same book "
-            f"{v['both_same_book']}, same stake {v['both_same_stake']}; production recs outside the pool "
+            f"{v['both_same_book']} (other book tied at the price {v['both_other_book_tied_at_the_price']}), "
+            f"same stake {v['both_same_stake']}; production recs outside the pool "
             f"{v['production_recs_outside_pool']}"
         )
     pw = r["power"]

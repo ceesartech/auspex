@@ -601,3 +601,76 @@ def test_mechanics_never_writes_the_json(tmp_path, monkeypatch):
     assert rp.main(["--ftdc-dir", "x", "--database-url", "postgresql://x", "--mechanics", "--out-json", str(out)]) == 0
     assert not out.exists()
     assert json.dumps(report)
+
+
+# ── Amendments after the run: the scaled-shape bound, ties, reproduction ──
+
+
+class TestScaledShape:
+    def test_recovers_the_true_stretch(self):
+        rng = np.random.default_rng(2)
+        q = rng.uniform(0.2, 0.5, (500, 3))
+        d = rng.normal(0, 0.02, (500, 3))
+        for k_true in (1.0, 1.4, 0.6):
+            y = q + k_true * d
+            e_dd, e_dr = rp.shape_moments(q, q + d, y)
+            out = rp.scaled_shape([(e_dd, e_dr)])
+            assert out["best_k"] == pytest.approx(k_true)
+            assert out["gain_at_best_k"] == pytest.approx(k_true**2 * e_dd)
+            assert out["gain_at_refit"] == pytest.approx((2 * k_true - 1) * e_dd)
+
+    def test_gain_at_refit_is_the_brier_difference(self):
+        rng = np.random.default_rng(3)
+        q = rng.dirichlet([2, 2, 1], 400)
+        p = rng.dirichlet([2, 2, 1], 400)
+        y = np.eye(3)[rng.integers(0, 3, 400)]
+        out = rp.scaled_shape([rp.shape_moments(q, p, y)])
+
+        def brier(x):
+            return np.mean(np.sum((x - y) ** 2, axis=1))
+
+        assert out["gain_at_refit"] == pytest.approx(brier(q) - brier(p))
+
+    def test_no_shift_has_no_bound(self):
+        q = np.full((3, 3), 1 / 3)
+        assert rp.scaled_shape([rp.shape_moments(q, q, np.eye(3))])["best_k"] is None
+
+
+def test_tied_books_are_the_fresh_books_at_the_best_price():
+    st = [
+        _q("a", "home", -0.5, 1.95, 0.5),
+        _q("b", "home", -0.5, 1.95, 0.5),
+        _q("c", "home", -0.5, 1.95, 30.0),
+        _q("d", "home", -0.5, 1.90, 0.5),
+    ]
+    (best,) = rp.best_quotes(st)
+    assert rp.tied_books(st, best) == ["a", "b"]
+
+
+def test_reproduction_accounts_for_every_production_rec():
+    matches = pd.DataFrame(
+        {"match_date": pd.to_datetime(["2026-09-10T15:00Z", "2026-09-11T15:00Z", "2026-09-12T15:00Z"])},
+        index=["m1", "m2", "m3"],
+    )
+    prod = pd.DataFrame(
+        {
+            "match_id": ["m1", "m2", "m3"],
+            "selection": ["home_-0.75", "away_0.5", "home_-1"],
+            "odds_decimal": [2.0, 1.9, 2.1],
+            "bookmaker": ["b", "x", "a"],
+            "stake": [10.0, 12.0, 8.0],
+            "status": ["won", "lost", "void"],
+            "created_at": pd.to_datetime(["2026-09-10T14:46Z", "2026-09-11T14:46Z", "2026-09-12T14:46Z"]),
+        }
+    )
+    r1 = rp.Rec("m1", "home_-0.75", "home", -0.75, 2.0, "a", 0.06, 0.5, 0.5, 0.5, 40.0, 10.0, 0.5)
+    r1.extra["tie_books"] = ["a", "b"]
+    r2 = rp.Rec("m2", "away_0.5", "away", 0.5, 1.9, "y", 0.06, 0.5, 0.5, 0.5, 40.0, 11.0, 0.5)
+    r2.extra["tie_books"] = ["y"]
+    status = {"m1": "eligible", "m2": "eligible", "m3": "ineligible"}
+    out = rp.reproduction(prod, [r1, r2], [], {"stored": ["m1", "m2"], "served": []}, status, matches)
+    s = out["stored"]
+    assert (s["production_recs_in_pool"], s["both"], s["production_only"], s["replay_only"]) == (2, 2, 0, 0)
+    assert s["both_same_price"] == 2 and s["both_same_stake"] == 1
+    assert s["both_same_book"] == 0 and s["both_other_book_tied_at_the_price"] == 1
+    assert s["production_recs_outside_pool"] == {"ineligible": 1}
