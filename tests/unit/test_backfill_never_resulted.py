@@ -201,3 +201,253 @@ class TestArguments:
         ids.write_text("aaaaaaaa-0000-0000-0000-000000000001\n")
         argv = ["--match-ids-file", str(ids), "--espn-cache", str(tmp_path / "e.json"), "--apply"]
         assert bnr.main(argv + ["--out-csv", str(tmp_path / "a.csv"), "--database-url", "x"]) == 1
+
+
+# ── the write path: heal_one's savepoint checks, plan()'s ESPN-owner refusal, run()'s pin ──────────────────────────
+
+
+class _HealCursor:
+    """What heal_one reads back after the results path wrote, inside its savepoint."""
+
+    def __init__(self, row_after, created=(0, 0), touched=()):
+        self.row_after, self.created, self.touched = row_after, created, touched
+        self.sql: list[str] = []
+        self._rows: list[dict] = []
+
+    def execute(self, sql, params=None):
+        self.sql.append(" ".join(sql.split()))
+        if sql is bnr.ROW_AFTER_SQL:
+            self._rows = [self.row_after] if self.row_after else []
+        elif sql is bnr.CREATED_SQL:
+            self._rows = [{"matches": self.created[0], "teams": self.created[1]}]
+        elif sql is bnr.TOUCHED_SQL:
+            self._rows = [{"id": i} for i in self.touched]
+        elif sql.split()[0] in ("SAVEPOINT", "ROLLBACK", "RELEASE"):
+            self._rows = []
+        else:
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+MID = "aaaaaaaa-0000-0000-0000-000000000001"
+FINISHED_2_1 = {"status": "finished", "home_score": 2, "away_score": 1, "match_date": KICKOFF, "espn_id": "401850590"}
+
+
+def _entry():
+    return {"match_id": MID, "_league_id": "lg", "_comp": {}, "_context": {}, "_final": (2, 1), "espn_final": "2-1"}
+
+
+@pytest.fixture
+def results_path(monkeypatch):
+    """fu._record_result and the grader stubbed: `calls` records what was graded; `wrote` / `identity` steer it."""
+    state = {"wrote": True, "identity": None, "raise": None, "graded": []}
+    for key in list(bnr.fu.IDENTITY_STATS):
+        monkeypatch.setitem(bnr.fu.IDENTITY_STATS, key, 0)
+
+    def record_result(cur, cfg, league_id, comp, context):
+        if state["raise"]:
+            raise state["raise"]
+        if state["identity"]:
+            bnr.fu.IDENTITY_STATS[state["identity"]] += 1
+        return state["wrote"]
+
+    monkeypatch.setattr(bnr.fu, "_record_result", record_result)
+    monkeypatch.setattr(bnr.gm, "finished_matches", lambda cur, ids: [{"match_id": i} for i in ids])
+    monkeypatch.setattr(bnr.gm, "grade_listed", lambda cur, matches: state["graded"].extend(matches))
+    return state
+
+
+class TestHealOne:
+    def test_a_heal_as_planned_is_released_and_graded(self, results_path):
+        cur, e = _HealCursor(FINISHED_2_1, touched=(MID, "earlier-heal")), _entry()
+        assert bnr.heal_one(cur, e, {"earlier-heal"}) == ""
+        assert cur.sql[0] == "SAVEPOINT heal_one" and cur.sql[-1] == "RELEASE SAVEPOINT heal_one"
+        assert not [q for q in cur.sql if q.startswith("ROLLBACK")]
+        assert results_path["graded"] == [{"match_id": MID}]
+        assert e["status_after"] == "finished" and e["score_after"] == "2-1"
+
+    @pytest.mark.parametrize(
+        "cursor_kw, steer, why",
+        [
+            ({"touched": (MID, "other-row")}, {}, "it touched other matches rows ['other-row']"),
+            ({"created": (1, 0)}, {}, "it inserted 1 matches / 0 teams row(s)"),
+            ({"created": (0, 1)}, {}, "it inserted 0 matches / 1 teams row(s)"),
+            ({"row_after": {**FINISHED_2_1, "away_score": 2}}, {}, "not finished 2-1"),
+            ({"row_after": {**FINISHED_2_1, "status": "scheduled"}}, {}, "the row is scheduled"),
+            ({}, {"wrote": False}, "it wrote nothing"),
+            ({}, {"identity": "forks_refused"}, "identity refusals {'forks_refused': 1}"),
+        ],
+        ids=["touched-other", "inserted-match", "inserted-team", "wrong-score", "not-finished", "nothing", "identity"],
+    )
+    def test_a_heal_that_did_not_write_as_planned_is_rolled_back_and_refused(self, results_path, cursor_kw, steer, why):
+        results_path.update(steer)
+        cur = _HealCursor(**{"row_after": FINISHED_2_1, **cursor_kw})
+        reason = bnr.heal_one(cur, _entry(), set())
+        assert reason.startswith("the results path did not write it as planned") and why in reason, reason
+        assert "ROLLBACK TO SAVEPOINT heal_one" in cur.sql and "RELEASE SAVEPOINT heal_one" not in cur.sql
+        assert results_path["graded"] == []  # nothing graded on a row that was rolled back
+        assert all(v == 0 for v in bnr.fu.IDENTITY_STATS.values())  # its refusal counted nowhere
+
+    def test_a_database_error_in_the_results_path_is_rolled_back_and_refused(self, results_path):
+        results_path["raise"] = bnr.psycopg2.errors.UniqueViolation("duplicate key")
+        cur = _HealCursor(FINISHED_2_1)
+        assert "the results path raised UniqueViolation" in bnr.heal_one(cur, _entry(), set())
+        assert cur.sql == ["SAVEPOINT heal_one", "ROLLBACK TO SAVEPOINT heal_one"] and results_path["graded"] == []
+
+
+class _PlanCursor:
+    """espn_owner's query: `owner` carries the competition's ESPN id already (or None)."""
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.params = None
+
+    def execute(self, sql, params=None):
+        assert sql is bnr.ESPN_OWNER_SQL, sql
+        self.params = params
+
+    def fetchone(self):
+        return {"id": self.owner} if self.owner else None
+
+
+class _Days:
+    replay = True
+
+    def events(self, slug, day):
+        return []
+
+
+class TestPlanEspnOwner:
+    @pytest.fixture
+    def matched(self, monkeypatch):
+        comp = _comp(2, 1, plays=(("10", 12), ("20", 40), ("10", 88)))
+        parts = bnr.fu._competition_parts(comp, bnr.SOCCER)
+        monkeypatch.setattr(
+            bnr, "match_competitions", lambda cur, rows, slug, events: {MID: {"401850590": (comp, {}, parts)}}
+        )
+        monkeypatch.setattr(bnr.fu, "build_pair_index", lambda cfg, events: {})
+
+    def test_a_competition_another_row_already_carries_is_refused_as_its_fork(self, matched):
+        cur, counts = _PlanCursor("bbbbbbbb-0000-0000-0000-000000000002"), bnr.Counter()
+        (e,) = bnr.plan(cur, [_row(id=MID)], AS_OF, _Days(), counts)
+        assert e["action"] == bnr.REFUSE and "already on row bbbbbbbb-0000-0000-0000-000000000002" in e["reason"]
+        assert cur.params == ("401850590", MID) and "_comp" not in e
+
+    def test_a_competition_no_other_row_carries_is_healed(self, matched):
+        (e,) = bnr.plan(_PlanCursor(None), [_row(id=MID)], AS_OF, _Days(), bnr.Counter())
+        assert e["action"] == bnr.HEAL and e["espn_final"] == "2-1" and e["_final"] == (2, 1)
+
+
+class _RunCursor:
+    """run()'s own reads: the listed rows, their lock and their teams."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self._rows: list[dict] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        if sql is bnr.ROWS_SQL:
+            self._rows = [dict(r) for r in self.rows]
+        elif sql is bnr.LOCK_SQL:
+            self._rows = [{k: r[k] for k in ("id", "status", "match_date", "home_id", "away_id")} for r in self.rows]
+        elif sql is bnr.TEAMS_SQL:
+            self._rows = [{"id": t, "external_ids": "{}"} for t in params[0]]
+        else:
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _RunConn:
+    def __init__(self, rows):
+        self.cur = _RunCursor(rows)
+        self.commits = self.rollbacks = 0
+
+    def cursor(self, cursor_factory=None):
+        return self.cur
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+class TestRunPin:
+    @pytest.fixture
+    def one_heal(self, monkeypatch):
+        """One listed row, planned HEAL; the heal grades one prediction (snapshot before -> after)."""
+
+        def plan(cur, rows, as_of, cache, counts):
+            return [{**bnr.entry_for(rows[0], "chi.1"), "action": bnr.HEAL}]
+
+        snaps = iter(
+            [
+                {
+                    ("predictions", "p1"): {
+                        "match_id": MID,
+                        "is_correct": None,
+                        "actual_outcome": None,
+                        "model_name": "ensemble",
+                        "prediction_type": "double_chance",
+                    }
+                },
+                {
+                    ("predictions", "p1"): {
+                        "match_id": MID,
+                        "is_correct": True,
+                        "actual_outcome": "1X",
+                        "model_name": "ensemble",
+                        "prediction_type": "double_chance",
+                    }
+                },
+            ]
+        )
+        monkeypatch.setattr(bnr, "prefetch", lambda rows, as_of, cache: None)
+        monkeypatch.setattr(bnr, "plan", plan)
+        monkeypatch.setattr(bnr, "write_archive", lambda cur, path, ids: 0)
+        monkeypatch.setattr(bnr, "heal_one", lambda cur, e, healed: "")
+        monkeypatch.setattr(bnr.gm, "snapshot", lambda cur, ids: next(snaps))
+        return _RunConn([_row(id=MID)])
+
+    PIN = {**{k: 0 for k in bnr.PLAN_KEYS}, "candidates": 1, "heal": 1, "predictions_graded": 1}
+
+    def _run(self, conn, tmp_path, apply_changes, expected):
+        (tmp_path / "espn.json").write_text(json.dumps({"days": {}}))  # a replayed cache: ESPN never called
+        return bnr.run(
+            conn, [MID], AS_OF, str(tmp_path / "espn.json"), apply_changes, expected, str(tmp_path / "a.csv")
+        )
+
+    def test_an_apply_at_its_pin_commits(self, one_heal, tmp_path):
+        counts = self._run(one_heal, tmp_path, True, dict(self.PIN))
+        assert one_heal.commits == 1 and counts["heal"] == 1 and counts["predictions_graded"] == 1
+
+    @pytest.mark.parametrize("key", ["heal", "predictions_graded", "candidates", "refuse", "teams_stamped"])
+    def test_an_apply_that_drifted_from_its_pin_rolls_back_and_writes_nothing(self, one_heal, tmp_path, key):
+        expected = dict(self.PIN)
+        expected[key] += 1
+        with pytest.raises(bnr.Refused, match=f"drifted from --expect-plan .*'{key}'"):
+            self._run(one_heal, tmp_path, True, expected)
+        assert one_heal.commits == 0 and one_heal.rollbacks >= 2  # the read's, then the whole run's
+        assert (tmp_path / "a.csv").exists() and (tmp_path / "a.csv.changes.csv").exists()  # written before
+
+    def test_a_dry_run_rolls_back(self, one_heal, tmp_path):
+        self._run(one_heal, tmp_path, False, None)
+        assert one_heal.commits == 0 and one_heal.rollbacks == 2
+
+    def test_an_apply_without_a_pin_rolls_back(self, one_heal, tmp_path):
+        with pytest.raises(bnr.Refused):
+            self._run(one_heal, tmp_path, True, None)
+        assert one_heal.commits == 0

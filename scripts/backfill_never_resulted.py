@@ -15,7 +15,10 @@ their P&L set, and ~4,500 ungraded predictions. A blanket results sweep
 other completed event of those leagues and days, healing, realigning and
 stamping rows nobody reviewed, and grade_completed_matches --days 160 would
 grade every finished match of every sport in the window. This touches the
-listed rows only.
+listed rows only, and scripts/ops/backfill_soccer_never_resulted.sh (runbook
+step 12) lists only the 38 the rehearsal reviewed for healing
+(scripts/data/soccer_never_resulted_reviewed.csv): a row that joins the
+class later is listed by the wrapper and left alone, for its own review.
 
 WHAT IT DOES
 ------------
