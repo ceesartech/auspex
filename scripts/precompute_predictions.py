@@ -133,6 +133,10 @@ def store_prediction(cur, match_id: str, prediction: dict, model_version: str) -
 # market is intentionally absent: the ensemble `match_result` row already
 # carries the (reconciled-against) home/draw/away prediction, so re-storing it
 # would be redundant.
+# Every type below is written and graded, but odd_even is NOT displayed: it
+# lost to a per-league constant beyond the noise in both O/U-anchor regimes
+# (scripts/ab_soccer_derived_vs_constant.py, 2026-11-01) and is listed in
+# services/api prediction_service.HIDDEN_PREDICTION_PAIRS ("ensemble:odd_even").
 MARKET_PREDICTION_TYPE: dict[str, str] = {
     "over_under": "over_under",
     "btts": "btts",

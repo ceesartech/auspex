@@ -468,12 +468,15 @@ class TestPredictionService:
         with pytest.raises(ValueError, match="not found"):
             service.get_match_predictions(str(uuid.uuid4()))
 
-    def test_hidden_pairs_are_exactly_the_nhl_dixon_coles_markets_that_lost_to_the_constant(self, mock_settings):
-        """The 2026-11-01 gate (scripts/ab_nhl_regulation_ties.py): the served
-        dixon_coles_nhl artifact lost to a per-season constant beyond the noise
-        on these five markets. Its puck line, clean sheet and win to nil did
-        not, and soccer's same-named derived markets (model 'ensemble') are a
-        different model — none of those may be hidden."""
+    def test_hidden_pairs_are_exactly_the_derived_markets_that_lost_to_the_constant(self, mock_settings):
+        """The 2026-11-01 gates. NHL (scripts/ab_nhl_regulation_ties.py): the
+        served dixon_coles_nhl artifact lost to a per-season constant beyond
+        the noise on five markets; its puck line, clean sheet and win to nil
+        did not. Soccer (scripts/ab_soccer_derived_vs_constant.py): of the 14
+        full-time derived types only odd_even lost to the per-league constant
+        in both O/U-anchor regimes. btts lost in the live regime only and
+        stays visible; soccer's same-named over_under / correct_score /
+        double_chance beat or tie their constant and stay visible."""
         from services.prediction_service import HIDDEN_PREDICTION_PAIRS
 
         assert HIDDEN_PREDICTION_PAIRS == [
@@ -482,33 +485,70 @@ class TestPredictionService:
             "dixon_coles_nhl:over_under",
             "dixon_coles_nhl:regulation_1x2",
             "dixon_coles_nhl:total_goals",
+            "ensemble:odd_even",
         ]
+        soccer_full_time_derived = (
+            "over_under",
+            "btts",
+            "correct_score",
+            "double_chance",
+            "draw_no_bet",
+            "asian_handicap",
+            "team_total",
+            "clean_sheet",
+            "win_to_nil",
+            "winning_margin",
+            "total_goals",
+            "result_btts",
+            "result_over_under",
+        )
+        soccer_other = ("match_result", "over_under_ht", "match_result_ht", "btts_ht", "ht_ft_double_result")
         for visible in (
             "dixon_coles_nhl:puck_line",
             "dixon_coles_nhl:clean_sheet",
             "dixon_coles_nhl:win_to_nil",
-            "ensemble:over_under",
-            "ensemble:correct_score",
-            "ensemble:double_chance",
             "ensemble_nhl_reg:match_result",
+            *(f"ensemble:{t}" for t in soccer_full_time_derived + soccer_other),
         ):
             assert visible not in HIDDEN_PREDICTION_PAIRS
 
+    def test_frontend_soccer_market_filter_mirrors_the_hidden_soccer_types(self, mock_settings):
+        """services/frontend/src/lib/markets.ts keeps its own copy of the hidden
+        soccer types (the frontend cannot import Python). It must equal the
+        'ensemble:' entries here, and the soccer market filter must offer none
+        of them: an offered hidden market would always come back empty."""
+        import re
+        from pathlib import Path
+
+        from services.prediction_service import HIDDEN_PREDICTION_PAIRS, HIDDEN_SOCCER_DERIVED_TYPES
+
+        markets_ts = Path(__file__).resolve().parents[3] / "frontend" / "src" / "lib" / "markets.ts"
+        source = markets_ts.read_text()
+        block = re.search(r"export const HIDDEN_SOCCER_MARKETS[^=]*=\s*\[([^\]]*)\]", source)
+        assert block, f"HIDDEN_SOCCER_MARKETS not found in {markets_ts}"
+        frontend_hidden = re.findall(r"'([^']+)'", block.group(1))
+        api_hidden = [p.split(":", 1)[1] for p in HIDDEN_PREDICTION_PAIRS if p.startswith("ensemble:")]
+        assert frontend_hidden == api_hidden == list(HIDDEN_SOCCER_DERIVED_TYPES)
+        assert "!HIDDEN_SOCCER_MARKETS.includes(" in source  # the filter that keeps them out of the dropdown
+
     def test_every_display_query_withholds_the_hidden_pairs(self, mock_db, mock_row, mock_settings):
-        """upcoming (default and an explicit market=regulation_1x2), the match
-        detail page and the live list all filter in SQL — before DISTINCT ON
-        and LIMIT, so a hidden row can neither show nor shadow another."""
+        """upcoming (default, an explicit market=regulation_1x2 and soccer's
+        market=odd_even), the match detail page and the live list all filter
+        in SQL — before DISTINCT ON and LIMIT, so a hidden row can neither
+        show nor shadow another."""
         from services.prediction_service import HIDDEN_PREDICTION_PAIRS, PredictionService
 
         predicate = "NOT ((p.model_name || ':' || p.prediction_type) = ANY(:hidden_pairs))"
         service = PredictionService(mock_db)
 
         mock_db.execute.return_value.fetchall.return_value = []
-        for kwargs in ({}, {"sport": "nhl", "market": "regulation_1x2"}):
+        for kwargs in ({}, {"sport": "nhl", "market": "regulation_1x2"}, {"sport": "soccer", "market": "odd_even"}):
             service.get_upcoming_predictions(**kwargs)
             sql, params = str(mock_db.execute.call_args[0][0]), mock_db.execute.call_args[0][1]
             assert predicate in sql and sql.index(predicate) < sql.index("ORDER BY p.match_id")
             assert params["hidden_pairs"] == HIDDEN_PREDICTION_PAIRS
+            if kwargs.get("market") == "odd_even":
+                assert params["prediction_type"] == "odd_even" and "ensemble:odd_even" in params["hidden_pairs"]
 
         service.get_live_predictions()
         sql, params = str(mock_db.execute.call_args[0][0]), mock_db.execute.call_args[0][1]
