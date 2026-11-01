@@ -81,13 +81,19 @@ def test_fd_full_run_pins_every_key_and_words_done_for_the_alias_merges(tmp_path
     (apply_,) = [c for c in calls if "--dedupe --apply" in c]
     assert "--expect-plan merge=68,alias_merge=4,fold=26,refuse=0,fold_unsettled_recs=0" in apply_
     assert "promote_raw runs and refuses the 4 alias-merged fixture(s) (exit 3)" in out
+    assert "the 68 mis-decoded raw rows until scripts/ops/repair_soccer_labels.sh, runbook step 13" in out
     assert "promote_raw may run again" not in out
     assert "repoint_team_matches.sh --pass 2" in out
 
 
-def test_fd_full_run_without_alias_merges_says_promote_raw_may_run(tmp_path):
+def test_fd_full_run_without_alias_merges_says_promote_raw_may_start_but_exits_3_until_the_labels_repair(tmp_path):
+    """Until scripts/ops/repair_soccer_labels.sh (runbook step 13) has run, promote_raw commits everything else but
+    exits 3 on the 68 mis-decoded raw rows its screen refuses: 'promote_raw may run again' was no longer true."""
     rc, out, _, _ = _run(tmp_path, "repair_football_data_kickoffs.sh", _fd_rules(pre_dedupe=DEDUPE, aliased=""))
-    assert rc == 0 and "promote_raw may run again" in out and "--pass 2 —" not in out, out
+    assert rc == 0 and "check_legacy_kickoffs passes, so promote_raw no longer refuses to start" in out, out
+    assert "exits 3 on the 68 mis-decoded raw rows" in out and "repair_soccer_labels.sh (runbook step 13)" in out
+    assert "promote_raw may run again" not in out and "--pass 2 —" not in out
+    assert "runbook step 15 grades the rest of their predictions" in out
 
 
 # --- backfill_soccer_regulation_scores.sh -------------------------------------------------------------------------
