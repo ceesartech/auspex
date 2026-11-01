@@ -19,14 +19,20 @@ WHY THIS EXISTS (2026-11-01)
   fresh, forward window is the only honest route. scripts/
   ab_soccer_ah_recs_replay.py measured what to expect on the old window
   (RESULT there): pooled shaped-line Brier -0.00112 +/- 0.00012 (the best
-  single line -0.00212, a goal-difference RPS -0.00047), and the replayed AH
-  recs of the two arms agree on ~80% of picks with the same fair-close CLV
-  (-3.2% each; a random side at the best price is -3.6%).
+  single line -0.00212, a goal-difference RPS -0.00047); the replayed AH
+  recs of the two arms agree on about 2 picks in 3; and an early bet (6 h
+  before kickoff) of either arm finishes -2.3% per rec against the last
+  observed fair price (refit - served -0.03 pts, SE 0.25).
 
-FORWARD WINDOW (pinned)
+FORWARD WINDOW AND DECISION SAMPLE (pinned)
   Only finished soccer matches kicking off at or after FORWARD_START
-  (2026-11-02T00:00Z, after this commit) are scored; an earlier --start is
-  refused, and a guard refuses the run if an earlier match reaches scoring.
+  (2026-11-02T00:00Z) are scored; an earlier --start is refused, and a guard
+  refuses the run if an earlier match reaches scoring. The decision sample
+  is EXACTLY the 12 monthly folds DECISION_FOLDS = 2026-11..2027-10: a match
+  after 2027-10-31 is never scored, whatever --end says, and no decision is
+  read before the data covers 2027-10-31 or on any other fold set (no
+  optional stopping: nobody can read at 6 folds, then 7, and stop at the
+  first SHIP).
 
 ARMS
   served  production's stored asian_handicap probabilities: the newest
@@ -59,39 +65,43 @@ GATE_METRICS (the operator picks ONE before the decision)
                       line significantly worse under rule A2 (a line regresses
                       when its fold-clustered t lower bound of dBrier is > 0).
                       Expected outcome from the old window: DO-NOT-SHIP (the
-                      measured effect is about a fifth of the threshold; the
-                      in-sample best rescaling of the refit's correction
-                      reaches -0.00118).
+                      measured effect is about a quarter of the threshold;
+                      the in-sample best rescaling of the refit's correction
+                      reaches -0.00118, so no power exists at any n).
   brier_significance  (POLICY CHANGE) the same units and A2 rule, the pooled
                       delta < 0 with the t(n_folds-1) clustered upper bound
                       < 0, and NO -0.005 threshold: "strictly better and
                       1x2-neutral" for a side artifact that never touches the
                       1x2, over/under or any other market.
-  money_clv           (POLICY CHANGE) the AH recommendation logic replayed for
-                      both arms at the last pipeline tick before kickoff
-                      (ab_soccer_ah_recs_replay), on matches with pre-match AH
-                      odds that pass the eligibility gate, served = the
-                      stored row the generator would have read at that tick
-                      (the newest created before it), refit reconciled to
-                      that row's 1x2 and anchor: SHIP only if the refit's
-                      recs beat the served recs on fair-close CLV per rec
-                      (odds taken x the >= 3-book power-de-vigged consensus at
-                      kickoff - 1), the match-clustered bootstrap 95% lower
-                      bound of the difference > 0. P/L is reported as context.
+  NO MONEY METRIC. The 2026-11-01 proposal listed money_clv ("fair-close
+  CLV" of the recs replayed at the last tick). Review showed it measures
+  nothing: no AH quote is captured after the last tick, so its "close" was
+  the bet's own moment and the number was the market-implied EV at bet time.
+  The replay's genuine closing-line readout (the early bet, 6 h out, against
+  the last tick's consensus) and realised P/L were then measured on THIS
+  gate's pair (stored vs refit_on_stored): early-bet CLV differs by -0.0002
+  a match (SD 0.0146: 36,500 matches for 80% power, ~9 years), stake P/L by
+  +0.006 a match (7.6 million matches). No money metric could decide here,
+  so none is offered.
 
-DECISION POINT (from the 2026-11-01 replay's numbers)
-  brier_house / brier_significance: at least 6 monthly folds AND at least
-    2,400 scored matches (the old window's per-match SD of the pooled delta,
-    0.0189, needs 2,241 matches for 80% power against the measured -0.00112;
-    6 folds keep the t(5) multiplier at 2.57). At ~930 matches a month with a
-    stored AH row that is the folds 2026-11..2027-04 (~5,500 matches),
-    decidable from 2027-05-01.
-  money_clv: at least 12 monthly folds AND at least 7,000 matches with
-    pre-match AH odds that pass the eligibility gate (the old window needs
-    6,934 for the measured stake-P/L difference and 5,146 for the flat one;
-    its CLV difference was -0.0004 a match, i.e. none). At 275-460 such
-    matches a month that is 15-25 months.
-  Below the point, or with no approved metric, the run prints counts only.
+DECISION POINT (planned on the replay's Part A2 / Part D, 2026-11-01)
+  Both metrics: the 12 pinned folds complete AND at least MIN_N = 5,300
+  scored matches. The plan is THIS gate's pair on the old window — 2,757
+  matches, pooled -0.00119 +/- 0.00043, per-match SD 0.0228 — under THIS
+  gate's rule, the t(k-1) upper bound of the unweighted mean of the k fold
+  means: each fold mean is N(delta, SD^2 / n_fold + tau2) with tau2 = 2.1e-7
+  (the window pair's 31 folds; the pair's own from 2026-07-14 on is 0), and
+  folds sized by the 2024-26 calendar at 822 matches an Aug-Oct month (the
+  June fold ~150 matches, July ~400, Dec/Jan ~600-650). Power at the
+  projected sizes: 6 folds (2026-11..2027-04, ~4,800 matches) 70%; 7 folds
+  81%, but the small June fold drops 8 folds to 74%; >= 80% from 10 folds
+  on; 12 folds (~8,800 matches, a full season, no season mix) 94% — 66% if
+  tau2 were the pair's all-fold 1.5e-6, which the constant-prior incident's
+  66-match June fold inflates. MIN_N is the 12-fold floor: below 5,224
+  matches (the projection scaled down) the power falls under 80%, so a
+  shortfall there is NO DECISION, not a weaker test. Decidable from
+  2027-11-01. Below the point, or with no approved metric, the run prints
+  counts only.
 
 WHAT A SHIP WOULD DEPLOY (the AH-only design; nothing here deploys it)
   1. Artifact. dixon_coles_soccer_ah: DIXON_COLES_CONFIG fitted on every
@@ -152,15 +162,17 @@ WHAT A SHIP WOULD DEPLOY (the AH-only design; nothing here deploys it)
      deletes and re-writes a match's pending recs), and the stored rows'
      ah_source says which artifact priced each one.
 
-MECHANICS (before this commit)
-  One smoke (--mechanics --limit 20) on the replica of the 2026-11-01
-  21:09:21Z read-only export: 0 forward matches (none had kicked off),
-  counts only; --start 2026-10-01 was refused. No delta of the forward
-  window exists yet.
+MECHANICS (before each commit)
+  d773da4: one smoke (--mechanics --limit 20) on the replica of the
+  2026-11-01 21:09:21Z read-only export: 0 forward matches (none had kicked
+  off), counts only; --start 2026-10-01 was refused. This revision (review
+  fixes, 2026-11-01 ~23:10Z, before any forward match kicked off): the same
+  smoke, 0 forward matches. No delta of the forward window exists.
 
 Read-only: SELECTs, plus temp files for the fit round-trip. Usage (api
-container, after the decision point and after an approving commit):
-    python /app/scripts/ab_soccer_ah_forward_gate.py --end <last day> --out-json /tmp/ah_forward.json
+container, from 2027-11-01 and after an approving commit; --end is not
+needed, the window stops at 2027-10-31):
+    python /app/scripts/ab_soccer_ah_forward_gate.py --out-json /tmp/ah_forward.json
 """
 
 from __future__ import annotations
@@ -168,14 +180,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import os
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -190,17 +200,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(me
 logger = logging.getLogger("ab_soccer_ah_forward_gate")
 
 FORWARD_START = pd.Timestamp("2026-11-02T00:00:00Z")
+DECISION_FOLDS: Tuple[str, ...] = tuple(
+    f"{y}-{m:02d}" for y, m in [(2026, 11), (2026, 12)] + [(2027, i) for i in range(1, 11)]
+)
+DECISION_LAST_DAY = "2027-10-31"
+MIN_N = 5300  # the 12-fold n floor for 80% power (replay Part D: 5,224), rounded up
 APPROVED_GATE_METRIC: Optional[str] = None  # PROPOSAL: set by an operator-approved commit, before the decision
 GATE_METRICS: Dict[str, Dict[str, Any]] = {
-    "brier_house": {"policy_change": False, "min_folds": 6, "min_n": 2400, "population": "stored_ah"},
-    "brier_significance": {"policy_change": True, "min_folds": 6, "min_n": 2400, "population": "stored_ah"},
-    "money_clv": {"policy_change": True, "min_folds": 12, "min_n": 7000, "population": "eligible_ah_odds"},
+    "brier_house": {"policy_change": False, "decision_folds": DECISION_FOLDS, "min_n": MIN_N},
+    "brier_significance": {"policy_change": True, "decision_folds": DECISION_FOLDS, "min_n": MIN_N},
 }
 HOUSE_THRESHOLD = -0.005
-INVARIANT_ATOL = 1e-9
 SHAPED_UNITS = rp.SHAPED_UNITS
-INVARIANT_LINES = ftdc.AH_INVARIANT_LINES
-POOLED = "pooled_shaped_mean"
+POOLED = rp.POOLED
 
 
 # ── Pure: the pinned rules ───────────────────────────────────────────
@@ -224,53 +236,44 @@ def check_scored(kickoffs: Sequence[Any]) -> None:
         raise RuntimeError(f"{len(early)} match(es) before {FORWARD_START} reached scoring — refused")
 
 
-def decision_gate(metric: Optional[str], n: int, n_folds: int) -> Tuple[bool, str]:
+def decision_end(end: Optional[str], newest: pd.Timestamp) -> Tuple[str, bool]:
+    """(the last day scored, whether the pinned decision window is complete).
+    Scoring never runs past DECISION_LAST_DAY whatever --end says; the window
+    is complete only when the scored span AND the data reach that day."""
+    last = pd.Timestamp(DECISION_LAST_DAY, tz="UTC")
+    want = pd.Timestamp(end, tz="UTC") if end else newest.tz_convert("UTC").normalize()
+    day = min(want, last)
+    return day.strftime("%Y-%m-%d"), bool(day >= last and newest >= last)
+
+
+def decision_gate(metric: Optional[str], n: int, folds: Sequence[str], complete: bool = True) -> Tuple[bool, str]:
     """(may decide, why not). Refuses with no approved metric, an unknown
-    metric, or below the metric's pre-registered folds and n."""
+    metric, an incomplete window, a fold set other than the pinned one, or
+    fewer scored matches than the pre-registered floor."""
     if metric is None:
         return False, "PROPOSAL: no gate metric is approved (APPROVED_GATE_METRIC is None) — no decision, no delta"
     if metric not in GATE_METRICS:
         return False, f"unknown gate metric {metric!r}"
     spec = GATE_METRICS[metric]
-    if n_folds < spec["min_folds"] or n < spec["min_n"]:
+    if not complete:
+        return False, f"{metric}: the data do not yet cover {DECISION_LAST_DAY} — no decision, no delta"
+    if tuple(folds) != tuple(spec["decision_folds"]):
         return False, (
-            f"{metric}: {n} scored / {n_folds} fold(s) < the pre-registered {spec['min_n']} / {spec['min_folds']} — "
+            f"{metric}: scored folds {list(folds)} are not the pinned {list(spec['decision_folds'])} — "
             "no decision, no delta"
+        )
+    if n < spec["min_n"]:
+        return False, (
+            f"{metric}: {n} scored matches < the pre-registered floor {spec['min_n']} (under 80% power) — "
+            "no decision, no delta; re-register"
         )
     return True, ""
 
 
-def handicap_vector(probs: Dict[str, float], line: float) -> np.ndarray:
-    """(home, away, push) of one line from a stored-form asian_handicap dict."""
-    lbl = ftdc.fmt_line(line)
-    try:
-        return np.array([float(probs[f"{lbl}_{s}"]) for s in ("home", "away", "push")])
-    except KeyError as exc:
-        raise RuntimeError(f"asian_handicap dict lacks line {lbl}: {exc}") from exc
-
-
-def score_match(
-    served: Dict[str, float], refit: Dict[str, float], home: int, away: int
-) -> Dict[str, Tuple[float, float]]:
-    """{unit: (served Brier, refit Brier)} for the 12 shaped lines and their
-    mean, graded by grading_outcomes' handicap settlement. Raises when an
-    invariant line differs between the arms beyond INVARIANT_ATOL."""
-    for line in INVARIANT_LINES:
-        gap = float(np.max(np.abs(handicap_vector(served, line) - handicap_vector(refit, line))))
-        if not math.isfinite(gap) or gap > INVARIANT_ATOL:
-            raise RuntimeError(f"invariant AH line {line} differs between served and refit by {gap:.2e}")
-    out: Dict[str, Tuple[float, float]] = {}
-    for unit, line in zip(SHAPED_UNITS, rp.SHAPED_LINES):
-        y = np.array(ftdc.handicap_truth(int(home) - int(away), line))
-        out[unit] = (
-            float(np.sum((handicap_vector(served, line) - y) ** 2)),
-            float(np.sum((handicap_vector(refit, line) - y) ** 2)),
-        )
-    out[POOLED] = (
-        float(np.mean([out[u][0] for u in SHAPED_UNITS])),
-        float(np.mean([out[u][1] for u in SHAPED_UNITS])),
-    )
-    return out
+# The per-match scoring is the replay's (scripts/ab_soccer_ah_recs_replay.py
+# Part A2 plans this gate's decision point on exactly this function).
+handicap_vector = rp.handicap_vector
+score_match = rp.score_ah_pair
 
 
 def decide_brier(per_unit: Dict[str, Dict[str, Any]], metric: str, disqualified: Optional[str]) -> Dict[str, Any]:
@@ -291,15 +294,6 @@ def decide_brier(per_unit: Dict[str, Dict[str, Any]], metric: str, disqualified:
     return {"ship": ship, "reason": reason, "regressions": regs}
 
 
-def decide_money(boot: Dict[str, Any], disqualified: Optional[str]) -> Dict[str, Any]:
-    if disqualified:
-        return {"ship": False, "reason": f"refit disqualified: {disqualified}"}
-    d = boot.get("diff_clv_fair") or {}
-    lo = d.get("lo95")
-    ship = lo is not None and lo > 0
-    return {"ship": ship, "reason": f"fair-close CLV difference {d.get('estimate')} (95% lower bound {lo})"}
-
-
 # ── Run ──────────────────────────────────────────────────────────────
 
 
@@ -309,31 +303,23 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     metric = APPROVED_GATE_METRIC
     frame = ftdc.load_frame(args.database_url)
     frame["s_home"], frame["s_away"], frame["s_ok"] = ftdc.settlement(frame)
-    end_day = args.end or frame["match_date"].max().strftime("%Y-%m-%d")
+    end_day, complete = decision_end(args.end, frame["match_date"].max())
     end_excl = pd.Timestamp(end_day, tz="UTC") + pd.Timedelta(days=1)
     counts: Dict[str, Any] = {
         "window": [str(start), end_day],
+        "window_complete": complete,
         "metric": metric,
         "no_stored": 0,
         "folds": [],
-        "money_matches": 0,
-        "money_ineligible": 0,
     }
     if end_excl <= start:
         counts.update(n_scored=0, disqualified=None)
-        counts["decision"] = {"decidable": False, "ship": False, "reason": decision_gate(metric, 0, 0)[1]}
+        counts["decision"] = {"decidable": False, "ship": False, "reason": decision_gate(metric, 0, [], False)[1]}
         return counts
     ev_all = frame[(frame["match_date"] >= start) & (frame["match_date"] < end_excl) & frame["s_ok"]]
     db = rp.load_db(args.database_url, start, end_excl)
     stored_by = {str(k): g for k, g in db["stored"].groupby("match_id")}
-    odds_by: Dict[str, List[Dict[str, Any]]] = {}
-    for rec in db["odds"].to_dict("records"):
-        odds_by.setdefault(str(rec["match_id"]), []).append(rec)
-    snaps = rp.snapshot_index(db["snaps"].to_dict("records"))
-    hist = rp.TeamHistory(db["history"])
     rows: List[Dict[str, Any]] = []
-    recs: Dict[str, List[rp.Rec]] = {"served": [], "refit": []}
-    money_ids: List[str] = []
     disq: Optional[str] = None
     with tempfile.TemporaryDirectory() as tmp:
         for fold in ft.build_folds(start, end_day):
@@ -355,38 +341,33 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             rho = float(refit.rho or 0.0)
             for r in ev.itertuples():
                 mid = str(r.match_id)
-                h_lam, a_lam = refit.lambdas_for_match(r.home_team, r.away_team, league=r.league_id)
                 st = rp.stored_inputs(stored_by.get(mid), mid, r.match_date)
                 if st is None:
                     counts["no_stored"] += 1
-                else:
-                    refit_ah = rp.derive_ah(h_lam, a_lam, rho, st["target"], st["anchor"])
-                    sc = score_match(st["probabilities"], refit_ah, r.s_home, r.s_away)
-                    row = {"match_id": mid, "fold": fold.label, "kickoff": r.match_date}
-                    for k, v in sc.items():
-                        row[f"{k}::served"], row[f"{k}::refit"] = v
-                    rows.append(row)
-                if mid in odds_by:
-                    money_match(r, h_lam, a_lam, rho, odds_by[mid], snaps, hist, stored_by, db["bankroll"], recs,
-                                money_ids, counts)  # fmt: skip
-    n_brier, n_money = len(rows), len(money_ids)
-    counts.update(n_scored=n_brier, money_matches=n_money, disqualified=disq)
-    n = n_money if metric == "money_clv" else n_brier
-    ok, why = decision_gate(metric, n, len(counts["folds"]))
-    if args.mechanics or not ok:
-        reason = "mechanics run: no delta read" if args.mechanics else why
-        counts["decision"] = {"decidable": False, "ship": False, "reason": reason}
+                    continue
+                h_lam, a_lam = refit.lambdas_for_match(r.home_team, r.away_team, league=r.league_id)
+                refit_ah = rp.derive_ah(h_lam, a_lam, rho, st["target"], st["anchor"])
+                sc = score_match(st["probabilities"], refit_ah, r.s_home, r.s_away)
+                row = {"match_id": mid, "fold": fold.label, "kickoff": r.match_date}
+                for k, v in sc.items():
+                    row[f"{k}::served"], row[f"{k}::refit"] = v
+                rows.append(row)
+    counts.update(n_scored=len(rows), disqualified=disq)
+    if args.mechanics:
+        counts["decision"] = {"decidable": False, "ship": False, "reason": "mechanics run: no delta read"}
+        return counts
+    if disq:  # a refit the trainer would refuse never ships; it is a verdict only once the gate may decide
+        counts["decision"] = {
+            "decidable": metric in GATE_METRICS and complete,
+            "ship": False,
+            "reason": f"refit disqualified: {disq}",
+        }
+        return counts
+    ok, why = decision_gate(metric, len(rows), counts["folds"], complete)
+    if not ok:
+        counts["decision"] = {"decidable": False, "ship": False, "reason": why}
         return counts
     out = dict(counts)
-    if metric == "money_clv":
-        ta = rp.per_match_totals(recs["served"], money_ids)
-        tb = rp.per_match_totals(recs["refit"], money_ids)
-        boot = rp.paired_bootstrap(ta, tb)
-        out["money"] = {"served": rp.money_summary(recs["served"]), "refit": rp.money_summary(recs["refit"])}
-        out["bootstrap"] = boot
-        out["per_unit"] = {}
-        out["decision"] = {"decidable": True, **decide_money(boot, disq)}
-        return out
     df = pd.DataFrame(rows)
     check_scored(df["kickoff"].tolist())
     folds_arr = df["fold"].to_numpy()
@@ -398,70 +379,19 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     return out
 
 
-def money_match(
-    r: Any,
-    h_lam: float,
-    a_lam: float,
-    rho: float,
-    rows: List[Dict[str, Any]],
-    snaps: Dict[Any, Any],
-    hist: Any,
-    stored_by: Dict[str, pd.DataFrame],
-    bankroll: float,
-    recs: Dict[str, List[Any]],
-    money_ids: List[str],
-    counts: Dict[str, Any],
-) -> None:
-    """money_clv for one match with pre-match AH odds: the generator replayed
-    at the last tick for the stored probabilities and for the refit reconciled
-    to the stored 1x2 and anchor of the row the generator would have read."""
-    mid = str(r.match_id)
-    tick = rp.last_tick_before(r.match_date)
-    gen = rp.gr.parse_args([])
-    if (
-        hist.count_before(r.home_team_id, tick) < gen.min_team_history
-        or hist.count_before(r.away_team_id, tick) < gen.min_team_history
-    ):
-        counts["money_ineligible"] += 1
-        return
-    st = rp.stored_inputs(stored_by.get(mid), mid, tick)
-    if st is None:
-        return
-    state = rp.quote_state(rows, snaps, tick)
-    close_state = rp.quote_state(rows, snaps, r.match_date - pd.Timedelta(microseconds=1))
-    arms = {"served": st["probabilities"], "refit": rp.derive_ah(h_lam, a_lam, rho, st["target"], st["anchor"])}
-    for arm, probs in arms.items():
-        out, _ = rp.replay_match(mid, probs, state, bankroll, gen.ev_threshold, gen.prob_floor)
-        for rec in out:
-            verdict, pl, flat = rp.settle(rec.selection, rec.odds, rec.stake, r.s_home, r.s_away, {})
-            p_close = rp.consensus_prob(close_state, rec.side, rec.line)
-            rec.extra.update(
-                {
-                    "verdict": verdict,
-                    "pl": pl,
-                    "flat": flat,
-                    "clv_fair": (rec.odds * p_close - 1.0) if p_close is not None else None,
-                }
-            )
-        recs[arm].extend(out)
-    money_ids.append(mid)
-
-
 def format_report(r: Dict[str, Any]) -> str:
     d = r["decision"]
     L = [
         f"Soccer AH forward gate (PROPOSAL; approved metric: {r['metric']}): window {r['window'][0]}..{r['window'][1]}",
-        f"scored {r['n_scored']} matches in folds {r['folds'] or 'none'}; no stored AH row {r['no_stored']}; "
-        f"money population {r['money_matches']} (ineligible {r['money_ineligible']}); "
-        f"disqualified {r['disqualified'] or 'no'}",
+        f"scored {r['n_scored']} matches in folds {r['folds'] or 'none'} (pinned {DECISION_FOLDS[0]}.."
+        f"{DECISION_FOLDS[-1]}, floor {MIN_N}; window complete: {r['window_complete']}); no stored AH row "
+        f"{r['no_stored']}; disqualified {r['disqualified'] or 'no'}",
     ]
     if not d.get("decidable"):
         L.append(f"NO DECISION: {d['reason']}")
         return "\n".join(L)
-    for u, p in r["per_unit"].items():
+    for u, p in (r.get("per_unit") or {}).items():
         L.append(ftdc._pair_line(u, p))
-    for arm, m in (r.get("money") or {}).items():
-        L.append(rp._money_line(arm, m))
     L.append(f"DECISION ({r['metric']}): {'SHIP' if d['ship'] else 'DO-NOT-SHIP'} — {d['reason']}")
     return "\n".join(L)
 
@@ -469,7 +399,11 @@ def format_report(r: Dict[str, Any]) -> str:
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--start", default=None, help=f"refused before {FORWARD_START.date()}")
-    p.add_argument("--end", default=None, help="last kickoff day (default: newest finished match)")
+    p.add_argument(
+        "--end",
+        default=None,
+        help=f"last kickoff day scored (default: newest finished match); never past {DECISION_LAST_DAY}",
+    )
     p.add_argument("--limit", type=int, default=0, help="cap matches per fold (mechanics smoke)")
     p.add_argument("--mechanics", action="store_true", help="counts only: never read a delta")
     p.add_argument("--out-json", default=None)

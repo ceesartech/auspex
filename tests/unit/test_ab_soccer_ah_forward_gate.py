@@ -1,9 +1,9 @@
 """Unit tests for the PROPOSED forward AH-only gate (scripts/
 ab_soccer_ah_forward_gate.py): the rules pinned in code (the window, the
-unapproved metric, the decision point), the per-match scoring against
-grading_outcomes' handicap settlement and the invariant-line guard, the two
-Brier decisions and the money decision, and run() end to end on a synthetic
-corpus with the database and the fit faked."""
+unapproved metric, the pinned decision folds and n floor, no money metric),
+the per-match scoring against grading_outcomes' handicap settlement and the
+invariant-line guard, the two Brier decisions, and run() end to end on a
+synthetic corpus with the database and the fit faked."""
 
 from __future__ import annotations
 
@@ -42,18 +42,21 @@ def _ah(h=1.5, a=1.1, rho=-0.05, target=(0.48, 0.27, 0.25), anchor=None):
     return {k: float(v) for k, v in out.items()}
 
 
+FOLDS = fg.DECISION_FOLDS
+
+
 class TestPinnedRules:
     def test_it_is_a_proposal(self):
         assert fg.APPROVED_GATE_METRIC is None
         assert fg.FORWARD_START == pd.Timestamp("2026-11-02T00:00:00Z")
-        assert fg.GATE_METRICS["brier_house"] == {
-            "policy_change": False,
-            "min_folds": 6,
-            "min_n": 2400,
-            "population": "stored_ah",
-        }
+        assert FOLDS == tuple(["2026-11", "2026-12"] + [f"2027-{m:02d}" for m in range(1, 11)])
+        assert fg.DECISION_LAST_DAY == "2027-10-31" and fg.MIN_N == 5300
+        assert fg.GATE_METRICS["brier_house"] == {"policy_change": False, "decision_folds": FOLDS, "min_n": 5300}
         assert fg.GATE_METRICS["brier_significance"]["policy_change"] is True
-        assert fg.GATE_METRICS["money_clv"]["min_folds"] == 12 and fg.GATE_METRICS["money_clv"]["min_n"] == 7000
+        assert set(fg.GATE_METRICS) == {"brier_house", "brier_significance"}  # no money metric: it measured nothing
+
+    def test_scoring_is_the_replays(self):
+        assert fg.score_match is rp.score_ah_pair and fg.handicap_vector is rp.handicap_vector
 
     def test_the_window_cannot_start_early(self):
         assert fg.check_window(None) == fg.FORWARD_START
@@ -68,15 +71,29 @@ class TestPinnedRules:
         with pytest.raises(RuntimeError, match="reached scoring"):
             fg.check_scored([pd.Timestamp("2026-11-01T20:00:00Z")])
 
-    def test_no_decision_without_an_approved_metric_or_below_the_point(self):
-        ok, why = fg.decision_gate(None, 10_000, 12)
+    def test_no_decision_without_an_approved_metric_or_off_the_pinned_sample(self):
+        ok, why = fg.decision_gate(None, 10_000, FOLDS)
         assert not ok and "PROPOSAL" in why
-        assert fg.decision_gate("brier_magic", 10_000, 12)[0] is False
-        assert fg.decision_gate("brier_house", 2399, 6)[0] is False
-        assert fg.decision_gate("brier_house", 2400, 5)[0] is False
-        assert fg.decision_gate("brier_house", 2400, 6) == (True, "")
-        assert fg.decision_gate("money_clv", 6999, 12)[0] is False
-        assert fg.decision_gate("money_clv", 7000, 12) == (True, "")
+        assert fg.decision_gate("brier_magic", 10_000, FOLDS)[0] is False
+        assert fg.decision_gate("money_clv", 10_000, FOLDS)[0] is False
+        assert fg.decision_gate("brier_house", 5300, FOLDS) == (True, "")
+        assert fg.decision_gate("brier_significance", 5300, FOLDS) == (True, "")
+        ok, why = fg.decision_gate("brier_house", 5299, FOLDS)
+        assert not ok and "floor" in why
+        # Optional stopping: no decision on 6, 11 or 13 folds, or on a fold set that skips one.
+        for folds in (FOLDS[:6], FOLDS[:-1], (*FOLDS, "2027-11"), FOLDS[1:]):
+            ok, why = fg.decision_gate("brier_house", 10_000, folds)
+            assert not ok and "not the pinned" in why
+        ok, why = fg.decision_gate("brier_house", 10_000, FOLDS, complete=False)
+        assert not ok and "do not yet cover" in why
+
+    def test_the_scored_window_never_runs_past_the_decision_folds(self):
+        newest = pd.Timestamp("2028-03-01T20:00:00Z")
+        assert fg.decision_end(None, newest) == ("2027-10-31", True)
+        assert fg.decision_end("2028-01-31", newest) == ("2027-10-31", True)
+        assert fg.decision_end("2027-06-30", newest) == ("2027-06-30", False)
+        assert fg.decision_end(None, pd.Timestamp("2027-10-30T21:00:00Z")) == ("2027-10-30", False)
+        assert fg.decision_end("2027-10-31", pd.Timestamp("2027-10-30T21:00:00Z")) == ("2027-10-31", False)
 
 
 class TestScoring:
@@ -141,12 +158,6 @@ class TestDecisions:
 
     def test_disqualified_never_ships(self):
         assert fg.decide_brier(self._units(-0.01), "brier_house", "fold 2026-11: not converged")["ship"] is False
-        assert fg.decide_money({"diff_clv_fair": {"lo95": 0.01}}, "x")["ship"] is False
-
-    def test_money_needs_the_clv_lower_bound_above_zero(self):
-        assert fg.decide_money({"diff_clv_fair": {"estimate": 0.004, "lo95": 0.001}}, None)["ship"] is True
-        assert fg.decide_money({"diff_clv_fair": {"estimate": 0.004, "lo95": -0.001}}, None)["ship"] is False
-        assert fg.decide_money({}, None)["ship"] is False
 
 
 class _FakeDC:
@@ -156,11 +167,11 @@ class _FakeDC:
         return (1.7, 0.9) if home < away else (1.2, 1.3)
 
 
-def _synthetic(n_days=200):
+def _synthetic(n_days=200, start="2026-09-01"):
     rng = np.random.default_rng(4)
     rows, stored, mid = [], [], 0
     teams = [f"T{i}" for i in range(10)]
-    for d in pd.date_range("2026-09-01", periods=n_days, freq="D", tz="UTC"):
+    for d in pd.date_range(start, periods=n_days, freq="D", tz="UTC"):
         for _ in range(3):
             h, a = rng.choice(teams, 2, replace=False)
             hs, as_ = int(rng.poisson(1.5)), int(rng.poisson(1.1))
@@ -188,21 +199,10 @@ def _synthetic(n_days=200):
 
 
 class TestSyntheticRun:
-    def _setup(self, monkeypatch, n_days=200):
-        frame, st = _synthetic(n_days)
+    def _setup(self, monkeypatch, n_days=200, start="2026-09-01"):
+        frame, st = _synthetic(n_days, start)
         monkeypatch.setattr(fg.ftdc, "load_frame", lambda url: frame.copy())
-        empty_odds = pd.DataFrame(columns=["match_id", "bookmaker", "selection", "line", "odds_decimal", "ts",
-                                           "last_seen_at", "created", "is_live"])  # fmt: skip
-        empty_snaps = pd.DataFrame(
-            columns=["match_id", "bookmaker", "selection", "line", "odds_decimal", "captured_at"]
-        )
-        hist = frame[["home_team_id", "away_team_id", "match_date"]]
-        monkeypatch.setattr(
-            fg.rp,
-            "load_db",
-            lambda url, s, e: {"stored": st, "odds": empty_odds, "snaps": empty_snaps, "history": hist,
-                               "bankroll": 1000.0},
-        )  # fmt: skip
+        monkeypatch.setattr(fg.rp, "load_db", lambda url, s, e: {"stored": st})
         fits = []
 
         def fake_fit(fit_df, tmp, tag):
@@ -220,28 +220,62 @@ class TestSyntheticRun:
         n_fwd = int(((md >= fg.FORWARD_START) & (md < pd.Timestamp("2027-03-16", tz="UTC"))).sum())
         assert r["n_scored"] == n_fwd and "per_unit" not in r
         assert r["decision"]["decidable"] is False and "PROPOSAL" in r["decision"]["reason"]
-        assert r["folds"][0] == "2026-11"
+        assert r["folds"][0] == "2026-11" and r["window_complete"] is False
         for tag, newest in fits:  # every refit stops before its own month
             assert newest < pd.Timestamp(f"{tag}-01", tz="UTC")
         assert "NO DECISION" in fg.format_report(r)
 
-    def test_approved_house_metric_decides_on_forward_matches_only(self, monkeypatch):
-        frame, _ = self._setup(monkeypatch)
-        monkeypatch.setattr(fg, "APPROVED_GATE_METRIC", "brier_house")
-        spec = dict(fg.GATE_METRICS["brier_house"], min_n=100, min_folds=3)
-        monkeypatch.setattr(fg, "GATE_METRICS", {**fg.GATE_METRICS, "brier_house": spec})
-        r = fg.run(fg.parse_args(["--database-url", "x", "--end", "2027-03-15"]))
-        assert r["decision"]["decidable"] is True and "ship" in r["decision"]
-        assert r["per_unit"][fg.POOLED]["n"] == r["n_scored"]
-        assert r["per_unit"][fg.POOLED]["n_folds"] == len(r["folds"])
-        assert "DECISION (brier_house)" in fg.format_report(r)
+    def _approve(self, monkeypatch, metric="brier_house", min_n=100):
+        monkeypatch.setattr(fg, "APPROVED_GATE_METRIC", metric)
+        spec = dict(fg.GATE_METRICS[metric], min_n=min_n)
+        monkeypatch.setattr(fg, "GATE_METRICS", {**fg.GATE_METRICS, metric: spec})
 
-    def test_mechanics_reads_no_delta(self, monkeypatch):
-        self._setup(monkeypatch)
-        monkeypatch.setattr(fg, "APPROVED_GATE_METRIC", "brier_house")
-        r = fg.run(fg.parse_args(["--database-url", "x", "--end", "2027-03-15", "--mechanics", "--limit", "5"]))
-        assert "per_unit" not in r and r["decision"]["reason"] == "mechanics run: no delta read"
-        assert r["n_scored"] == 5 * len(r["folds"])
+    def test_approved_metric_decides_on_exactly_the_pinned_folds(self, monkeypatch):
+        frame, _ = self._setup(monkeypatch, n_days=600)  # data run to 2028-04
+        self._approve(monkeypatch)
+        r = fg.run(fg.parse_args(["--database-url", "x", "--end", "2028-02-15"]))
+        assert r["decision"]["decidable"] is True and "ship" in r["decision"]
+        assert tuple(r["folds"]) == FOLDS and r["window"][1] == "2027-10-31"
+        md = frame["match_date"]
+        n_pinned = int(((md >= fg.FORWARD_START) & (md < pd.Timestamp("2027-11-01", tz="UTC"))).sum())
+        assert r["n_scored"] == n_pinned  # nothing after 2027-10-31 is scored, whatever --end says
+        assert r["per_unit"][fg.POOLED]["n"] == r["n_scored"]
+        assert r["per_unit"][fg.POOLED]["n_folds"] == 12
+        assert "DECISION (brier_house)" in fg.format_report(r)
+        again = fg.run(fg.parse_args(["--database-url", "x"]))
+        assert again["per_unit"][fg.POOLED] == r["per_unit"][fg.POOLED]  # the same sample on every later read
+
+    def test_approved_metric_reads_nothing_before_the_window_completes(self, monkeypatch):
+        self._setup(monkeypatch, n_days=600)
+        self._approve(monkeypatch)
+        r = fg.run(fg.parse_args(["--database-url", "x", "--end", "2027-05-31"]))  # 7 folds in hand
+        assert "per_unit" not in r and r["decision"]["decidable"] is False
+        assert "do not yet cover" in r["decision"]["reason"]
+
+    def test_below_the_floor_no_decision(self, monkeypatch):
+        self._setup(monkeypatch, n_days=600)
+        self._approve(monkeypatch, min_n=10**6)
+        r = fg.run(fg.parse_args(["--database-url", "x"]))
+        assert "per_unit" not in r and "floor" in r["decision"]["reason"]
+
+    def test_mechanics_reads_no_delta_even_when_approved_and_complete(self, monkeypatch):
+        self._setup(monkeypatch, n_days=600)
+        self._approve(monkeypatch, min_n=1)
+        r = fg.run(fg.parse_args(["--database-url", "x", "--mechanics"]))
+        assert tuple(r["folds"]) == FOLDS and r["n_scored"] > 1
+        assert "per_unit" not in r and r["decision"] == {
+            "decidable": False,
+            "ship": False,
+            "reason": "mechanics run: no delta read",
+        }
+
+    def test_a_disqualified_refit_is_do_not_ship_once_decidable(self, monkeypatch):
+        self._setup(monkeypatch, n_days=600)
+        self._approve(monkeypatch)
+        monkeypatch.setattr(fg.htrainer, "fit_refusal", lambda res, model, fixtures: "not converged")
+        r = fg.run(fg.parse_args(["--database-url", "x"]))
+        assert r["decision"]["decidable"] is True and r["decision"]["ship"] is False
+        assert "disqualified" in r["decision"]["reason"] and "per_unit" not in r
 
     def test_nothing_after_the_start_yet(self, monkeypatch):
         self._setup(monkeypatch, n_days=40)
