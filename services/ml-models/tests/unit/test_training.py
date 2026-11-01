@@ -311,18 +311,32 @@ class TestSeenIdsTravelWithTheirEnsemble:
         monkeypatch.setattr(tam, "_raw_holdout_brier", lambda *a, **k: None)
         monkeypatch.setattr(tam, "_derived_over25_holdout", lambda *a, **k: None)
 
+        def write_model_bin(self):
+            model = self.registry.registry_dir / bundle.ensemble_name / bundle.ensemble_config.version / "model.bin"
+            model.parent.mkdir(parents=True)
+            model.write_text('{"weights": {"a": 1.0}}')
+
         def fake_train_all(self, **_kw):
             self.trained_models["xgboost_soccer_match_result"] = object()
             self.results["xgboost_soccer_match_result"] = {}
             if outcome == "ok":
-                model = self.registry.registry_dir / bundle.ensemble_name / bundle.ensemble_config.version / "model.bin"
-                model.parent.mkdir(parents=True)
-                model.write_text('{"weights": {"a": 1.0}}')
+                write_model_bin(self)
                 self.trained_models[bundle.ensemble_name] = object()
                 self.results[bundle.ensemble_name] = {}
                 self.results["poisson_soccer_match_result"] = {"convergence": "accepted", **_diag()}
             elif outcome == "failed":
                 self.results[bundle.ensemble_name] = {"error": "ensemble blew up"}
+            elif outcome == "failed_after_save":
+                # _train_ensemble puts the ensemble in trained_models before
+                # register_model, so a save that raises midway leaves a
+                # model.bin beside an error.
+                write_model_bin(self)
+                self.trained_models[bundle.ensemble_name] = object()
+                self.results[bundle.ensemble_name] = {"error": "register_model raised after writing model.bin"}
+            elif outcome == "stale_model_bin":
+                # A model.bin this run did not train: a VM run aborted before
+                # its swap left it in staging, and this run trained no ensemble.
+                write_model_bin(self)
             return self.results
 
         monkeypatch.setattr(tam.TrainingOrchestrator, "train_all", fake_train_all)
@@ -356,6 +370,19 @@ class TestSeenIdsTravelWithTheirEnsemble:
             _tam, bundle, rc, seen = self._main(tmp_path, monkeypatch, "failed")
         assert rc == 1 and not seen.exists() and not (tmp_path / bundle.ensemble_name).exists()
         assert any("NOT recording seen ids" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("outcome", ["failed_after_save", "stale_model_bin"])
+    def test_a_model_bin_that_is_not_a_good_ensemble_from_this_run_records_nothing(
+        self, tmp_path, monkeypatch, caplog, outcome
+    ):
+        """The model.bin exists in both cases, so only the trained_models and
+        error checks can refuse it."""
+        with caplog.at_level("ERROR"):
+            _tam, bundle, rc, seen = self._main(tmp_path, monkeypatch, outcome)
+        assert (tmp_path / bundle.ensemble_name / "1.0.0" / "model.bin").is_file()
+        assert not seen.exists()
+        assert rc == (1 if outcome == "failed_after_save" else 0)
+        assert any("NOT recording seen ids" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
 
     def test_a_single_model_run_records_nothing(self, tmp_path, monkeypatch):
         _tam, bundle, rc, seen = self._main(tmp_path, monkeypatch, "none", model_type="xgboost")

@@ -120,18 +120,23 @@ def newest_model_bin(ensemble_dir):
 def seen_ids_provenance(doc, model_bytes):
     """Does a seen-ids document belong to the ensemble model beside it?
 
-    Since 2026-11-02 train_all_models.write_seen_ids records the sha256 of the
-    ensemble model.bin it wrote with. Returns (True, reason) when that hash is
-    the given model's, (False, reason) when it is not or there is no model,
-    and (None, reason) for a document written before the hash was recorded:
-    unverifiable, which the caller accepts as before. The 2026-10-26 files
-    were rebuilt by hand after their run, one of them from a different frame,
-    and nothing could tell; a hash mismatch now says so."""
+    train_all_models.write_seen_ids records the sha256 of the ensemble
+    model.bin it wrote with, from the first retrain that runs this code
+    onward (2026-11-08 at the earliest, and per bundle only once a retrain of
+    that bundle is promoted). Returns (True, reason) when that hash is the
+    given model's, (False, reason) when it is not or there is no model, and
+    (None, reason) for a document written before the trainer recorded model
+    hashes: unverifiable, which the caller accepts as before. The 2026-10-26
+    files were rebuilt by hand after their run, one of them from a different
+    frame, and nothing could tell; a hash mismatch now says so."""
     import hashlib
 
     expected = (doc or {}).get("ensemble_model_sha256")
     if not expected:
-        return None, "no model hash recorded (written before 2026-11-02); provenance not verifiable"
+        return (
+            None,
+            "no model hash recorded (written before the trainer recorded model hashes); provenance not verifiable",
+        )
     if model_bytes is None:
         return False, f"records model sha256 {expected[:12]} but there is no model.bin beside it"
     actual = hashlib.sha256(model_bytes).hexdigest()
