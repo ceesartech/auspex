@@ -944,6 +944,7 @@ class TestRunEndToEnd:
         # The forward pair covers every gate match with a stored row before kickoff, ineligible or not.
         fw = r["brier_forward_pair"]
         assert fw["n"] == 3 and fw["invariant_max_abs"] < 1e-12
+        assert fw["units"][rp.POOLED]["post_incident"]["n"] == 3  # October: after the constant-prior incident
         rep = r["reproduction"]
         assert rep["production_recs_on_unfinished_matches"] == 1 and rep["stored"]["both"] == 1
         assert rep["production_settled"]["pl"] == 21.25
@@ -963,3 +964,46 @@ class TestRunEndToEnd:
         assert not {"money", "pairs", "early", "early_pairs", "reproduction", "power"} & set(r)
         assert set(r["brier_forward_pair"]) == {"n", "no_stored_before_kickoff", "invariant_max_abs"}
         assert "MECHANICS ONLY" in rp.format_report(r)
+
+
+class TestForwardPlanning:
+    def test_unequal_folds_reduce_to_equal_and_a_small_fold_costs_power(self):
+        d, sd, tau2 = -0.0012, 0.023, 2.0e-7
+        assert rp.clustered_t_power_sizes(d, sd, tau2, [900] * 8) == pytest.approx(
+            rp.clustered_t_power(d, sd, tau2, 8, 7200)
+        )
+        assert rp.clustered_t_power_sizes(d, sd, tau2, [900] * 7 + [150]) < rp.clustered_t_power_sizes(
+            d, sd, tau2, [900] * 7
+        )
+        assert rp.clustered_t_power_sizes(d, sd, tau2, [900, 0]) == 0.0
+
+    def test_unequal_folds_match_a_simulation_of_the_rule(self):
+        from scipy.stats import t as student_t
+
+        d, sd, tau2 = -0.0012, 0.023, 2.0e-7
+        sizes = np.array([830, 650, 600, 825, 860, 1060, 930, 150, 400, 860, 760, 850])
+        rng = np.random.default_rng(5)
+        fm = rng.normal(d, np.sqrt(sd * sd / sizes + tau2), (20_000, len(sizes)))
+        k = len(sizes)
+        upper = fm.mean(axis=1) + student_t.ppf(0.975, k - 1) * fm.std(axis=1, ddof=1) / math.sqrt(k)
+        assert rp.clustered_t_power_sizes(d, sd, tau2, sizes) == pytest.approx(float((upper < 0).mean()), abs=0.03)
+
+    def test_the_n_floor_is_where_the_scaled_projection_hits_80pct(self):
+        d, sd, tau2 = -0.0012, 0.023, 2.0e-7
+        sizes = [830, 650, 600, 825, 860, 1060, 930, 150, 400, 860, 760, 850]
+        floor = rp.n_floor_for_sizes(d, sd, tau2, sizes)
+        scale = floor / sum(sizes)
+        assert rp.clustered_t_power_sizes(d, sd, tau2, [n * scale for n in sizes]) >= 0.8
+        assert rp.clustered_t_power_sizes(d, sd, tau2, [n * scale * 0.97 for n in sizes]) < 0.8
+        assert rp.n_floor_for_sizes(d, sd, 1e-5, sizes[:4]) is None  # drift alone caps the power
+
+    def test_seasonal_sizes_follow_the_calendar_from_november(self):
+        window = {}
+        for y in (2024, 2025, 2026):
+            for m in range(1, 13):
+                if (y, m) <= (2026, 10):
+                    window[f"{y}-{m:02d}"] = 200 if m == 6 else 1000
+        out = rp.seasonal_fold_sizes(window, 900.0, 13)
+        assert out[0] == pytest.approx(900.0 * 29 / 30)  # 2026-11, opened on the 2nd
+        assert out[7] == pytest.approx(180.0)  # 2027-06: a fifth of an Aug-Oct month
+        assert out[12] == pytest.approx(900.0)  # 2027-11, unclipped

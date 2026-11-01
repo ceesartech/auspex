@@ -204,8 +204,8 @@ THE RUN (fixed with this design, committed before the full run)
   9, stored 7, refit_on_stored 8.)
 
 RESULT (2026-11-01; the run above, on the replica of the 21:09:21Z export;
-the money section's CLV wording is corrected by amendment 4 — numbers for
-amendments 4-9 follow in the next commit)
+updated after review with the amended readouts — amendments 4-10; every
+Brier, P/L, reproduction and power number of the first run is unchanged)
   Inputs. The FT gate re-run reproduced the recorded gate exactly: n = 25,604,
   31 folds, live refit - served on over_2.5 -0.00375 (clustered -0.00358 +/-
   0.00044), every AH unit to the digit, live check 371/371 stored predictions
@@ -232,67 +232,108 @@ amendments 4-9 follow in the next commit)
   by 0.015. Even the in-sample best rescaling of that correction (served +
   k (refit - served), k fitted on the scored rows) gains only 0.00230 on
   ah_-2 (k 1.39), 0.00118 pooled (k 1.28), 0.00051 on the RPS (k 1.38):
-  under half the gate on the best line, about a quarter pooled.
+  under half the gate on the best line, about a quarter pooled. The pooled
+  delta's between-fold variance tau2 is 2.1e-7 (31 folds).
   Choosing asian_handicap, a single line, a pooling or a score after the
   gate's per-unit results were read is post hoc; none of these numbers can
   ship anything.
-  PART B — money. served vs refit, every eligible match with pre-match AH
-  odds (871 matches, 170 with a rec in either arm; today's logic throughout):
-    served  142 recs, stake 3,240.09, P/L -296.27 (ROI -9.1%), flat -13.35
-            (-9.4%), fair-close CLV -3.23% per rec
-    refit   154 recs, stake 3,504.41, P/L -136.16 (ROI -3.9%), flat -5.58
-            (-3.6%), fair-close CLV -3.21% per rec
-    overlap 120 identical recs (108 at the same price and stake), 0 on a
-            moved line; served-only 22 recs (-38% ROI), refit-only 34 (-4%)
+  PART A2 — the forward gate's own pair, stored vs refit_on_stored (2,757
+  matches with a stored AH row before kickoff, 2026-06..10; invariant lines
+  agree to 7.8e-16, no abort): pooled shaped lines -0.00119 +/- 0.00043
+  per match (SD 0.0228), clustered -0.00053 +/- 0.00071 over 5 folds of 66,
+  225, 758, 773 and 935 matches. Its tau2 over all 5 folds is 1.5e-6, driven
+  by the 66-match June fold of the constant-prior incident (+0.0020); from
+  2026-07-14 on it is 0 (2,650 matches, -0.00123, SD 0.0231), and Aug-Oct
+  alone 2.8e-7 (ad hoc) — the window pair's size.
+  PART B — money at the last tick. served vs refit, every eligible match with
+  pre-match AH odds (871 matches, 170 with a rec in either arm; today's logic
+  throughout, so ~93% of the recs are from 2026-09-05 on — see the caveat):
+    served  142 recs, stake 3,240.09, P/L -296.27 (ROI -9.1%, bootstrap SE
+            7.2), flat -13.35 (-9.4%), market EV at bet -3.23% per rec
+    refit   154 recs, stake 3,504.41, P/L -136.16 (ROI -3.9%, SE 7.2), flat
+            -5.58 (-3.6%), market EV at bet -3.21% per rec
+    overlap 120 of the 176 distinct recs are identical (108 at the same price
+            and stake), 0 on a moved line; served-only 22 recs (-38% ROI),
+            refit-only 34 (-4%): about 1 pick in 3 differs
     refit - served: ROI +5.3 pts (bootstrap SE 4.7, 95% [-3.9, +14.6]); flat
-            ROI +5.8 pts (SE 4.5); total P/L +160 (SE 162); fair-close CLV
-            +0.0002 per rec (SE 0.0007, 95% [-0.0012, +0.0017])
+            ROI +5.8 pts (SE 4.5); total P/L +160 (SE 162); market EV at bet
+            +0.0002 per rec (SE 0.0007)
   The production-faithful pair, stored vs refit_on_stored (871 matches):
-    147 vs 155 recs, ROI -5.8% vs -5.3% (difference +0.4 pts, SE 4.9), CLV
-    -3.25% vs -3.22% (difference +0.0003, SE 0.0008); 120 identical recs.
+    147 vs 155 recs, ROI -5.8% vs -5.3% (difference +0.4 pts, SE 4.9); 120 of
+    182 distinct recs identical.
   From 2026-09-05 (647 matches): served vs refit ROI -12.0% vs -6.4% (+5.5
-  pts, SE 5.1); stored vs refit_on_stored -7.0% vs -6.8% (+0.15 pts, SE 5.1).
-  Same-book CLV is exactly 0 for every arm: the replay prices at the last
-  tick, and no AH price moved in the final 14 minutes. Fair-close CLV of
-  EVERY fresh best quote at the tick (a random side at the best price) is
-  -3.59% (n = 1,360): the AH recs of either arm are ~0.35 pts better than a
-  random pick and still 3.2% worse than the closing consensus, and the refit
-  does not change that. The money differences are inside the noise and the
-  closing-value difference is zero.
-  PART C — reproduction, 2026-09-05..2026-10-31: the stored arm reproduces
-  all 140 production AH recs on 134 matches and nothing else (recall 1.000,
-  precision 1.000): 140/140 the same price and the same stake; the book
-  differs on 54, every one a book tied at the same price at the tick
-  (best_odds' SQL picks among ties arbitrarily). Production's own settled
-  P/L on them, -249.81, equals the replay's settlement to rounding (-249.84;
-  ad hoc check). The served arm (today's artifact and 1x2 incumbent)
-  reproduces 107 of the 140 (recall 0.76, precision 0.81), every one at the
-  same price, 70 at the same stake: that gap is input drift, not the replay
-  (the stored AH probabilities differ from the served arm's by a median
-  0.021, p90 0.061, on the shaped lines, because each week's 1x2 ensemble and
-  artifact differ from the 2026-11-01 ones).
-  PART D — power, from this window's per-match SDs (80%, two-sided 5%):
-    Brier pooled shaped lines   2,241 matches to show -0.00112 is non-zero
-                                (~2.4-2.7 months at 820-935 matches a month
-                                with a stored AH row); the -0.005 gate is
-                                unreachable at this effect size at ANY n
-    Brier ah_-2 / GD RPS        2,394 / 1,687 matches, same caveat
-    money, stake P/L            6,934 eligible AH-odds matches (15 months at
-                                October's 458, 25 at the Aug-Oct 275) for
-                                the measured +0.18 a match; flat P/L 5,146
-    fair-close CLV              no effect to detect (-0.0004 a match); the
-                                production-faithful P/L difference is +0.006
-                                a match, i.e. never
+  pts, SE 5.1); stored vs refit_on_stored -7.0% (SE 7.2) vs -6.8% (+0.15 pts,
+  SE 5.1).
+  These recs are written at the last tick, and no AH quote is captured after
+  it (0 quotes between the tick and kickoff; 0 consensus values differ at
+  kickoff), so no closing-line value exists for them: same-book CLV is 0 by
+  construction, and the "market EV at bet" — -3.2% per rec in every arm,
+  -3.59% for every fresh best quote (a random side at the best price) — only
+  says the best price sits ~3% below the market's fair price when the bet is
+  placed, while the model claims ~+11.5%.
+  PART B2 — the early bet (6 h before kickoff, kickoffs 2026-09-05..10-31,
+  647 matches), valued against the last tick's consensus:
+    served           134 recs, CLV -2.34% per rec (bootstrap SE 0.44),
+                     market EV when placed -3.65%, move +1.38% (SE 0.43;
+                     59% of recs moved toward, 36% away)
+    refit            131 recs, CLV -2.37% (SE 0.46), move +1.31%
+    stored           145 recs, CLV -2.29% (SE 0.43), move +1.38% (SE 0.42)
+    refit_on_stored  146 recs, CLV -2.45% (SE 0.45), move +1.26%
+    every fresh best quote at the early tick (random side): CLV -3.91%,
+    market EV -3.89%, move +0.05% (SE 0.11). Ad hoc: a market-only pick (per
+    match the best quote that beats its own consensus most) moves -0.43%
+    (SE 0.15).
+    refit - served CLV -0.03 pts (SE 0.25), stored-pair -0.15 pts (SE 0.26):
+    none. Same-book CLV of the early bets +1.3% to +1.5% per rec.
+  So the market does move toward the model's AH picks (+1.3 pts, where a
+  random side moves 0 and a market-only pick moves against itself), but not
+  by enough: an early bet still finishes 2.3% below the last observed fair
+  price, and the refit changes none of it.
+  PART C — reproduction, 2026-09-05..2026-10-31: production wrote 142 AH recs
+  on matches kicking off then; 2 (away_2 and home_-1.75, 25.00 each, still
+  pending) sit on two matches still marked 'scheduled', which the replay
+  never loads. The stored arm reproduces the other 140, on 134 matches, and
+  nothing else (recall 1.000, precision 1.000): 140/140 the same price and
+  the same stake; the book differs on 54, every one a book tied at the same
+  price at the tick (best_odds' SQL picks among ties arbitrarily).
+  Production's settled P/L on them is -249.81 on 3,239.65 staked: ROI -7.7%
+  (match bootstrap SE 7.3, 95% [-21.9%, +6.5%]); the market EV at bet of the
+  same bets, stake-weighted, is -3.3%. The window cannot tell this stream
+  from break-even or from a zero-edge stream paying the margin. The served
+  arm (today's artifact and 1x2 incumbent) reproduces 107 of the 140 (recall
+  0.76, precision 0.81), every one at the same price, 70 at the same stake:
+  that gap is input drift, not the replay (the stored AH probabilities
+  differ from the served arm's by a median 0.021, p90 0.061, on the shaped
+  lines, because each week's 1x2 ensemble and artifact differ from the
+  2026-11-01 ones).
+  PART D — power (80%, two-sided 5%):
+    window pair, per-match z (context): pooled shaped lines 2,241 matches,
+        ah_-2 2,394, GD RPS 1,687; the -0.005 gate is unreachable at these
+        effect sizes at ANY n
+    forward pair, the forward gate's clustered t(k-1) rule, pooled shaped
+        lines (delta -0.00119, SD 0.0228, planning tau2 2.1e-7, 822 matches a
+        month Aug-Oct, folds projected with the 2024-26 calendar shape: June
+        ~0.18 and July ~0.49 of an Aug-Oct month): 6 folds (2026-11..2027-04,
+        4,832 matches) 70% power; 7 folds 81%; adding the small June fold
+        drops 8 folds to 74%; >= 80% from 10 folds on; 12 folds
+        (2026-11..2027-10, 8,780 matches) 94% (66% under the sensitivity
+        tau2 1.5e-6), the 12-fold n floor for 80% 5,224
+    money, forward pair: stake P/L +0.006 a match (SD 5.77): 7.6 million
+        matches; flat P/L 645,000; early-bet CLV -0.0002 a match (SD 0.0146):
+        36,500 matches (~106 months at ~345 early-bet matches a month) — no
+        money metric can decide this pair in practice (the window pair's
+        +0.18 a match, 6,934 matches, is the noise the forward pair removes)
   ANSWER. A streamlined AH-only deployment is buildable (design in scripts/
   ab_soccer_ah_forward_gate.py) but this window gives no case for it: the
-  Brier gain is real and too small for the house gate, and the replayed
-  recommendations make the same bets 80% of the time with the same closing
-  value; the P/L gap in the window pair is noise, and it vanishes in the
-  production-faithful pair.
+  Brier gain is real and too small for the house gate; the replayed
+  recommendations agree on about 2 picks in 3, and the P/L gap in the window
+  pair is noise that vanishes in the production-faithful pair; and the one
+  closing-line readout the data allows, the early bet, is the same for both
+  models (-2.3% against the last observed fair price).
 
-AMENDMENTS AFTER THE RUN (none changes a money, CLV, reproduction or Brier
-delta; the full run was re-run after them and every one of those numbers is
-identical, compared field by field)
+AMENDMENTS AFTER THE RUN (1-3 change no money, reproduction or Brier delta;
+the full run was re-run after them and every one of those numbers is
+identical, compared field by field; 4-10 are the review round below)
   1. Part A's "shift ceiling" readout was mis-described as a bound (the
      measured gain exceeded it). It is replaced by the scaled-shape bound
      (shape_moments / scaled_shape).
@@ -317,6 +358,17 @@ identical, compared field by field)
      of the same bets.
   8. Part D plans the forward gate on its own pair and its own clustered rule.
   9. The window caveat above (pre-2026-09-05 quotes read as stale).
+  After the first full run of 4-9 (planning and context only; every Brier,
+  money, early-bet and reproduction number of that run is unchanged,
+  compared field by field, and recs.csv is byte-identical):
+  10. Part A2 also reports the forward pair without the constant-prior
+      incident, and Part D plans the forward gate with projected seasonal
+      fold sizes (clustered_t_power_sizes, n_floor_for_sizes,
+      seasonal_fold_sizes; the rule's unweighted fold mean gives a June fold
+      of ~150 matches full weight), a planning tau2 that excludes the
+      incident and a sensitivity tau2 that keeps it; the early-bet random
+      side also reports its movement on the quotes where both consensus
+      values exist.
 
 Read-only: SELECTs only. Usage (local replica):
     python scripts/ab_soccer_ah_recs_replay.py --ftdc-dir <ft gate --out-dir> \\
@@ -404,6 +456,12 @@ EARLY_PAIRS: Tuple[Tuple[str, str, Optional[pd.Timestamp]], ...] = (
 )
 INVARIANT_ATOL = 1e-9
 POOLED = "pooled_shaped_mean"
+# Amendment 10. Stored soccer predictions of 2026-06-15..07-13 were the
+# constant-prior incident; the forward pair's between-fold variance is also
+# reported without them (the forward window has no such rows).
+INCIDENT_END = pd.Timestamp("2026-07-14T00:00:00Z")
+FORWARD_FIRST_FOLD = pd.Timestamp("2026-11-01T00:00:00Z")
+FORWARD_FIRST_FOLD_SHARE = 29.0 / 30.0  # the forward window opens 2026-11-02
 
 AH_ODDS_SQL = """
     SELECT
@@ -1117,6 +1175,64 @@ def clustered_t_power(delta: float, sd: float, tau2: float, k: int, n: int) -> f
     return float(nct.sf(student_t.ppf(0.975, k - 1), k - 1, ncp))
 
 
+def clustered_t_power_sizes(delta: float, sd: float, tau2: float, sizes: Sequence[float]) -> float:
+    """clustered_t_power for UNEQUAL folds: the rule's estimate is the
+    unweighted mean of the k fold means, so its variance is
+    sum_i (sd^2 / n_i + tau2) / k^2 and a small fold weighs as much as a big
+    one; the power is read from a noncentral t(k-1) at that variance (equal
+    sizes give clustered_t_power exactly)."""
+    from scipy.stats import nct
+    from scipy.stats import t as student_t
+
+    k = len(sizes)
+    if k < 2 or delta == 0 or any(n <= 0 for n in sizes):
+        return 0.0
+    var = sum(sd * sd / n + tau2 for n in sizes) / (k * k)
+    if var <= 0:
+        return 1.0
+    return float(nct.sf(student_t.ppf(0.975, k - 1), k - 1, abs(delta) / math.sqrt(var)))
+
+
+def n_floor_for_sizes(
+    delta: float, sd: float, tau2: float, sizes: Sequence[float], target: float = POWER_TARGET
+) -> Optional[int]:
+    """The total n below which the projected fold sizes, scaled down
+    uniformly, fall under `target` power (None when even 100x the projection
+    does not reach it): the floor a pinned fold set should refuse to decide
+    below."""
+    total = float(sum(sizes))
+    if total <= 0 or clustered_t_power_sizes(delta, sd, tau2, [n * 100 for n in sizes]) < target:
+        return None
+    lo, hi = 0.0, 100.0
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if mid > 0 and clustered_t_power_sizes(delta, sd, tau2, [n * mid for n in sizes]) >= target:
+            hi = mid
+        else:
+            lo = mid
+    return int(math.ceil(hi * total))
+
+
+def seasonal_fold_sizes(window_sizes: Dict[str, int], rate: float, k: int) -> List[float]:
+    """Projected matches in the forward folds 2026-11.. (k of them): `rate`
+    (matches a month, Aug-Oct 2026) times each calendar month's share of an
+    Aug-Oct month in the window pair's eval set over its last 24 complete
+    months (summer and winter breaks shrink folds; 2024-25: June ~0.2, July
+    ~0.5, December/January ~0.7 of an Aug-Oct month), the first fold clipped to
+    the window's 2026-11-02 start."""
+    months = sorted(window_sizes)[-24:]
+    by_cal: Dict[int, List[float]] = {}
+    for m in months:
+        by_cal.setdefault(int(m[5:7]), []).append(float(window_sizes[m]))
+    base = float(np.mean([v for c in (8, 9, 10) for v in by_cal.get(c, [])]))
+    out = []
+    for i in range(k):
+        cal = (FORWARD_FIRST_FOLD.month - 1 + i) % 12 + 1
+        share = float(np.mean(by_cal[cal])) / base if by_cal.get(cal) and base > 0 else 1.0
+        out.append(rate * share * (FORWARD_FIRST_FOLD_SHARE if i == 0 else 1.0))
+    return out
+
+
 def n_for_clustered_power(delta: float, sd: float, tau2: float, k: int, target: float = POWER_TARGET):
     """The smallest n with clustered_t_power >= target at k folds, or None when
     tau2 alone keeps it below target at any n."""
@@ -1431,7 +1547,7 @@ def forward_pair_brier(
             worst = max(worst, float(np.max(np.abs(handicap_vector(st["probabilities"], line)
                                                    - handicap_vector(ros, line)))))  # fmt: skip
         sc = score_ah_pair(st["probabilities"], ros, int(g_["s_home"]), int(g_["s_away"]))
-        row: Dict[str, Any] = {"match_id": mid, "fold": folds_all[i]}
+        row: Dict[str, Any] = {"match_id": mid, "fold": folds_all[i], "kickoff": g.match_date}
         for k, (a, b) in sc.items():
             row[f"{k}::served"], row[f"{k}::refit"] = a, b
         rows.append(row)
@@ -1447,6 +1563,13 @@ def forward_pair_brier(
     d = df[f"{POOLED}::refit"].to_numpy() - df[f"{POOLED}::served"].to_numpy()
     out["units"][POOLED]["sd_per_match"] = per_match_diff(d)["sd"]
     out["units"][POOLED]["between_folds"] = between_fold_variance(d, f)
+    post = (pd.to_datetime(df["kickoff"], utc=True) >= INCIDENT_END).to_numpy()
+    out["units"][POOLED]["post_incident"] = {
+        "n": int(post.sum()),
+        "delta": float(d[post].mean()) if post.any() else None,
+        "sd_per_match": per_match_diff(d[post])["sd"],
+        "between_folds": between_fold_variance(d[post], f[post]),
+    }
     return out
 
 
@@ -1633,6 +1756,9 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 np.array([c for since, c, _ in baseline_early if keep(since) and c is not None])
             ),
             "ev_mkt": per_match_diff(np.array([e for since, _, e in baseline_early if keep(since) and e is not None])),
+            "move_both_known": per_match_diff(
+                np.array([c - e for since, c, e in baseline_early if keep(since) and c is not None and e is not None])
+            ),
         }
         for name, keep in (("all", lambda x: True), ("from_repro_start", lambda x: x))
     }
@@ -2022,41 +2148,56 @@ def _early_rate(report: Dict[str, Any]) -> Optional[float]:
 
 def forward_brier_plan(report: Dict[str, Any]) -> Dict[str, Any]:
     """The forward gate's Brier decision point, planned on its OWN pair
-    (Part A2) under its OWN rule (the fold-clustered t(k-1) upper bound < 0):
-    for each fold count k, the power at the expected matches (k x the forward
-    pair's mean monthly n, Aug-Oct 2026) and the n that 80% power needs.
-    tau2 is the larger of the window pair's estimate (31 folds) and the
-    forward pair's own (few, unequal folds): the conservative choice."""
+    (Part A2) under its OWN rule (the fold-clustered t(k-1) upper bound < 0).
+    For each fold count k from 2026-11: the projected matches (seasonal fold
+    sizes at the pair's Aug-Oct 2026 monthly n), the power at them, the power
+    with equal folds of the same mean, the n floor (the projection scaled
+    down to 80% power), and the power under the sensitivity tau2. Planning
+    tau2 = the larger of the window pair's (31 folds) and the forward pair's
+    without the constant-prior incident; sensitivity tau2 = the forward pair's
+    over all its folds (inflated by the incident's 66-match June fold)."""
     fp = (report.get("brier_forward_pair") or {}).get("units", {}).get(POOLED)
     if not fp:
         return {}
     sizes = report["brier_forward_pair"].get("fold_sizes", {})
     recent = [v for k, v in sizes.items() if "2026-08" <= k <= "2026-10"]
     rate = float(np.mean(recent)) if recent else None
-    tau_w = (report["brier"].get("pooled_shaped_mean", {}).get("between_folds") or {}).get("tau2")
-    tau_f = (fp.get("between_folds") or {}).get("tau2")
-    tau2 = max(x for x in (tau_w, tau_f, 0.0) if x is not None)
+    win_bf = report["brier"].get("pooled_shaped_mean", {}).get("between_folds") or {}
+    tau_w = win_bf.get("tau2")
+    tau_post = ((fp.get("post_incident") or {}).get("between_folds") or {}).get("tau2")
+    tau_all = (fp.get("between_folds") or {}).get("tau2")
+    tau2 = max(x for x in (tau_w, tau_post, 0.0) if x is not None)
     delta, sd = fp["delta"], fp["sd_per_match"]
     plan: Dict[str, Any] = {
         "delta": delta,
         "sd_per_match": sd,
         "tau2_window_pair": tau_w,
-        "tau2_forward_pair": tau_f,
+        "tau2_forward_post_incident": tau_post,
+        "tau2_forward_all_folds": tau_all,
         "tau2_used": tau2,
         "matches_per_month": rate,
         "n_80pct_z_per_match": n_for_power(sd, delta),
         "by_folds": {},
     }
-    if delta is None or sd is None or not rate or delta >= 0:
+    if delta is None or sd is None or not rate or delta >= 0 or not win_bf.get("fold_sizes"):
         return plan
     for k in range(4, 19):
+        proj = seasonal_fold_sizes(win_bf["fold_sizes"], rate, k)
         plan["by_folds"][k] = {
-            "expected_n": int(round(k * rate)),
-            "power_at_expected_n": clustered_t_power(delta, sd, tau2, k, int(round(k * rate))),
-            "n_for_80pct": n_for_clustered_power(delta, sd, tau2, k),
+            "projected_sizes": [int(round(x)) for x in proj],
+            "projected_n": int(round(sum(proj))),
+            "power_projected": clustered_t_power_sizes(delta, sd, tau2, proj),
+            "power_equal_folds": clustered_t_power(delta, sd, tau2, k, int(round(sum(proj)))),
+            "n_floor_80pct": n_floor_for_sizes(delta, sd, tau2, proj),
+            "power_projected_sensitivity_tau2": (
+                clustered_t_power_sizes(delta, sd, tau_all, proj) if tau_all is not None else None
+            ),
         }
-    ok = [k for k, v in plan["by_folds"].items() if v["power_at_expected_n"] >= POWER_TARGET]
+    ok = [k for k, v in plan["by_folds"].items() if v["power_projected"] >= POWER_TARGET]
     plan["smallest_k_with_80pct"] = min(ok) if ok else None
+    ks = sorted(plan["by_folds"])
+    stable = [k for k in ks if all(plan["by_folds"][j]["power_projected"] >= POWER_TARGET for j in ks if j >= k)]
+    plan["smallest_k_staying_at_80pct"] = min(stable) if stable else None
     return plan
 
 
@@ -2161,6 +2302,7 @@ def format_report(r: Dict[str, Any]) -> str:
         L.append(ftdc._pair_line(u, p))
     L.append(f"  fold sizes {fw.get('fold_sizes')}")
     L.append(f"  pooled between folds: {(fw.get('units') or {}).get(POOLED, {}).get('between_folds')}")
+    L.append(f"  pooled without the incident: {(fw.get('units') or {}).get(POOLED, {}).get('post_incident')}")
     L += ["", "PART B — money (replayed at the last tick; settled by grading_outcomes):"]
     L.append(
         "  'market EV at bet' = odds x the >= 3-book power-de-vigged consensus at the bet's own tick - 1. It is NOT "
@@ -2212,7 +2354,9 @@ def format_report(r: Dict[str, Any]) -> str:
     for name, v in r["early_baseline"].items():
         L.append(
             f"  EVERY fresh best quote at the early tick [{name}]: CLV vs last consensus n={v['clv_fair']['n']} mean "
-            f"{_f(v['clv_fair']['mean'], '+.4f')}; market EV when placed mean {_f(v['ev_mkt']['mean'], '+.4f')}"
+            f"{_f(v['clv_fair']['mean'], '+.4f')}; market EV when placed mean {_f(v['ev_mkt']['mean'], '+.4f')}; move "
+            f"(both known, n={v['move_both_known']['n']}) {_f(v['move_both_known']['mean'], '+.4f')} SE "
+            f"{_f(v['move_both_known']['se'], '.4f')}"
         )
     for arm, m in r["early"].items():
         L.append(_early_line(arm, m))
@@ -2270,15 +2414,21 @@ def format_report(r: Dict[str, Any]) -> str:
     L.append(
         f"  forward gate, pooled shaped lines, clustered t rule: delta {_f(fp.get('delta'))} sd "
         f"{_f(fp.get('sd_per_match'), '.4f')} tau2 used {_f(fp.get('tau2_used'), '.3e')} (window "
-        f"{_f(fp.get('tau2_window_pair'), '.3e')}, forward {_f(fp.get('tau2_forward_pair'), '.3e')}); "
-        f"{_f(fp.get('matches_per_month'), '.0f')} matches a month; per-match z n {fp.get('n_80pct_z_per_match')}"
+        f"{_f(fp.get('tau2_window_pair'), '.3e')}, forward without the incident "
+        f"{_f(fp.get('tau2_forward_post_incident'), '.3e')}; sensitivity, forward all folds "
+        f"{_f(fp.get('tau2_forward_all_folds'), '.3e')}); {_f(fp.get('matches_per_month'), '.0f')} matches a month; "
+        f"per-match z n {fp.get('n_80pct_z_per_match')}"
     )
     for k, v in (fp.get("by_folds") or {}).items():
         L.append(
-            f"    k={k:<3} expected n {v['expected_n']:>6}  power {v['power_at_expected_n']:.3f}  n for 80% "
-            f"{v['n_for_80pct']}"
+            f"    k={k:<3} projected n {v['projected_n']:>6}  power {v['power_projected']:.3f} (equal folds "
+            f"{v['power_equal_folds']:.3f}; sensitivity {_f(v['power_projected_sensitivity_tau2'], '.3f')})  n floor "
+            f"{v['n_floor_80pct']}  sizes {v['projected_sizes']}"
         )
-    L.append(f"    smallest k with 80% at the expected n: {fp.get('smallest_k_with_80pct')}")
+    L.append(
+        f"    smallest k with 80% at the projected n: {fp.get('smallest_k_with_80pct')}; smallest k from which it "
+        f"stays >= 80%: {fp.get('smallest_k_staying_at_80pct')}"
+    )
     return "\n".join(L)
 
 
