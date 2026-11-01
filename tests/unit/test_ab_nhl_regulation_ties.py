@@ -7,6 +7,7 @@ run() end to end on a synthetic frame, no DB."""
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import json
 import sys
@@ -395,3 +396,143 @@ class TestSyntheticRun:
         assert "refuse this frame" in r["disqualified"]["reg_margin_frozen"]["reason"]
         assert not r["decision"]["ship"] and "disqualified" in r["decision"]["reason"]
         assert "DO-NOT-SHIP" in gate.format_report(r)
+
+
+# ── The re-gate pre-registration (pinned in code) ────────────────────
+
+
+class TestRegateRules:
+    def test_the_pinned_constants(self):
+        assert gate.REGATE.deciding_arm == "reg_diag"
+        assert gate.REGATE.candidates["reg_diag"] == ((0,), False)  # one tie factor, refitted monthly
+        assert gate.REGATE.candidates["reg_diag_frozen"] == ((0,), True)
+        assert gate.REGATE.first_kickoff == "2026-11-02T00:00:00+00:00"
+        assert gate.REGATE.min_games == 1000
+        assert gate.REGATE.regular_season_only
+        assert gate.REGATE.start == "2026-11-01"
+        # The 2026-11-01 gate is untouched and stays the default.
+        assert gate.GATE_2026_11_01.deciding_arm == "reg_margin_frozen"
+        assert gate.GATE_2026_11_01.first_kickoff is None and gate.GATE_2026_11_01.min_games == 0
+
+    @pytest.mark.parametrize(
+        "season_type,game_type,expected",
+        [
+            ("regular", None, True),
+            ("regular", "regular", True),
+            ("REGULAR ", None, True),
+            ("postseason", "playoff", False),
+            ("preseason", None, False),
+            (None, "regular", True),
+            (float("nan"), "regular", True),
+            (None, "playoff", False),
+            (None, None, False),
+            ("postseason", "regular", False),  # season_type has the last word when present
+        ],
+    )
+    def test_is_regular_season(self, season_type, game_type, expected):
+        assert gate.is_regular_season(season_type, game_type) is expected
+
+    def test_the_window_is_pinned(self):
+        args = gate.parse_args(["--regate", "--database-url", "x"])
+        assert gate.mode_for(args) == (gate.REGATE, "2026-11-01")
+        args = gate.parse_args(["--regate", "--start", "2026-10-01", "--database-url", "x"])
+        with pytest.raises(RuntimeError, match="pinned"):
+            gate.mode_for(args)
+        args = gate.parse_args(["--database-url", "x"])
+        assert gate.mode_for(args) == (gate.GATE_2026_11_01, gate.DEFAULT_START)
+
+    def test_games_on_or_before_2026_11_01_are_never_scorable(self):
+        ev = pd.DataFrame(
+            {
+                "match_date": pd.to_datetime(
+                    ["2026-11-01T23:59:00Z", "2026-11-02T00:00:00Z", "2026-11-05T01:00:00Z", "2026-11-06T01:00:00Z"]
+                ),
+                "season_type": ["regular", "regular", "regular", "preseason"],
+                "game_type": [None, None, None, None],
+            }
+        )
+        assert list(gate.scorable(ev, gate.REGATE)) == [False, True, True, False]
+        assert list(gate.scorable(ev, gate.GATE_2026_11_01)) == [True] * 4
+        with pytest.raises(RuntimeError, match="reached scoring"):
+            gate.check_scored(ev.iloc[[0]], gate.REGATE)
+        with pytest.raises(RuntimeError, match="non-regular-season"):
+            gate.check_scored(ev.iloc[[3]], gate.REGATE)
+        gate.check_scored(ev.iloc[[1, 2]], gate.REGATE)
+
+    def test_no_decision_below_the_pinned_n(self):
+        assert gate.decidable(999, gate.REGATE)[0] is False
+        assert "not decidable" in gate.decidable(999, gate.REGATE)[1]
+        assert gate.decidable(1000, gate.REGATE) == (True, "")
+        assert gate.decidable(1, gate.GATE_2026_11_01) == (True, "")
+
+
+class TestRegateRun:
+    @staticmethod
+    def _setup(monkeypatch, tmp_path, extra=()):
+        frame = nhl_frame("2025-10-01", "2026-12-31", per_day=4, seed=5)
+        md = pd.to_datetime(frame["match_date"], utc=True)
+        tags = pd.DataFrame(
+            {"match_id": frame["match_id"], "season_type": "regular", "game_type": None}
+        )  # fmt: skip
+        # Every 7th game after the window opens is a postseason game: never scored.
+        post = (md >= "2026-11-02") & (np.arange(len(frame)) % 7 == 0)
+        tags.loc[post.to_numpy(), "season_type"] = "postseason"
+        reg = frame[["match_id", "regulation_winner"]]
+        monkeypatch.setattr(
+            gate.nhl, "load_frame", lambda url: gate.nhl.assemble_frame(frame.drop(columns="regulation_winner"), reg)
+        )
+        monkeypatch.setattr(gate, "load_season_tags", lambda url: tags)
+        served = DixonColesPredictor(gate.nhl.arm_configs()["pinned"])
+        served.train(frame[frame["match_date"] < "2026-03-01"][gate.nhl.FIT_COLS])
+        served.rho = 0.0
+        path = tmp_path / "served.bin"
+        served.save(str(path))
+        sha = gate.ht.fingerprint(str(path))["sha256"]
+        argv = ["--regate", "--served-artifact", str(path), "--served-sha256", sha, "--database-url", "x", *extra]
+        scorable = (md >= "2026-11-02") & ~post
+        return gate.parse_args(argv), frame, int(scorable.sum())
+
+    def test_below_the_n_it_reports_counts_only(self, monkeypatch, tmp_path):
+        args, _, n = self._setup(monkeypatch, tmp_path)
+        assert 50 < n < 1000
+        r = gate.run(args)
+        assert r["counts_only"] and r["n_eval"] == n
+        assert r["decision"] == {
+            "arm": "reg_diag",
+            "ship": False,
+            "decidable": False,
+            "reason": f"{n} scored game(s) < the pre-registered 1000: not decidable, no delta read",
+        }
+        assert "vs_served" not in r and "brier" not in r
+        assert {f["arm"] for f in r["fits"]} == {"refit_frozen", "reg_diag_frozen", "reg_diag"}
+        text = gate.format_report(r)
+        assert "COUNTS ONLY" in text and "NO DECISION (reg_diag)" in text
+        json.dumps(gate.ht.clean_json(r), allow_nan=False)
+
+    def test_at_the_n_reg_diag_decides_on_regular_season_games_after_the_cutoff(self, monkeypatch, tmp_path):
+        args, frame, n = self._setup(monkeypatch, tmp_path, extra=["--out-rows", str(tmp_path / "rows.csv")])
+        monkeypatch.setattr(gate, "REGATE", dataclasses.replace(gate.REGATE, min_games=100))
+        r = gate.run(args)
+        assert not r.get("counts_only")
+        assert r["n_eval"] == n and r["folds"] == ["2026-11", "2026-12"]
+        assert r["decision"]["arm"] == "reg_diag"
+        assert set(r["verdicts_vs_served"]) == {"refit_frozen", "reg_diag", "reg_diag_frozen"}
+        rows = pd.read_csv(tmp_path / "rows.csv")
+        assert (pd.to_datetime(rows["match_date"], utc=True) >= pd.Timestamp("2026-11-02T00:00:00Z")).all()
+        post_ids = set(frame["match_id"]) - set(rows["match_id"])
+        assert post_ids  # the postseason and pre-cutoff games are excluded
+        assert sum(1 for f in r["fits"] if f["arm"] == "reg_diag") == 2  # refitted monthly
+        assert "DECISION (pre-registered: reg_diag must pass" in gate.format_report(r)
+
+    def test_mechanics_never_reads_a_delta_and_limit_caps_the_folds(self, monkeypatch, tmp_path):
+        args, _, n = self._setup(monkeypatch, tmp_path, extra=["--mechanics", "--limit", "60"])
+        monkeypatch.setattr(gate, "REGATE", dataclasses.replace(gate.REGATE, min_games=100))
+        r = gate.run(args)
+        assert r["counts_only"] and r["n_eval"] == 120 and r["folds"] == ["2026-11", "2026-12"]
+        assert r["decision"]["reason"] == "mechanics run: no delta read"
+
+    def test_no_scorable_game_yet(self, monkeypatch, tmp_path):
+        args, _, _ = self._setup(monkeypatch, tmp_path, extra=["--end", "2026-11-01"])
+        r = gate.run(args)
+        assert r["counts_only"] and r["n_eval"] == 0 and r["folds"] == []
+        assert r["decision"]["decidable"] is False

@@ -173,6 +173,72 @@ replica of the 02:37Z export; 8 folds 2025-10..2026-10, n=1,611)
   with rho != 0 (none of these arms is one). Re-run on the same export:
   JSON, per-game rows and grids identical to the recorded run.
 
+RE-GATE — PRE-REGISTERED 2026-11-01, committed before any re-gate run (--regate)
+  Why. The gate above was DO-NOT-SHIP on its single deciding arm, but its
+  context arm reg_diag_frozen (one tie log-factor) passed the primary with no
+  blocking regression. Switching arms after reading that would be choosing
+  the winner after the fact, so the audit §4 row's revisit condition asks for
+  a fresh-window re-gate with the tie-factor model PRE-REGISTERED as the
+  deciding arm. This is that pre-registration. It changes nothing in the
+  gate above (its mode, GATE_2026_11_01, is the default and reproduces the
+  recorded run).
+  Deciding arm  reg_diag: margin_buckets (0,) — the regulation scoreline
+                Pois x Pois x exp(theta_0 [i == j]) fitted jointly by
+                train_hockey_dixon_coles.fit_regulation_model with
+                DIXON_COLES_CONFIG (dixon_coles_nhl), rho 0, REFITTED MONTHLY:
+                each fold's fit uses every game strictly before the fold's
+                month start (ft.split_fold). The monthly refit is the arm, not
+                an option: it is the object a monthly NHL job would serve, and
+                the soccer gates showed a one-off fit decays.
+  Context       reg_diag_frozen (the same model fitted once before
+                2026-11-01), refit_frozen, served, and the constants. Never
+                decide.
+  Served        the production dixon_coles_nhl file, sha256 ac4e7e10...
+                (SERVED_SHA256). If production's file changes before the
+                decision, this run refuses it and the re-gate must be
+                re-registered against the new incumbent.
+  Window        folds from 2026-11 (REGATE_FOLD_START), pooled / skipped as
+                above. A game is scored only if it kicks off at or after
+                2026-11-02T00:00Z (REGATE_FIRST_KICKOFF: games on or before
+                2026-11-01 UTC are never scored, and a guard refuses the run
+                if one reaches scoring) AND is a regular-season game
+                (metadata.season_type 'regular', or game_type 'regular' when
+                season_type is absent; preseason, postseason and untagged
+                games are excluded).
+  When          the decision is read once >= 1,000 such games exist
+                (REGATE_MIN_GAMES; about early April 2027 at ~6.6 games a day).
+                Below that the run reports counts only — no delta, no
+                verdict — so nobody can peek and stop early. If the 2026-27
+                regular season ends short of 1,000 scored games, the decision
+                waits for the next regular season's games; the rule does not
+                change.
+  Units, primary, statistics: as the gate above (regulation_1x2 primary,
+                ab_nhl_dixon_coles.UNITS graded by grading_outcomes, paired
+                per-game deltas with fold-clustered SE and t(n_folds-1)
+                bounds).
+  DECISION RULE SHIP only if reg_diag (not disqualified) (a) passes
+                ship_strict vs served on regulation_1x2 (dBrier <= -0.005,
+                per-match AND fold-clustered z=2 upper bounds < 0, AND the
+                t(n_folds-1) clustered upper bound < 0) and (b) is
+                significantly worse on NO blocking unit under rule A2 (a unit
+                regresses when its fold-clustered t(n_folds-1) 95% LOWER bound
+                of dBrier is > 0; per-match delta - 2 SE without a clustered
+                SE; an unassessable unit blocks).
+  SHIP would mean: train_hockey_dixon_coles.py fits fit_regulation_model with
+  margin buckets (0,) on a monthly schedule outside retrain_models,
+  promote_dc_model.py gets an "nhl" entry, an operator-run train + promote
+  wrapper, and a markets un-hide only where the gated artifact beats the
+  per-season constant. This commit runs nothing of that.
+  Mechanics. Before this commit the re-gate ran only as a mechanics smoke
+  (--regate --mechanics --limit 60) on a local replica of a read-only
+  REPEATABLE READ export of prod's NHL matches at 2026-11-01 21:36:55Z (8,339
+  rows; the served file copied, sha256 ac4e7e10 checked): 0 scorable games
+  (none after 2026-11-01 had been played), counts only. The 2026-11-01
+  gate's own path ran the same way (--mechanics --limit 60: 480 games, 8
+  folds, 12 fits, counts only). No delta of either was computed for output.
+  Usage once the n is reached (api container):
+    python /app/scripts/ab_nhl_regulation_ties.py --regate --out-json /tmp/ab_nhl_regate.json
+
 Per-game output for an independent recomputation: --out-rows (CSV: per arm
 the regulation and over-line probabilities and every unit's per-game Brier),
 --out-grids (npz: per arm the 121-cell final grid per game).
@@ -191,6 +257,7 @@ import math
 import os
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -231,6 +298,49 @@ REFERENCE_FROZEN = "refit_frozen"
 CHALLENGERS = (REFERENCE_FROZEN, *CANDIDATES)
 CONSTANT_ARMS = nhl.CONSTANT_ARMS
 ARMS = ("served", *CHALLENGERS, *CONSTANT_ARMS)
+
+# ── The re-gate (pre-registered 2026-11-01; docstring "RE-GATE") ─────
+REGATE_FOLD_START = "2026-11-01"  # first fold month; reg_diag_frozen (context) is fitted before it
+REGATE_FIRST_KICKOFF = "2026-11-02T00:00:00+00:00"  # a game on or before 2026-11-01 (UTC) is never scored
+REGATE_MIN_GAMES = 1000  # no decision, and no delta, below this many scored games
+REGATE_DECIDING_ARM = "reg_diag"
+REGATE_CANDIDATES: Dict[str, Tuple[Tuple[int, ...], bool]] = {
+    "reg_diag": ((0,), False),  # THE DECIDING ARM: one tie log-factor, refitted monthly
+    "reg_diag_frozen": ((0,), True),  # context: the same model fitted once before the first fold
+}
+SEASON_TAGS_SQL = """
+    SELECT m.id::text AS match_id, m.metadata->>'season_type' AS season_type,
+           m.metadata->>'game_type' AS game_type
+    FROM matches m
+    JOIN leagues l ON l.id = m.league_id
+    WHERE l.sport = 'nhl' AND m.status = 'finished'
+"""
+
+
+@dataclass(frozen=True)
+class GateMode:
+    """What one run of this harness gates: its window start, its candidate
+    arms, the deciding arm, and the re-gate's scoring rules."""
+
+    name: str
+    start: str
+    candidates: Dict[str, Tuple[Tuple[int, ...], bool]]
+    deciding_arm: str
+    first_kickoff: Optional[str] = None  # never score a game before this
+    regular_season_only: bool = False
+    min_games: int = 0  # refuse to decide (and to report a delta) below this
+
+
+GATE_2026_11_01 = GateMode("2026-11-01 gate", DEFAULT_START, CANDIDATES, DECIDING_ARM)
+REGATE = GateMode(
+    "re-gate (pre-registered 2026-11-01)",
+    REGATE_FOLD_START,
+    REGATE_CANDIDATES,
+    REGATE_DECIDING_ARM,
+    first_kickoff=REGATE_FIRST_KICKOFF,
+    regular_season_only=True,
+    min_games=REGATE_MIN_GAMES,
+)
 
 
 # ── Pure ─────────────────────────────────────────────────────────────
@@ -302,6 +412,73 @@ def per_match_pair(c: np.ndarray, b: np.ndarray) -> Dict[str, Any]:
     return {"n": n, "delta": float(d.mean()), "se": float(d.std(ddof=1) / math.sqrt(n)) if n > 1 else None}
 
 
+def _present(v: Any) -> bool:
+    return v is not None and not (isinstance(v, float) and math.isnan(v))
+
+
+def is_regular_season(season_type: Any, game_type: Any) -> bool:
+    """A regular-season NHL game: metadata.season_type 'regular', or (no
+    season_type) the legacy loader's game_type 'regular'. Preseason,
+    postseason / playoff and untagged games are not."""
+    if _present(season_type):
+        return str(season_type).strip().lower() == "regular"
+    return _present(game_type) and str(game_type).strip().lower() == "regular"
+
+
+def scorable(ev: pd.DataFrame, mode: GateMode) -> np.ndarray:
+    """Which of a fold's games this mode may score: kicking off at or after
+    mode.first_kickoff and, for the re-gate, in the regular season."""
+    keep = np.ones(len(ev), dtype=bool)
+    if mode.first_kickoff is not None:
+        keep &= (pd.to_datetime(ev["match_date"], utc=True) >= pd.Timestamp(mode.first_kickoff)).to_numpy()
+    if mode.regular_season_only:
+        keep &= np.array([is_regular_season(s, g) for s, g in zip(ev["season_type"], ev["game_type"])], dtype=bool)
+    return keep
+
+
+def check_scored(ev: pd.DataFrame, mode: GateMode) -> None:
+    """Refuse loudly if a game the mode must never score reached scoring."""
+    if not len(ev):
+        return
+    if mode.first_kickoff is not None:
+        early = pd.to_datetime(ev["match_date"], utc=True) < pd.Timestamp(mode.first_kickoff)
+        if early.any():
+            raise RuntimeError(
+                f"{mode.name}: {int(early.sum())} game(s) before {mode.first_kickoff} reached scoring — refused"
+            )
+    if mode.regular_season_only:
+        bad = [not is_regular_season(s, g) for s, g in zip(ev["season_type"], ev["game_type"])]
+        if any(bad):
+            raise RuntimeError(f"{mode.name}: {sum(bad)} non-regular-season game(s) reached scoring — refused")
+
+
+def decidable(n_scored: int, mode: GateMode) -> Tuple[bool, str]:
+    """(True, '') when the mode may decide on n_scored games, else (False, why)."""
+    if n_scored < mode.min_games:
+        return False, f"{n_scored} scored game(s) < the pre-registered {mode.min_games}: not decidable, no delta read"
+    return True, ""
+
+
+def mode_for(args: argparse.Namespace) -> Tuple[GateMode, str]:
+    """(mode, window start). The re-gate's window is pinned: any other
+    --start is refused."""
+    if getattr(args, "regate", False):
+        if args.start is not None and args.start != REGATE.start:
+            raise RuntimeError(f"the re-gate window is pinned to {REGATE.start}; --start {args.start} refused")
+        return REGATE, REGATE.start
+    return GATE_2026_11_01, args.start or GATE_2026_11_01.start
+
+
+def load_season_tags(database_url: str) -> pd.DataFrame:
+    from sqlalchemy import create_engine
+
+    engine = create_engine(database_url)
+    try:
+        return pd.read_sql(SEASON_TAGS_SQL, engine)
+    finally:
+        engine.dispose()
+
+
 # ── Model plumbing (needs ml-models on the path) ─────────────────────
 
 
@@ -356,7 +533,15 @@ def fit_candidate(
 
 def run(args: argparse.Namespace) -> Dict[str, Any]:
     sys.path.insert(0, ht.ML_SRC)
+    mode, start = mode_for(args)
+    candidates = mode.candidates
+    challengers_all = (REFERENCE_FROZEN, *candidates)
+    arms_all = ("served", *challengers_all, *CONSTANT_ARMS)
     frame, frame_audit = nhl.load_frame(args.database_url)
+    if mode.regular_season_only:
+        frame = frame.merge(load_season_tags(args.database_url), on="match_id", how="left", validate="many_to_one")
+    else:
+        frame["season_type"], frame["game_type"] = None, None
     frame["match_date"] = pd.to_datetime(frame["match_date"], utc=True)
     frame = frame.sort_values("match_date", kind="stable").reset_index(drop=True)
     dups = int(frame["match_id"].duplicated().sum())
@@ -365,11 +550,25 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         frame = frame.drop_duplicates("match_id", keep="first").reset_index(drop=True)
     frame["season"] = [nhl.season_of(t) for t in frame["match_date"]]
     end = args.end or frame["match_date"].max().strftime("%Y-%m-%d")
-    raw_folds = ft.build_folds(args.start, end)
-    counts = [len(ft.split_fold(frame, f)[1]) for f in raw_folds]
+    limit = int(getattr(args, "limit", 0) or 0)
+
+    def fold_rows(fold: Any) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        fit_df, ev = ft.split_fold(frame, fold)
+        ev = ev[scorable(ev, mode)]
+        if limit:
+            ev = ev.head(limit)
+        check_scored(ev, mode)
+        return fit_df, ev
+
+    raw_folds = ft.build_folds(start, end) if pd.Timestamp(end, tz="UTC") >= pd.Timestamp(start, tz="UTC") else []
+    counts = [len(fold_rows(f)[1]) for f in raw_folds]
     folds, pooled, skipped = nhl.pool_thin_folds(raw_folds, counts)
     if not folds:
-        raise RuntimeError(f"no fold has >= {nhl.MIN_FOLD_EVAL} eval rows between {args.start} and {end}")
+        if mode.min_games:
+            _, why = decidable(0, mode)
+            logger.warning("%s: no fold has >= %d scorable games — %s", mode.name, nhl.MIN_FOLD_EVAL, why)
+            return counts_only_report(mode, start, end, 0, [], pooled, skipped, [], {}, why)
+        raise RuntimeError(f"no fold has >= {nhl.MIN_FOLD_EVAL} eval rows between {start} and {end}")
     for p in pooled:
         logger.info("fold %s (%d eval rows) pooled into %s", p["fold"], p["n_eval"], p["into"])
     for s in skipped:
@@ -398,7 +597,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     cfgs = nhl.arm_configs()
     cfg = cfgs["refit"]
     decay = float(cfg.hyperparameters.get("time_decay", 0.0))
-    arms: List[str] = list(ARMS)
+    arms: List[str] = list(arms_all)
     scores: Dict[str, Dict[str, List[np.ndarray]]] = {a: {u: [] for u in UNIT_NAMES} for a in arms}
     log_scores: Dict[str, List[np.ndarray]] = {a: [] for a in arms}
     p_reg: Dict[str, List[np.ndarray]] = {a: [] for a in arms}
@@ -449,7 +648,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         frozen[REFERENCE_FROZEN] = model
         if refusal is not None:
             disqualify(REFERENCE_FROZEN, label0, f"the NHL trainer would refuse this fit: {refusal}")
-        for arm, (buckets, is_frozen) in CANDIDATES.items():
+        for arm, (buckets, is_frozen) in candidates.items():
             if not is_frozen:
                 continue
             try:
@@ -463,7 +662,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 disqualify(arm, label0, f"the NHL trainer would refuse this fit: {refusal}")
 
         for fold in folds:
-            fit_df, ev = ft.split_fold(frame, fold)
+            fit_df, ev = fold_rows(fold)
             truth = nhl.fixed_truth(ev)
             arm_probs: Dict[str, Dict[str, np.ndarray]] = {}
             arm_totals: Dict[str, np.ndarray] = {}
@@ -473,7 +672,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             if bad:
                 raise RuntimeError(f"served fold {fold.label}: {bad}")
             arm_probs["served"], arm_totals["served"], arm_grids["served"] = probs, tot, fin
-            for arm in [REFERENCE_FROZEN, *(a for a, (_, f) in CANDIDATES.items() if f)]:
+            for arm in [REFERENCE_FROZEN, *(a for a, (_, f) in candidates.items() if f)]:
                 if arm not in arms:
                     continue
                 probs, tot, fin, bad = model_arm(frozen[arm], ev)
@@ -481,7 +680,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                     disqualify(arm, fold.label, bad)
                     continue
                 arm_probs[arm], arm_totals[arm], arm_grids[arm] = probs, tot, fin
-            for arm, (buckets, is_frozen) in CANDIDATES.items():
+            for arm, (buckets, is_frozen) in candidates.items():
                 if is_frozen or arm not in arms:
                     continue
                 try:
@@ -519,7 +718,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 bad = nhl.invalid_probabilities(arm_probs[arm])
                 if bad is None:
                     continue
-                if arm in CHALLENGERS:
+                if arm in challengers_all:
                     disqualify(arm, fold.label, bad)
                     del arm_probs[arm]
                 else:
@@ -541,16 +740,30 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             logger.info("fold %s: fit=%d eval=%d arms=%s", fold.label, len(fit_df), len(ev), ",".join(arms))
 
     # A disqualified arm's earlier folds are dropped with it.
-    live = [a for a in ARMS if a in arms]
+    live = [a for a in arms_all if a in arms]
+    folds_arr = np.concatenate(fold_of)
+    ok, why = decidable(int(len(folds_arr)), mode)
+    if getattr(args, "mechanics", False) or not ok:
+        return counts_only_report(
+            mode,
+            start,
+            end,
+            int(len(folds_arr)),
+            [f.label for f in folds],
+            pooled,
+            skipped,
+            fits,
+            disqualified,
+            "mechanics run: no delta read" if getattr(args, "mechanics", False) else why,
+        )
     cat = {a: {u: np.concatenate(scores[a][u]) for u in UNIT_NAMES} for a in live}
     cat_log = {a: np.concatenate(log_scores[a]) for a in live}
-    folds_arr = np.concatenate(fold_of)
     ev_all = pd.concat(ev_frames, ignore_index=True)
     yr = np.vstack(y_reg)
     realised_total = (ev_all["home_score"] + ev_all["away_score"]).to_numpy(dtype=float)
     seasons = ev_all["season"].to_numpy(dtype=int)
     fold_labels = list(dict.fromkeys(folds_arr.tolist()))
-    challengers = [a for a in live if a in CHALLENGERS]
+    challengers = [a for a in live if a in challengers_all]
     every = np.ones(len(folds_arr), dtype=bool)
 
     def pair(a: str, b: str, unit: str = PRIMARY, mask: Optional[np.ndarray] = None) -> Dict[str, Any]:
@@ -596,7 +809,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     discovery = np.isin(folds_arr, DISCOVERY_FOLDS)
     report: Dict[str, Any] = {
         "n_eval": int(len(folds_arr)),
-        "window": {"start": args.start, "end": end, "frozen_fit_cutoff": frozen_cutoff.isoformat()},
+        "mode": mode.name,
+        "window": {"start": start, "end": end, "frozen_fit_cutoff": frozen_cutoff.isoformat()},
         "folds": fold_labels,
         "pooled_folds": pooled,
         "skipped_folds": skipped,
@@ -628,6 +842,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 ("reg_diag_frozen", "reg_poisson_frozen"),
                 ("reg_poisson_frozen", "refit_frozen"),
                 ("reg_margin", "reg_margin_frozen"),
+                ("reg_diag", "reg_diag_frozen"),
             )
             if a in live and b in live
         },
@@ -661,7 +876,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             "season_2026_27": freshness(fresh_season),
             "after_previous_gate": freshness(newer),
         },
-        "decision": decide(verdicts_vs_served, regressions, disqualified),
+        "decision": decide(verdicts_vs_served, regressions, disqualified, arm=mode.deciding_arm),
     }
     if args.out_rows:
         write_rows(args.out_rows, ev_all, folds_arr, live, cat, p_reg, p_over)
@@ -672,6 +887,35 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             **{a: np.vstack(grids[a]) for a in live},
         )
     return report
+
+
+def counts_only_report(
+    mode: GateMode,
+    start: str,
+    end: str,
+    n_scored: int,
+    folds: List[str],
+    pooled: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+    fits: List[Dict[str, Any]],
+    disqualified: Dict[str, Any],
+    why: str,
+) -> Dict[str, Any]:
+    """The report of a run that may not read a delta (a mechanics smoke, or
+    the re-gate below its n): counts and fit bookkeeping only."""
+    return {
+        "counts_only": True,
+        "mode": mode.name,
+        "window": {"start": start, "end": end, "first_kickoff": mode.first_kickoff},
+        "n_eval": n_scored,
+        "min_games": mode.min_games,
+        "folds": folds,
+        "pooled_folds": pooled,
+        "skipped_folds": skipped,
+        "fits": [{k: f.get(k) for k in ("fold", "arm", "n_fit", "teams", "refusal")} for f in fits],
+        "disqualified": disqualified,
+        "decision": {"arm": mode.deciding_arm, "ship": False, "decidable": False, "reason": why},
+    }
 
 
 def _mean(x: np.ndarray) -> Optional[float]:
@@ -722,6 +966,18 @@ def _f(v: Any, spec: str = "+.5f") -> str:
 
 
 def format_report(r: Dict[str, Any]) -> str:
+    if r.get("counts_only"):
+        d = r["decision"]
+        refused = [f["arm"] for f in r["fits"] if f["refusal"]]
+        return "\n".join(
+            [
+                f"NHL regulation-tie A/B [{r['mode']}] — COUNTS ONLY: {r['n_eval']} scorable games (minimum "
+                f"{r['min_games']}), folds {r['folds'] or 'none'}, window {r['window']}",
+                f"fits: {len(r['fits'])}; refused: {refused or 'none'}; "
+                f"disqualified: {sorted(r['disqualified']) or 'none'}",
+                f"NO DECISION ({d['arm']}): {d['reason']}",
+            ]
+        )
     w = r["window"]
     L = [
         f"NHL regulation-tie A/B — {r['n_eval']} games, folds {r['folds'][0]}..{r['folds'][-1]} ({len(r['folds'])});"
@@ -829,7 +1085,7 @@ def format_report(r: Dict[str, Any]) -> str:
     d = r["decision"]
     L += [
         "",
-        f"DECISION (pre-registered: {DECIDING_ARM} must pass ship_strict vs served on {PRIMARY} AND be significantly"
+        f"DECISION (pre-registered: {d['arm']} must pass ship_strict vs served on {PRIMARY} AND be significantly"
         f" worse on no blocking unit): {'SHIP' if d['ship'] else 'DO-NOT-SHIP'} — {d['reason']}",
     ]
     for u, why in d["regressions"].items():
@@ -845,7 +1101,20 @@ def format_report(r: Dict[str, Any]) -> str:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--start", default=DEFAULT_START, help="first eval day; the frozen arms are fitted before its month")
+    p.add_argument(
+        "--start",
+        default=None,
+        help=f"first eval day (default {DEFAULT_START}); the frozen arms are fitted before its month. "
+        "Refused with --regate (its window is pinned)",
+    )
+    p.add_argument(
+        "--regate",
+        action="store_true",
+        help="the pre-registered re-gate: reg_diag decides, regular-season games kicking off from "
+        f"{REGATE_FIRST_KICKOFF} only, no decision and no delta below {REGATE_MIN_GAMES} games",
+    )
+    p.add_argument("--limit", type=int, default=0, help="cap scored games per fold (mechanics smoke); 0 = all")
+    p.add_argument("--mechanics", action="store_true", help="counts and fit bookkeeping only: never read a delta")
     p.add_argument("--end", default=None, help="last eval day (default: newest NHL match)")
     p.add_argument("--served-artifact", default=SERVED_ARTIFACT)
     p.add_argument("--served-sha256", default=SERVED_SHA256, help="refuse any other incumbent")
