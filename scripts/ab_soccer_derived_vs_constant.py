@@ -90,6 +90,49 @@ were produced; the harness and its arms are unchanged)
             served half-time artifact was refitted on every match up to
             2026-10-31, so no historical window is out of sample for it.
 
+RESULT (2026-11-01; the committed rule run once, unamended): hide odd_even only.
+  Harness run: ab_soccer_ft_dixon_coles.py --end 2026-10-31 --served-sha256
+  02141a6a... --live-check-model-version served, unchanged, on a local replica
+  of a read-only REPEATABLE READ prod export taken 21:11:21-21:11:35Z. At the
+  export no soccer_repair_runbook.sh or other scripts/ops process was running
+  and no runbook state file existed, so this is the pre-runbook corpus. All 11
+  soccer model files were copied byte-identical (sha256 checked against the
+  api container). The run reproduced the gate's record exactly: n = 25,604,
+  31 folds 2024-04..2026-10, refit - served -0.00375 on over_2.5 (live),
+  live-anchored 504 rows (2%), proxy-anchored 12,436 (49%); the live check
+  re-derived all 371 matches' stored predictions of
+  ensemble_soccer_match_result_1.0.0+1793505994 (1x2-only to 2.8e-17, the 69
+  anchored to 5.0e-7).
+  Per type, served - base_league (per-match delta +/- SE; fold-clustered t
+  95% interval):
+    HIDE odd_even  live  +0.00039 +/- 0.00017, t [+0.00013, +0.00098]
+                   proxy +0.00036 +/- 0.00016, t [+0.00010, +0.00094]
+          Served's mean P(odd) is 0.488 against 0.499 realised and the
+          constant's 0.492. ESPN era (n = 3,211): +0.00012 +/- 0.00047, inside
+          the noise. Its recommendations were already switched off.
+    keep btts      live  +0.00131 +/- 0.00030, t [+0.00072, +0.00205]
+                   proxy -0.00027 +/- 0.00034, t [-0.00067, +0.00079]
+          Loses in the live regime only, so it stays visible under the rule.
+          ESPN era, the months the live anchor actually reaches: live -0.00006
+          +/- 0.00071 (a tie). Context: against base_league_dw it loses in both
+          regimes (+0.00195 / +0.00037, lower bounds +0.00137 / +0.00003).
+    keep over_under   live -0.00072 +/- 0.00091, t [-0.00291, +0.00283];
+                      proxy -0.00942, t upper -0.00367. No line loses on its
+                      own in either regime (over_2.5 live -0.00043).
+    keep total_goals  live +0.00036, t [-0.00028, +0.00149]; proxy -0.00163,
+                      t upper -0.00006.
+    keep, served better beyond the noise in both regimes (live delta):
+          double_chance -0.0472, draw_no_bet -0.0749, asian_handicap -0.537
+          (17-line sum), team_total -0.0514, clean_sheet -0.0138, win_to_nil
+          -0.0150, winning_margin -0.0163, result_btts -0.0233,
+          result_over_under -0.0263, correct_score (121-cell grid) -0.0049.
+  No unit loses on its own inside a multi-line type that keeps.
+  Independent recompute (closeout2 scratch, adhoc/recompute.py): odd_even
+  and btts re-derived row by row through derive_from_lambdas from the saved
+  lambdas, rho, 1x2 targets and anchors, with the per-league constant rebuilt
+  in float64 from the raw export. Every per-row Brier matched scores.npz to
+  8.9e-16, and the deltas and bounds matched.
+
 Usage (after the harness run; no database needed):
     python scripts/ab_soccer_derived_vs_constant.py --scores <out-dir>/scores.npz \\
         --report <out-json> --out-json /tmp/derived_vs_constant.json
