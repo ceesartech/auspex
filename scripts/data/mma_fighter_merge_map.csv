@@ -4,8 +4,17 @@
 # record (sports.core.api.espn.com/v2/sports/mma/athletes/<id>) gives the display name and date of birth. Both rows
 # of each pair sit on bouts of the SAME athlete id; prod rows from the read-only export of 2026-11-01T21:06:57Z.
 # The kept row is the one carrying ESPN's current display name (the exact tier resolves it); the other spelling
-# becomes an alias of it. Left out as ambiguous (see the stream report): 'Valesca Machado' / 'Tina Black' (one
-# ESPN competition id, two names, no ESPN athlete named Valesca Machado) and 'Bruno Silva' (one row, two athletes).
+# becomes an alias of it. Left out as ambiguous (see the stream report):
+#   'Valesca Machado' / 'Tina Black': one ESPN competition id (401914464) at one kickoff under two names, and no ESPN
+#     athlete named Valesca Machado; run B holds that stale row for the user (mma_stale_rows_hold_20261101.csv).
+#   'Bruno Silva': one row holding two ESPN athletes (4333158 and 3895544): a split, not a merge.
+#   'José Luiz' / 'José Montanha': Jhonata Diniz v 'José Luiz' (fb14d227, team 83681ac6 created 2026-06-06) and v
+#     'José Montanha' (28982783, created 2026-06-07) at the same kickoff, 2026-06-20 21:00Z: the same pattern as the
+#     pairs below (a second row a day later), but neither bout is on ESPN's card and ESPN's only 'Jose Luiz'
+#     (athlete 3097880) is listed at 132 lb while Diniz fights at heavyweight. Run B deletes both rows (not fought;
+#     run A cancels them as dropped), which leaves 'José Luiz' a team row with no bout.
+#   'Rafael Cerqueira': one row today, but ESPN now spells athlete 5212598 'Raffael Cerqueira'; his next bout would
+#     mint a second row unless an alias is added.
 merged_team_id,merged_name,kept_team_id,kept_name,espn_athlete_id,method,evidence
 bc5ea294-cfa8-476b-957b-ddcee9fca9b6,Zachary Reese,287b3afc-aaba-43f8-8c55-ce23fce34055,Zach Reese,5143223,espn_athlete_id+same_card,"ESPN athlete 5143223 (Zach Reese, born 1994-03-24) is the competitor on all five 'Zachary Reese' bouts: competitions 401571756 (2023-08-23 v Eli Aronov), 401611927 (2023-12-02 v Cody Brundage), 401656407 (2024-06-09 v Julian Marquez), 401702533 (2024-08-24 v Jose Daniel Medina) and 401874061 (2026-07-11 v Ryan Gandra); and on both 'Zach Reese' rows. 2026-07-11: our stale row aaa88ed4 'Zachary Reese' v Ryan Gandra sits beside the finished row bc120f84 'Zach Reese' v Ryan Gandra at the same kickoff."
 38c31803-3928-430e-8ac4-583948c13fb7,Matthieu Duclos,94a682a9-7f23-462f-851e-6ccd29fff37e,Matthieu Letho Duclos,5013686,espn_athlete_id,"ESPN athlete 5013686 (Matthieu Letho Duclos, born 1995-04-04) is the competitor of competition 401698248 (2024-08-28 00:00Z v Marco Tulio; our finished row 4745066f 'Matthieu Duclos' v Marco Tulio) and of 401902948 (2026-09-05 v Luis Felipe Dias; our finished row 5e2eb0cb 'Matthieu Letho Duclos'). No stale row: the merge re-points one finished bout onto the kept row's history."
