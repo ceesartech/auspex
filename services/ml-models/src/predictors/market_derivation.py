@@ -649,15 +649,30 @@ NHL_PUCK_LINES: Tuple[float, ...] = (-1.5, 1.5)
 NHL_TOTAL_LINES: Tuple[float, ...] = (4.5, 5.5, 6.5)
 
 
-def derive_hockey_markets(P: np.ndarray) -> Dict[str, Dict[str, float]]:
+def derive_hockey_markets(P: np.ndarray, final: Optional[np.ndarray] = None) -> Dict[str, Dict[str, float]]:
     """Derive NHL markets from a Dixon-Coles scoreline matrix.
+
+    Two modes:
+
+    * ``final`` omitted (every artifact without a regulation structure —
+      the legacy behaviour, unchanged): ONE matrix fitted on FINAL scores
+      (including OT/SO) serves every market, its i==j cells read as "tied
+      at the end of regulation" and split 50/50 in the moneyline. A final
+      NHL score is never tied, so this under-prices regulation ties (~15%
+      served vs ~22-25% realised, 2026-10-31 gate) and leaves tie cells in
+      the final-score markets.
+    * ``final`` given (an artifact carrying a
+      predictors.hockey_regulation.RegulationStructure): ``P`` is the
+      REGULATION scoreline and ``final`` the final one (each regulation tie
+      moved one goal up for the overtime / shootout winner). The
+      regulation markets — regulation_1x2 and double_chance, which grade on
+      metadata.regulation_winner — read ``P``; every market that grades on
+      the final score (moneyline, puck_line, over_under, total_goals,
+      clean_sheet, win_to_nil, correct_score) reads ``final``.
 
     Unlike soccer there's no "draw" outcome at the end of the
     game — NHL games go to overtime + shootout to produce a
-    winner. The Dixon-Coles model here is trained on FINAL scores
-    (including OT/SO) so the i==j cells represent "tied at the end
-    of regulation" mass that gets redistributed to home/away
-    50/50 in the final moneyline. We expose BOTH views:
+    winner. We expose BOTH views:
 
       moneyline      — home/away with draw mass split 50/50
       regulation_1x2 — home/draw/away preserved (3-way reg market)
@@ -673,34 +688,50 @@ def derive_hockey_markets(P: np.ndarray) -> Dict[str, Dict[str, float]]:
 
     Lines pulled from NHL_PUCK_LINES and NHL_TOTAL_LINES.
     """
-    P = np.asarray(P, dtype=float)
-    s = P.sum()
-    if s > 0 and abs(s - 1.0) > 1e-9:
-        P = P / s
-    N = P.shape[0]
+
+    def _normalised(M: np.ndarray) -> np.ndarray:
+        M = np.asarray(M, dtype=float)
+        mass = M.sum()
+        return M / mass if mass > 0 and abs(mass - 1.0) > 1e-9 else M
+
+    R = _normalised(P)
+    N = R.shape[0]
     i_idx, j_idx = np.indices((N, N))
-    total = i_idx + j_idx
-    margin = i_idx - j_idx
     home_mask = i_idx > j_idx
     draw_mask = i_idx == j_idx
     away_mask = i_idx < j_idx
+
+    # The regulation 3-way, from the regulation matrix (legacy: the one matrix).
+    p_home = float(R[home_mask].sum())
+    p_draw = float(R[draw_mask].sum())
+    p_away = float(R[away_mask].sum())
+
+    # Every final-score market reads the final matrix (legacy: the one matrix).
+    P = R if final is None else _normalised(final)
+    if P.shape != R.shape:
+        raise ValueError(f"final matrix {P.shape} does not match the regulation matrix {R.shape}")
+    total = i_idx + j_idx
+    margin = i_idx - j_idx
     ph = P.sum(axis=1)
     pa = P.sum(axis=0)
 
-    p_home = float(P[home_mask].sum())
-    p_draw = float(P[draw_mask].sum())
-    p_away = float(P[away_mask].sum())
-
     markets: Dict[str, Dict[str, float]] = {}
 
-    # Moneyline: draw mass split 50/50 (OT coin-flip approximation).
-    # Sharper than "no-draw" exclusion because most NHL OT games
-    # are decided by a single goal that can't be predicted from
-    # regulation scoring rates alone.
-    markets["moneyline"] = {
-        "home": p_home + 0.5 * p_draw,
-        "away": p_away + 0.5 * p_draw,
-    }
+    if final is None:
+        # Moneyline: draw mass split 50/50 (OT coin-flip approximation).
+        # Sharper than "no-draw" exclusion because most NHL OT games
+        # are decided by a single goal that can't be predicted from
+        # regulation scoring rates alone.
+        markets["moneyline"] = {
+            "home": p_home + 0.5 * p_draw,
+            "away": p_away + 0.5 * p_draw,
+        }
+    else:
+        # The final matrix has already resolved every regulation tie.
+        markets["moneyline"] = {
+            "home": float(P[home_mask].sum()),
+            "away": float(P[away_mask].sum()),
+        }
 
     # Regulation 1x2 (3-way) — preserves the draw mass for users
     # who want the reg-time market.

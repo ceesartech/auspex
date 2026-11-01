@@ -939,6 +939,13 @@ class DixonColesPredictor(PoissonMatchPredictor):
         # inside the shared MLE); the Dixon-Coles default is the 730-day
         # half-life that won the half-life sweep. See DIXON_COLES_CONFIG.
         self.time_decay = float(config.hyperparameters.get("time_decay", DEFAULT_DIXON_COLES_TIME_DECAY))
+        # NHL only: the fitted regulation-scoreline structure
+        # (predictors.hockey_regulation.RegulationStructure.to_payload()), or
+        # None. Kept as the raw payload so this module does not import the
+        # hockey one; the NHL serve path parses and validates it. Saved only
+        # when set, so every other artifact's bytes are unchanged, and an
+        # artifact without it loads as None and serves exactly as before.
+        self.regulation_structure: Optional[Dict[str, Any]] = None
 
     def _score_matrix(self, home_lambda: float, away_lambda: float) -> np.ndarray:
         mg = self.max_goals + 1
@@ -1024,6 +1031,8 @@ class DixonColesPredictor(PoissonMatchPredictor):
 
         data = self._artifact_payload()
         data["rho"] = self.rho
+        if self.regulation_structure is not None:
+            data["regulation_structure"] = self.regulation_structure
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
         logger.info(f"Dixon-Coles model saved to {path}")
@@ -1038,4 +1047,5 @@ class DixonColesPredictor(PoissonMatchPredictor):
 
         self._load_artifact_payload(data)
         self.rho = data["rho"]
+        self.regulation_structure = data.get("regulation_structure")
         logger.info(f"Dixon-Coles model loaded from {path}")

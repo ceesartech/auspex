@@ -197,24 +197,22 @@ def store_prediction(
     )
 
 
-def _load_hockey_dixon_coles():
-    """Load the NHL Dixon-Coles artifact if present. Returns None when
-    the model hasn't been trained yet (so the trained ensemble path
-    keeps working unchanged). This is the PRODUCTION path, and nothing
-    writes it automatically: train_hockey_dixon_coles.py stages into
-    /app/models/staging-nhl/dixon_coles_nhl/1.0.0 and refuses this tree.
-    A staged fit may reach this path only through scripts/promote_dc_model.py,
-    which has no "nhl" entry until scripts/ab_nhl_dixon_coles.py passes."""
+HOCKEY_DC_PRODUCTION_PATH = "/app/models/production/dixon_coles_nhl/1.0.0/model.bin"
+
+
+def _load_hockey_dixon_coles_artifact(path: str, label: str = "NHL Dixon-Coles"):
+    """Load an NHL Dixon-Coles artifact from ``path`` exactly as the serve
+    path does, or None (logged) when it is missing or unloadable. An artifact
+    carrying a regulation structure (predictors.hockey_regulation) must carry
+    a VALID one: a malformed structure is refused here, loudly, rather than
+    served as the legacy single-matrix model it is not."""
     from pathlib import Path
 
-    path = Path("/app/models/production/dixon_coles_nhl/1.0.0/model.bin")
-    if not path.exists():
-        logger.info(
-            "NHL Dixon-Coles artifact not found at %s; analytic markets disabled.",
-            path,
-        )
+    if not Path(path).exists():
+        logger.info("%s artifact not found at %s; analytic markets disabled.", label, path)
         return None
     try:
+        from predictors.hockey_regulation import structure_of  # type: ignore
         from predictors.model_config import DIXON_COLES_CONFIG  # type: ignore
         from predictors.poisson_models import DixonColesPredictor  # type: ignore
     except Exception as e:
@@ -226,7 +224,54 @@ def _load_hockey_dixon_coles():
     except Exception as e:
         logger.warning("Hockey model load failed at %s: %s", path, e)
         return None
+    try:
+        structure_of(model)
+    except ValueError as e:
+        logger.error("%s at %s carries a malformed regulation structure (%s) — refusing to serve it", label, path, e)
+        return None
     return model
+
+
+def _load_hockey_dixon_coles():
+    """Load the PRODUCTION NHL Dixon-Coles artifact if present. Returns None
+    when the model hasn't been trained yet (so the trained ensemble path
+    keeps working unchanged). Nothing writes this path automatically:
+    train_hockey_dixon_coles.py stages into
+    /app/models/staging-nhl/dixon_coles_nhl/1.0.0 and refuses this tree, and a
+    staged fit reaches it only through scripts/promote_dc_model.py."""
+    return _load_hockey_dixon_coles_artifact(HOCKEY_DC_PRODUCTION_PATH)
+
+
+def hockey_dc_matrices(model, home_team: str, away_team: str):
+    """(regulation matrix, final matrix, structured) for one fixture, as the
+    serve path builds them: lambdas_for_match(home, away) with NO league,
+    build_dc_matrix(..., rho, MAX_GOALS_DERIVE). A legacy artifact (no
+    regulation structure) serves ONE final-score matrix for every market, so
+    both are that matrix and structured is False; an artifact with a
+    structure returns its regulation and final matrices."""
+    from predictors.hockey_regulation import structure_of  # type: ignore
+    from predictors.market_derivation import MAX_GOALS_DERIVE, build_dc_matrix  # type: ignore
+
+    h_lam, a_lam = model.lambdas_for_match(home_team, away_team)
+    P = build_dc_matrix(h_lam, a_lam, float(getattr(model, "rho", 0.0) or 0.0), max_goals=MAX_GOALS_DERIVE)
+    structure = structure_of(model)
+    if structure is None:
+        return P, P, False
+    R, F = structure.matrices(P)
+    return R, F, True
+
+
+def hockey_dc_markets(model, home_team: str, away_team: str) -> dict:
+    """The analytic NHL markets precompute stores for one fixture
+    (HOCKEY_DERIVE_TO_PREDICTION's keys): derive_markets('nhl', ...) minus
+    its moneyline, which the trained ensemble's supersedes. The A/B harness
+    reads every arm through this same function."""
+    from predictors.market_derivation import derive_markets  # type: ignore
+
+    R, F, structured = hockey_dc_matrices(model, home_team, away_team)
+    analytic = derive_markets("nhl", R, final=F) if structured else derive_markets("nhl", R)
+    analytic.pop("moneyline", None)
+    return analytic
 
 
 # Hockey-DC analytic market_type → predictions.prediction_type.
@@ -329,7 +374,7 @@ def run(database_url: str, days: int, notify: bool = True) -> dict:
     hockey_dc_model = _load_hockey_dixon_coles()
     if hockey_dc_model is not None:
         try:
-            from predictors.market_derivation import MAX_GOALS_DERIVE, build_dc_matrix, derive_markets  # type: ignore
+            from predictors.market_derivation import derive_markets  # type: ignore  # noqa: F401
 
             hockey_derive_ready = True
         except Exception as e:
@@ -479,19 +524,11 @@ def run(database_url: str, days: int, notify: bool = True) -> dict:
                 # rows intact.
                 if hockey_derive_ready and hockey_dc_model is not None:
                     try:
-                        h_lam, a_lam = hockey_dc_model.lambdas_for_match(m["home_team"], m["away_team"])
-                        nhl_P = build_dc_matrix(
-                            h_lam,
-                            a_lam,
-                            float(getattr(hockey_dc_model, "rho", 0.0) or 0.0),
-                            max_goals=MAX_GOALS_DERIVE,
-                        )
-                        analytic = derive_markets("nhl", nhl_P)
                         # 'moneyline' from the analytic deriver is
                         # weaker than the trained ensemble's
-                        # moneyline; skip it explicitly. The other
-                        # analytic markets fill genuine gaps.
-                        analytic.pop("moneyline", None)
+                        # moneyline; hockey_dc_markets drops it. The
+                        # other analytic markets fill genuine gaps.
+                        analytic = hockey_dc_markets(hockey_dc_model, m["home_team"], m["away_team"])
                         dc_version = "1.0.0"
                         for market_type, probs in analytic.items():
                             predicted += _store_hockey_market(cur, m["match_id"], dc_version, market_type, probs)

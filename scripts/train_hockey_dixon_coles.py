@@ -190,6 +190,135 @@ def served_fixtures(frame: Any) -> Iterable[Tuple[str, str, None]]:
     return ((home, away, None) for home, away in pairs.itertuples(index=False))
 
 
+# ── The regulation-scoreline model (predictors.hockey_regulation) ────
+# Gated by scripts/ab_nhl_regulation_ties.py, which fits its candidate arms
+# through fit_regulation_model below so the gate measures exactly this code.
+
+# The frame above plus metadata.regulation_winner ('home' / 'away', or 'tie' —
+# 'draw' on ESPN rows written before 2026-10 — when the game went past
+# regulation), which the regulation scoreline is derived from.
+NHL_DC_REGULATION_QUERY = NHL_DC_TRAINING_QUERY.replace(
+    "NULL::jsonb AS features",
+    "NULL::jsonb AS features,\n        m.metadata->>'regulation_winner' AS regulation_winner",
+)
+REGULATION_LABELS = {"home": False, "away": False, "tie": True, "draw": True}  # label -> went past regulation
+# The margin buckets of the deciding arm, pre-registered in
+# ab_nhl_regulation_ties.py (the BIC rule on the 2021-01..2025-09 rows).
+REGULATION_MARGIN_BUCKETS: Tuple[int, ...] = (0, 1, 2, 3, 4)
+# fit_refusal's level tolerance, applied to the regulation fit's served level.
+MAX_REGULATION_LEVEL_BIAS = 0.02
+
+
+def regulation_frame(frame: Any) -> Any:
+    """``frame`` (FIT columns + regulation_winner, FINAL scores) with
+    home_score / away_score replaced by the REGULATION scoreline and an
+    ``overtime_home_win`` column (1.0 / 0.0 for a game that went past
+    regulation, NaN otherwise). Raises on a row without a known
+    regulation_winner or whose final score contradicts it
+    (hockey_regulation.regulation_scores) — guessing either would fit on it
+    silently."""
+    import numpy as np
+    from predictors.hockey_regulation import regulation_scores  # type: ignore
+
+    labels = frame["regulation_winner"].map(lambda v: REGULATION_LABELS.get(v) if isinstance(v, str) else None)
+    unknown = labels.isna()
+    if unknown.any():
+        raise ValueError(
+            f"{int(unknown.sum())} NHL row(s) without a known regulation_winner "
+            f"(e.g. {frame.loc[unknown, 'regulation_winner'].head(3).tolist()}) — no regulation score to fit"
+        )
+    past = labels.astype(bool).to_numpy()
+    final_h = frame["home_score"].to_numpy(dtype=int)
+    final_a = frame["away_score"].to_numpy(dtype=int)
+    reg_h, reg_a = regulation_scores(final_h, final_a, past)
+    out = frame.copy()
+    out["home_score"], out["away_score"] = reg_h, reg_a
+    out["overtime_home_win"] = np.where(past, (final_h > final_a).astype(float), np.nan)
+    return out
+
+
+def regulation_fit_refusal(
+    result: Dict[str, Any], model: Any, fixtures: Iterable[Tuple[str, str, Any]]
+) -> Optional[str]:
+    """Why a regulation-model fit must NOT be written, or None.
+
+    The Poisson start converged (result['poisson_iterations']) and the joint
+    structure fit converged (result['iterations']); the served level — mean
+    REGULATION total goals under the fitted regulation matrices vs observed
+    — is within +/-2%; the structure is valid; rho is 0; and every fixture's
+    served regulation AND final matrices (precompute_predictions_nhl's
+    lambdas_for_match without a league) are finite and normalised, the final
+    one with no tie mass."""
+    import numpy as np
+    from predictors.hockey_regulation import structure_of  # type: ignore
+    from predictors.market_derivation import MAX_GOALS_DERIVE, build_dc_matrix  # type: ignore
+
+    if result.get("poisson_iterations") is None:
+        return "the Poisson start did not converge"
+    if result.get("iterations") is None:
+        return "the regulation-structure fit did not converge"
+    fitted, observed = result.get("fitted_mean_total_goals"), result.get("observed_mean_total_goals")
+    if not (halftime._finite(fitted) and halftime._finite(observed) and observed > 0):
+        return f"no usable level check (fitted {fitted!r}, observed {observed!r})"
+    bias = fitted / observed - 1.0
+    if abs(bias) > MAX_REGULATION_LEVEL_BIAS:
+        return (
+            f"fitted mean regulation total goals {fitted:.4f} vs observed {observed:.4f} ({100 * bias:+.2f}%) is "
+            f"outside +/-{100 * MAX_REGULATION_LEVEL_BIAS:.0f}%"
+        )
+    if float(getattr(model, "rho", 0.0) or 0.0) != 0.0:
+        return f"rho is {model.rho!r}, not 0"
+    try:
+        structure = structure_of(model)
+    except ValueError as e:
+        return f"invalid regulation structure: {e}"
+    if structure is None:
+        return "the model carries no regulation structure"
+    for home, away, _ in fixtures:
+        P = build_dc_matrix(*model.lambdas_for_match(home, away), 0.0, max_goals=MAX_GOALS_DERIVE)
+        R, F = structure.matrices(P)
+        for name, M in (("regulation", R), ("final", F)):
+            if not (np.isfinite(M).all() and (M >= 0).all() and abs(float(M.sum()) - 1.0) < 1e-6):
+                return f"invalid served {name} matrix for {home} v {away}"
+        if float(np.trace(F)) != 0.0:
+            return f"the served final matrix for {home} v {away} holds tie mass"
+    return None
+
+
+def fit_regulation_model(
+    frame: Any, cfg: Any, margin_buckets: Tuple[int, ...] = REGULATION_MARGIN_BUCKETS
+) -> Tuple[Any, Dict[str, Any], Optional[str]]:
+    """Fit the regulation-scoreline model on ``frame`` (FIT columns +
+    regulation_winner, FINAL scores): DixonColesPredictor(cfg) on the
+    regulation scoreline, rho forced to 0, then the team strengths and the
+    margin log-factors jointly by maximum likelihood with the overtime home
+    share (hockey_regulation.fit_structure); the structure rides in the
+    artifact as model.regulation_structure. Returns (model, result,
+    refusal) — refusal from regulation_fit_refusal, None when the fit may be
+    written. ``margin_buckets`` () is the plain Poisson on regulation scores
+    (the overtime resolution still applies)."""
+    from predictors.hockey_regulation import fit_structure  # type: ignore
+    from predictors.market_derivation import MAX_GOALS_DERIVE  # type: ignore
+    from predictors.poisson_models import DixonColesPredictor  # type: ignore
+
+    reg = regulation_frame(frame)
+    fit_cols = ["home_team", "away_team", "home_score", "away_score", "match_date", "league_id"]
+    reg_df = reg[fit_cols].copy()
+    model = DixonColesPredictor(cfg)
+    result = model.train(reg_df)
+    force_rho_zero(model, result)
+    poisson = {k: result.get(k) for k in ("iterations", "fitted_mean_total_goals", "observed_mean_total_goals")}
+    structure, sresult = fit_structure(
+        model, reg_df, reg["overtime_home_win"].to_numpy(), margin_buckets, int(MAX_GOALS_DERIVE)
+    )
+    model.regulation_structure = structure.to_payload()
+    result.update(sresult)
+    result["poisson_iterations"] = poisson["iterations"]
+    result["poisson_fitted_mean_total_goals"] = poisson["fitted_mean_total_goals"]
+    refusal = regulation_fit_refusal(result, model, list(served_fixtures(reg_df)))
+    return model, result, refusal
+
+
 def holdout_diagnostic(model: Any, train_df: Any, holdout_df: Any) -> Dict[str, Any]:
     """The --holdout-fraction diagnostic, in hockey terms: each held-out match
     read exactly as precompute_predictions_nhl serves it —
