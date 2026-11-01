@@ -51,7 +51,10 @@
 #      plan is within the reviewed set: match_stats_inserted <= 4,
 #      odds_inserted <= 13, every other key 0;
 #   3. apply, pinned to the dry run's counts (--expect-plan, every key): one
-#      transaction, committed only when its own plan equals the pin;
+#      transaction, committed only when its own plan equals the pin (exit 1:
+#      rolled back, nothing changed; exit 3 would mean committed at a pin
+#      expecting refused rows, which step 2 rules out — reported as FAILED,
+#      committed, inspect);
 #   4. after-state, EXPECTED: a fresh dry run plans 0 for every key, and each
 #      fixture the fd repair alias-merged (its newest apply CSV listing any)
 #      holds a match_stats row for both its sides.
@@ -173,10 +176,20 @@ log "3/4 apply (pinned: $pin)"
 step promote_after_apply --apply --expect-plan "$pin" --out-csv ${B}_apply_$STAMP.csv
 rc=$?
 log "step 3 exit $rc"
-if [ "$rc" -ne 0 ]; then
-  log "ABORT at step 3 (full log /tmp/promote_after_apply.log in the api container): the checked apply is one transaction — a refusal or a drift rolled it back, nothing changed"
-  exit 1
-fi
+case "$rc" in
+  0) ;;
+  3)
+    # A checked --apply exits 3 only AFTER its commit, at a pin that expected refused, duplicated or screened-out
+    # rows (promote_raw's EXIT STATUS). Step 2 pins all three to 0, so this cannot happen as written; if it does,
+    # the change is committed and nothing here may call it rolled back.
+    log "FAILED at step 3 (full log /tmp/promote_after_apply.log in the api container): promote_raw exited 3 AFTER COMMITTING — its pin expected refused, duplicated or screened-out raw rows, which step 2's bounds (refused = duplicates = refused_raw = 0) rule out; the change IS committed — inspect (every change is in ${B}_apply_$STAMP.csv)"
+    exit 1
+    ;;
+  *)
+    log "ABORT at step 3 (full log /tmp/promote_after_apply.log in the api container): the checked apply is one transaction — a refusal or a drift rolled it back, nothing changed"
+    exit 1
+    ;;
+esac
 
 log "4/4 after-state"
 step promote_after_verify --dry-run --out-csv ${B}_verify_$STAMP.csv

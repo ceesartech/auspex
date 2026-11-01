@@ -1,4 +1,4 @@
-"""The soccer runbook's steps 12-14, run for real against a scripted docker
+"""The soccer runbook's steps 12, 14 and 15, run for real against a scripted docker
 (tests/unit/_ops_fake_docker.py): scripts/ops/backfill_soccer_never_resulted.sh,
 promote_raw_after_repair.sh and grade_folded_soccer_rows.sh. Each re-plans
 read-only first and exits 0 ('ALREADY DONE') without a backup or a write when
@@ -339,7 +339,7 @@ def test_the_reviewed_list_is_the_rehearsals_38_heals_4_left_alone_and_the_liga_
     assert "5b94347b-daec-4117-aa09-710cd860a2b6" not in {r["match_id"] for r in rows}  # not played when reviewed
 
 
-# --- promote_raw_after_repair.sh (step 13) ------------------------------------------------------------------------
+# --- promote_raw_after_repair.sh (step 14) ------------------------------------------------------------------------
 
 KEYS = (
     "matches_inserted matches_changed match_stats_inserted match_stats_changed odds_inserted teams_inserted "
@@ -358,9 +358,12 @@ PR_ZERO = _promote_plan()
 ALIASED = " ".join(f"{i:08d}-1111-1111-1111-111111111111" for i in range(4))
 
 
-def _pr_rules(pre_plan=PR_PLAN, pre_rc=0, dry_plan=PR_PLAN, verify_plan=PR_ZERO, sides="4/4", aliased=ALIASED):
+def _pr_rules(
+    pre_plan=PR_PLAN, pre_rc=0, dry_plan=PR_PLAN, verify_plan=PR_ZERO, sides="4/4", aliased=ALIASED, apply_rc=0
+):
     return [
         {"match": r"/tmp/promote_after_pre\.log 2>&1", "out": "tool exit", "rc": pre_rc},
+        {"match": r"/tmp/promote_after_apply\.log 2>&1", "out": "tool exit", "rc": apply_rc},
         {"match": r"promote_raw\.py .* > /tmp/promote_after_\w+\.log 2>&1", "out": "tool exit 0"},
         {"match": r"grep -o 'PLAN \.\*' /tmp/promote_after_pre\.log", "out": pre_plan},
         {"match": r"grep -o 'PLAN \.\*' /tmp/promote_after_dry\.log", "out": dry_plan},
@@ -451,12 +454,27 @@ def test_promote_after_state_failures_exit_1(tmp_path, kw, why):
     assert rc == 1 and "FAILED after-state" in out and why in out, out
 
 
+def test_promote_apply_refused_says_rolled_back_nothing_changed(tmp_path):
+    rc, out, calls, _ = _run(tmp_path, "promote_raw_after_repair.sh", _pr_rules(apply_rc=1))
+    assert rc == 1 and "ABORT at step 3" in out and "rolled it back, nothing changed" in out, out
+    assert not [c for c in calls if "promote_after_verify" in c]
+
+
+def test_promote_apply_exit_3_is_reported_committed_not_rolled_back(tmp_path):
+    """A checked --apply exits 3 only after its commit (promote_raw's EXIT STATUS): step 2's bounds make it
+    unreachable, but if it happens the wrapper must not claim a rollback."""
+    rc, out, calls, _ = _run(tmp_path, "promote_raw_after_repair.sh", _pr_rules(apply_rc=3))
+    assert rc == 1 and "FAILED at step 3" in out and "AFTER COMMITTING" in out and "IS committed" in out, out
+    assert "rolled it back" not in out and "nothing changed" not in out.split("3/4 apply", 1)[1]
+    assert not [c for c in calls if "promote_after_verify" in c]
+
+
 def test_promote_without_an_alias_merge_listed_skips_that_check(tmp_path):
     rc, out, _, _ = _run(tmp_path, "promote_raw_after_repair.sh", _pr_rules(aliased=""))
     assert rc == 0 and "no alias-merged fixture listed" in out, out
 
 
-# --- grade_folded_soccer_rows.sh (step 14) ------------------------------------------------------------------------
+# --- grade_folded_soccer_rows.sh (step 15) ------------------------------------------------------------------------
 
 FOLDED = "\n".join(f"{i:08d}-2222-2222-2222-222222222222" for i in range(26))
 GF_PLAN = "PLAN matches=26 predictions_graded=504 predictions_regraded=0 recs_changed=0"
