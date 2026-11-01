@@ -46,6 +46,12 @@ status finished, both scores present, nearest kickoff within
                post-kickoff prices, superseded duplicates, features_cache).
   no twin     -> tennis/MMA: DELETE (a pairing that never played: a re-drawn
                slot, a walkover); its prices have no result to train on.
+               That holds only once the days ESPN resulted are in: no UFC
+               bout before 2026-07-10 was ever resulted (results ingestion
+               shipped 07-13 with a 3-day look-back), and on 2026-11-01 44
+               fought June bouts sat here without a twin. Backfill such days
+               first (scripts/backfill_results.py;
+               scripts/ops/repair_stranded_recs_mma.sh runs it before this).
                soccer: LEFT ALONE and reported by class (see below).
   ambiguous   -> left alone, counted.
   soccer twin that is a football-data copy -> LEFT ALONE, whether or not

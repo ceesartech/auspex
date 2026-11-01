@@ -81,6 +81,14 @@ destroy recs that a backfill can settle honestly. Fix the data first; the
 repair tool is not the remedy for missing results. That rule is ENFORCED in
 code (see RECOVERABLE_BY_BACKFILL), not left to whoever reads this docstring.
 
+MMA joined that rule on 2026-11-01, although it stays in the default list
+(its fixture duplicates do settle from twins here): 20 of the 21 UFC recs
+stranded since June had no twin because no June bout was ever resulted —
+ESPN still served every winner, and scripts/backfill_results.py settled them
+(6W/14L). The 21st was a bout dropped from its card, which
+fetch_upcoming.cancel_dropped_bouts now cancels so the grader voids its recs
+('void: match cancelled'). --void-no-twin over mma would have voided all 21.
+
 Every affected row is written to --out-csv BEFORE any UPDATE runs (in
 dry-run too), mirroring backups/voided_rec_ids_2026-07-13.csv and
 backups/gate_voided_ids_2026-07-13.csv. The CSV is the ONLY reversal record
@@ -95,7 +103,7 @@ Usage (inside the api container):
     python /app/scripts/repair_stranded_recs.py                    # dry-run
     python /app/scripts/repair_stranded_recs.py --apply
     python /app/scripts/repair_stranded_recs.py --sport tennis --apply
-    python /app/scripts/repair_stranded_recs.py --void-no-twin --apply
+    python /app/scripts/repair_stranded_recs.py --sport tennis --void-no-twin --apply
 
 Each run writes its OWN timestamped CSV, so the dry-run / apply / verify
 sequence above never destroys an earlier audit file. Acceptance after an
@@ -139,7 +147,8 @@ ALLOWED_SPORTS = ("soccer", "tennis", "mma", "nba", "nhl")
 # Sports whose stranded recs have NO twin because their RESULTS were never
 # ingested, not because the fixture row was duplicated. Voiding these
 # destroys rows a results backfill can settle honestly — refused in code.
-RECOVERABLE_BY_BACKFILL = frozenset({"nba", "nhl"})
+# mma: see the module docstring (2026-11-01).
+RECOVERABLE_BY_BACKFILL = frozenset({"nba", "nhl", "mma"})
 
 # Bounds on the interval knobs. Both feed SQL interval arithmetic:
 # a NEGATIVE --stale-after-hours flips `NOW() - interval '-24 hours'` into
@@ -1020,8 +1029,9 @@ def validate_request(
         raise UnsafeRequest(
             f"--void-no-twin is refused for {', '.join(blocked)}: those stranded recs have no twin because "
             f"their RESULTS were never ingested, not because the fixture row was duplicated. They are "
-            f"recoverable — run the results backfill first "
-            f"(scripts/fetch_upcoming.py --results --days-back N). Voiding them destroys settleable rows."
+            f"recoverable — run the results backfill first (scripts/backfill_results.py, or "
+            f"scripts/fetch_upcoming.py --results --days-back N). Voiding them destroys settleable rows; a bout "
+            f"dropped from its card is cancelled by the results path and voided by the grader."
         )
 
 

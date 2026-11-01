@@ -528,11 +528,27 @@ def test_distinct_fixtures_are_not_reported_as_duplicates(tmp_path):
 def test_void_no_twin_is_refused_for_backfill_recoverable_sports(tmp_path):
     """The nba/nhl rule was documentation-only: `--sport nhl --void-no-twin`
     would have permanently voided 18 Finals recs a backfill can settle."""
-    assert rs.RECOVERABLE_BY_BACKFILL == frozenset({"nba", "nhl"})
+    assert rs.RECOVERABLE_BY_BACKFILL == frozenset({"nba", "nhl", "mma"})
     conn = FakeConn([make_rec(sport="nhl")], [])
     with pytest.raises(rs.UnsafeRequest, match="backfill"):
         _run(conn, tmp_path, sports=["nhl"], void_no_twin=True)
     assert conn.cur.updates == []
+
+
+@pytest.mark.parametrize("sports", [["mma"], ["tennis", "mma"], None])
+def test_void_no_twin_is_refused_over_mma(tmp_path, sports):
+    """2026-11-01: 20 of the 21 UFC recs stranded since June had no twin because no June bout was ever resulted;
+    --void-no-twin would have voided recs ESPN's results settle. The default list includes mma."""
+    conn = FakeConn([make_rec(sport="mma")], [])
+    with pytest.raises(rs.UnsafeRequest, match="backfill_results"):
+        rs.run(conn, sports=sports or list(rs.DEFAULT_SPORTS), void_no_twin=True, out_csv=str(tmp_path / "x.csv"))
+    assert conn.cur.updates == []
+
+
+def test_mma_twins_still_settle_without_the_void_flag(tmp_path):
+    conn = FakeConn([make_rec(sport="mma")], [make_match(TWIN)])
+    result = _run(conn, tmp_path, sports=["mma"])
+    assert result["per_sport"]["mma"]["settled_won"] + result["per_sport"]["mma"]["settled_lost"] == 1
 
 
 def test_nba_nhl_may_still_be_inspected_without_the_void_flag(tmp_path):
