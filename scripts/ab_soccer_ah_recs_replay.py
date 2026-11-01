@@ -57,6 +57,17 @@ PART A — BRIER (context, post hoc; live regime; refit - served)
   Re-derived matrices must reproduce scores.npz's AH Briers to 1e-12 (the run
   aborts otherwise).
 
+PART A2 — THE FORWARD GATE'S OWN PAIR (amendment 6; planning, post hoc)
+  scripts/ab_soccer_ah_forward_gate.py does not score served vs refit: it
+  scores production's stored AH row (the newest created before kickoff)
+  against the monthly refit reconciled to that row's stored 1x2 and anchor.
+  This part scores exactly that pair on every gate eval match of this window
+  with such a row, through the same function (score_ah_pair; an invariant-line
+  mismatch aborts), and reports per line and pooled the per-match and
+  fold-clustered deltas, the per-match SD and the between-fold variance tau2
+  (between_fold_variance). Part D plans the forward gate's decision point on
+  these numbers, not on the window pair's.
+
 PART B — MONEY: the AH recommendation logic replayed per arm
   Population: every finished soccer match kicking off in [--start, --end)
   with at least one pre-match (prematch_odds) AH odds row. Recommendations
@@ -89,11 +100,21 @@ PART B — MONEY: the AH recommendation logic replayed per arm
                    the bankroll
   Settlement: grading_outcomes.grade_rec_selection (quarter lines and pushes
   included, 90-minute score) and rec_status_and_pl. Flat P/L stakes 1 unit.
-  CLV: (i) same book: odds taken / the last pre-kickoff snapshot at the same
-  book - 1 (vw_rec_clv's definition; near 0 by construction, since recs are
-  re-priced up to the last tick); (ii) fair close: odds taken x the
-  >= 3-book power-de-vigged consensus at kickoff - 1 (the no-push edge
-  against the closing market).
+  Price readouts: (i) same-book CLV: odds taken / the last pre-kickoff
+  snapshot at the same book - 1 (vw_rec_clv's definition); (ii) market EV at
+  bet time: odds taken x the >= 3-book power-de-vigged consensus at the bet's
+  own tick - 1 (what the market implied about the bet when it was placed).
+  NEITHER IS A CLOSING-LINE VALUE for a rec written at the last tick: no AH
+  quote is captured after that tick (the odds fetch runs in the same tick,
+  10-55 s before the generator reads; the run counts quotes captured after
+  the tick and consensus values that differ at kickoff, and both are 0), so
+  the "close" is the bet's own moment and (i) is 0 by construction.
+  [Amendment 4: (ii) was first reported as "fair-close CLV" against a
+  consensus "at kickoff"; that consensus is identical to the tick's.]
+  Caveat on the window: until 2ec19b8 (2026-09-04) an odds row kept its first
+  price and first-seen timestamp and had no last_seen_at, so today's
+  freshness guard reads almost every pre-2026-09-05 quote as stale: ~93% of
+  the window's replayed recs are from REPRO_START on.
   Arms:
     served           the gate's served arm: the 2026-11-01 artifact, the
                      current 1x2 incumbent's target, the live-replayed anchor
@@ -117,6 +138,29 @@ PART B — MONEY: the AH recommendation logic replayed per arm
   (resampling matches, paired), and the per-match SE of the paired per-match
   difference.
 
+PART B2 — THE EARLY BET: A CLOSING-LINE READOUT (amendment 5)
+  A closing-line value needs the bet placed before the last observed quote.
+  So each arm is also replayed at the last tick at least EARLY_HOURS = 6 h
+  before kickoff, on matches kicking off from EARLY_SINCE = REPRO_START (the
+  first full day with current prices, last_seen_at and snapshots), with the
+  probabilities it had then (stored: the newest row created before that
+  tick; refit_on_stored reconciled to it; served and refit unchanged), and
+  each early rec is valued against the consensus at the LAST tick, the latest
+  pre-kickoff state anyone observes:
+    clv_fair  odds taken x p_last - 1  (the edge against the last observed
+              fair price; CLV proper)
+    ev_mkt    odds taken x p_early - 1 (what the market implied when placed)
+    move      odds taken x (p_last - p_early) = clv_fair - ev_mkt (the market
+              moving toward the bet)
+    clv_same  odds taken / the same book's last pre-kickoff price - 1
+  Per arm: recs, the four means, the share of recs the market moved toward
+  and away from; per pair (served vs refit, stored vs refit_on_stored): the
+  overlap and the match-clustered paired bootstrap of the clv_fair and move
+  differences; and every fresh best quote at the early tick (a random side at
+  the best price) as the baseline. 6 h is a single pre-declared horizon
+  (prices move in it: ~23,000 AH snapshot changes fall in the last 6 h before
+  kickoff of 2026-07..10 matches); no other horizon is read.
+
 PART C — REPRODUCTION
   The stored arm, replayed with the logic era's de-vig, against production's
   actual AH recs (betting_recommendations, every status) on matches kicking
@@ -124,13 +168,26 @@ PART C — REPRODUCTION
   share of production recs reproduced with the same match, selection and line,
   and of those the same price, book and stake. The served arm is compared the
   same way (its gap is model-input drift: each week's 1x2 and Dixon-Coles
-  artifact differ from the 2026-11-01 ones).
+  artifact differ from the 2026-11-01 ones). Production recs on matches that
+  are not finished (stale 'scheduled' rows) are counted after the
+  REPRO_START filter, never compared. Production's own settled P/L on the
+  compared recs is reported with a match-clustered bootstrap SE and 95%
+  interval, next to the stake-weighted market EV at bet time of the same
+  bets (the loss a zero-edge stream would expect). [Amendment 7.]
 
 PART D — POWER
   From this window's per-match variances: the n (and the months at the
   current monthly volume) a forward AH-only gate needs to detect the measured
   effect with 80% power at two-sided 5%, for each Brier primary and for the
-  money / CLV primaries.
+  money / CLV primaries. [Amendment 8: the window pair's per-match z-test n
+  is context only. The forward gate's Brier decision point is planned on its
+  own pair (Part A2) under its own rule — the fold-clustered t(k-1) upper
+  bound below 0 — with clustered_t_power: each fold mean is
+  N(delta, sd^2 k / n + tau2), so power depends on the number of folds k,
+  not only on n. For k = 4..18: the power at k x the pair's Aug-Oct monthly
+  n, the n 80% power needs, and the smallest k reaching 80%. The money
+  readouts are planned on the forward pair too (stake and flat P/L; early-bet
+  clv_fair).]
 
 THE RUN (fixed with this design, committed before the full run)
   --ftdc-dir = a re-run of the committed scripts/ab_soccer_ft_dixon_coles.py
@@ -146,7 +203,9 @@ THE RUN (fixed with this design, committed before the full run)
   counts on its first 146 eligible matches, June-July 2026: served 8, refit
   9, stored 7, refit_on_stored 8.)
 
-RESULT (2026-11-01; the run above, on the replica of the 21:09:21Z export)
+RESULT (2026-11-01; the run above, on the replica of the 21:09:21Z export;
+the money section's CLV wording is corrected by amendment 4 — numbers for
+amendments 4-9 follow in the next commit)
   Inputs. The FT gate re-run reproduced the recorded gate exactly: n = 25,604,
   31 folds, live refit - served on over_2.5 -0.00375 (clustered -0.00358 +/-
   0.00044), every AH unit to the digit, live check 371/371 stored predictions
@@ -242,6 +301,22 @@ identical, compared field by field)
      price, and Part C counts the book mismatches that are such ties.
   3. The monthly volume query truncates match_date in UTC explicitly (it had
      used the session time zone; the recorded run's session was UTC).
+  After review (2026-11-01, committed before any of these readouts ran on
+  the full window; before this commit they ran only as --mechanics smokes):
+  4. "fair-close CLV" is renamed what it is — the market-implied EV at bet
+     time (ev_mkt) — because no AH quote is captured after the last tick; the
+     run counts quotes captured after the tick and consensus values that
+     differ at kickoff, so the identity is checked, not assumed. The
+     same-book CLV's 0 is explained by the same fact (it was attributed to
+     "no AH price moved in the final 14 minutes", which nothing shows).
+  5. Part B2, the early bet: the only closing-line readout this data allows.
+  6. Part A2, the forward gate's own pair.
+  7. Part C counts production recs on unfinished matches after the
+     REPRO_START filter (they were counted over the whole window) and
+     reports production's realised ROI with a bootstrap SE and the market EV
+     of the same bets.
+  8. Part D plans the forward gate on its own pair and its own clustered rule.
+  9. The window caveat above (pre-2026-09-05 quotes read as stale).
 
 Read-only: SELECTs only. Usage (local replica):
     python scripts/ab_soccer_ah_recs_replay.py --ftdc-dir <ft gate --out-dir> \\
@@ -306,6 +381,29 @@ BOOTSTRAP_SEED = 20261101
 RECONSTRUCT_ATOL = 1e-12
 Z_ALPHA = 1.959963984540054  # two-sided 5%
 Z_BETA = 0.8416212335729143  # 80% power
+POWER_TARGET = 0.80
+# Amendment 4 (after the run). No AH quote is captured after the last
+# generator tick: the odds fetch runs in the same tick, 10-55 s before the
+# generator reads. So the consensus "at kickoff" IS the consensus at the tick,
+# and odds taken at the tick x that consensus - 1 is the market-implied EV of
+# the bet when it is placed, not a closing-line value. A closing-line readout
+# needs a bet placed before the last observed quote: the EARLY bet, replayed
+# at the last tick at least EARLY_HOURS before kickoff, against the consensus
+# at the last tick (the latest pre-kickoff state anyone observes).
+EARLY_HOURS = 6
+# The early bet needs a quote's price AND age at a tick hours before kickoff.
+# Prices: odds_snapshots, from 2026-07-13. Ages: until 2ec19b8 (2026-09-04)
+# an odds row kept its FIRST price and first-seen timestamp forever and had
+# no last_seen_at (stamped from 2026-09-04 19:42Z), so before then every quote
+# reads as days old and today's freshness guard suppresses it. The early bet
+# therefore starts with REPRO_START, the first full day of the current schema.
+EARLY_SINCE = REPRO_START
+EARLY_PAIRS: Tuple[Tuple[str, str, Optional[pd.Timestamp]], ...] = (
+    ("served", "refit", None),
+    ("stored", "refit_on_stored", None),
+)
+INVARIANT_ATOL = 1e-9
+POOLED = "pooled_shaped_mean"
 
 AH_ODDS_SQL = """
     SELECT
@@ -392,7 +490,7 @@ RECS_SQL = """
     SELECT br.id::text AS rec_id, br.match_id::text AS match_id, br.selection,
            br.odds_at_recommendation::float AS odds_decimal, br.bookmaker,
            br.recommended_stake::float AS stake, br.expected_value::float AS ev, br.status, br.actual_result,
-           br.profit_loss::float AS profit_loss, br.created_at
+           br.profit_loss::float AS profit_loss, br.created_at, m.match_date AS kickoff, m.status AS match_status
     FROM betting_recommendations br
     JOIN matches m ON m.id = br.match_id
     JOIN leagues l ON l.id = m.league_id AND l.sport = 'soccer'
@@ -701,6 +799,63 @@ def closing_price(
     return None
 
 
+def captured_after(
+    rows: Sequence[Dict[str, Any]],
+    snaps: Dict[Tuple[str, str, str, float], List[Tuple[pd.Timestamp, float]]],
+    after: Any,
+    kickoff: Any,
+) -> int:
+    """How many observations of this match's AH quotes fall strictly between
+    `after` (the last tick) and kickoff: snapshots, and rows whose price moved
+    or which were last seen in that gap. 0 means the market is not observed
+    after the tick, so nothing measured at kickoff can differ from the tick."""
+    t, ko = _ts(after), _ts(kickoff)
+    if t is None or ko is None:
+        raise ValueError(f"captured_after needs timestamps, got {after!r} / {kickoff!r}")
+    n = 0
+    for r in rows:
+        key = (str(r["match_id"]), str(r["bookmaker"]), str(r["selection"]).lower(), round(float(r["line"]), 4))
+        n += sum(1 for at, _ in snaps.get(key, []) if t < at < ko)
+        n += sum(1 for v in (_ts(r.get("ts")), _ts(r.get("last_seen_at"))) if v is not None and t < v < ko)
+    return n
+
+
+def handicap_vector(probs: Dict[str, float], line: float) -> np.ndarray:
+    """(home, away, push) of one line from a stored-form asian_handicap dict."""
+    lbl = ftdc.fmt_line(line)
+    try:
+        return np.array([float(probs[f"{lbl}_{s}"]) for s in ("home", "away", "push")])
+    except KeyError as exc:
+        raise RuntimeError(f"asian_handicap dict lacks line {lbl}: {exc}") from exc
+
+
+def score_ah_pair(
+    served: Dict[str, float], refit: Dict[str, float], home: int, away: int
+) -> Dict[str, Tuple[float, float]]:
+    """{unit: (served Brier, refit Brier)} for the 12 shaped lines and their
+    mean, each a 3-way Brier over the effective home / away / push masses
+    against grading_outcomes' handicap settlement on the 90-minute score.
+    Raises when an invariant line (AH 0, +-0.25, +-0.5: a function of the 1x2
+    after the reconcile) differs between the arms beyond INVARIANT_ATOL — the
+    arms were then not reconciled to the same 1x2, which is a bug."""
+    for line in ftdc.AH_INVARIANT_LINES:
+        gap = float(np.max(np.abs(handicap_vector(served, line) - handicap_vector(refit, line))))
+        if not math.isfinite(gap) or gap > INVARIANT_ATOL:
+            raise RuntimeError(f"invariant AH line {line} differs between served and refit by {gap:.2e}")
+    out: Dict[str, Tuple[float, float]] = {}
+    for unit, line in zip(SHAPED_UNITS, SHAPED_LINES):
+        y = np.array(ftdc.handicap_truth(int(home) - int(away), line))
+        out[unit] = (
+            float(np.sum((handicap_vector(served, line) - y) ** 2)),
+            float(np.sum((handicap_vector(refit, line) - y) ** 2)),
+        )
+    out[POOLED] = (
+        float(np.mean([out[u][0] for u in SHAPED_UNITS])),
+        float(np.mean([out[u][1] for u in SHAPED_UNITS])),
+    )
+    return out
+
+
 # ── Pure: comparisons and statistics ─────────────────────────────────
 
 
@@ -730,15 +885,17 @@ def compare_recs(a: Sequence[Rec], b: Sequence[Rec]) -> Dict[str, Any]:
 
 
 def money_summary(recs: Sequence[Rec]) -> Dict[str, Any]:
-    """Counts, stake, stake-weighted and flat P/L and ROI, verdicts and CLV of
-    settled recs (ungradable ones are counted, never scored)."""
+    """Counts, stake, stake-weighted and flat P/L and ROI, verdicts, the
+    same-book CLV and the market-implied EV at bet time (odds x the consensus
+    at the tick - 1) of settled recs (ungradable ones are counted, never
+    scored)."""
     settled = [r for r in recs if r.extra.get("verdict") is not None]
     stake = sum(r.stake for r in settled)
     pl = sum(r.extra["pl"] for r in settled)
     flat = sum(r.extra["flat"] for r in settled)
     clv_s = [r.extra["clv_same"] for r in recs if r.extra.get("clv_same") is not None]
-    clv_f = [r.extra["clv_fair"] for r in recs if r.extra.get("clv_fair") is not None]
-    clv_f_w = [(r.extra["clv_fair"], r.stake) for r in recs if r.extra.get("clv_fair") is not None]
+    ev_m = [r.extra["ev_mkt"] for r in recs if r.extra.get("ev_mkt") is not None]
+    ev_m_w = [(r.extra["ev_mkt"], r.stake) for r in recs if r.extra.get("ev_mkt") is not None]
     verdicts: Dict[str, int] = {}
     for r in settled:
         verdicts[r.extra["verdict"]] = verdicts.get(r.extra["verdict"], 0) + 1
@@ -757,22 +914,22 @@ def money_summary(recs: Sequence[Rec]) -> Dict[str, Any]:
         "verdicts": verdicts,
         "clv_same_mean": float(np.mean(clv_s)) if clv_s else None,
         "clv_same_n": len(clv_s),
-        "clv_fair_mean": float(np.mean(clv_f)) if clv_f else None,
-        "clv_fair_stake_weighted": (
-            float(sum(c * s for c, s in clv_f_w) / sum(s for _, s in clv_f_w))
-            if clv_f_w and sum(s for _, s in clv_f_w) > 0
+        "ev_mkt_mean": float(np.mean(ev_m)) if ev_m else None,
+        "ev_mkt_stake_weighted": (
+            float(sum(c * s for c, s in ev_m_w) / sum(s for _, s in ev_m_w))
+            if ev_m_w and sum(s for _, s in ev_m_w) > 0
             else None
         ),
-        "clv_fair_n": len(clv_f),
+        "ev_mkt_n": len(ev_m),
     }
 
 
 def per_match_totals(recs: Sequence[Rec], match_ids: Sequence[str]) -> Dict[str, np.ndarray]:
     """Per match (aligned to match_ids): stake, P/L, flat count and P/L of settled
-    recs, and the sum / count of fair-close CLV."""
+    recs, and the sum / count of the market-implied EV at bet time."""
     pos = {m: i for i, m in enumerate(match_ids)}
     n = len(match_ids)
-    out = {k: np.zeros(n) for k in ("stake", "pl", "flat_n", "flat_pl", "clv_sum", "clv_n", "clv_w", "stake_clv")}
+    out = {k: np.zeros(n) for k in ("stake", "pl", "flat_n", "flat_pl", "ev_sum", "ev_n")}
     for r in recs:
         i = pos.get(r.match_id)
         if i is None:
@@ -782,12 +939,25 @@ def per_match_totals(recs: Sequence[Rec], match_ids: Sequence[str]) -> Dict[str,
             out["pl"][i] += r.extra["pl"]
             out["flat_n"][i] += 1
             out["flat_pl"][i] += r.extra["flat"]
-        if r.extra.get("clv_fair") is not None:
-            out["clv_sum"][i] += r.extra["clv_fair"]
-            out["clv_n"][i] += 1
-            out["clv_w"][i] += r.extra["clv_fair"] * r.stake
-            out["stake_clv"][i] += r.stake
+        if r.extra.get("ev_mkt") is not None:
+            out["ev_sum"][i] += r.extra["ev_mkt"]
+            out["ev_n"][i] += 1
     return out
+
+
+def per_match_sum(recs: Sequence[Rec], match_ids: Sequence[str], key: str) -> Tuple[np.ndarray, np.ndarray]:
+    """(sum, count) per match (aligned to match_ids) of rec.extra[key], skipping Nones."""
+    pos = {m: i for i, m in enumerate(match_ids)}
+    s, c = np.zeros(len(match_ids)), np.zeros(len(match_ids))
+    for r in recs:
+        i = pos.get(r.match_id)
+        if i is None:
+            raise KeyError(f"rec on match {r.match_id} outside the compared population")
+        v = r.extra.get(key)
+        if v is not None:
+            s[i] += float(v)
+            c[i] += 1
+    return s, c
 
 
 def _ratio(num: np.ndarray, den: np.ndarray) -> float:
@@ -798,9 +968,10 @@ def _ratio(num: np.ndarray, den: np.ndarray) -> float:
 def paired_bootstrap(
     ta: Dict[str, np.ndarray], tb: Dict[str, np.ndarray], draws: int = BOOTSTRAP_DRAWS, seed: int = BOOTSTRAP_SEED
 ) -> Dict[str, Any]:
-    """Match-clustered paired bootstrap of each arm's ROI (stake, flat), fair-CLV
-    mean, and the differences b - a (ROI, total P/L per match). Returns the
-    point estimate, the bootstrap SE and the 2.5 / 97.5 percentiles."""
+    """Match-clustered paired bootstrap of each arm's ROI (stake, flat), mean
+    market-implied EV at bet time, and the differences b - a (ROI, total P/L
+    per match). Returns the point estimate, the bootstrap SE and the
+    2.5 / 97.5 percentiles."""
     n = len(ta["pl"])
     if n == 0:
         return {}
@@ -810,15 +981,14 @@ def paired_bootstrap(
         "b_roi_stake": lambda ix: _ratio(tb["pl"][ix], tb["stake"][ix]),
         "a_roi_flat": lambda ix: _ratio(ta["flat_pl"][ix], ta["flat_n"][ix]),
         "b_roi_flat": lambda ix: _ratio(tb["flat_pl"][ix], tb["flat_n"][ix]),
-        "a_clv_fair": lambda ix: _ratio(ta["clv_sum"][ix], ta["clv_n"][ix]),
-        "b_clv_fair": lambda ix: _ratio(tb["clv_sum"][ix], tb["clv_n"][ix]),
+        "a_ev_mkt": lambda ix: _ratio(ta["ev_sum"][ix], ta["ev_n"][ix]),
+        "b_ev_mkt": lambda ix: _ratio(tb["ev_sum"][ix], tb["ev_n"][ix]),
         "diff_roi_stake": lambda ix: _ratio(tb["pl"][ix], tb["stake"][ix]) - _ratio(ta["pl"][ix], ta["stake"][ix]),
         "diff_roi_flat": lambda ix: _ratio(tb["flat_pl"][ix], tb["flat_n"][ix])
         - _ratio(ta["flat_pl"][ix], ta["flat_n"][ix]),
         "diff_pl_total": lambda ix: float(tb["pl"][ix].sum() - ta["pl"][ix].sum()),
         "diff_flat_pl_total": lambda ix: float(tb["flat_pl"][ix].sum() - ta["flat_pl"][ix].sum()),
-        "diff_clv_fair": lambda ix: _ratio(tb["clv_sum"][ix], tb["clv_n"][ix])
-        - _ratio(ta["clv_sum"][ix], ta["clv_n"][ix]),
+        "diff_ev_mkt": lambda ix: _ratio(tb["ev_sum"][ix], tb["ev_n"][ix]) - _ratio(ta["ev_sum"][ix], ta["ev_n"][ix]),
     }
     full = np.arange(n)
     point = {k: f(full) for k, f in stats.items()}
@@ -858,6 +1028,111 @@ def n_for_power(sd: Optional[float], delta: Optional[float], z_alpha: float = Z_
     if sd is None or delta is None or not math.isfinite(sd) or not math.isfinite(delta) or delta == 0:
         return None
     return int(math.ceil(((z_alpha + z_beta) * sd / abs(delta)) ** 2))
+
+
+def ratio_bootstrap(
+    num_a: np.ndarray,
+    den_a: np.ndarray,
+    num_b: np.ndarray,
+    den_b: np.ndarray,
+    draws: int = BOOTSTRAP_DRAWS,
+    seed: int = BOOTSTRAP_SEED,
+) -> Dict[str, Any]:
+    """Match-clustered paired bootstrap of two per-match ratio means
+    (sum num / sum den, e.g. the mean CLV per rec) and their difference b - a."""
+    n = len(num_a)
+    if n == 0:
+        return {}
+    rng = np.random.default_rng(seed)
+    stats: Dict[str, Callable[[np.ndarray], float]] = {
+        "a": lambda ix: _ratio(num_a[ix], den_a[ix]),
+        "b": lambda ix: _ratio(num_b[ix], den_b[ix]),
+        "diff": lambda ix: _ratio(num_b[ix], den_b[ix]) - _ratio(num_a[ix], den_a[ix]),
+    }
+    full = np.arange(n)
+    boot = {k: np.empty(draws) for k in stats}
+    for b in range(draws):
+        ix = rng.integers(0, n, n)
+        for k, f in stats.items():
+            boot[k][b] = f(ix)
+    out: Dict[str, Any] = {}
+    for k, f in stats.items():
+        v = boot[k][np.isfinite(boot[k])]
+        est = f(full)
+        out[k] = {
+            "estimate": est if math.isfinite(est) else None,
+            "se": float(v.std(ddof=1)) if v.size > 1 else None,
+            "lo95": float(np.percentile(v, 2.5)) if v.size else None,
+            "hi95": float(np.percentile(v, 97.5)) if v.size else None,
+        }
+    out["matches"] = n
+    return out
+
+
+def between_fold_variance(d: np.ndarray, folds: np.ndarray) -> Dict[str, Any]:
+    """Method-of-moments split of a per-match paired difference into its
+    within-fold noise and tau2, the variance of the TRUE fold means (a monthly
+    refit shares one fit per fold, so its effect drifts month to month):
+    var(fold means) - mean(within variance / fold size), floored at 0. tau2
+    does not shrink with more matches per fold, only with more folds — which
+    is why the clustered rule's power is set by the fold count."""
+    d = np.asarray(d, dtype=float)
+    f = np.asarray(folds).astype(str)
+    ok = np.isfinite(d)
+    d, f = d[ok], f[ok]
+    labels = sorted(set(f.tolist()))
+    sizes = np.array([(f == x).sum() for x in labels])
+    keep = [x for x, s in zip(labels, sizes) if s >= 2]
+    if len(keep) < 3:
+        return {"n_folds": len(keep), "tau2": None, "fold_sizes": dict(zip(labels, sizes.tolist()))}
+    means = np.array([d[f == x].mean() for x in keep])
+    within = np.array([d[f == x].var(ddof=1) / (f == x).sum() for x in keep])
+    tau2 = float(means.var(ddof=1) - within.mean())
+    return {
+        "n_folds": len(keep),
+        "var_fold_means": float(means.var(ddof=1)),
+        "mean_within_var_over_n": float(within.mean()),
+        "tau2": max(tau2, 0.0),
+        "tau2_raw": tau2,
+        "fold_sizes": dict(zip(labels, sizes.tolist())),
+    }
+
+
+def clustered_t_power(delta: float, sd: float, tau2: float, k: int, n: int) -> float:
+    """Power of the fold-clustered rule 'the t(k-1) upper bound of dBrier < 0'
+    with k equal folds and n matches in all, against a true effect `delta`
+    (< 0) with per-match SD `sd` and between-fold variance tau2: each fold
+    mean is N(delta, sd^2 k / n + tau2), the rule's statistic is their
+    one-sample t with k - 1 degrees of freedom, so the power is
+    P(noncentral t(k-1, |delta| / sqrt(sd^2/n + tau2/k)) > t_0.975(k-1))."""
+    from scipy.stats import nct
+    from scipy.stats import t as student_t
+
+    if k < 2 or n < k or delta == 0:
+        return 0.0
+    var = sd * sd / n + tau2 / k
+    if var <= 0:
+        return 1.0
+    ncp = abs(delta) / math.sqrt(var)
+    return float(nct.sf(student_t.ppf(0.975, k - 1), k - 1, ncp))
+
+
+def n_for_clustered_power(delta: float, sd: float, tau2: float, k: int, target: float = POWER_TARGET):
+    """The smallest n with clustered_t_power >= target at k folds, or None when
+    tau2 alone keeps it below target at any n."""
+    hi = 10**8
+    if clustered_t_power(delta, sd, tau2, k, hi) < target:
+        return None
+    lo = k
+    if clustered_t_power(delta, sd, tau2, k, lo) >= target:
+        return lo
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if clustered_t_power(delta, sd, tau2, k, mid) >= target:
+            hi = mid
+        else:
+            lo = mid
+    return hi
 
 
 # ── Pure: Brier readouts ─────────────────────────────────────────────
@@ -1083,6 +1358,7 @@ def brier_part(pm: pd.DataFrame, scores: Dict[str, np.ndarray], mechanics: bool,
     pooled_r = np.mean(np.stack([b("refit", u) for u in SHAPED_UNITS]), axis=0)
     out["pooled_shaped_mean"] = ftdc.pair(pooled_r, pooled_s, f)
     out["pooled_shaped_mean"]["sd_per_match"] = per_match_diff(pooled_r - pooled_s)["sd"]
+    out["pooled_shaped_mean"]["between_folds"] = between_fold_variance(pooled_r - pooled_s, f)
     cls = gd_class(h, a)
     gd = {arm: gd_probabilities(mats[arm]) for arm in mats}
     rps = {arm: rps_rows(gd[arm], cls) for arm in gd}
@@ -1120,6 +1396,60 @@ def brier_part(pm: pd.DataFrame, scores: Dict[str, np.ndarray], mechanics: bool,
     return out
 
 
+def forward_pair_brier(
+    pm: pd.DataFrame,
+    scores: Dict[str, np.ndarray],
+    stored_by: Dict[str, pd.DataFrame],
+    mechanics: bool,
+    limit: int = 0,
+) -> Dict[str, Any]:
+    """PART A2 — the forward gate's OWN pair on this window: on every gate
+    eval match with a stored asian_handicap row created before kickoff,
+    production's stored AH probabilities (served) against the gate's monthly
+    refit reconciled to that row's stored 1x2 and anchor (refit_on_stored),
+    scored exactly as scripts/ab_soccer_ah_forward_gate.py scores them
+    (score_ah_pair; an invariant-line mismatch aborts). Its per-match SD and
+    between-fold variance are what the forward gate's decision point is
+    planned on (Part D)."""
+    folds_all = np.asarray(scores["fold"]).astype(str)
+    rows: List[Dict[str, Any]] = []
+    no_stored = 0
+    worst = 0.0
+    for i, g in enumerate(pm.itertuples(index=False)):
+        if limit and len(rows) >= limit:
+            break
+        mid = str(g.match_id)
+        if mid not in stored_by:
+            continue
+        st = stored_inputs(stored_by[mid], mid, pd.Timestamp(g.match_date))
+        if st is None:
+            no_stored += 1
+            continue
+        g_ = pm.iloc[i]
+        ros = derive_ah(g_["lam_h::refit"], g_["lam_a::refit"], g_["rho::refit"], st["target"], st["anchor"])
+        for line in ftdc.AH_INVARIANT_LINES:
+            worst = max(worst, float(np.max(np.abs(handicap_vector(st["probabilities"], line)
+                                                   - handicap_vector(ros, line)))))  # fmt: skip
+        sc = score_ah_pair(st["probabilities"], ros, int(g_["s_home"]), int(g_["s_away"]))
+        row: Dict[str, Any] = {"match_id": mid, "fold": folds_all[i]}
+        for k, (a, b) in sc.items():
+            row[f"{k}::served"], row[f"{k}::refit"] = a, b
+        rows.append(row)
+    out: Dict[str, Any] = {"n": len(rows), "no_stored_before_kickoff": no_stored, "invariant_max_abs": worst}
+    if mechanics or not rows:
+        return out
+    df = pd.DataFrame(rows)
+    f = df["fold"].to_numpy()
+    out["fold_sizes"] = {str(k): int(v) for k, v in df["fold"].value_counts().sort_index().items()}
+    out["units"] = {
+        u: ftdc.pair(df[f"{u}::refit"].to_numpy(), df[f"{u}::served"].to_numpy(), f) for u in (*SHAPED_UNITS, POOLED)
+    }
+    d = df[f"{POOLED}::refit"].to_numpy() - df[f"{POOLED}::served"].to_numpy()
+    out["units"][POOLED]["sd_per_match"] = per_match_diff(d)["sd"]
+    out["units"][POOLED]["between_folds"] = between_fold_variance(d, f)
+    return out
+
+
 # ── Part B / C: the replay ───────────────────────────────────────────
 
 
@@ -1142,9 +1472,12 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             "max_stake_fraction": rec_gating.MAX_STAKE_FRACTION,
             "min_consensus_books": rec_gating.MIN_CONSENSUS_BOOKS,
         },
+        "early_bet": {"hours_before_kickoff": EARLY_HOURS, "kickoffs_from": str(EARLY_SINCE)},
         "stored_ah_matches_per_month": db["stored_ah_per_month"],
     }
     report["brier"] = brier_part(pm, scores, args.mechanics, args.limit)
+    stored_by = {str(k): g for k, g in db["stored"].groupby("match_id")}
+    report["brier_forward_pair"] = forward_pair_brier(pm, scores, stored_by, args.mechanics, args.limit)
 
     odds = db["odds"]
     report["ah_odds"] = {
@@ -1161,17 +1494,19 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     matches = db["matches"].set_index("match_id")
     pm_by = pm.set_index("match_id")
     hist = TeamHistory(db["history"])
-    stored_by = {str(k): g for k, g in db["stored"].groupby("match_id")}
     cand = sorted((m for m in rows_by_match if m in matches.index), key=lambda m: (matches.loc[m, "match_date"], m))
     if args.limit:
         cand = cand[: int(args.limit)]
     bankroll = db["bankroll"]
 
     state_drops: Dict[str, int] = {k: 0 for k in STATE_DROP_REASONS}
+    early_drops: Dict[str, int] = {k: 0 for k in STATE_DROP_REASONS}
     recs: Dict[str, List[Rec]] = {arm: [] for arm in ARMS}
+    recs_early: Dict[str, List[Rec]] = {arm: [] for arm in ARMS}
     repro_recs: List[Rec] = []
     suppressed: Dict[str, Dict[str, int]] = {arm: {} for arm in ARMS}
     defined: Dict[str, List[str]] = {arm: [] for arm in ARMS}
+    defined_early: Dict[str, List[str]] = {arm: [] for arm in ARMS}
     status: Dict[str, str] = {}
     counts: Dict[str, Any] = {
         "candidates": len(cand),
@@ -1179,9 +1514,15 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         "not_in_gate_eval": 0,
         "no_stored": 0,
         "price_ties": 0,
+        "quotes_captured_after_tick": 0,
+        "consensus_differs_at_kickoff": 0,
+        "early_candidates": 0,
+        "early_ineligible": 0,
+        "early_no_stored": 0,
     }
     stored_vs_served_ah: List[float] = []
-    baseline_clv: List[Tuple[bool, float]] = []
+    baseline: List[Tuple[bool, float]] = []
+    baseline_early: List[Tuple[bool, Optional[float], Optional[float]]] = []
     shaped_keys = [f"{ftdc.fmt_line(x)}_{s}" for x in SHAPED_LINES for s in ("home", "away", "push")]
     for mid in cand:
         mrow = matches.loc[mid]
@@ -1197,12 +1538,17 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         status[mid] = "eligible"
         rows = rows_by_match[mid]
         state = quote_state(rows, snaps, tick, state_drops)
+        # The consensus at kickoff equals the tick's when no quote is captured
+        # in between (amendment 4): both are counted, never assumed.
+        counts["quotes_captured_after_tick"] += captured_after(rows, snaps, tick, ko)
         close_state = quote_state(rows, snaps, ko - pd.Timedelta(microseconds=1))
         counts["price_ties"] += price_ties(state)
         for q in best_quotes(state):
-            p_close_q = consensus_prob(close_state, q.selection, q.line) if is_fresh(q) else None
-            if p_close_q is not None:
-                baseline_clv.append((ko >= REPRO_START, q.odds * p_close_q - 1.0))
+            p_q = consensus_prob(state, q.selection, q.line) if is_fresh(q) else None
+            if p_q is not None:
+                baseline.append((ko >= REPRO_START, q.odds * p_q - 1.0))
+                if consensus_prob(close_state, q.selection, q.line) != p_q:
+                    counts["consensus_differs_at_kickoff"] += 1
         meta = mrow["metadata"] if isinstance(mrow["metadata"], dict) else {}
         arm_probs: Dict[str, Dict[str, float]] = {}
         g = pm_by.loc[mid] if mid in pm_by.index else None
@@ -1230,6 +1576,9 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 rr, _ = replay_match(
                     mid, st["probabilities"], state, bankroll, args.ev_threshold, args.prob_floor, devig
                 )
+                for r in rr:
+                    p_m = consensus_prob(state, r.side, r.line)
+                    r.extra["ev_mkt"] = (r.odds * p_m - 1.0) if p_m is not None else None
                 repro_recs.extend(rr)
         for arm, probs in arm_probs.items():
             defined[arm].append(mid)
@@ -1239,7 +1588,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             for r in rr:
                 verdict, pl, flat = settle(r.selection, r.odds, r.stake, mrow["home_score"], mrow["away_score"], meta)
                 close = closing_price(snaps, rows, mid, r.bookmaker, r.side, r.line, ko)
-                p_close = consensus_prob(close_state, r.side, r.line)
+                p_m = consensus_prob(state, r.side, r.line)
                 r.extra.update(
                     {
                         "kickoff": str(ko),
@@ -1248,13 +1597,21 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                         "pl": pl,
                         "flat": flat,
                         "clv_same": (r.odds / close - 1.0) if close else None,
-                        "clv_fair": (r.odds * p_close - 1.0) if p_close is not None else None,
-                        "p_close": p_close,
+                        "ev_mkt": (r.odds * p_m - 1.0) if p_m is not None else None,
+                        "p_mkt": p_m,
                     }
                 )
             recs[arm].extend(rr)
+        if ko >= EARLY_SINCE:
+            counts["early_candidates"] += 1
+            early_bets(
+                mid, mrow, g, arm_probs, rows, snaps, state, stored_by, hist, bankroll, args, early_drops,
+                recs_early, defined_early, baseline_early, counts,
+            )  # fmt: skip
     counts["state_drops"] = state_drops
+    counts["early_state_drops"] = early_drops
     counts["defined"] = {arm: len(v) for arm, v in defined.items()}
+    counts["defined_early"] = {arm: len(v) for arm, v in defined_early.items()}
     counts["stored_vs_served_max_abs_shaped"] = (
         {
             "n": len(stored_vs_served_ah),
@@ -1266,8 +1623,17 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     )
     report["replay"] = counts
     report["suppressed"] = suppressed
-    report["clv_fair_baseline"] = {
-        name: per_match_diff(np.array([v for since, v in baseline_clv if keep(since)]))
+    report["ev_mkt_baseline"] = {
+        name: per_match_diff(np.array([v for since, v in baseline if keep(since)]))
+        for name, keep in (("all", lambda x: True), ("from_repro_start", lambda x: x))
+    }
+    report["early_baseline"] = {
+        name: {
+            "clv_fair": per_match_diff(
+                np.array([c for since, c, _ in baseline_early if keep(since) and c is not None])
+            ),
+            "ev_mkt": per_match_diff(np.array([e for since, _, e in baseline_early if keep(since) and e is not None])),
+        }
         for name, keep in (("all", lambda x: True), ("from_repro_start", lambda x: x))
     }
     by_month: Dict[str, int] = {}
@@ -1280,18 +1646,162 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     report["ah_odds_matches_per_month"] = float(np.mean(recent)) if recent else None
     if args.mechanics:
         report["rec_counts"] = {arm: len(v) for arm, v in recs.items()}
+        report["early_rec_counts"] = {arm: len(v) for arm, v in recs_early.items()}
         return report
     if args.out_csv:
-        write_recs_csv(args.out_csv, recs)
+        write_recs_csv(args.out_csv, {**recs, **{f"{a}@early": v for a, v in recs_early.items()}})
 
     report["money"] = {arm: money_summary(v) for arm, v in recs.items()}
     report["pairs"] = {
         pair_name(a, b, since): compare_pair(recs, defined, matches, a, b, since, args.bootstrap_draws)
         for a, b, since in PAIRS
     }
-    report["reproduction"] = reproduction(db["recs"], repro_recs, recs["served"], defined, status, matches)
+    report["early"] = {arm: early_summary(v) for arm, v in recs_early.items()}
+    report["early_pairs"] = {
+        pair_name(a, b, since): compare_early_pair(
+            recs_early, defined_early, matches, a, b, since, args.bootstrap_draws
+        )
+        for a, b, since in EARLY_PAIRS
+    }
+    report["reproduction"] = reproduction(
+        db["recs"], repro_recs, recs["served"], defined, status, matches, args.bootstrap_draws
+    )
     report["power"] = power(report)
     return report
+
+
+def early_bets(
+    mid: str,
+    mrow: Any,
+    g: Any,
+    arm_probs: Dict[str, Dict[str, float]],
+    rows: Sequence[Dict[str, Any]],
+    snaps: Dict[Tuple[str, str, str, float], List[Tuple[pd.Timestamp, float]]],
+    state_last: Sequence[Quote],
+    stored_by: Dict[str, pd.DataFrame],
+    hist: TeamHistory,
+    bankroll: float,
+    args: argparse.Namespace,
+    drops: Dict[str, int],
+    recs_early: Dict[str, List[Rec]],
+    defined_early: Dict[str, List[str]],
+    baseline_early: List[Tuple[bool, Optional[float], Optional[float]]],
+    counts: Dict[str, Any],
+) -> None:
+    """The early bet of one match (amendment 4): the generator replayed at the
+    last tick at least EARLY_HOURS before kickoff, each arm with the
+    probabilities it had then (stored: the newest row created before that
+    tick; refit_on_stored reconciled to it), and each rec valued against the
+    consensus at the LAST tick (state_last), the latest pre-kickoff quote
+    state anyone observes: clv_fair = odds x p_last - 1 (the edge against the
+    last observed fair price), ev_mkt = odds x p_early - 1 (what the market
+    implied when the bet was placed), move = odds x (p_last - p_early) (the
+    market moving toward the bet: CLV proper), clv_same = odds / the same
+    book's last pre-kickoff price - 1 (vw_rec_clv's definition)."""
+    ko = mrow["match_date"]
+    t_e = last_tick_before(ko - pd.Timedelta(hours=EARLY_HOURS))
+    if (
+        hist.count_before(mrow["home_team_id"], t_e) < args.min_team_history
+        or hist.count_before(mrow["away_team_id"], t_e) < args.min_team_history
+    ):
+        counts["early_ineligible"] += 1
+        return
+    state_e = quote_state(rows, snaps, t_e, drops)
+    for q in best_quotes(state_e):
+        if not is_fresh(q):
+            continue
+        p_l, p_e = consensus_prob(state_last, q.selection, q.line), consensus_prob(state_e, q.selection, q.line)
+        baseline_early.append(
+            (
+                ko >= REPRO_START,
+                (q.odds * p_l - 1.0) if p_l is not None else None,
+                (q.odds * p_e - 1.0) if p_e is not None else None,
+            )
+        )
+    probs_e: Dict[str, Dict[str, float]] = {a: arm_probs[a] for a in ("served", "refit") if a in arm_probs}
+    st_e = stored_inputs(stored_by.get(mid), mid, t_e)
+    if st_e is None:
+        counts["early_no_stored"] += 1
+    else:
+        probs_e["stored"] = st_e["probabilities"]
+        if g is not None:
+            probs_e["refit_on_stored"] = derive_ah(
+                g["lam_h::refit"], g["lam_a::refit"], g["rho::refit"], st_e["target"], st_e["anchor"]
+            )
+    for arm, probs in probs_e.items():
+        defined_early[arm].append(mid)
+        rr, _ = replay_match(mid, probs, state_e, bankroll, args.ev_threshold, args.prob_floor)
+        for r in rr:
+            p_e = consensus_prob(state_e, r.side, r.line)
+            p_l = consensus_prob(state_last, r.side, r.line)
+            close = closing_price(snaps, rows, mid, r.bookmaker, r.side, r.line, ko)
+            r.extra.update(
+                {
+                    "kickoff": str(ko),
+                    "tick": str(t_e),
+                    "p_mkt": p_e,
+                    "p_last": p_l,
+                    "ev_mkt": (r.odds * p_e - 1.0) if p_e is not None else None,
+                    "clv_fair": (r.odds * p_l - 1.0) if p_l is not None else None,
+                    "move": (r.odds * (p_l - p_e)) if p_l is not None and p_e is not None else None,
+                    "clv_same": (r.odds / close - 1.0) if close else None,
+                }
+            )
+        recs_early[arm].extend(rr)
+
+
+def early_summary(recs: Sequence[Rec]) -> Dict[str, Any]:
+    """Per-arm readout of the early bets: count, mean edge against the last
+    observed consensus, mean market-implied EV when placed, mean movement, and
+    the same-book CLV."""
+
+    def mean(key: str) -> Tuple[Optional[float], int]:
+        v = [float(r.extra[key]) for r in recs if r.extra.get(key) is not None]
+        return (float(np.mean(v)) if v else None), len(v)
+
+    out: Dict[str, Any] = {"recs": len(recs), "matches": len({r.match_id for r in recs})}
+    for key in ("clv_fair", "ev_mkt", "move", "clv_same"):
+        out[f"{key}_mean"], out[f"{key}_n"] = mean(key)
+    mv = [float(r.extra["move"]) for r in recs if r.extra.get("move") is not None]
+    out["share_moved_toward"] = (sum(1 for x in mv if x > 0) / len(mv)) if mv else None
+    out["share_moved_away"] = (sum(1 for x in mv if x < 0) / len(mv)) if mv else None
+    return out
+
+
+def compare_early_pair(
+    recs: Dict[str, List[Rec]],
+    defined: Dict[str, List[str]],
+    matches: pd.DataFrame,
+    a: str,
+    b: str,
+    since: Optional[pd.Timestamp],
+    draws: int,
+) -> Dict[str, Any]:
+    """Arms a and b's early bets on the matches both are defined for: overlap,
+    each arm's readout, and the match-clustered paired bootstrap of the mean
+    clv_fair and mean move per rec (b - a)."""
+    common = sorted(set(defined[a]) & set(defined[b]))
+    if since is not None:
+        common = [m for m in common if matches.loc[m, "match_date"] >= since]
+    keep = set(common)
+    ra = [r for r in recs[a] if r.match_id in keep]
+    rb = [r for r in recs[b] if r.match_id in keep]
+    cmp_ = compare_recs(ra, rb)
+    out: Dict[str, Any] = {
+        "matches": len(common),
+        "a": early_summary(ra),
+        "b": early_summary(rb),
+        "same": len(cmp_["same"]),
+        "moved_line": len(cmp_["moved_line"]),
+        "a_only": len(cmp_["a_only"]),
+        "b_only": len(cmp_["b_only"]),
+    }
+    for key in ("clv_fair", "move"):
+        sa, ca = per_match_sum(ra, common, key)
+        sb, cb = per_match_sum(rb, common, key)
+        out[f"bootstrap_{key}"] = ratio_bootstrap(sa, ca, sb, cb, draws)
+        out[f"per_match_{key}_sum_diff"] = per_match_diff(sb - sa)
+    return out
 
 
 def pair_name(a: str, b: str, since: Optional[pd.Timestamp]) -> str:
@@ -1336,7 +1846,7 @@ def compare_pair(
         "bootstrap": paired_bootstrap(ta, tb, draws),
         "per_match_pl_diff": per_match_diff(tb["pl"] - ta["pl"]),
         "per_match_flat_diff": per_match_diff(tb["flat_pl"] - ta["flat_pl"]),
-        "per_match_clv_sum_diff": per_match_diff(tb["clv_sum"] - ta["clv_sum"]),
+        "per_match_ev_sum_diff": per_match_diff(tb["ev_sum"] - ta["ev_sum"]),
         "a_shaped_share": _shaped_share(ra),
         "b_shaped_share": _shaped_share(rb),
     }
@@ -1355,25 +1865,52 @@ def reproduction(
     defined: Dict[str, List[str]],
     status: Dict[str, str],
     matches: pd.DataFrame,
+    draws: int = BOOTSTRAP_DRAWS,
 ) -> Dict[str, Any]:
     """Production's AH recs on matches kicking off from REPRO_START against
     the stored-arm replay (logic-era de-vig) and the served-arm replay. Every
-    production rec is accounted for: compared, on a match the replay found
-    ineligible, on a match the arm is not defined for, or written after
-    kickoff (excluded)."""
+    production rec is accounted for: on a match not finished (counted, never
+    compared: the replay loads finished matches only), compared, on a match
+    the replay found ineligible, on a match the arm is not defined for, or
+    written after kickoff (excluded). Also production's own realised P/L on
+    the compared recs with a match-clustered bootstrap, next to the
+    market-implied EV of the same bets (what a zero-edge stream loses)."""
     prod = prod.copy()
-    prod["kickoff"] = [matches.loc[m, "match_date"] if m in matches.index else pd.NaT for m in prod["match_id"]]
-    unknown = int(prod["kickoff"].isna().sum())
-    prod = prod[prod["kickoff"].notna()]
+    prod["kickoff"] = pd.to_datetime(prod["kickoff"], utc=True)
     prod = prod[prod["kickoff"] >= REPRO_START]
+    unfinished = ~prod["match_id"].isin(matches.index)
+    left = prod[unfinished]
+    prod = prod[~unfinished]
     after = prod["created_at"] >= prod["kickoff"]
     pre = prod[~after]
     out: Dict[str, Any] = {
+        "production_recs_from_repro_start": int(len(prod) + len(left)),
+        "production_recs_on_unfinished_matches": int(len(left)),
+        "production_unfinished_detail": {
+            "matches": int(left["match_id"].nunique()),
+            "match_status": {str(k): int(v) for k, v in left["match_status"].value_counts().items()},
+            "rec_status": {str(k): int(v) for k, v in left["status"].value_counts().items()},
+            "stake": float(left["stake"].sum()),
+        },
         "production_recs": int(len(prod)),
         "production_written_after_kickoff": int(after.sum()),
-        "production_recs_on_unfinished_or_unknown_matches": unknown,
         "production_matches": int(pre["match_id"].nunique()),
         "production_by_status": {str(k): int(v) for k, v in pre["status"].value_counts().items()},
+    }
+    settled = pre[pre["profit_loss"].notna()]
+    mids = sorted(settled["match_id"].astype(str).unique())
+    pos = {m: i for i, m in enumerate(mids)}
+    pl, stake = np.zeros(len(mids)), np.zeros(len(mids))
+    for r in settled.itertuples():
+        pl[pos[str(r.match_id)]] += float(r.profit_loss)
+        stake[pos[str(r.match_id)]] += float(r.stake)
+    bs = ratio_bootstrap(pl, stake, pl, stake, draws) if mids else {}
+    out["production_settled"] = {
+        "recs": int(len(settled)),
+        "matches": len(mids),
+        "stake": float(stake.sum()),
+        "pl": float(pl.sum()),
+        "roi_stake": bs.get("a"),
     }
     pk = {(str(r.match_id), str(r.selection)): r for r in pre.itertuples()}
     for name, rr in (("stored", stored_recs), ("served", served_recs)):
@@ -1389,6 +1926,8 @@ def reproduction(
             outside[why] = outside.get(why, 0) + 1
         both = sorted(set(mine) & set(prod_in))
         po = {k: float(prod_in[k].odds_decimal) for k in both}
+        ev_w = [(mine[k].extra.get("ev_mkt"), float(prod_in[k].stake)) for k in both]
+        ev_w = [(e, w) for e, w in ev_w if e is not None]
         out[name] = {
             "matches_in_pool": len(pool),
             "production_recs_in_pool": len(prod_in),
@@ -1409,26 +1948,32 @@ def reproduction(
             "both_same_stake": sum(1 for k in both if abs(float(prod_in[k].stake) - mine[k].stake) < 0.005),
             "recall": len(both) / len(prod_in) if prod_in else None,
             "precision": len(both) / len(mine) if mine else None,
+            "both_ev_mkt_stake_weighted": (
+                sum(e * w for e, w in ev_w) / sum(w for _, w in ev_w) if ev_w and sum(w for _, w in ev_w) > 0 else None
+            ),
         }
     return out
 
 
 def power(report: Dict[str, Any]) -> Dict[str, Any]:
     """n (and months at the current volume) to detect each measured effect with
-    80% power at two-sided 5%."""
+    80% power at two-sided 5%: per-match z tests for the window pair (context)
+    and the money readouts, and the fold-clustered t rule the forward gate
+    decides on for its own pair (stored vs refit_on_stored)."""
     br = report["brier"]
     per_month = report.get("stored_ah_matches_per_month") or {}
     recent = [v for k, v in per_month.items() if k >= "2026-08"]
     stored_rate = float(np.mean(recent)) if recent else None
     pr = report["pairs"][pair_name("served", "refit", None)]
+    pf = report["pairs"][pair_name("stored", "refit_on_stored", None)]
     out: Dict[str, Any] = {"stored_ah_matches_per_month_since_2026_08": stored_rate}
     for name in ("best_single_line", "pooled_shaped_mean", "gd_rps"):
         p = br[name]
         n = n_for_power(p.get("sd_per_match"), p.get("delta"))
-        out[f"brier_{name}"] = {
+        out[f"window_brier_{name}"] = {
             "delta": p.get("delta"),
             "sd_per_match": p.get("sd_per_match"),
-            "n_matches_80pct": n,
+            "n_matches_80pct_z": n,
             "months_at_current_volume": (n / stored_rate) if n and stored_rate else None,
             "house_gate": (
                 "unreachable at this effect size (|delta| < 0.005)"
@@ -1436,22 +1981,83 @@ def power(report: Dict[str, Any]) -> Dict[str, Any]:
                 else "the point estimate clears -0.005"
             ),
         }
+    out["forward_brier_pooled"] = forward_brier_plan(report)
     ah_rate = report.get("ah_odds_matches_per_month")
-    for key, label in (
-        ("per_match_pl_diff", "money_stake_pl"),
-        ("per_match_flat_diff", "money_flat_pl"),
-        ("per_match_clv_sum_diff", "clv_fair_sum"),
+    for pair, tag in ((pr, "window"), (pf, "forward")):
+        for key, label in (("per_match_pl_diff", "money_stake_pl"), ("per_match_flat_diff", "money_flat_pl")):
+            d = pair[key]
+            n = n_for_power(d.get("sd"), d.get("mean"))
+            out[f"{tag}_{label}"] = {
+                "mean_per_match": d.get("mean"),
+                "sd_per_match": d.get("sd"),
+                "n_matches_80pct_z": n,
+                "months_at_current_volume": (n / ah_rate) if n and ah_rate else None,
+            }
+    early_rate = _early_rate(report)
+    for name, tag in (
+        (pair_name("served", "refit", None), "window"),
+        (pair_name("stored", "refit_on_stored", None), "forward"),
     ):
-        d = pr[key]
+        d = report["early_pairs"][name]["per_match_clv_fair_sum_diff"]
         n = n_for_power(d.get("sd"), d.get("mean"))
-        out[label] = {
+        out[f"{tag}_early_clv_fair"] = {
             "mean_per_match": d.get("mean"),
             "sd_per_match": d.get("sd"),
-            "n_matches_80pct": n,
-            "months_at_current_volume": (n / ah_rate) if n and ah_rate else None,
+            "n_matches_80pct_z": n,
+            "months_at_current_volume": (n / early_rate) if n and early_rate else None,
         }
     out["ah_odds_matches_per_month_since_2026_08"] = ah_rate
+    out["early_matches_per_month_since_2026_08"] = early_rate
     return out
+
+
+def _early_rate(report: Dict[str, Any]) -> Optional[float]:
+    """Early-bet matches per month: the matches the early pair is defined for,
+    over the months from EARLY_SINCE to the window end."""
+    n = (report.get("replay") or {}).get("defined_early", {}).get("stored")
+    end = pd.Timestamp(report["window"]["end"])
+    months = (end - EARLY_SINCE).total_seconds() / 86400 / 30.4375
+    return (float(n) / months) if n and months > 0 else None
+
+
+def forward_brier_plan(report: Dict[str, Any]) -> Dict[str, Any]:
+    """The forward gate's Brier decision point, planned on its OWN pair
+    (Part A2) under its OWN rule (the fold-clustered t(k-1) upper bound < 0):
+    for each fold count k, the power at the expected matches (k x the forward
+    pair's mean monthly n, Aug-Oct 2026) and the n that 80% power needs.
+    tau2 is the larger of the window pair's estimate (31 folds) and the
+    forward pair's own (few, unequal folds): the conservative choice."""
+    fp = (report.get("brier_forward_pair") or {}).get("units", {}).get(POOLED)
+    if not fp:
+        return {}
+    sizes = report["brier_forward_pair"].get("fold_sizes", {})
+    recent = [v for k, v in sizes.items() if "2026-08" <= k <= "2026-10"]
+    rate = float(np.mean(recent)) if recent else None
+    tau_w = (report["brier"].get("pooled_shaped_mean", {}).get("between_folds") or {}).get("tau2")
+    tau_f = (fp.get("between_folds") or {}).get("tau2")
+    tau2 = max(x for x in (tau_w, tau_f, 0.0) if x is not None)
+    delta, sd = fp["delta"], fp["sd_per_match"]
+    plan: Dict[str, Any] = {
+        "delta": delta,
+        "sd_per_match": sd,
+        "tau2_window_pair": tau_w,
+        "tau2_forward_pair": tau_f,
+        "tau2_used": tau2,
+        "matches_per_month": rate,
+        "n_80pct_z_per_match": n_for_power(sd, delta),
+        "by_folds": {},
+    }
+    if delta is None or sd is None or not rate or delta >= 0:
+        return plan
+    for k in range(4, 19):
+        plan["by_folds"][k] = {
+            "expected_n": int(round(k * rate)),
+            "power_at_expected_n": clustered_t_power(delta, sd, tau2, k, int(round(k * rate))),
+            "n_for_80pct": n_for_clustered_power(delta, sd, tau2, k),
+        }
+    ok = [k for k, v in plan["by_folds"].items() if v["power_at_expected_n"] >= POWER_TARGET]
+    plan["smallest_k_with_80pct"] = min(ok) if ok else None
+    return plan
 
 
 def write_recs_csv(path: str, recs: Dict[str, List[Rec]]) -> None:
@@ -1489,13 +2095,31 @@ def _money_line(name: str, m: Dict[str, Any]) -> str:
         f"  {name:<22} recs {m['recs']:>4} (settled {m['settled']}, {m['matches']} matches)  stake {m['stake']:>9.2f}"
         f"  P/L {m['pl']:>+9.2f}  ROI {_f(m['roi_stake'], '+.3f')}  flat {m['flat_pl']:>+7.2f}"
         f" ROI {_f(m['roi_flat'], '+.3f')}  odds {_f(m['mean_odds'], '.2f')}  CLV same {_f(m['clv_same_mean'], '+.4f')}"
-        f" fair {_f(m['clv_fair_mean'], '+.4f')} (n={m['clv_fair_n']})"
+        f"  market EV at bet {_f(m['ev_mkt_mean'], '+.4f')} (n={m['ev_mkt_n']})"
+    )
+
+
+def _early_line(name: str, m: Dict[str, Any]) -> str:
+    return (
+        f"  {name:<22} recs {m['recs']:>4} ({m['matches']} matches)  CLV vs last consensus "
+        f"{_f(m['clv_fair_mean'], '+.4f')} (n={m['clv_fair_n']})  market EV when placed {_f(m['ev_mkt_mean'], '+.4f')}"
+        f"  move {_f(m['move_mean'], '+.4f')} (toward {_f(m['share_moved_toward'], '.2f')}, away "
+        f"{_f(m['share_moved_away'], '.2f')})  CLV same book {_f(m['clv_same_mean'], '+.4f')} (n={m['clv_same_n']})"
+    )
+
+
+def _boot_line(k: str, v: Dict[str, Any]) -> str:
+    v = v or {}
+    return (
+        f"    {k:<20} {_f(v.get('estimate'), '+.4f')}  bootstrap SE {_f(v.get('se'), '.4f')}  95% "
+        f"[{_f(v.get('lo95'), '+.4f')}, {_f(v.get('hi95'), '+.4f')}]"
     )
 
 
 def format_report(r: Dict[str, Any]) -> str:
     rp = r["replay"]
     br = r["brier"]
+    fw = r["brier_forward_pair"]
     L = [
         f"Soccer AH replay: window {r['window']['start']}..{r['window']['end']}; bankroll {r['bankroll']}",
         f"AH odds: {r['ah_odds']['rows']} pre-match rows on {r['ah_odds']['matches']} finished matches, first created "
@@ -1503,11 +2127,18 @@ def format_report(r: Dict[str, Any]) -> str:
         f"candidates {rp['candidates']}: ineligible {rp['ineligible']}, outside the gate's eval set "
         f"{rp['not_in_gate_eval']}, no stored prediction {rp['no_stored']}; arms defined {rp['defined']}",
         f"odds state at the tick: {rp['state_drops']}; best prices shared by 2+ books {rp['price_ties']}",
+        f"quotes captured after the last tick, before kickoff: {rp['quotes_captured_after_tick']}; best-quote "
+        f"consensus different at kickoff: {rp['consensus_differs_at_kickoff']}",
+        f"early bet ({EARLY_HOURS} h, kickoffs from {EARLY_SINCE.date()}): candidates {rp['early_candidates']}, "
+        f"ineligible {rp['early_ineligible']}, no stored row {rp['early_no_stored']}; arms defined "
+        f"{rp['defined_early']}; odds state {rp['early_state_drops']}",
         f"stored vs served shaped AH max |d| per match: {rp['stored_vs_served_max_abs_shaped']}",
         f"Brier re-derivation vs scores.npz: max |d| {br['reconstruct_max_abs']:.1e} over {br['n']} rows",
+        f"forward pair (stored vs refit_on_stored): {fw['n']} matches, no stored row before kickoff "
+        f"{fw['no_stored_before_kickoff']}, invariant lines max |d| {fw['invariant_max_abs']:.1e}",
     ]
     if r["mechanics"]:
-        L.append(f"MECHANICS ONLY (no deltas, no money): rec counts {r['rec_counts']}")
+        L.append(f"MECHANICS ONLY (no deltas, no money): rec counts {r['rec_counts']}; early {r['early_rec_counts']}")
         return "\n".join(L)
     L += ["", "PART A — Brier, refit - served, live regime (post hoc; context only):"]
     for u in ALL_AH_UNITS:
@@ -1516,6 +2147,7 @@ def format_report(r: Dict[str, Any]) -> str:
         L.append(ftdc._pair_line(name, br[name]))
     for name, v in br["verdicts"].items():
         L.append(f"  house gate on {name}: {'PASS' if v['ship_strict'] else 'FAIL'} — {v['line']}")
+    L.append(f"  pooled between folds: {br['pooled_shaped_mean'].get('between_folds')}")
     L.append(
         "  scaled-shape bound (in-sample best k for served + k*(refit - served); gain = Brier reduction vs served):"
     )
@@ -1524,10 +2156,19 @@ def format_report(r: Dict[str, Any]) -> str:
             f"    {name:<20} E[sum d^2] {_f(v['e_d2'], '.5f')}  gain at refit {_f(v['gain_at_refit'])}  best k "
             f"{_f(v['best_k'], '.2f')}  gain at best k {_f(v['gain_at_best_k'])}"
         )
+    L += ["", "PART A2 — the forward gate's own pair (stored vs refit_on_stored; refit - stored):"]
+    for u, p in (fw.get("units") or {}).items():
+        L.append(ftdc._pair_line(u, p))
+    L.append(f"  fold sizes {fw.get('fold_sizes')}")
+    L.append(f"  pooled between folds: {(fw.get('units') or {}).get(POOLED, {}).get('between_folds')}")
     L += ["", "PART B — money (replayed at the last tick; settled by grading_outcomes):"]
-    for name, v in r["clv_fair_baseline"].items():
+    L.append(
+        "  'market EV at bet' = odds x the >= 3-book power-de-vigged consensus at the bet's own tick - 1. It is NOT "
+        "closing-line value: no AH quote is captured after the last tick, so the 'close' is the bet's own moment."
+    )
+    for name, v in r["ev_mkt_baseline"].items():
         L.append(
-            f"  fair-close CLV of EVERY fresh best quote (a random side at the best price) [{name}]: n={v['n']} "
+            f"  market EV at bet of EVERY fresh best quote (a random side at the best price) [{name}]: n={v['n']} "
             f"mean {_f(v['mean'], '+.4f')} sd {_f(v['sd'], '.4f')}"
         )
     for arm, m in r["money"].items():
@@ -1555,24 +2196,53 @@ def format_report(r: Dict[str, Any]) -> str:
             "diff_roi_flat",
             "diff_pl_total",
             "diff_flat_pl_total",
-            "a_clv_fair",
-            "b_clv_fair",
-            "diff_clv_fair",
+            "a_ev_mkt",
+            "b_ev_mkt",
+            "diff_ev_mkt",
         ):
-            v = bs.get(k) or {}
-            L.append(
-                f"    {k:<20} {_f(v.get('estimate'), '+.4f')}  bootstrap SE {_f(v.get('se'), '.4f')}  95% "
-                f"[{_f(v.get('lo95'), '+.4f')}, {_f(v.get('hi95'), '+.4f')}]"
-            )
-        for k in ("per_match_pl_diff", "per_match_flat_diff", "per_match_clv_sum_diff"):
+            L.append(_boot_line(k, bs.get(k)))
+        for k in ("per_match_pl_diff", "per_match_flat_diff", "per_match_ev_sum_diff"):
             d = p[k]
             L.append(f"    {k:<24} mean {_f(d['mean'], '+.4f')}  sd {_f(d['sd'], '.4f')}  SE {_f(d['se'], '.4f')}")
-    rep = r["reproduction"]
     L += [
         "",
-        f"PART C — reproduction vs production's AH recs from {REPRO_START.date()}: {rep['production_recs']} recs "
+        f"PART B2 — the early bet: replayed {EARLY_HOURS} h before kickoff, valued against the consensus at the last "
+        "tick (the latest observed pre-kickoff state; the closing-line readout):",
+    ]
+    for name, v in r["early_baseline"].items():
+        L.append(
+            f"  EVERY fresh best quote at the early tick [{name}]: CLV vs last consensus n={v['clv_fair']['n']} mean "
+            f"{_f(v['clv_fair']['mean'], '+.4f')}; market EV when placed mean {_f(v['ev_mkt']['mean'], '+.4f')}"
+        )
+    for arm, m in r["early"].items():
+        L.append(_early_line(arm, m))
+    for name, p in r["early_pairs"].items():
+        L += [
+            "",
+            f"  [{name}] {p['matches']} matches; same rec {p['same']}, moved line {p['moved_line']}, a only "
+            f"{p['a_only']}, b only {p['b_only']}",
+            _early_line("a", p["a"]),
+            _early_line("b", p["b"]),
+        ]
+        for key in ("clv_fair", "move"):
+            bs = p[f"bootstrap_{key}"]
+            for k in ("a", "b", "diff"):
+                L.append(_boot_line(f"{key} {k}", bs.get(k)))
+            d = p[f"per_match_{key}_sum_diff"]
+            L.append(f"    per-match {key} sum diff mean {_f(d['mean'], '+.4f')}  sd {_f(d['sd'], '.4f')}")
+    rep = r["reproduction"]
+    ps = rep["production_settled"]
+    roi = ps.get("roi_stake") or {}
+    L += [
+        "",
+        f"PART C — reproduction vs production's AH recs from {REPRO_START.date()}: "
+        f"{rep['production_recs_from_repro_start']} recs, of which {rep['production_recs_on_unfinished_matches']} on "
+        f"matches not finished ({rep['production_unfinished_detail']}); {rep['production_recs']} on finished matches "
         f"({rep['production_written_after_kickoff']} written after kickoff, excluded) on {rep['production_matches']} "
         "matches",
+        f"  production's settled recs: {ps['recs']} on {ps['matches']} matches, stake {ps['stake']:.2f}, P/L "
+        f"{ps['pl']:+.2f}, ROI {_f(roi.get('estimate'), '+.4f')} (match bootstrap SE {_f(roi.get('se'), '.4f')}, 95% "
+        f"[{_f(roi.get('lo95'), '+.4f')}, {_f(roi.get('hi95'), '+.4f')}])",
     ]
     for name in REPRO_ARMS:
         v = rep[name]
@@ -1581,7 +2251,8 @@ def format_report(r: Dict[str, Any]) -> str:
             f"{v['both']} (recall {_f(v['recall'], '.3f')}, precision {_f(v['precision'], '.3f')}); of both: same "
             f"price {v['both_same_price']}, within 0.05 {v['both_price_within_0.05']}, same book "
             f"{v['both_same_book']} (other book tied at the price {v['both_other_book_tied_at_the_price']}), "
-            f"same stake {v['both_same_stake']}; production recs outside the pool "
+            f"same stake {v['both_same_stake']}, stake-weighted market EV at bet "
+            f"{_f(v['both_ev_mkt_stake_weighted'], '+.4f')}; production recs outside the pool "
             f"{v['production_recs_outside_pool']}"
         )
     pw = r["power"]
@@ -1591,8 +2262,23 @@ def format_report(r: Dict[str, Any]) -> str:
         f"{_f(pw['ah_odds_matches_per_month_since_2026_08'], '.0f')}",
     ]
     for k, v in pw.items():
+        if k == "forward_brier_pooled":
+            continue
         if isinstance(v, dict):
             L.append(f"  {k:<32} {v}")
+    fp = pw.get("forward_brier_pooled") or {}
+    L.append(
+        f"  forward gate, pooled shaped lines, clustered t rule: delta {_f(fp.get('delta'))} sd "
+        f"{_f(fp.get('sd_per_match'), '.4f')} tau2 used {_f(fp.get('tau2_used'), '.3e')} (window "
+        f"{_f(fp.get('tau2_window_pair'), '.3e')}, forward {_f(fp.get('tau2_forward_pair'), '.3e')}); "
+        f"{_f(fp.get('matches_per_month'), '.0f')} matches a month; per-match z n {fp.get('n_80pct_z_per_match')}"
+    )
+    for k, v in (fp.get("by_folds") or {}).items():
+        L.append(
+            f"    k={k:<3} expected n {v['expected_n']:>6}  power {v['power_at_expected_n']:.3f}  n for 80% "
+            f"{v['n_for_80pct']}"
+        )
+    L.append(f"    smallest k with 80% at the expected n: {fp.get('smallest_k_with_80pct')}")
     return "\n".join(L)
 
 

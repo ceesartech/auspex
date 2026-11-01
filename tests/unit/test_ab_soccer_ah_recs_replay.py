@@ -441,12 +441,12 @@ def test_derive_ah_is_what_precompute_stores():
 # ── Comparison and statistics ────────────────────────────────────────
 
 
-def _rec(match, sel, odds=2.0, stake=10.0, verdict=go.REC_WON, clv=0.01):
+def _rec(match, sel, odds=2.0, stake=10.0, verdict=go.REC_WON, ev_mkt=0.01):
     side, line = sel.split("_")
     r = rp.Rec(match, sel, side, float(line), odds, "b", 0.06, 0.55, 0.55, 0.5, 40.0, stake, 0.5)
     pl = {go.REC_WON: stake * (odds - 1), go.REC_LOST: -stake}[verdict]
     flat = {go.REC_WON: odds - 1, go.REC_LOST: -1.0}[verdict]
-    r.extra.update({"verdict": verdict, "pl": pl, "flat": flat, "clv_fair": clv, "clv_same": 0.0})
+    r.extra.update({"verdict": verdict, "pl": pl, "flat": flat, "ev_mkt": ev_mkt, "clv_same": 0.0})
     return r
 
 
@@ -461,9 +461,11 @@ class TestCompare:
         assert [r.match_id for r in c["b_only"]] == ["m4"]
 
     def test_money_summary(self):
-        m = rp.money_summary([_rec("m1", "home_-1"), _rec("m2", "home_-1", verdict=go.REC_LOST)])
+        m = rp.money_summary([_rec("m1", "home_-1"), _rec("m2", "home_-1", verdict=go.REC_LOST, ev_mkt=-0.03)])
         assert m["recs"] == 2 and m["pl"] == pytest.approx(0.0) and m["roi_flat"] == pytest.approx(0.0)
         assert m["verdicts"] == {go.REC_WON: 1, go.REC_LOST: 1}
+        assert m["ev_mkt_mean"] == pytest.approx(-0.01) and m["ev_mkt_n"] == 2
+        assert "clv_fair_mean" not in m  # the bet-time readout is never called a closing-line value
 
     def test_rec_outside_the_population_is_loud(self):
         with pytest.raises(KeyError):
@@ -478,6 +480,13 @@ class TestBootstrap:
         bs = rp.paired_bootstrap(t, t, draws=200)
         assert bs["diff_pl_total"]["estimate"] == 0.0 and bs["diff_pl_total"]["se"] == 0.0
         assert bs["a_roi_flat"]["estimate"] == pytest.approx((20 * 1.0 - 10) / 30)
+
+    def test_bet_time_market_ev_keys(self):
+        recs = [_rec(f"m{i}", "home_-1", ev_mkt=-0.03 + 0.001 * i) for i in range(10)]
+        t = rp.per_match_totals(recs, [f"m{i}" for i in range(10)])
+        bs = rp.paired_bootstrap(t, t, draws=100)
+        assert bs["a_ev_mkt"]["estimate"] == pytest.approx(np.mean([-0.03 + 0.001 * i for i in range(10)]))
+        assert bs["diff_ev_mkt"]["estimate"] == 0.0 and "diff_clv_fair" not in bs
 
     def test_deterministic_and_point_estimates_are_direct(self):
         ids = [f"m{i}" for i in range(40)]
@@ -593,9 +602,18 @@ def test_mechanics_never_writes_the_json(tmp_path, monkeypatch):
             "state_drops": {},
             "price_ties": 0,
             "stored_vs_served_max_abs_shaped": None,
+            "quotes_captured_after_tick": 0,
+            "consensus_differs_at_kickoff": 0,
+            "early_candidates": 0,
+            "early_ineligible": 0,
+            "early_no_stored": 0,
+            "defined_early": {},
+            "early_state_drops": {},
         },
         "brier": {"n": 0, "reconstruct_max_abs": 0.0},
+        "brier_forward_pair": {"n": 0, "no_stored_before_kickoff": 0, "invariant_max_abs": 0.0},
         "rec_counts": {},
+        "early_rec_counts": {},
     }
     monkeypatch.setattr(rp, "run", lambda args: report)
     assert rp.main(["--ftdc-dir", "x", "--database-url", "postgresql://x", "--mechanics", "--out-json", str(out)]) == 0
@@ -654,23 +672,294 @@ def test_reproduction_accounts_for_every_production_rec():
     )
     prod = pd.DataFrame(
         {
-            "match_id": ["m1", "m2", "m3"],
-            "selection": ["home_-0.75", "away_0.5", "home_-1"],
-            "odds_decimal": [2.0, 1.9, 2.1],
-            "bookmaker": ["b", "x", "a"],
-            "stake": [10.0, 12.0, 8.0],
-            "status": ["won", "lost", "void"],
-            "created_at": pd.to_datetime(["2026-09-10T14:46Z", "2026-09-11T14:46Z", "2026-09-12T14:46Z"]),
+            "match_id": ["m1", "m2", "m3", "m9", "m0"],
+            "selection": ["home_-0.75", "away_0.5", "home_-1", "away_2", "home_0"],
+            "odds_decimal": [2.0, 1.9, 2.1, 1.95, 1.9],
+            "bookmaker": ["b", "x", "a", "a", "a"],
+            "stake": [10.0, 12.0, 8.0, 25.0, 5.0],
+            "status": ["won", "lost", "void", "pending", "lost"],
+            "profit_loss": [10.0, -12.0, 0.0, None, -5.0],
+            "created_at": pd.to_datetime(
+                [
+                    "2026-09-10T14:46Z",
+                    "2026-09-11T14:46Z",
+                    "2026-09-12T14:46Z",
+                    "2026-09-20T14:46Z",
+                    "2026-08-01T14:46Z",
+                ]
+            ),
+            # m9: a stale 'scheduled' row from REPRO_START on; m0: unfinished and before it (not counted).
+            "kickoff": pd.to_datetime(
+                [
+                    "2026-09-10T15:00Z",
+                    "2026-09-11T15:00Z",
+                    "2026-09-12T15:00Z",
+                    "2026-09-20T15:00Z",
+                    "2026-08-01T15:00Z",
+                ]
+            ),
+            "match_status": ["finished", "finished", "finished", "scheduled", "scheduled"],
         }
     )
     r1 = rp.Rec("m1", "home_-0.75", "home", -0.75, 2.0, "a", 0.06, 0.5, 0.5, 0.5, 40.0, 10.0, 0.5)
-    r1.extra["tie_books"] = ["a", "b"]
+    r1.extra.update({"tie_books": ["a", "b"], "ev_mkt": -0.02})
     r2 = rp.Rec("m2", "away_0.5", "away", 0.5, 1.9, "y", 0.06, 0.5, 0.5, 0.5, 40.0, 11.0, 0.5)
-    r2.extra["tie_books"] = ["y"]
+    r2.extra.update({"tie_books": ["y"], "ev_mkt": -0.05})
     status = {"m1": "eligible", "m2": "eligible", "m3": "ineligible"}
-    out = rp.reproduction(prod, [r1, r2], [], {"stored": ["m1", "m2"], "served": []}, status, matches)
+    out = rp.reproduction(prod, [r1, r2], [], {"stored": ["m1", "m2"], "served": []}, status, matches, draws=200)
+    assert out["production_recs_from_repro_start"] == 4 and out["production_recs_on_unfinished_matches"] == 1
+    assert out["production_unfinished_detail"]["match_status"] == {"scheduled": 1}
+    assert out["production_recs"] == 3
     s = out["stored"]
     assert (s["production_recs_in_pool"], s["both"], s["production_only"], s["replay_only"]) == (2, 2, 0, 0)
     assert s["both_same_price"] == 2 and s["both_same_stake"] == 1
     assert s["both_same_book"] == 0 and s["both_other_book_tied_at_the_price"] == 1
     assert s["production_recs_outside_pool"] == {"ineligible": 1}
+    assert s["both_ev_mkt_stake_weighted"] == pytest.approx((-0.02 * 10 - 0.05 * 12) / 22)
+    ps = out["production_settled"]
+    assert (ps["recs"], ps["matches"], ps["stake"], ps["pl"]) == (3, 3, 30.0, -2.0)
+    assert ps["roi_stake"]["estimate"] == pytest.approx(-2.0 / 30.0) and ps["roi_stake"]["se"] > 0
+
+
+# ── Amendments 4-9: the bet-time readout, the early bet, the forward pair ──
+
+
+def test_captured_after_counts_quotes_between_the_tick_and_kickoff():
+    ko = pd.Timestamp("2026-10-10T15:00:00Z")
+    t = rp.last_tick_before(ko)
+    snap = {"match_id": "m1", "bookmaker": "a", "selection": "home", "line": -0.5, "odds_decimal": 1.9}
+    rows = [_row("a", "home", -0.5, 1.9, ko - pd.Timedelta(hours=48), ts=ko - pd.Timedelta(hours=2), seen=t)]
+    snaps = rp.snapshot_index([{**snap, "captured_at": ko - pd.Timedelta(hours=2)}])
+    assert rp.captured_after(rows, snaps, t, ko) == 0  # seen AT the tick is not after it
+    snaps = rp.snapshot_index(
+        [{**snap, "captured_at": ko - pd.Timedelta(hours=2)}, {**snap, "captured_at": ko - pd.Timedelta(minutes=5)}]
+    )
+    assert rp.captured_after(rows, snaps, t, ko) == 1
+    rows[0]["last_seen_at"] = ko - pd.Timedelta(minutes=1)
+    assert rp.captured_after(rows, snaps, t, ko) == 2
+    rows[0]["last_seen_at"] = ko + pd.Timedelta(minutes=1)  # after kickoff: not a pre-kickoff observation
+    assert rp.captured_after(rows, snaps, t, ko) == 1
+    with pytest.raises(ValueError):
+        rp.captured_after(rows, snaps, None, ko)
+
+
+def _ah(h=1.5, a=1.1, rho=-0.05, target=(0.48, 0.27, 0.25), anchor=None):
+    out = md.derive_from_lambdas(h, a, rho, target_1x2=target, target_over_25=anchor)["asian_handicap"]
+    return {k: float(v) for k, v in out.items()}
+
+
+class TestScoreAhPair:
+    def test_shaped_lines_and_the_pooled_mean(self):
+        sc = rp.score_ah_pair(_ah(), _ah(h=1.7, a=1.0), 2, 0)
+        assert set(sc) == {*rp.SHAPED_UNITS, rp.POOLED}
+        y = np.array(ftdc.handicap_truth(2, -1.75))
+        assert sc["ah_-1.75"][0] == pytest.approx(float(np.sum((rp.handicap_vector(_ah(), -1.75) - y) ** 2)))
+        assert sc[rp.POOLED][1] == pytest.approx(np.mean([sc[u][1] for u in rp.SHAPED_UNITS]))
+
+    def test_an_invariant_line_mismatch_aborts(self):
+        with pytest.raises(RuntimeError, match="invariant AH line"):
+            rp.score_ah_pair(_ah(target=(0.48, 0.27, 0.25)), _ah(target=(0.5, 0.26, 0.24)), 1, 0)
+
+
+class TestStatistics:
+    def test_ratio_bootstrap(self):
+        rng = np.random.default_rng(1)
+        num, den = rng.normal(-0.03, 0.02, 50), np.ones(50)
+        bs = rp.ratio_bootstrap(num, den, num, den, draws=200)
+        assert bs["diff"]["estimate"] == 0.0 and bs["diff"]["se"] == 0.0
+        assert bs["a"]["estimate"] == pytest.approx(num.mean()) and bs["a"]["se"] > 0
+        assert rp.ratio_bootstrap(np.array([]), np.array([]), np.array([]), np.array([])) == {}
+        empty = rp.ratio_bootstrap(np.zeros(3), np.zeros(3), np.zeros(3), np.zeros(3), draws=20)
+        assert empty["a"]["estimate"] is None  # no recs at all: no mean, not a zero
+
+    def test_between_fold_variance_recovers_tau(self):
+        rng = np.random.default_rng(7)
+        folds = np.repeat([f"f{i:02d}" for i in range(60)], 400)
+        true = np.repeat(rng.normal(-0.001, 0.0005, 60), 400)
+        d = true + rng.normal(0, 0.02, len(true))
+        out = rp.between_fold_variance(d, folds)
+        assert out["n_folds"] == 60 and out["tau2"] == pytest.approx(0.0005**2, rel=0.5)
+        assert rp.between_fold_variance(d[:800], folds[:800])["tau2"] is None  # 2 folds: no estimate
+
+    def test_clustered_power_matches_a_simulation_of_the_rule(self):
+        from scipy.stats import t as student_t
+
+        delta, sd, tau2, k, n = -0.0012, 0.023, 2.0e-7, 6, 5400
+        rng = np.random.default_rng(11)
+        fm = rng.normal(delta, math.sqrt(sd * sd * k / n + tau2), (20_000, k))
+        upper = fm.mean(axis=1) + student_t.ppf(0.975, k - 1) * fm.std(axis=1, ddof=1) / math.sqrt(k)
+        assert rp.clustered_t_power(delta, sd, tau2, k, n) == pytest.approx(float((upper < 0).mean()), abs=0.015)
+
+    def test_clustered_power_needs_folds_not_only_matches(self):
+        delta, sd, tau2 = -0.0012, 0.023, 2.0e-7
+        assert rp.clustered_t_power(delta, sd, tau2, 6, 6000) < rp.clustered_t_power(delta, sd, tau2, 10, 6000)
+        assert rp.clustered_t_power(delta, sd, tau2, 6, 4000) < rp.clustered_t_power(delta, sd, tau2, 6, 8000)
+        # With tau2 = 0 and many folds it is the per-match z test.
+        n_z = rp.n_for_power(sd, delta)
+        assert rp.clustered_t_power(delta, sd, 0.0, 400, n_z) == pytest.approx(0.80, abs=0.01)
+        # Between-fold drift alone can cap the power below 80% at any n with too few folds.
+        assert rp.n_for_clustered_power(delta, sd, 1e-6, 4) is None
+        n8 = rp.n_for_clustered_power(delta, sd, tau2, 8)
+        assert rp.clustered_t_power(delta, sd, tau2, 8, n8) >= 0.8 > rp.clustered_t_power(delta, sd, tau2, 8, n8 - 1)
+        assert rp.clustered_t_power(0.0, sd, tau2, 8, 1000) == 0.0
+
+
+# ── run() end to end on a synthetic world ────────────────────────────
+
+KO1 = pd.Timestamp("2026-10-10T15:00:00Z")  # before POWER_DEVIG_SINCE
+KO2 = pd.Timestamp("2026-10-28T15:00:00Z")  # after it
+KO3 = pd.Timestamp("2026-10-12T15:00:00Z")  # team X has 3 finished matches: ineligible
+TARGET = (0.60, 0.22, 0.18)
+LAMS = {"served": (2.0, 0.9), "refit": (2.1, 0.85)}
+SPEC = [("m1", KO1, "H1", "A1", 2, 0), ("m2", KO2, "H2", "A2", 1, 1), ("m3", KO3, "H3", "X", 0, 2)]
+# book: (home -0.5 price history [(hours before kickoff, price)], away +0.5 price)
+BOOKS = {"a": ([(48, 1.95), (2, 1.85)], 2.00), "b": ([(48, 1.80)], 2.05), "c": ([(48, 1.80)], 2.05)}
+
+
+def _world(tmp_path, after_tick=False):
+    weights = ftdc.unit_weights()
+    h = np.array([s[4] for s in SPEC])
+    a = np.array([s[5] for s in SPEC])
+    truth = ftdc.vector_truth(h, a)
+    pm_rows = []
+    for mid, ko, _, _, hs, as_ in SPEC:
+        row = {"match_id": mid, "match_date": ko.isoformat(), "s_home": hs, "s_away": as_, "anchor_live": np.nan,
+               "target::home": TARGET[0], "target::draw": TARGET[1], "target::away": TARGET[2]}  # fmt: skip
+        for arm, (lh, la) in LAMS.items():
+            row[f"lam_h::{arm}"], row[f"lam_a::{arm}"], row[f"rho::{arm}"] = lh, la, -0.05
+        pm_rows.append(row)
+    pm = pd.DataFrame(pm_rows)
+    scores = {}
+    for arm, (lh, la) in LAMS.items():
+        P = np.stack([ftdc.served_matrix(lh, la, -0.05, np.array(TARGET), None) for _ in SPEC])
+        for u in rp.ALL_AH_UNITS:
+            scores[f"brier::{arm}::live::{u}"] = ftdc.brier_rows(np.einsum("rij,kij->rk", P, weights[u]), truth[u])
+    scores["fold"] = np.array(["2026-10"] * len(SPEC))
+    scores["match_id"] = pm["match_id"].to_numpy().astype(str)
+    pm.to_csv(tmp_path / "per_match.csv.gz", index=False, compression="gzip")
+    np.savez_compressed(tmp_path / "scores.npz", **scores)
+
+    odds, snaps, matches, stored = [], [], [], []
+    for mid, ko, home, away, hs, as_ in SPEC:
+        seen = rp.last_tick_before(ko) - pd.Timedelta(seconds=30)  # the fetch just before the generator
+        created = ko - pd.Timedelta(hours=48)
+        for book, (hist, away_px) in BOOKS.items():
+            last_h, last_px = hist[-1]
+            odds.append(_row(book, "home", -0.5, last_px, created, ts=ko - pd.Timedelta(hours=last_h), seen=seen,
+                             match=mid))  # fmt: skip
+            odds.append(_row(book, "away", 0.5, away_px, created, seen=seen, match=mid))
+            for hrs, px in hist:
+                snaps.append({"match_id": mid, "bookmaker": book, "selection": "home", "line": -0.5,
+                              "odds_decimal": px, "captured_at": ko - pd.Timedelta(hours=hrs)})  # fmt: skip
+            snaps.append({"match_id": mid, "bookmaker": book, "selection": "away", "line": 0.5,
+                          "odds_decimal": away_px, "captured_at": created})  # fmt: skip
+        matches.append({"match_id": mid, "match_date": ko, "home_team_id": home, "away_team_id": away,
+                        "home_score": hs, "away_score": as_, "metadata": {}, "league_name": "L"})  # fmt: skip
+        made = ko - pd.Timedelta(hours=8)  # before the early tick
+        stored.append([mid, "v1", "asian_handicap", _ah(1.9, 0.95, -0.05, TARGET), {"reconcile": "1x2"}, made])
+        stored.append([mid, "v1", "match_result", dict(zip(("home", "draw", "away"), TARGET)), {}, made])
+    if after_tick:  # a book moves after the last tick: the market IS observed after it
+        snaps.append({"match_id": "m1", "bookmaker": "b", "selection": "home", "line": -0.5, "odds_decimal": 1.70,
+                      "captured_at": KO1 - pd.Timedelta(minutes=5)})  # fmt: skip
+    history = []
+    for team in ("H1", "A1", "H2", "A2", "H3"):
+        history += [{"home_team_id": team, "away_team_id": "Z", "match_date": pd.Timestamp("2026-08-01", tz="UTC")
+                     + pd.Timedelta(days=i)} for i in range(12)]  # fmt: skip
+    history += [{"home_team_id": "X", "away_team_id": "Z", "match_date": pd.Timestamp("2026-08-01", tz="UTC")}] * 3
+    recs = pd.DataFrame(
+        [
+            {"rec_id": "r1", "match_id": "m1", "selection": "home_-0.5", "odds_decimal": 1.85, "bookmaker": "a",
+             "stake": 25.0, "ev": 0.11, "status": "won", "actual_result": "won", "profit_loss": 21.25,
+             "created_at": KO1 - pd.Timedelta(minutes=14), "kickoff": KO1, "match_status": "finished"},
+            {"rec_id": "r9", "match_id": "m9", "selection": "away_2", "odds_decimal": 1.9, "bookmaker": "a",
+             "stake": 25.0, "ev": 0.08, "status": "pending", "actual_result": None, "profit_loss": None,
+             "created_at": KO1, "kickoff": KO1 + pd.Timedelta(hours=1), "match_status": "scheduled"},
+        ]
+    )  # fmt: skip
+    db = {
+        "odds": pd.DataFrame(odds),
+        "snaps": pd.DataFrame(snaps),
+        "matches": pd.DataFrame(matches),
+        "history": pd.DataFrame(history),
+        "stored": pd.DataFrame(
+            stored, columns=["match_id", "model_version", "prediction_type", "probabilities", "metadata", "created_at"]
+        ),
+        "recs": recs,
+        "bankroll": 1000.0,
+        "stored_ah_per_month": {"2026-10": 3},
+    }
+    return db
+
+
+class TestRunEndToEnd:
+    def _run(self, tmp_path, monkeypatch, extra=(), after_tick=False):
+        db = _world(tmp_path, after_tick)
+        monkeypatch.setattr(rp, "load_db", lambda url, s, e: db)
+        calls = []
+        orig = rp.replay_match
+
+        def spy(match_id, probs, state, bankroll, ev, floor, devig=rec_gating.devig_power, **kw):
+            calls.append((match_id, devig))
+            return orig(match_id, probs, state, bankroll, ev, floor, devig, **kw)
+
+        monkeypatch.setattr(rp, "replay_match", spy)
+        argv = ["--ftdc-dir", str(tmp_path), "--database-url", "x", "--start", "2026-10-01", "--end", "2026-11-01",
+                "--bootstrap-draws", "50", *extra]  # fmt: skip
+        return rp.run(rp.parse_args(argv)), calls, db
+
+    def test_eligibility_devig_era_and_the_bet_time_readout(self, tmp_path, monkeypatch):
+        csv = tmp_path / "recs.csv"
+        r, calls, db = self._run(tmp_path, monkeypatch, extra=["--out-csv", str(csv)])
+        assert r["replay"]["ineligible"] == 1 and r["replay"]["defined"]["served"] == 2
+        assert "m3" not in {m for m, _ in calls}  # an ineligible match is never priced
+        prop = {m for m, d in calls if d is rec_gating.devig_proportional}
+        assert prop == {"m1"}  # the reproduction reads the logic era's de-vig before POWER_DEVIG_SINCE only
+        assert r["replay"]["quotes_captured_after_tick"] == 0 and r["replay"]["consensus_differs_at_kickoff"] == 0
+        stored_m1 = r["pairs"]["stored vs refit_on_stored"]["a"]
+        assert stored_m1["recs"] == 2 and stored_m1["clv_same_mean"] == 0.0
+        rows = pd.read_csv(csv)
+        at_t = rows[(rows["arm"] == "stored") & (rows["match_id"] == "m1")].iloc[0]
+        assert at_t["odds"] == 1.85 and at_t["bookmaker"] == "a"
+        state_t = rp.quote_state(
+            [o for o in db["odds"].to_dict("records") if o["match_id"] == "m1"],
+            rp.snapshot_index(db["snaps"].to_dict("records")),
+            rp.last_tick_before(KO1),
+        )
+        p_t = rp.consensus_prob(state_t, "home", -0.5)
+        assert at_t["ev_mkt"] == pytest.approx(1.85 * p_t - 1.0)
+        assert pd.isna(rows[rows["arm"] == "stored"]["clv_fair"]).all()  # the at-tick rec has no closing-line value
+        # The early bet: priced 6 h out at the price then, valued against the LAST tick's consensus.
+        early = rows[(rows["arm"] == "stored@early") & (rows["match_id"] == "m1")].iloc[0]
+        t_e = rp.last_tick_before(KO1 - pd.Timedelta(hours=rp.EARLY_HOURS))
+        assert pd.Timestamp(early["tick"]) == t_e and early["odds"] == 1.95
+        state_e = rp.quote_state([o for o in db["odds"].to_dict("records") if o["match_id"] == "m1"],
+                                 rp.snapshot_index(db["snaps"].to_dict("records")), t_e)  # fmt: skip
+        p_e = rp.consensus_prob(state_e, "home", -0.5)
+        assert early["clv_fair"] == pytest.approx(1.95 * p_t - 1.0)
+        assert early["ev_mkt"] == pytest.approx(1.95 * p_e - 1.0)
+        assert early["move"] == pytest.approx(1.95 * (p_t - p_e)) and early["move"] > 0
+        assert early["clv_same"] == pytest.approx(1.95 / 1.85 - 1.0)
+        assert r["early"]["stored"]["recs"] == 2 and r["early"]["stored"]["share_moved_toward"] == 1.0
+        assert r["early_pairs"]["stored vs refit_on_stored"]["bootstrap_clv_fair"]["diff"]["estimate"] == 0.0
+        # The forward pair covers every gate match with a stored row before kickoff, ineligible or not.
+        fw = r["brier_forward_pair"]
+        assert fw["n"] == 3 and fw["invariant_max_abs"] < 1e-12
+        rep = r["reproduction"]
+        assert rep["production_recs_on_unfinished_matches"] == 1 and rep["stored"]["both"] == 1
+        assert rep["production_settled"]["pl"] == 21.25
+        assert "forward_brier_pooled" in r["power"] and "forward_early_clv_fair" in r["power"]
+        text = rp.format_report(r)
+        assert "NOT closing-line value" in text and "PART B2" in text and "PART A2" in text
+
+    def test_a_quote_after_the_tick_is_counted(self, tmp_path, monkeypatch):
+        r, _, _ = self._run(tmp_path, monkeypatch, after_tick=True)
+        assert r["replay"]["quotes_captured_after_tick"] == 1
+        assert r["replay"]["consensus_differs_at_kickoff"] >= 1
+
+    def test_mechanics_reads_no_money_and_writes_no_csv(self, tmp_path, monkeypatch):
+        csv = tmp_path / "recs.csv"
+        r, _, _ = self._run(tmp_path, monkeypatch, extra=["--mechanics", "--out-csv", str(csv)])
+        assert not csv.exists()
+        assert not {"money", "pairs", "early", "early_pairs", "reproduction", "power"} & set(r)
+        assert set(r["brier_forward_pair"]) == {"n", "no_stored_before_kickoff", "invariant_max_abs"}
+        assert "MECHANICS ONLY" in rp.format_report(r)
