@@ -101,7 +101,8 @@ those destroys a real fixture. They are left alone and reported:
                   plays twice in two hours;
   replayed_later  the same pairing finished later, beyond the window and
                   within 120 days (postponed and replayed);
-  never_resulted  none of the above: a results backfill can settle it.
+  never_resulted  none of the above: a results backfill can settle it
+                  (scripts/backfill_never_resulted.py, runbook step 12).
 
 POSTPONED (--postponed-list, soccer)
 ------------------------------------
