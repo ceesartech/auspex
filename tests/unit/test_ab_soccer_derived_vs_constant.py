@@ -225,6 +225,74 @@ def test_the_espn_era_context_covers_folds_from_2026_06(tmp_path):
     assert r["types"]["btts"]["espn_era"]["live"]["n"] == 7 * PER_FOLD
 
 
+# ── The anchor-mix context (added after the run; never decides) ──────
+
+
+def _anchored(n: int, every: int = 3) -> np.ndarray:
+    return (np.arange(n) % every) == 0
+
+
+def test_anchor_mix_is_the_share_weighted_mean_of_the_anchored_and_unanchored_deltas(tmp_path):
+    s = _roundtrip(tmp_path, _scores({("proxy", "btts"): -0.004, ("none", "btts"): 0.002}, seed=5))
+    a = _anchored(len(s["fold"]))
+    mix = dvc.anchor_mix(s, a, "btts", shares=(0.25, 0.5), n_boot=500)
+    const = s["brier::base_league::-::btts"]
+    d_a = float(np.mean(s["brier::served::proxy::btts"][a] - const[a]))
+    d_u = float(np.mean(s["brier::served::none::btts"][~a] - const[~a]))
+    assert mix["anchored_rows"] == int(a.sum()) and mix["unanchored_rows"] == int((~a).sum())
+    assert mix["delta_anchored_proxy"] == pytest.approx(d_a, abs=1e-15)
+    assert mix["delta_unanchored_none"] == pytest.approx(d_u, abs=1e-15)
+    for key, f in (("0.25", 0.25), ("0.50", 0.5)):
+        cell = mix["shares"][key]
+        assert cell["delta"] == pytest.approx(f * d_a + (1 - f) * d_u, abs=1e-15)
+        assert cell["lower_95_boot"] < cell["delta"] < cell["upper_95_boot"]
+    assert mix["shares"]["0.25"]["delta"] > 0 > mix["shares"]["0.50"]["delta"]
+    # Same seed, same interval: the context is reproducible.
+    again = dvc.anchor_mix(s, a, "btts", shares=(0.25, 0.5), n_boot=500)
+    assert again["shares"] == mix["shares"]
+
+
+def test_anchor_mix_skips_draws_for_draw_no_bet_and_refuses_a_wrong_mask(tmp_path):
+    s = _roundtrip(tmp_path, _scores(seed=6))
+    a = _anchored(len(s["fold"]))
+    mix = dvc.anchor_mix(s, a, "draw_no_bet", n_boot=200)
+    graded = np.isfinite(s["brier::served::none::draw_no_bet"])
+    assert mix["anchored_rows"] + mix["unanchored_rows"] == int(graded.sum()) < len(graded)
+    with pytest.raises(RuntimeError, match="anchor mask"):
+        dvc.anchor_mix(s, a[:-1], "btts")
+    with pytest.raises(RuntimeError, match="both anchored and unanchored"):
+        dvc.anchor_mix(s, np.ones(len(a), dtype=bool), "btts")
+
+
+def test_the_anchor_mix_never_changes_the_verdict(tmp_path):
+    s = _roundtrip(tmp_path, _scores({(None, "odd_even"): 0.01, ("live", "btts"): 0.01}, seed=7))
+    plain = dvc.run(s)
+    with_mix = dvc.run(s, anchored=_anchored(len(s["fold"])))
+    assert with_mix["hidden_pairs"] == plain["hidden_pairs"] == ["ensemble:odd_even"]
+    for market, t in with_mix["types"].items():
+        assert set(t["anchor_mix"]["shares"]) == {f"{f:.2f}" for f in dvc.ANCHOR_SHARES}
+        assert {k: v for k, v in t.items() if k != "anchor_mix"} == {
+            k: v for k, v in plain["types"][market].items() if k != "anchor_mix"
+        }
+        assert plain["types"][market]["anchor_mix"] == {}
+
+
+def test_load_anchor_mask_reads_the_harness_per_match_file_and_refuses_another_order(tmp_path):
+    s = _scores(seed=8)
+    s["anchor_proxy"] = np.where(_anchored(len(s["fold"])), 0.55, np.nan)
+    paths = ftdc.write_outputs(s, str(tmp_path / "out"))
+    scores = dvc.load_scores(paths["scores_npz"])
+    mask = dvc.load_anchor_mask(paths["per_match_csv"], scores)
+    np.testing.assert_array_equal(mask, _anchored(len(s["fold"])))
+    shuffled = dict(scores)
+    shuffled["match_id"] = scores["match_id"][::-1]
+    with pytest.raises(RuntimeError, match="same order"):
+        dvc.load_anchor_mask(paths["per_match_csv"], shuffled)
+    no_ids = {k: v for k, v in scores.items() if k != "match_id"}
+    with pytest.raises(RuntimeError, match="no match_id"):
+        dvc.load_anchor_mask(paths["per_match_csv"], no_ids)
+
+
 # ── Provenance and the command line ──────────────────────────────────
 
 
@@ -259,6 +327,20 @@ def test_main_end_to_end(tmp_path, capsys):
     assert result["provenance"]["served_sha256"].startswith("02141a6a")
     text = capsys.readouterr().out
     assert "btts" in text and "HIDE" in text and "HIDDEN_PREDICTION_PAIRS to add" in text
+
+
+def test_main_with_per_match_adds_the_anchor_mix_and_hides_the_same(tmp_path, capsys):
+    s = _scores({(None, "btts"): 0.01})
+    s["anchor_proxy"] = np.where(_anchored(len(s["fold"])), 0.55, np.nan)
+    paths = ftdc.write_outputs(s, str(tmp_path / "out"))
+    out = tmp_path / "result.json"
+    rc = dvc.main(["--scores", paths["scores_npz"], "--per-match", paths["per_match_csv"], "--out-json", str(out)])
+    assert rc == 0
+    result = json.loads(out.read_text())
+    assert result["hidden_pairs"] == ["ensemble:btts"]
+    assert set(result["types"]["btts"]["anchor_mix"]["shares"]) == {"0.16", "0.29", "0.32", "0.49"}
+    text = capsys.readouterr().out
+    assert "anchor mix (context" in text and "16%" in text and "fold-clustered delta" in text
 
 
 def test_main_returns_1_on_a_broken_input(tmp_path):

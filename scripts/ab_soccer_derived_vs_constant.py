@@ -6,9 +6,11 @@ WHY THIS EXISTS
 The 2026-11-01 gate for the full-time Dixon-Coles that serves the derived
 soccer markets (scripts/ab_soccer_ft_dixon_coles.py, DO-NOT-SHIP) found, as
 context, that the served derived BTTS is significantly worse than a per-league
-constant (live regime +0.00131 Brier, fold-clustered t lower bound +0.00072)
-and that its over-2.5 is no better than one (-0.00043, inside the noise). It
-compared only those two markets and the correct-score grid with a constant.
+constant (live regime: per-match +0.00131 Brier +/- 0.00030; fold-clustered
++0.00139 +/- 0.00033, t(30) lower bound +0.00072) and that its over-2.5 is no
+better than one (per-match -0.00043; clustered -0.00024 +/- 0.00044, inside
+the noise). It compared only those two markets and the correct-score grid
+with a constant.
 
 The NHL precedent (d2246cf, 641f93f): the dixon_coles_nhl markets that lost to
 a per-season constant beyond the noise stopped being displayed. They are
@@ -103,25 +105,45 @@ RESULT (2026-11-01; the committed rule run once, unamended): hide odd_even only.
   re-derived all 371 matches' stored predictions of
   ensemble_soccer_match_result_1.0.0+1793505994 (1x2-only to 2.8e-17, the 69
   anchored to 5.0e-7).
-  Per type, served - base_league (per-match delta +/- SE; fold-clustered t
-  95% interval):
-    HIDE odd_even  live  +0.00039 +/- 0.00017, t [+0.00013, +0.00098]
-                   proxy +0.00036 +/- 0.00016, t [+0.00010, +0.00094]
-          Served's mean P(odd) is 0.488 against 0.499 realised and the
-          constant's 0.492. ESPN era (n = 3,211): +0.00012 +/- 0.00047, inside
-          the noise. Its recommendations were already switched off.
-    keep btts      live  +0.00131 +/- 0.00030, t [+0.00072, +0.00205]
-                   proxy -0.00027 +/- 0.00034, t [-0.00067, +0.00079]
-          Loses in the live regime only, so it stays visible under the rule.
-          ESPN era, the months the live anchor actually reaches: live -0.00006
-          +/- 0.00071 (a tie). Context: against base_league_dw it loses in both
-          regimes (+0.00195 / +0.00037, lower bounds +0.00137 / +0.00003).
-    keep over_under   live -0.00072 +/- 0.00091, t [-0.00291, +0.00283];
-                      proxy -0.00942, t upper -0.00367. No line loses on its
-                      own in either regime (over_2.5 live -0.00043).
-    keep total_goals  live +0.00036, t [-0.00028, +0.00149]; proxy -0.00163,
-                      t upper -0.00006.
-    keep, served better beyond the noise in both regimes (live delta):
+  Per type, served - base_league, in two forms. "Per-match" is the mean
+  delta over all matches with its SE (matches treated as independent).
+  "Clustered" is the unweighted mean of the 31 monthly fold means, with its
+  SE from the spread of those monthly means. The rule reads the 95% interval
+  t(30) puts on the clustered numbers (t(30) = 2.04), not the per-match
+  pair, so the bound cannot be rebuilt from the per-match numbers.
+    HIDE odd_even
+      live   per-match +0.00039 +/- 0.00017; clustered +0.00055 +/- 0.00021,
+             t(30) [+0.00013, +0.00098]
+      proxy  per-match +0.00036 +/- 0.00016; clustered +0.00052 +/- 0.00021,
+             t(30) [+0.00010, +0.00094]
+      Served's mean P(odd) is 0.488 against 0.499 realised and the
+      constant's 0.492. ESPN era (2026-06 on, n = 3,211, 5 folds), live:
+      per-match +0.00012 +/- 0.00047; clustered +0.00083 +/- 0.00104, t(4)
+      [-0.00206, +0.00372]: too few months to say anything. Its
+      recommendations were already switched off.
+    keep btts (an operator decision: see the POST-RUN NOTE below)
+      live   per-match +0.00131 +/- 0.00030; clustered +0.00139 +/- 0.00033,
+             t(30) [+0.00072, +0.00205]
+      proxy  per-match -0.00027 +/- 0.00034; clustered +0.00006 +/- 0.00036,
+             t(30) [-0.00067, +0.00079]
+      Loses in the live regime only, so the committed rule keeps it. ESPN
+      era, live: per-match -0.00006 +/- 0.00071; clustered +0.00014 +/-
+      0.00058, t(4) [-0.00148, +0.00176]: as uninformative as odd_even's.
+      Context: against base_league_dw it loses in both regimes (clustered
+      +0.00208 +/- 0.00035 / +0.00075 +/- 0.00035, t(30) lower bounds
+      +0.00137 / +0.00003).
+    keep over_under
+      live   per-match -0.00072 +/- 0.00091; clustered -0.00004 +/- 0.00141,
+             t(30) [-0.00291, +0.00283]
+      proxy  per-match -0.00942 +/- 0.00113; clustered -0.00731 +/- 0.00178,
+             t(30) [-0.01095, -0.00367]
+      No line loses on its own in either regime (over_2.5 live -0.00043).
+    keep total_goals
+      live   per-match +0.00036 +/- 0.00026; clustered +0.00061 +/- 0.00043,
+             t(30) [-0.00028, +0.00149]
+      proxy  per-match -0.00163 +/- 0.00030; clustered -0.00105 +/- 0.00049,
+             t(30) [-0.00205, -0.00006]
+    keep, served better beyond the noise in both regimes (live per-match delta):
           double_chance -0.0472, draw_no_bet -0.0749, asian_handicap -0.537
           (17-line sum), team_total -0.0514, clean_sheet -0.0138, win_to_nil
           -0.0150, winning_margin -0.0163, result_btts -0.0233,
@@ -133,9 +155,51 @@ RESULT (2026-11-01; the committed rule run once, unamended): hide odd_even only.
   in float64 from the raw export. Every per-row Brier matched scores.npz to
   8.9e-16, and the deltas and bounds matched.
 
+POST-RUN NOTE (added after review, 2026-11-01 evening; the rule above is NOT
+amended and its output, odd_even only, stands as the rule's result)
+  * The rule combines the two regimes with AND: a type hides only when it
+    loses in both. That departs from the house convention it borrows its
+    regimes from. In ab_soccer_ft_dixon_coles.decide() a significant
+    regression in EITHER deciding regime blocks a ship (rule b, A2). The NHL
+    rule (d2246cf) had one regime and hid a whole type when any one of its
+    lines lost (over_under, for its 4.5 line alone). BTTS stays visible only
+    because of the AND. Under an either-regime reading it hides (live t(30)
+    lower bound +0.00072). odd_even hides under either reading. No other
+    type changes, and no line loses on its own inside a kept type.
+  * The rule text's "production anchored 25-32% of matches in Sep-Oct 2026"
+    is the harness's live-replay share (anchor_live per fold: 2026-09 25.4%,
+    2026-10 32.2%), not a production measurement. Production only started
+    anchoring on 2026-10-26 (15:45Z). A read-only prod check at 2026-11-01
+    22:00Z, on the newest stored btts row per match since then (the
+    metadata 'reconcile' tag), found 66 of 226 finished matches anchored
+    (29%: 47 of 166 in October, 19 of 60 in November). For the 318 upcoming
+    matches the share is 51 (16%), because O/U odds arrive close to kickoff.
+  * At production's share BTTS loses by more than odd_even. anchor_mix()
+    (context, added after the run; run with --per-match) scores the
+    anchored share of rows in the proxy regime (the rows the proxy anchors)
+    and the rest in the none regime, and mixes the two per-match means. With
+    a 4,000-draw bootstrap over the monthly folds (95% interval):
+        anchored   btts                            odd_even
+        16%        +0.00121 [+0.00047, +0.00193]   +0.00046 [+0.00011, +0.00078]
+        29%        +0.00062 [-0.00004, +0.00129]   +0.00042 [+0.00009, +0.00071]
+        32%        +0.00048 [-0.00017, +0.00115]   +0.00041 [+0.00008, +0.00069]
+        49%        -0.00029 [-0.00096, +0.00034]   +0.00035 [+0.00003, +0.00064]
+    At 29% the BTTS lower bound sits at about zero (two independent
+    bootstraps gave +0.00002 and, at 28%, +0.00001). total_goals ties the
+    constant at 16% and 29% and beats it from 32%; over_under ties it at 16%
+    and beats it from 29%; every other type beats it at every share.
+    Re-running the script with the context reproduced every other output
+    field of the original run to 1.3e-15 relative (float rounding).
+  * So BTTS is left to the operator, with a recommendation to hide it (one
+    entry in each of the two lists; see the audit-doc entry), unless the
+    operator deliberately prefers this rule's conservative reading.
+  * For future display rules: say up front whether regimes combine with AND
+    or OR, and justify any break from the A2 either-regime convention.
+
 Usage (after the harness run; no database needed):
     python scripts/ab_soccer_derived_vs_constant.py --scores <out-dir>/scores.npz \\
-        --report <out-json> --out-json /tmp/derived_vs_constant.json
+        --report <out-json> --out-json /tmp/derived_vs_constant.json \\
+        [--per-match <out-dir>/per_match.csv.gz]   # adds the anchor-mix context
 """
 
 from __future__ import annotations
@@ -150,6 +214,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ab_halftime_dixon_coles as ht  # noqa: E402
@@ -167,6 +232,13 @@ DECIDING_REGIMES: Tuple[str, ...] = ("live", "proxy")
 CONTEXT_REGIMES: Tuple[str, ...] = ("none",)
 ESPN_ERA_FIRST_FOLD = "2026-06"  # fold labels are "YYYY-MM"
 NAN_TYPES = frozenset({"draw_no_bet"})  # the only type that does not grade on every row (a draw)
+# Context only (added after the run; never decides): anchored shares for the
+# row mix. 0.16 and 0.29 are production's measured shares since the anchor
+# shipped on 2026-10-26 (upcoming / finished matches, read-only prod check
+# 2026-11-01 22:00Z), 0.32 the live replay's October share, 0.49 the proxy's.
+ANCHOR_SHARES: Tuple[float, ...] = (0.16, 0.29, 0.32, 0.49)
+ANCHOR_MIX_BOOT = 4000
+ANCHOR_MIX_SEED = 20261101
 
 # Every stored full-time derived type -> the harness units summed into its per-match score.
 TYPE_UNITS: Dict[str, Tuple[str, ...]] = {
@@ -225,6 +297,75 @@ def compare_unit(scores: Dict[str, np.ndarray], unit: str, regime: str, baseline
     )
 
 
+def load_anchor_mask(per_match_csv: str, scores: Dict[str, np.ndarray]) -> np.ndarray:
+    """True on the rows the proxy regime anchors (anchor_proxy not null in the
+    harness's per_match.csv.gz). Refuses a file whose match_ids are not the
+    scores' match_ids in the same order."""
+    pm = pd.read_csv(per_match_csv, usecols=["match_id", "anchor_proxy"], dtype={"match_id": str})
+    if "match_id" not in scores:
+        raise RuntimeError("scores.npz carries no match_id: cannot align it with per_match.csv.gz")
+    ids = np.asarray(scores["match_id"]).astype(str)
+    if len(pm) != len(ids) or not np.array_equal(pm["match_id"].to_numpy(dtype=str), ids):
+        raise RuntimeError(
+            f"{per_match_csv} ({len(pm)} rows) does not list the scores' {len(ids)} match_ids in the same order"
+        )
+    return pm["anchor_proxy"].notna().to_numpy()
+
+
+def anchor_mix(
+    scores: Dict[str, np.ndarray],
+    anchored: np.ndarray,
+    market: str,
+    shares: Sequence[float] = ANCHOR_SHARES,
+    n_boot: int = ANCHOR_MIX_BOOT,
+    seed: int = ANCHOR_MIX_SEED,
+) -> Dict[str, Any]:
+    """Context, never decides (added after the run). Served - base_league on
+    the type's per-match score if a share f of matches were O/U-anchored: the
+    rows the proxy regime anchors are scored in the proxy regime, the rows it
+    never anchors in the none regime, and the two per-match means are mixed
+    f : 1 - f. The interval resamples the monthly folds with replacement
+    (n_boot draws) and takes the 2.5 / 97.5 percentiles."""
+    anchored = np.asarray(anchored, dtype=bool)
+    if anchored.shape != (len(scores["fold"]),):
+        raise RuntimeError(f"anchor mask has {anchored.shape} rows, scores have {len(scores['fold'])}")
+    const = type_score(scores, BASELINE, "none", market)
+    d_anch = type_score(scores, SERVED, "proxy", market) - const
+    d_none = type_score(scores, SERVED, "none", market) - const
+    ok = np.isfinite(d_anch) & np.isfinite(d_none)
+    a, u = anchored & ok, ~anchored & ok
+    if not a.any() or not u.any():
+        raise RuntimeError(f"{market}: the anchor mix needs both anchored and unanchored gradable rows")
+    labels, inv = np.unique(np.asarray(scores["fold"]).astype(str), return_inverse=True)
+    k = len(labels)
+    sum_a = np.bincount(inv[a], weights=d_anch[a], minlength=k)
+    cnt_a = np.bincount(inv[a], minlength=k).astype(float)
+    sum_u = np.bincount(inv[u], weights=d_none[u], minlength=k)
+    cnt_u = np.bincount(inv[u], minlength=k).astype(float)
+    mean_a, mean_u = float(sum_a.sum() / cnt_a.sum()), float(sum_u.sum() / cnt_u.sum())
+    # Each draw is a vector of fold multiplicities (k folds drawn with replacement).
+    w = np.random.default_rng(seed).multinomial(k, np.full(k, 1.0 / k), size=n_boot).astype(float)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        boot_a, boot_u = (w @ sum_a) / (w @ cnt_a), (w @ sum_u) / (w @ cnt_u)
+    out: Dict[str, Any] = {
+        "anchored_rows": int(a.sum()),
+        "unanchored_rows": int(u.sum()),
+        "delta_anchored_proxy": mean_a,
+        "delta_unanchored_none": mean_u,
+        "shares": {},
+    }
+    for f in shares:
+        draws = f * boot_a + (1.0 - f) * boot_u
+        draws = draws[np.isfinite(draws)]
+        lo, hi = np.percentile(draws, [2.5, 97.5])
+        out["shares"][f"{f:.2f}"] = {
+            "delta": f * mean_a + (1.0 - f) * mean_u,
+            "lower_95_boot": float(lo),
+            "upper_95_boot": float(hi),
+        }
+    return out
+
+
 def hide_verdict(market: str, per_regime: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     """The pre-registered rule: hide when the A2 lower bound of served -
     constant is > 0 in every DECIDING_REGIMES regime. Raises when a deciding
@@ -270,7 +411,11 @@ def provenance(report: Optional[Dict[str, Any]], scores: Dict[str, np.ndarray]) 
     return out
 
 
-def run(scores: Dict[str, np.ndarray], report: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def run(
+    scores: Dict[str, np.ndarray],
+    report: Optional[Dict[str, Any]] = None,
+    anchored: Optional[np.ndarray] = None,
+) -> Dict[str, Any]:
     prov = provenance(report, scores)
     folds = np.asarray(scores["fold"]).astype(str)
     espn = np.array([f >= ESPN_ERA_FIRST_FOLD for f in folds], dtype=bool)
@@ -287,6 +432,7 @@ def run(scores: Dict[str, np.ndarray], report: Optional[Dict[str, Any]] = None) 
             "per_unit": (
                 {r: {u: compare_unit(scores, u, r) for u in units} for r in DECIDING_REGIMES} if len(units) > 1 else {}
             ),
+            "anchor_mix": anchor_mix(scores, anchored, market) if anchored is not None else {},
         }
     hidden = sorted(f"{MODEL_NAME}:{m}" for m, t in types.items() if t["hide"])
     return {"provenance": prov, "espn_era_rows": int(espn.sum()), "types": types, "hidden_pairs": hidden}
@@ -314,6 +460,8 @@ def format_report(r: Dict[str, Any]) -> str:
         f"served sha256 {str(prov.get('served_sha256'))[:8]}...",
         "dBrier = served - constant on the type's per-match score (sum of its units); "
         "HIDE when the 95% lower bound is > 0 in live AND proxy.",
+        "Columns: per-match delta +/-SE; cl = fold-clustered delta (unweighted mean of the monthly fold means) "
+        "+/-SE; t = the t(n_folds-1) 95% interval on the clustered numbers, which the rule reads.",
         "",
     ]
     for market, t in r["types"].items():
@@ -326,6 +474,13 @@ def format_report(r: Dict[str, Any]) -> str:
             L.append(f"    {regime:<6} vs {CONTEXT_BASELINE}: {_pair_cells(p)}")
         for regime, p in t["espn_era"].items():
             L.append(f"    {regime:<6} ESPN era: {_pair_cells(p)}  n={p['n']}")
+        mix = t.get("anchor_mix") or {}
+        if mix:
+            cells = ", ".join(
+                f"{float(f):.0%} {_f(v['delta'])} [{_f(v['lower_95_boot'])}, {_f(v['upper_95_boot'])}]"
+                for f, v in mix["shares"].items()
+            )
+            L.append(f"    anchor mix (context; share anchored: delta [fold-bootstrap 95%]): {cells}")
         for regime, per in t["per_unit"].items():
             for unit, p in per.items():
                 flag = "  <- this unit alone loses" if (nhl.lower_bound(p) or 0) > 0 else ""
@@ -338,6 +493,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--scores", required=True, help="scores.npz from ab_soccer_ft_dixon_coles.py --out-dir")
     p.add_argument("--report", default=None, help="the same run's --out-json (provenance and row-count check)")
+    p.add_argument(
+        "--per-match",
+        default=None,
+        help="the same run's per_match.csv.gz: adds the anchor-mix context (never decides)",
+    )
     p.add_argument("--out-json", default=None)
     return p.parse_args(argv)
 
@@ -346,7 +506,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     try:
         report = json.loads(Path(args.report).read_text()) if args.report else None
-        result = run(load_scores(args.scores), report)
+        scores = load_scores(args.scores)
+        anchored = load_anchor_mask(args.per_match, scores) if args.per_match else None
+        result = run(scores, report, anchored)
     except Exception as exc:
         logger.error("ab_soccer_derived_vs_constant failed: %s", exc, exc_info=True)
         return 1

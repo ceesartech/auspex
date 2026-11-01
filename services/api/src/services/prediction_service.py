@@ -381,15 +381,22 @@ HEADLINE_PAIRS: List[str] = sorted(
 #
 # Soccer (model_name 'ensemble', which precompute_predictions writes for every
 # soccer derived row and no other sport writes — read-only prod check
-# 2026-11-01) applies the same rule to every full-time derived type
-# (scripts/ab_soccer_derived_vs_constant.py, rule committed before its run on
-# 2026-11-01: served vs the per-league constant, each stored type judged on
-# the sum of its lines, hidden only when the 95% lower bound is > 0 in both
-# the live and the proxy O/U-anchor regime; n=25,604, 31 folds 2024-04..2026-10).
-# Only odd_even loses: +0.00039 Brier live (t lower bound +0.00013), +0.00036
-# proxy (+0.00010). btts loses in the live regime only (+0.00131, lower
-# +0.00072; proxy -0.00027, t [-0.00067, +0.00079]) and stays visible;
-# over_under and total_goals tie the constant; every other type beats it.
+# 2026-11-01) applies an adapted form of the rule to every full-time derived
+# type (scripts/ab_soccer_derived_vs_constant.py, rule committed before its
+# run on 2026-11-01: served vs the per-league constant, each stored type
+# judged on the sum of its lines, hidden only when the 95% lower bound is > 0
+# in BOTH the live and the proxy O/U-anchor regime; n=25,604, 31 monthly
+# folds 2024-04..2026-10). The bound is the t(30) interval on the
+# fold-clustered delta (mean of the monthly means), quoted beside the
+# per-match delta. Only odd_even loses in both: live per-match +0.00039 Brier
+# +/- 0.00017, clustered +0.00055 +/- 0.00021, t(30) lower bound +0.00013;
+# proxy per-match +0.00036 +/- 0.00016, clustered +0.00052 +/- 0.00021, lower
+# +0.00010. btts loses in the live regime only (per-match +0.00131 +/-
+# 0.00030, clustered +0.00139 +/- 0.00033, lower +0.00072; proxy per-match
+# -0.00027 +/- 0.00034, clustered +0.00006 +/- 0.00036, t(30) [-0.00067,
+# +0.00079]), so this rule keeps it visible; hiding it is an open operator
+# decision (see the script's POST-RUN NOTE). over_under and total_goals tie
+# the constant; every other type beats it.
 HIDDEN_NHL_DIXON_COLES_TYPES: Tuple[str, ...] = (
     "regulation_1x2",
     "double_chance",
