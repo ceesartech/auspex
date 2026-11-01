@@ -202,6 +202,17 @@ jobs:
           # (test_recommendation_math.py) and the calibration metrics.
           # They ran green locally for months while gating NOTHING in CI
           # (July-2026 audit §6.1). They need no DB/Redis.
+          # The *_pg tests (test_grading_sql_pg, test_backfill_results_pg)
+          # start a throwaway cluster with initdb/pg_ctl and skip when those
+          # are not on PATH; Ubuntu runner images keep them off PATH under
+          # /usr/lib/postgresql/<v>/bin, so put the newest one there.
+          pgbin=$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$pgbin" ]; then
+            export PATH="$pgbin:$PATH"
+            echo "Postgres server binaries for the *_pg tests: $pgbin ($(initdb --version))"
+          else
+            echo "No /usr/lib/postgresql/*/bin on this runner: the *_pg tests skip"
+          fi
           echo "::group::pytest tests/unit (repo root)"
           pytest tests/unit -q --rootdir=.
           echo "::endgroup::"
