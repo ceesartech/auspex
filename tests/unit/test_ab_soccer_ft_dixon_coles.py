@@ -581,3 +581,62 @@ class TestSqlAndLiveCheck:
         frame.loc[frame.prediction_type == "btts", "probabilities"] = [{"yes": 0.9, "no": 0.1}] * 2
         with pytest.raises(RuntimeError, match="live check"):
             ab.live_check("db", "v1", dc)
+
+
+# ── Settlement and the constant frame ────────────────────────────────
+
+
+def _frame(n=300, seed=0):
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range("2024-01-01", periods=n, freq="12h", tz="UTC")
+    return pd.DataFrame(
+        {
+            "match_date": dates,
+            "league_id": rng.choice(["L1", "L2"], n),
+            "home_score": rng.poisson(1.5, n),
+            "away_score": rng.poisson(1.1, n),
+            "regulation_home_score": None,
+            "regulation_away_score": None,
+        }
+    )
+
+
+class TestSettlementAndConstantFrame:
+    def test_full_time_markets_settle_on_the_90_minute_pair(self):
+        f = _frame(4)
+        f.loc[0, ["home_score", "away_score", "regulation_home_score", "regulation_away_score"]] = [3, 2, "2", "2"]
+        f.loc[1, ["home_score", "away_score", "regulation_home_score", "regulation_away_score"]] = [1, 0, "4", "0"]
+        h, a, ok = ab.settlement(f)
+        assert (h[0], a[0], ok[0]) == (2, 2, True)  # decided in extra time: graded on 2-2
+        assert not ok[1]  # a 90-minute pair above the final score is unusable: not graded
+        assert ok[2] and (h[2], a[2]) == (f.loc[2, "home_score"], f.loc[2, "away_score"])
+
+    def test_fold_constants_fit_the_prefix_only(self):
+        f = _frame()
+        f["s_home"], f["s_away"], f["s_ok"] = ab.settlement(f)
+        cf = ab.build_constant_frame(f)
+        n_fit = 120
+        out = ab.fold_constants(cf, n_fit, ["L1", "L2", "L9"], np.ones(n_fit))
+        y = ((f["s_home"] + f["s_away"]) > 2.5).astype(float).to_numpy()[:n_fit]
+        lg = f["league_id"].to_numpy()[:n_fit]
+        g = y.mean()
+        l1 = (y[lg == "L1"].sum() + ab.CONSTANT_SHRINKAGE * g) / ((lg == "L1").sum() + ab.CONSTANT_SHRINKAGE)
+        p = out["base_league"][ab.PRIMARY][:, 0]
+        assert p[0] == pytest.approx(l1, abs=1e-6) and p[2] == pytest.approx(g, abs=1e-6)  # L9 unseen -> global
+        assert out["base_league_dw"][ab.GRID].sum(axis=1) == pytest.approx([1.0, 1.0, 1.0], abs=1e-6)
+
+    def test_an_unsorted_frame_is_refused(self):
+        f = _frame(10).iloc[::-1].reset_index(drop=True)
+        f["s_home"], f["s_away"], f["s_ok"] = ab.settlement(f)
+        with pytest.raises(RuntimeError, match="sorted"):
+            ab.build_constant_frame(f)
+
+
+class TestAnchorGuard:
+    def test_a_matrix_that_ignores_its_anchor_aborts_the_fold(self, monkeypatch):
+        ev, lam, tg, a_live, a_proxy, truth, const = _fold_inputs(seed=3)
+        real = ab.served_matrix
+        monkeypatch.setattr(ab, "served_matrix", lambda h, a, rho, t, p: real(h, a, rho, t, None))
+        monkeypatch.setattr(ab, "derive_fidelity", lambda *args, **kw: 0.0)  # the sampled check would catch it first
+        with pytest.raises(RuntimeError, match="misses its anchor"):
+            ab.score_fold("2026-09", ev, tg, a_live, a_proxy, truth, {"served": _FakeDC(lam)}, const, ab.unit_weights())
