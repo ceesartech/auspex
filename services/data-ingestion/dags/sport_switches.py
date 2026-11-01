@@ -19,9 +19,10 @@ False (dormant), in auspex_pipeline:
     other recommendation tasks.
 Nothing else schedules horse racing: retrain_models has no horse bundle
 (train_horse_racing_win.py runs by hand), monitor_models stops paging on
-the horse streams once no race prediction has been written for 48 h (its
-findings are then logged as warnings), and the API / frontend only list
-races and recs, so they go quiet on their own.
+the horse streams once no race prediction has been created for 72 h
+(monitor_models.HORSE_DORMANT_AFTER_HOURS; its findings are then logged
+as warnings), and the API / frontend only list races and recs, so they go
+quiet on their own.
 
 True: the original branch — racecards >> results >> features >>
 consensus >> ranker >> recommendations, and grade_completed_races.
