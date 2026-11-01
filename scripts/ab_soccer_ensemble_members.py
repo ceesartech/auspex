@@ -226,6 +226,23 @@ its readout and its decision rule were committed before its first run).
   Expectation, stated before the run: DO-NOT-SHIP. At 4.65% blend weight the
   arm moves the served 1x2 by about 0.0007 on average, and the in-sample-
   optimal bound above caps any change to these members near -0.0006.
+  RESULT (2026-11-01 evening; read-only export of prod at 21:22Z, runbook not
+  started; incumbent = the 2026-11-01 04:06Z artifacts, whose Poisson member
+  the rebuilt split reproduced to 0.0 after 10 boundary assignments):
+  DO-NOT-SHIP on both counts.
+    n = 25,604 matches (2024-04-07 .. 2026-10-31, 31 monthly folds), served
+    1x2 Brier 0.60173.
+    poisson_converged - served  +0.0000077 ± 0.0000089, clustered
+                                +0.0000105 ± 0.0000096, t-bound +0.0000301.
+                                Null, and nowhere near -0.005.
+    Blocking unit: identity_split_fixtures regresses (+0.000090 per match,
+    clustered lower bound +0.000022 > 0, n=1,582).
+    The arm moves the served 1x2 by mean L1 0.0013 (max |dp| 0.0040).
+    Standalone the converged member is slightly WORSE than the 2-cycle one
+    (Brier 0.63380 vs 0.63329): converging fixes the fit, not the forecast.
+    The other arms, re-run on this incumbent, repeat their earlier readings:
+    refit -0.00032 (clustered -0.00040 ± 0.00010), drop +0.00013,
+    refit_pretest -0.00009.
 
 Read-only: SELECTs, plus temp files for the round-trip. Usage (api container):
     python /app/scripts/ab_soccer_ensemble_members.py --end 2026-10-31 \\
