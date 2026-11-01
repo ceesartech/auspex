@@ -1,13 +1,15 @@
-"""Unit tests for the soccer ensemble scoreline-members A/B harness: the pure
+"""Unit tests for the soccer ensemble scoreline-members A/B harness: the
 pieces that decide whether the experiment is honest. That covers the blend
-arithmetic each arm uses, the serve-path row builder, the out-of-sample
-window, the in-memory merge simulation, the trainer-frame parity of the
-member fits, and the verdict. The DB and model paths are exercised by running
-the harness."""
+arithmetic and the arm assembly, the serve-path row builder and fidelity
+refusals, the out-of-sample window and the fold guard, the in-memory merge
+simulation, the trainer-frame parity and save/load round-trip of the member
+fits, the in-sample-optimal weight bound, the report's signs and verdicts, and
+run() end to end on a synthetic corpus with the DB and registry faked."""
 
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import re
 import sys
 from pathlib import Path
@@ -156,7 +158,7 @@ class TestMergeSimulation:
         return pd.DataFrame(
             {
                 "match_id": ["fd1", "espn1", "espn2", "other"],
-                "match_date": [t + pd.Timedelta(hours=1), t, t + pd.Timedelta(days=7), t],
+                "match_date": [t, t + pd.Timedelta(hours=1), t + pd.Timedelta(days=7), t],
                 "home_team_id": ["old", "new", "x", "y"],
                 "away_team_id": ["opp", "opp", "new", "z"],
                 "home_team": ["Manchester City", "Man City", "X", "Y"],
@@ -179,6 +181,12 @@ class TestMergeSimulation:
         assert kept.loc["espn1", "home_team"] == "Manchester City" and kept.loc["espn1", "home_team_id"] == "old"
         assert kept.loc["espn2", "away_team"] == "Manchester City"
         assert stats["rows_repointed"] == 2 and stats["twin_rows_folded"] == 1 and stats["twin_clusters"] == 1
+
+    def test_without_features_on_either_twin_the_earlier_row_is_kept(self):
+        frame = self._frame()
+        frame.loc[frame["match_id"] == "espn1", "has_features"] = False
+        out, _ = ab.simulate_team_merge(frame, self._map())
+        assert sorted(out["match_id"]) == ["espn2", "fd1", "other"]
 
     def test_twins_that_disagree_on_the_score_are_refused(self):
         frame = self._frame()
@@ -243,6 +251,407 @@ class TestTrainerParity:
         assert pois.league_baselines == {}  # POISSON_CONFIG fits one global baseline
         assert ab.known_teams(dc, ["t0", "zz"], ["t1", "t2"]).tolist() == [2.0, 1.0]
 
+    def test_a_refit_is_served_through_save_and_the_serving_load(self, tmp_path, monkeypatch):
+        from predictors.poisson_models import DixonColesPredictor
+
+        loaded = []
+        real_load = DixonColesPredictor.load
+
+        def spy(self, p):
+            loaded.append((self, p))
+            return real_load(self, p)
+
+        monkeypatch.setattr(DixonColesPredictor, "load", spy)
+        dc, _ = ab.fit_member(ab.DIXON_COLES, _corpus().head(300), str(tmp_path), "rt")
+        assert len(loaded) == 1 and dc is loaded[0][0]  # the object scored is the one load() rebuilt
+        assert loaded[0][1].endswith("dixon_coles_soccer_match_result_rt.bin")
+
+
+class TestAssembleArms:
+    def _inputs(self, n=5):
+        probs = _probs(n=n, seed=4)
+        learned = {m: probs[m] for m in ab.LEARNED_MEMBERS}
+        rng = np.random.default_rng(9)
+        scoreline = {}
+        for arm in ab.MEMBER_ARMS:
+            scoreline[arm] = {}
+            for m in ab.SCORELINE_MEMBERS:
+                raw = rng.random((n, 3)) + 0.1
+                scoreline[arm][m] = raw / raw.sum(axis=1, keepdims=True)
+        market = np.full((n, 3), np.nan)
+        market[::2] = [0.5, 0.3, 0.2]
+        return learned, scoreline, market, np.arange(n) % 3
+
+    def test_each_arm_is_the_blend_it_names(self):
+        learned, scoreline, market, y = self._inputs()
+        p = ab.assemble_arms(learned, scoreline, market, y, WEIGHTS)
+        w = ab.normalised_weights(WEIGHTS, ab.ALL_MEMBERS)
+        for arm in ab.MEMBER_ARMS:
+            expect = sum(w[m] * learned[m] for m in ab.LEARNED_MEMBERS)
+            expect = expect + sum(w[m] * scoreline[arm][m] for m in ab.SCORELINE_MEMBERS)
+            assert p[arm] == pytest.approx(expect, abs=1e-12)
+        assert set(p) == set(ab.ARMS) | {ab.BOUND_ARM, "oracle"}
+
+    def test_drop_is_the_learned_members_alone_renormalised(self):
+        learned, scoreline, market, y = self._inputs()
+        p = ab.assemble_arms(learned, scoreline, market, y, WEIGHTS)
+        total = sum(WEIGHTS[m] for m in ab.LEARNED_MEMBERS)
+        expect = sum(WEIGHTS[m] / total * learned[m] for m in ab.LEARNED_MEMBERS)
+        assert p["drop"] == pytest.approx(expect, abs=1e-12)
+        # and no scoreline member can move it
+        scoreline["served"] = {m: np.tile([1.0, 0.0, 0.0], (len(y), 1)) for m in ab.SCORELINE_MEMBERS}
+        assert ab.assemble_arms(learned, scoreline, market, y, WEIGHTS)["drop"] == pytest.approx(expect, abs=1e-12)
+
+    def test_the_bound_replaces_both_members_by_the_market_on_market_rows_only(self):
+        learned, scoreline, market, y = self._inputs()
+        p = ab.assemble_arms(learned, scoreline, market, y, WEIGHTS)
+        assert np.isfinite(p[ab.BOUND_ARM][::2]).all() and np.isnan(p[ab.BOUND_ARM][1::2]).all()
+        swapped = {m: np.tile([0.5, 0.3, 0.2], (len(y), 1)) for m in ab.SCORELINE_MEMBERS}
+        expect = ab.blend({**learned, **swapped}, WEIGHTS, ab.ALL_MEMBERS)
+        assert p[ab.BOUND_ARM][::2] == pytest.approx(expect[::2], abs=1e-12)
+        rows = np.arange(len(y))
+        assert (p["oracle"][rows, y] > p["served"][rows, y]).all()  # the members' share went to the outcome
+
+
+class _FakeEnsemble:
+    """predict_proba returns a fixed per-row table, optionally perturbed."""
+
+    def __init__(self, table, batch_offset=0.0, single_offset=0.0, nan_row=None):
+        self.table = np.asarray(table, dtype=float)
+        self.batch_offset, self.single_offset, self.nan_row = batch_offset, single_offset, nan_row
+
+    def predict_proba(self, X):
+        out = self.table[X.index.to_numpy()].copy()
+        if len(X) == 1:
+            return out + self.single_offset
+        if self.nan_row is not None:
+            out[self.nan_row] = np.nan
+        return out + self.batch_offset
+
+
+class TestServePathFidelity:
+    def _x(self, n=10):
+        rng = np.random.default_rng(2)
+        raw = rng.random((n, 3)) + 0.1
+        return pd.DataFrame({"f": np.arange(n)}), raw / raw.sum(axis=1, keepdims=True)
+
+    def test_a_faithful_ensemble_passes(self):
+        x, p = self._x()
+        batch, single, n = ab.serve_path_fidelity(_FakeEnsemble(p), x, p)
+        assert batch == 0.0 and single == 0.0 and n == len(x)
+
+    def test_a_nan_in_the_ensembles_batch_is_refused(self):
+        x, p = self._x()
+        with pytest.raises(RuntimeError, match="non-finite"):
+            ab.serve_path_fidelity(_FakeEnsemble(p, nan_row=3), x, p)
+
+    def test_a_nan_in_the_harness_blend_is_refused(self):
+        x, p = self._x()
+        mine = p.copy()
+        mine[0] = np.nan
+        with pytest.raises(RuntimeError, match="non-finite"):
+            ab.serve_path_fidelity(_FakeEnsemble(p), x, mine)
+
+    def test_a_blend_off_by_more_than_the_tolerance_is_refused(self):
+        x, p = self._x()
+        with pytest.raises(RuntimeError, match="differ by"):
+            ab.serve_path_fidelity(_FakeEnsemble(p, batch_offset=1e-4), x, p)
+
+    def test_single_row_predictions_that_differ_from_the_batch_are_refused(self):
+        x, p = self._x()
+        with pytest.raises(RuntimeError, match="one-row-at-a-time"):
+            ab.serve_path_fidelity(_FakeEnsemble(p, single_offset=1e-4), x, p)
+
+    def test_max_gap_refuses_a_shape_mismatch(self):
+        with pytest.raises(RuntimeError, match="shapes"):
+            ab.max_gap("x", np.zeros((2, 3)), np.zeros((3, 3)))
+
+
+class TestFoldGuard:
+    def test_a_fit_row_inside_the_eval_month_is_refused(self):
+        fold = ab.ft.build_folds("2024-05-01", "2024-05-31")[0]
+        before = pd.DataFrame({"match_date": pd.to_datetime(["2024-04-30 20:00"], utc=True)})
+        inside = pd.DataFrame({"match_date": pd.to_datetime(["2024-05-02 15:00"], utc=True)})
+        ab.check_fold_disjoint(before, inside, fold)
+        with pytest.raises(RuntimeError, match="overlap"):
+            ab.check_fold_disjoint(pd.concat([before, inside]), inside, fold)
+        with pytest.raises(RuntimeError, match="overlap"):
+            ab.check_fold_disjoint(before, pd.concat([before, inside]), fold)
+
+
+class TestOptimalSimplexWeights:
+    def _sources(self, n=400, seed=5):
+        rng = np.random.default_rng(seed)
+        y = rng.integers(0, 3, n)
+        sources = []
+        for sharp in (0.2, 0.5, 0.0):
+            raw = rng.random((n, 3)) + 0.2 + sharp * np.eye(3)[y]
+            sources.append(raw / raw.sum(axis=1, keepdims=True))
+        return sources, y
+
+    def test_matches_a_dense_grid_search(self):
+        sources, y = self._sources()
+        w, brier = ab.optimal_simplex_weights(sources, y)
+        assert w.min() >= 0 and w.sum() == pytest.approx(1.0)
+        grid = []
+        for a, b in itertools.product(np.linspace(0, 1, 101), repeat=2):
+            if a + b <= 1 + 1e-12:
+                ww = np.array([a, b, 1 - a - b])
+                grid.append(ab.ft.brier_multiclass(np.tensordot(ww, np.stack(sources), axes=1), y).mean())
+        assert brier <= min(grid) + 1e-12
+        assert brier == pytest.approx(min(grid), abs=1e-4)
+        assert brier == pytest.approx(ab.ft.brier_multiclass(np.tensordot(w, np.stack(sources), axes=1), y).mean())
+
+    def test_a_perfect_source_takes_all_the_weight(self):
+        sources, y = self._sources()
+        w, brier = ab.optimal_simplex_weights(sources + [np.eye(3)[y]], y)
+        assert w[-1] == pytest.approx(1.0) and brier == pytest.approx(0.0, abs=1e-12)
+
+    def test_non_finite_sources_are_refused(self):
+        sources, y = self._sources()
+        sources[1][0, 0] = np.nan
+        with pytest.raises(RuntimeError, match="non-finite"):
+            ab.optimal_simplex_weights(sources, y)
+
+
+def _stacked(n_folds=6, per_fold=150, seed=11):
+    """Synthetic per-row arrays shaped like run()'s. Built so that refit is
+    WORSE than served and drop is far BETTER, by construction."""
+    rng = np.random.default_rng(seed)
+    n = n_folds * per_fold
+    y = rng.integers(0, 3, n)
+
+    def rand_p():
+        raw = rng.random((n, 3)) + 0.2
+        return raw / raw.sum(axis=1, keepdims=True)
+
+    learned = {m: rand_p() for m in ab.LEARNED_MEMBERS}
+    scoreline = {arm: {m: rand_p() for m in ab.SCORELINE_MEMBERS} for arm in ab.MEMBER_ARMS}
+    market = rand_p()
+    market[1::3] = np.nan
+    p = ab.assemble_arms(learned, scoreline, market, y, WEIGHTS)
+    p["refit"] = 0.7 * p["served"] + 0.3 * np.eye(3)[(y + 1) % 3]
+    p["drop"] = 0.7 * p["served"] + 0.3 * np.eye(3)[y]
+    s = {
+        "y": y,
+        "fold": np.repeat([f"2025-{k + 1:02d}" for k in range(n_folds)], per_fold).astype(object),
+        "market": market,
+        "espn_era": (np.arange(n) >= n // 2).astype(float),
+        "identity_split": (np.arange(n) % 10 == 0).astype(float),
+    }
+    for arm in ab.MEMBER_ARMS:
+        s[f"known::{arm}"] = np.full(n, 2.0)
+        for m in ab.SCORELINE_MEMBERS:
+            s[f"q::{arm}::{m}"] = scoreline[arm][m]
+    for m in ab.LEARNED_MEMBERS:
+        s[f"q::learned::{m}"] = learned[m]
+    for arm, arr in p.items():
+        s[f"p::{arm}"] = arr
+    return s
+
+
+class TestBuildReport:
+    def test_a_worse_challenger_reads_positive_and_a_better_one_ships(self):
+        s = _stacked()
+        r = ab.build_report(s, meta={})
+        y = s["y"]
+        worse = ab.ft.brier_multiclass(s["p::refit"], y) - ab.ft.brier_multiclass(s["p::served"], y)
+        better = ab.ft.brier_multiclass(s["p::drop"], y) - ab.ft.brier_multiclass(s["p::served"], y)
+        assert r["vs_served"]["refit"]["delta"] == pytest.approx(worse.mean()) and worse.mean() > 0
+        assert r["vs_served"]["drop"]["delta"] == pytest.approx(better.mean()) and better.mean() < -0.005
+        assert r["verdicts_vs_served"]["refit"]["ship"] is False
+        assert r["verdicts_vs_served"]["refit"]["ship_strict"] is False
+        assert r["verdicts_vs_served"]["drop"]["ship_strict"] is True
+        assert r["per_fold_vs_served"]["refit"][0]["delta"] > 0
+
+    def test_the_bound_is_scored_on_the_market_rows_only(self):
+        s = _stacked()
+        r = ab.build_report(s, meta={})
+        has = np.isfinite(s["market"]).all(axis=1)
+        expect = ab.ft.brier_multiclass(s[f"p::{ab.BOUND_ARM}"][has], s["y"][has]).mean()
+        assert r["market_rows"] == int(has.sum()) == len(has) - len(has[1::3])
+        assert r["brier"][ab.BOUND_ARM] == pytest.approx(expect)
+        assert r["bound"]["members_as_market_vs_served"]["n"] == int(has.sum())
+        on, off = r["bound"]["refit_vs_served_on_market_rows"], r["bound"]["refit_vs_served_off_market_rows"]
+        assert on["n"] == int(has.sum()) and off["n"] == int((~has).sum())
+
+    def test_in_sample_optimal_weights_never_lose_to_the_production_weights(self):
+        s = _stacked()
+        opt = ab.build_report(s, meta={})["bound"]["in_sample_optimal_weights"]
+        # the five served members at the production weights are one point of the simplex searched
+        assert opt["served"]["delta_vs_served"] <= 1e-12
+        assert sum(opt["refit"]["weights"].values()) == pytest.approx(1.0)
+        assert set(opt["learned_only"]["weights"]) == set(ab.LEARNED_MEMBERS)
+
+    def test_a_nan_in_any_scored_arm_is_refused_not_zeroed(self):
+        for arm in ("served", "refit", "drop", "refit_pretest", "oracle"):
+            s = _stacked()
+            s[f"p::{arm}"][3] = np.nan
+            with pytest.raises(RuntimeError, match=f"arm {arm}"):
+                ab.build_report(s, meta={})
+
+    def test_a_bound_row_that_disagrees_with_the_market_mask_is_refused(self):
+        s = _stacked()
+        s[f"p::{ab.BOUND_ARM}"][1] = s["p::served"][1]  # finite where there is no market
+        with pytest.raises(RuntimeError, match="finite on"):
+            ab.build_report(s, meta={})
+
+
+class _Learned:
+    """A fitted learned member: a fixed function of one serve-row feature."""
+
+    is_fitted = True
+    feature_names = ["feature__f1"]
+
+    def __init__(self, scale):
+        self.scale = scale
+
+    def predict_proba(self, X):
+        f = pd.to_numeric(X["feature__f1"]).to_numpy(dtype=float)
+        raw = np.stack([np.exp(self.scale * f), np.ones_like(f), np.exp(-self.scale * f)], axis=1)
+        return raw / raw.sum(axis=1, keepdims=True)
+
+
+def _corpus(seed=7):
+    """Two matches a day, 2023-01-01 .. 2024-06-30, eight teams, one league,
+    with every column MATCHES_SQL selects plus the outcome."""
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range("2023-01-01 15:00", "2024-06-30 15:00", freq="12h", tz="UTC")
+    rows = []
+    for i, d in enumerate(dates):
+        h, a = rng.choice(8, 2, replace=False)
+        rows.append(
+            {
+                "match_id": f"m{i:05d}",
+                "match_date": d,
+                "league_id": "L1",
+                "league_name": "League One",
+                "home_team_id": f"t{h}",
+                "away_team_id": f"t{a}",
+                "home_team": f"Team {h}",
+                "away_team": f"Team {a}",
+                "home_score": int(rng.poisson(1.5)),
+                "away_score": int(rng.poisson(1.1)),
+            }
+        )
+    frame = pd.DataFrame(rows)
+    frame["outcome"] = np.where(
+        frame["home_score"] > frame["away_score"], 0, np.where(frame["home_score"] == frame["away_score"], 1, 2)
+    )
+    return frame
+
+
+class TestRunEndToEnd:
+    """run() on a synthetic corpus, with only the DB reads and the registry
+    faked: the serve rows, fidelity checks, member refits, fold guard, arm
+    assembly, report and per-match CSV are the real code."""
+
+    SEEN_BEFORE = pd.Timestamp("2024-03-16", tz="UTC")
+
+    def _setup(self, tmp_path, monkeypatch):
+        from predictors.ensemble import EnsemblePredictor
+        from predictors.model_config import ENSEMBLE_CONFIG
+
+        frame = _corpus()
+        seen_rows = frame[frame["match_date"] < self.SEEN_BEFORE]
+        seen = set(seen_rows["match_id"])
+        ens = EnsemblePredictor(ENSEMBLE_CONFIG)
+        for m, scale in zip(ab.LEARNED_MEMBERS, (0.3, 0.5, 0.8)):
+            ens.add_model(m, _Learned(scale), weight=WEIGHTS[m])
+        for m in ab.SCORELINE_MEMBERS:  # the incumbent: fitted on the oldest 70% of its train+val
+            model, _ = ab.fit_member(m, seen_rows.head(int(0.7 * len(seen_rows))), str(tmp_path), "incumbent")
+            ens.add_model(m, model, weight=WEIGHTS[m])
+        rng = np.random.default_rng(1)
+        late = frame[frame["match_date"] >= pd.Timestamp("2024-03-01", tz="UTC")]
+        features = {mid: {"f1": float(rng.normal())} for mid in late["match_id"]}
+        no_features = late["match_id"].iloc[-5]
+        del features[no_features]
+        features[late["match_id"].iloc[-9]] = {"f1": None}  # takes the corpus median, as production does
+        quote = ab.ft.MarketQuote(probs=np.array([0.46, 0.27, 0.27]), n_books=3, book_sum_median=1.05)
+        market = {mid: quote for mid in late["match_id"].iloc[::2]}
+        calls = {"medians": 0}
+
+        def medians(url):
+            calls["medians"] += 1
+            return {"f1": 0.25}
+
+        monkeypatch.setattr(ab, "load_frame", lambda url: frame.copy())
+        monkeypatch.setattr(ab, "load_ensemble", lambda path: (ens, "fake-ensemble"))
+        monkeypatch.setattr(ab, "member_fingerprint", lambda path, m: {"member": m})
+        monkeypatch.setattr(ab, "load_seen_ids", lambda path: set(seen))
+        monkeypatch.setattr(ab, "load_features", lambda url, start, end: dict(features))
+        monkeypatch.setattr(ab, "load_medians", medians)
+        monkeypatch.setattr(ab, "load_market_1x2", lambda url, start, end, min_books: dict(market))
+        args = ab.parse_args(
+            [
+                "--database-url",
+                "postgresql:///unused",
+                "--model-path",
+                str(tmp_path / "registry"),
+                "--merge-map",
+                "",
+                "--out-dir",
+                str(tmp_path / "out"),
+            ]
+        )
+        return frame, ens, features, market, calls, args
+
+    def test_runs_and_every_arm_is_rebuilt_from_its_members(self, tmp_path, monkeypatch):
+        frame, _ens, features, market, calls, args = self._setup(tmp_path, monkeypatch)
+        r = ab.run(args)
+        m = r["meta"]
+        assert r["folds"] == ["2024-04", "2024-05", "2024-06"]
+        assert [f["fold"] for f in m["skipped_folds"]] == ["2024-03"]  # 32 rows < MIN_FOLD_EVAL
+        in_eval = frame[(frame["match_date"] >= pd.Timestamp("2024-04-01", tz="UTC"))]
+        assert r["n_eval"] == int(in_eval["match_id"].isin(features.keys()).sum()) == len(in_eval) - 1
+        assert m["eval_rows_without_features"] == 1 and m["median_filled_values"] == 1 and calls["medians"] == 1
+        assert m["fidelity_batch_max_abs"] <= ab.FIDELITY_ATOL and m["fidelity_single_row_max_abs"] <= ab.FIDELITY_ATOL
+        for fit in m["fits"]:
+            if fit["fold"] != "pretest":
+                assert pd.Timestamp(fit["fit_newest"]) < pd.Timestamp(f"{fit['fold']}-01", tz="UTC")
+        df = pd.read_csv(r["per_match_csv"])
+        assert len(df) == r["n_eval"] and set(df["fold"]) == set(r["folds"])
+
+        def cols(prefix):
+            return df[[f"{prefix}::{c}" for c in ab.CLASSES]].to_numpy(dtype=float)
+
+        learned = {mm: cols(f"q::learned::{mm}") for mm in ab.LEARNED_MEMBERS}
+        assert cols("p::drop") == pytest.approx(ab.blend(learned, WEIGHTS, ab.LEARNED_MEMBERS), abs=1e-12)
+        for arm in ab.MEMBER_ARMS:
+            members = {**learned, **{mm: cols(f"q::{arm}::{mm}") for mm in ab.SCORELINE_MEMBERS}}
+            assert cols(f"p::{arm}") == pytest.approx(ab.blend(members, WEIGHTS, ab.ALL_MEMBERS), abs=1e-12)
+        has = df["match_id"].isin(market.keys()).to_numpy()
+        assert np.isfinite(cols(f"p::{ab.BOUND_ARM}")[has]).all()
+        assert np.isnan(cols(f"p::{ab.BOUND_ARM}")[~has]).all()
+        d = (df["brier::refit"] - df["brier::served"]).mean()
+        assert r["vs_served"]["refit"]["delta"] == pytest.approx(d)
+
+    def test_a_fit_that_reaches_its_eval_month_fails_the_run(self, tmp_path, monkeypatch):
+        *_, args = self._setup(tmp_path, monkeypatch)
+        real_split = ab.ft.split_fold
+
+        def leaky(frame, fold):
+            _fit, ev = real_split(frame, fold)
+            return frame, ev  # the whole corpus, the eval month included
+
+        monkeypatch.setattr(ab.ft, "split_fold", leaky)
+        with pytest.raises(RuntimeError, match="overlap"):
+            ab.run(args)
+
+    def test_a_nan_from_the_ensemble_fails_the_run(self, tmp_path, monkeypatch):
+        _frame, ens, *_rest, args = self._setup(tmp_path, monkeypatch)
+        real = ens.predict_proba
+
+        def poisoned(X, apply_calibration=True):
+            out = np.array(real(X), dtype=float)
+            if len(X) > 1:
+                out[0] = np.nan
+            return out
+
+        monkeypatch.setattr(ens, "predict_proba", poisoned)
+        with pytest.raises(RuntimeError, match="non-finite"):
+            ab.run(args)
+
 
 class TestVerdict:
     def _pair(self, delta, se, se_cluster, n_folds=31):
@@ -267,3 +676,8 @@ class TestVerdict:
         assert m["brier"] == pytest.approx(((0.4**2 + 0.3**2 + 0.1**2) + (0.2**2 + 0.5**2 + 0.7**2)) / 2)
         assert m["log_loss"] == pytest.approx(-(np.log(0.6) + np.log(0.3)) / 2)
         assert 0 <= m["ece"] <= 1 and m["real_away"] == pytest.approx(0.5)
+
+    def test_standalone_metrics_refuses_non_finite_rows_instead_of_dropping_them(self):
+        proba = np.array([[0.6, 0.3, 0.1], [np.nan, np.nan, np.nan]])
+        with pytest.raises(RuntimeError, match="non-finite"):
+            ab.standalone_metrics(proba, np.array([0, 2]))

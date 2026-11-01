@@ -17,7 +17,10 @@ attack = defense = 1.0: its LEAGUE baseline in the Dixon-Coles member
 ESPN-spelling twin of the 2026 identity split. Both members look teams up by
 teams.name. Their blend weights were learned on val with these same fits:
 Dixon-Coles 0.046 and Poisson 0.046 (XGBoost 0.448, NN 0.354, LightGBM
-0.105), so together they make up 9.2% of every served 1x2 probability.
+0.105), so together they make up 9.2% of every served 1x2 probability. Both
+sit at the trainer's floor: EnsemblePredictor's log-loss fit put each below
+min_weight 0.05, which lifted them to 0.05 before renormalising (0.05/1.0869
+= 0.046, identically for both).
 
 SAME ARTIFACT AS THE DERIVED MARKETS. scripts/precompute_predictions.py
 derives the ~15 soccer markets from
@@ -31,8 +34,10 @@ is how stale the deployed fit is. The derived over-2.5 / BTTS effect is
 printed as information only, because a trainer change that refits the member
 would move those markets too.
 
-PRE-REGISTERED ARMS (fixed on 2026-11-01, before the first full run). Every
-arm is scored on the identical eval rows, through the serve path.
+ARMS (fixed in-session on 2026-11-01 before the first full run, but committed
+together with the results, so git cannot show the order; every arm came out
+null and none was picked on its result). Every arm is scored on the identical
+eval rows, through the serve path.
   served         the production ensemble as it is: all five on-disk
                  artifacts and the production weights.
   refit          the SAME fitters (the trainer's classes, configs and frame
@@ -56,7 +61,8 @@ arm is scored on the identical eval rows, through the serve path.
   predictions across val, which is a walk-forward stacking trainer that does
   not exist. Re-learning drop's weights would need the trainer's own val
   frame (its SQL odds columns), which the serve-path frame used here does not
-  reproduce. Neither is a faithful reproduction, so neither runs.
+  reproduce. Neither is a faithful reproduction, so neither runs. The
+  in-sample-optimal BOUND below covers both from above.
 
 READOUTS
   PRIMARY    the served soccer 1x2 Brier (3-class sum), comparing refit with
@@ -71,14 +77,25 @@ READOUTS
              from 2026-06); fixtures touching a team the merge map
              (scripts/data/soccer_team_merge_map.csv) will fold; per-fold
              deltas; refit_pretest vs served; refit vs drop.
-  BOUND      members_as_market: both members replaced by the de-vigged
+  BOUND      (diagnostic, not part of the verdict; the in-sample-optimal
+             readout was added after review, post hoc)
+             in_sample_optimal_weights: the five simplex weights refitted ON
+             THE EVAL ROWS THEMSELVES to minimise the Brier, solved exactly,
+             for the served, refit and refit_pretest members and for the
+             learned members alone. Leaky and optimistic by construction, so
+             it is an upper bound on what ANY linear re-weighting of these
+             member predictions could gain: the re-learned-weights arm that is
+             not run, and the trainer's own log-loss fit with its 0.05 floor,
+             are both inside it. It does not bound a better member.
+             members_as_market: both members replaced by the de-vigged
              closing 1x2 consensus (>= --min-books books, pre-kickoff rows
-             only, prematch_odds()) on the rows that have one. It shows how
-             far ANY refit could move the blend at its 9.2% weight if it were
-             as good as the market the learned members already track. Also
-             printed: the oracle (members = the realised outcome), the
-             absolute ceiling at that weight, and the |Δp| the refit
-             actually produced.
+             only, prematch_odds()). It bounds a refit only under the
+             ASSUMPTION that a scoreline member cannot beat that market, and
+             only on the rows that carry a quote (about 42%), which are the
+             rows where refit gains least; refit - served is printed on and
+             off those rows. The oracle (members = the realised outcome)
+             shows that without the assumption there is no hard bound. Also
+             printed: the |Δp| the refit actually produced.
   INFO       derived over-2.5 and BTTS through derive_from_lambdas, with each
              arm's Dixon-Coles reconciled to that arm's 1x2 (drop uses the
              served Dixon-Coles). No O/U-2.5 market anchor is applied here.
@@ -103,8 +120,11 @@ PROTOCOL
     and excluded, because the serve path cannot predict them either. Two
     checks fail the run loudly: the per-member blend computed here must
     equal ensemble.predict_proba on the batch, and a sample predicted one
-    row at a time (as production does) must equal the batch. Refit members
-    are round-tripped through save() and the serving loader.
+    row at a time (as production does) must equal the batch. A NaN on either
+    side fails them too. Refit members are round-tripped through save() and
+    the serving loader.
+  * Every arm except members_as_market must be finite on every eval row: a
+    non-finite probability fails the run rather than scoring as 0.
   * Paired statistics clustered by fold (ab_soccer_dixon_coles_refit.
     paired_delta). A fold with fewer than MIN_FOLD_EVAL rows is skipped
     rather than counted as a full cluster.
@@ -118,9 +138,15 @@ CORPUS CAVEAT
   map applied in memory: the twins' rows take the kept team's id and name,
   and twin fixtures (same teams within 36 h, same score) collapse to one row,
   keeping the row that carries features. It approximates the repaired
-  corpus for the members. It does NOT rebuild the learned members' features
-  (runbook step 10), and it ignores the one-hour kickoff shift, which moves
-  no row across a fold boundary that matters to a month-level refit.
+  corpus for the members, whose frame holds finished, scored rows only: 2,115
+  twin sides on 1,585 rows and 171 twin pairs, where the runbook's step 3
+  counts (2,469 sides, 308 folds) span every match status. It does NOT
+  rebuild the learned members' features (runbook step 10), and it ignores
+  the one-hour kickoff shift, which moves no row across a fold boundary that
+  matters to a month-level refit. Nor does it simulate step 4's row dedupe
+  (repair_football_data_kickoffs folds about 98 soccer rows: dedupe 68,
+  alias 4, fold 26); those rows stay in fit and eval, but the comparison is
+  paired, so a duplicate counts in every arm.
 
 RESULT (2026-11-01; read-only export of prod at 02:40Z, pre-runbook corpus;
 incumbent = the 2026-10-26 artifacts): DO-NOT-SHIP, every arm.
@@ -131,21 +157,29 @@ incumbent = the 2026-10-26 artifacts): DO-NOT-SHIP, every arm.
                           the gate.
   drop - served           +0.00017 ± 0.00011, clustered +0.00006 ± 0.00018.
   refit_pretest - served  -0.00008 ± 0.00005, clustered -0.00013 ± 0.00006.
-  The bound: both members replaced by the market move the blend by -0.00054
-  (clustered -0.00101 ± 0.00059, n=10,774 market rows), where the market
-  alone is -0.00146 ahead of served. At 9.2% weight no refit can reach -0.005.
+  The bound (diagnostic; the verdict rests on the direct measurement above):
+  weights refitted on the eval rows themselves, leaky and so optimistic, gain
+  at most -0.00058 with the refit members (whose combined weight rises only
+  to 0.161), -0.00021 with the served members and -0.00026 with
+  refit_pretest, so every linear re-weighting of these members, re-learned
+  weights included, falls at least 8x short of the gate. members_as_market
+  moves the blend -0.00054 (clustered -0.00101 ± 0.00059), but only if no
+  member can beat the market, and only on the 10,774 rows (42%) with a quote,
+  which are where refit gains least: refit - served is -0.00003 there and
+  -0.00053 off them (clustered -0.00067 ± 0.00021, n=14,955). The market
+  alone is -0.00146 ahead of served on its rows.
   Standalone, the refit Dixon-Coles member beats the served one by 0.0145
   (0.61463 vs 0.62911) and the refit Poisson member by 0.0066, but only about a
   third of the weighted first-order gain survives the blend.
   The simulated merge (--simulate-merge-map) gives refit - served -0.00024,
-  clustered -0.00032 ± 0.00009: the repair moves it AWAY from the gate,
-  because the served members already know the merged teams' football-data
-  names.
+  clustered -0.00032 ± 0.00009 (in-sample-optimal weights -0.00056): the
+  repair moves it AWAY from the gate, because the served members already know
+  the merged teams' football-data names.
   INFO, unanchored derived markets, refit - served: over-2.5 -0.0039 ± 0.0004
   (t-bound -0.0029), BTTS -0.0026 ± 0.0004.
-  Fidelity checks: 41 of 41 live predictions stored by this incumbent for
-  matches finished 2026-10-27..31 equal the served arm to 6e-8, and prod's
-  library versions reproduce the local member outputs to 1.2e-7 (n=400).
+  Fidelity checks: all 164 live predictions stored by this incumbent for
+  matches 2026-10-26..31 equal the served arm to 7.5e-8, and prod's library
+  versions reproduce the local member outputs to 1.2e-7 (n=400).
   Every refit of the Poisson member stops at 1000 iterations without
   converging (POISSON_CONFIG, regularization 0.001). The served artifact is
   the same.
@@ -165,6 +199,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -331,6 +366,130 @@ def blend(member_probs: Dict[str, np.ndarray], weights: Dict[str, float], member
     return out
 
 
+def assemble_arms(
+    learned: Dict[str, np.ndarray],
+    scoreline: Dict[str, Dict[str, np.ndarray]],
+    market: np.ndarray,
+    y_idx: np.ndarray,
+    weights: Dict[str, float],
+) -> Dict[str, np.ndarray]:
+    """Every arm's served 1x2 for one fold's eval rows, built from the
+    per-member probabilities. `learned` holds the three learned members
+    (shared by every arm), `scoreline[arm]` the two scoreline members of each
+    MEMBER_ARMS arm, and `market` the de-vigged consensus (NaN rows where there
+    is none).
+      served, refit, refit_pretest  all five members at the production weights
+      drop               the learned members alone, their weights renormalised
+      members_as_market  both scoreline members replaced by the market (NaN
+                         off the market rows)
+      oracle             the served members' share replaced by the outcome"""
+    missing = [a for a in MEMBER_ARMS if a not in scoreline]
+    if missing:
+        raise ValueError(f"no scoreline members for arm(s) {missing}")
+    out = {arm: blend({**learned, **scoreline[arm]}, weights, ALL_MEMBERS) for arm in MEMBER_ARMS}
+    out["drop"] = blend(learned, weights, LEARNED_MEMBERS)
+    mk = np.asarray(market, dtype=float)
+    out[BOUND_ARM] = blend({**learned, POISSON: mk, DIXON_COLES: mk}, weights, ALL_MEMBERS)
+    w = normalised_weights(weights, ALL_MEMBERS)
+    member_sum = np.zeros_like(out["served"])
+    for m in SCORELINE_MEMBERS:
+        member_sum = member_sum + w[m] * np.asarray(scoreline["served"][m], dtype=float)
+    out["oracle"] = oracle_blend(out["served"], member_sum, y_idx, float(sum(w[m] for m in SCORELINE_MEMBERS)))
+    return out
+
+
+def require_finite(what: str, proba: np.ndarray) -> None:
+    """Refuse loudly if any probability is NaN or infinite. A tolerance test
+    alone lets NaN through: np.max of an array holding NaN is NaN, and
+    `NaN > atol` is False."""
+    arr = np.asarray(proba, dtype=float)
+    bad = ~np.isfinite(arr)
+    if bad.any():
+        rows = int(bad.reshape(len(arr), -1).any(axis=1).sum()) if arr.ndim else 1
+        raise RuntimeError(f"{what}: {rows} row(s) carry non-finite probabilities")
+
+
+def max_gap(what: str, a: np.ndarray, b: np.ndarray, atol: float = FIDELITY_ATOL) -> float:
+    """max |a - b| between two probability arrays, refusing loudly unless both
+    are finite, the same shape, and within `atol`."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if a.shape != b.shape:
+        raise RuntimeError(f"{what}: shapes {a.shape} and {b.shape} differ")
+    require_finite(what, a)
+    require_finite(what, b)
+    gap = float(np.max(np.abs(a - b))) if a.size else 0.0
+    if not math.isfinite(gap) or gap > atol:
+        raise RuntimeError(f"{what} differ by {gap:.2e} (tolerance {atol:.0e})")
+    return gap
+
+
+def serve_path_fidelity(
+    ensemble: Any, serve_x: pd.DataFrame, p_blend: np.ndarray, sample_size: int = SINGLE_ROW_SAMPLE
+) -> Tuple[float, float, int]:
+    """The two serve-path checks that fail the run loudly: the per-member
+    blend this harness computes must equal ensemble.predict_proba on the
+    batch, and a sample predicted one row at a time (as production does) must
+    equal the batch. Returns (batch gap, single-row gap, sample size)."""
+    p_ensemble = np.asarray(ensemble.predict_proba(serve_x), dtype=float)
+    fid_batch = max_gap("per-member blend vs ensemble.predict_proba", p_blend, p_ensemble)
+    rng = np.random.default_rng(20261101)
+    sample = rng.choice(len(serve_x), size=min(sample_size, len(serve_x)), replace=False)
+    single = np.vstack([np.asarray(ensemble.predict_proba(serve_x.iloc[[i]]), dtype=float) for i in sample])
+    fid_single = max_gap("one-row-at-a-time predictions vs the batch", single, p_ensemble[sample])
+    return fid_batch, fid_single, int(len(sample))
+
+
+def check_fold_disjoint(fit_df: pd.DataFrame, ev: pd.DataFrame, fold: Any) -> None:
+    """Refuse a fold whose fit reaches its own eval rows: every fit row must
+    be strictly before the fold's cutoff and every eval row on or after it."""
+    if not (fit_df["match_date"] < fold.fit_cutoff).all() or (ev["match_date"] < fold.fit_cutoff).any():
+        raise RuntimeError(f"fold {fold.label}: fit and eval overlap")
+
+
+def optimal_simplex_weights(sources: Sequence[np.ndarray], y_idx: np.ndarray) -> Tuple[np.ndarray, float]:
+    """(weights, mean Brier): the convex weights (w >= 0, sum 1) that minimise
+    the mean 3-class Brier of sum_k w_k P_k against y_idx, solved exactly.
+
+    The Brier is quadratic in w: mean ||sum_k w_k P_k - Y||^2 = w'Gw - 2b'w + 1
+    with G_jk = mean <P_j, P_k> and b_j = mean <P_j, Y>. Its minimum over the
+    simplex lies on some support S, where it is the minimum of the same
+    quadratic under sum(w_S) = 1 alone: one bordered linear solve. Every
+    support is tried (31 for five sources), a solution with a negative weight
+    is discarded, and the best feasible one wins, so there is no optimiser
+    tolerance to argue about."""
+    P = np.stack([np.asarray(p, dtype=float) for p in sources])
+    k, n = P.shape[0], P.shape[1]
+    require_finite("optimal_simplex_weights sources", P.reshape(k * n, -1))
+    Y = np.zeros(P.shape[1:])
+    Y[np.arange(n), np.asarray(y_idx, dtype=int)] = 1.0
+    G = np.einsum("inc,jnc->ij", P, P) / n
+    b = np.einsum("inc,nc->i", P, Y) / n
+    best_w: Optional[np.ndarray] = None
+    best_obj = math.inf
+    for size in range(1, k + 1):
+        for support in itertools.combinations(range(k), size):
+            S = list(support)
+            A = np.zeros((size + 1, size + 1))
+            A[:size, :size] = 2.0 * G[np.ix_(S, S)]
+            A[:size, size] = 1.0
+            A[size, :size] = 1.0
+            rhs = np.concatenate([2.0 * b[S], [1.0]])
+            w_s = np.linalg.lstsq(A, rhs, rcond=None)[0][:size]
+            if (w_s < -1e-12).any():
+                continue
+            w = np.zeros(k)
+            w[S] = np.clip(w_s, 0.0, None)
+            w = w / w.sum()
+            obj = float(w @ G @ w - 2.0 * b @ w)
+            if obj < best_obj:
+                best_w, best_obj = w, obj
+    if best_w is None:
+        raise RuntimeError("optimal_simplex_weights found no feasible support")
+    brier = float(ft.brier_multiclass(np.tensordot(best_w, P, axes=1), y_idx).mean())
+    return best_w, brier
+
+
 def serve_row(features: Dict[str, Any], identity: Dict[str, Any], medians: Dict[str, float]) -> Tuple[dict, int]:
     """One eval row, exactly as precompute_predictions builds it. Returns
     (row, number of values replaced by a corpus median).
@@ -479,8 +638,7 @@ def standalone_metrics(proba: np.ndarray, y_idx: np.ndarray) -> Dict[str, Any]:
 
     proba = np.asarray(proba, dtype=float)
     y = np.asarray(y_idx, dtype=int)
-    ok = np.isfinite(proba).all(axis=1)
-    proba, y = proba[ok], y[ok]
+    require_finite("standalone_metrics (mask the rows out first)", proba)
     if not len(y):
         return {"n": 0}
     cal = ProbabilityCalibrator().calibration_error(proba, y)
@@ -556,10 +714,19 @@ def load_ensemble(model_path: str):
     return ensemble, meta
 
 
-def member_fingerprint(path: Path) -> Dict[str, Any]:
+def member_fingerprint(model_path: str, member: str) -> Dict[str, Any]:
+    """sha256 and fit summary of the artifact the API loader resolves for
+    `member` (_latest_model_bin: the newest */model.bin by mtime), so the
+    provenance names the file that was actually scored."""
+    from services.prediction_service import _latest_model_bin  # type: ignore
+
+    path = _latest_model_bin(Path(model_path) / member)
+    if path is None:
+        raise RuntimeError(f"no {member} artifact under {model_path}/{member}/")
     raw = path.read_bytes()
     data = json.loads(raw)
     return {
+        "path": str(path),
         "sha256": hashlib.sha256(raw).hexdigest(),
         "teams": len(data.get("team_attack") or {}),
         "league_baselines": len(data.get("league_baselines") or {}),
@@ -732,7 +899,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     w_norm = normalised_weights(weights, ALL_MEMBERS)
     member_weight = float(sum(w_norm[m] for m in SCORELINE_MEMBERS))
     served_members = {m: ensemble.models[m] for m in SCORELINE_MEMBERS}
-    fingerprints = {m: member_fingerprint(Path(args.model_path) / m / "1.0.0" / "model.bin") for m in SCORELINE_MEMBERS}
+    fingerprints = {m: member_fingerprint(args.model_path, m) for m in SCORELINE_MEMBERS}
     fit_slice = served_fit_slice(frame, args.model_path, set(served_members[DIXON_COLES].team_attack))
     seen_ids = load_seen_ids(args.model_path)
 
@@ -792,16 +959,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     learned = {m: np.asarray(ensemble.models[m].predict_proba(serve_x), dtype=float) for m in LEARNED_MEMBERS}
     served_scoreline = {m: member_proba(served_members[m], eval_df) for m in SCORELINE_MEMBERS}
     p_served_all = blend({**learned, **served_scoreline}, weights, ALL_MEMBERS)
-    p_ensemble = np.asarray(ensemble.predict_proba(serve_x), dtype=float)
-    fidelity_batch = float(np.max(np.abs(p_ensemble - p_served_all)))
-    if fidelity_batch > FIDELITY_ATOL:
-        raise RuntimeError(f"per-member blend differs from ensemble.predict_proba by {fidelity_batch:.2e}")
-    rng = np.random.default_rng(20261101)
-    sample = rng.choice(len(serve_x), size=min(SINGLE_ROW_SAMPLE, len(serve_x)), replace=False)
-    single = np.vstack([np.asarray(ensemble.predict_proba(serve_x.iloc[[i]]), dtype=float) for i in sample])
-    fidelity_single = float(np.max(np.abs(single - p_ensemble[sample])))
-    if fidelity_single > FIDELITY_ATOL:
-        raise RuntimeError(f"one-row-at-a-time predictions differ from the batch by {fidelity_single:.2e}")
+    fidelity_batch, fidelity_single, n_sample = serve_path_fidelity(ensemble, serve_x, p_served_all)
 
     market = load_market_1x2(args.database_url, folds[0].eval_start, span_end, args.min_books)
     pos = {idx: i for i, idx in enumerate(eval_df.index)}
@@ -824,8 +982,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 skipped.append({"fold": fold.label, "n_eval": int(len(ev))})
                 logger.warning("fold %s skipped: %d eval rows < %d", fold.label, len(ev), MIN_FOLD_EVAL)
                 continue
-            if not (fit_df["match_date"] < fold.fit_cutoff).all() or (ev["match_date"] < fold.fit_cutoff).any():
-                raise RuntimeError(f"fold {fold.label}: fit and eval overlap")
+            check_fold_disjoint(fit_df, ev, fold)
             idx = np.array([pos[i] for i in ev.index])
             refit = {}
             for m in SCORELINE_MEMBERS:
@@ -846,19 +1003,15 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             c.add("away_team", ev["away_team"].to_numpy(dtype=object))
             c.add("identity_split", ev["identity_split"].to_numpy(dtype=float))
             c.add("espn_era", (ev["match_date"] >= ESPN_ERA_START).to_numpy(dtype=float))
-            p_arm: Dict[str, np.ndarray] = {}
+            scoreline: Dict[str, Dict[str, np.ndarray]] = {}
             for arm in MEMBER_ARMS:
-                probs = {m: member_proba(arm_members[arm][m], ev) for m in SCORELINE_MEMBERS}
+                scoreline[arm] = {m: member_proba(arm_members[arm][m], ev) for m in SCORELINE_MEMBERS}
                 for m in SCORELINE_MEMBERS:
-                    c.add(f"q::{arm}::{m}", probs[m])
+                    c.add(f"q::{arm}::{m}", scoreline[arm][m])
                 c.add(f"known::{arm}", known_teams(arm_members[arm][DIXON_COLES], ev["home_team"], ev["away_team"]))
-                p_arm[arm] = blend({**lp, **probs}, weights, ALL_MEMBERS)
-            p_arm["drop"] = blend(lp, weights, LEARNED_MEMBERS)
             mk = np.vstack([market[mid].probs if mid in market else np.full(3, np.nan) for mid in ev["match_id"]])
             c.add("market", mk)
-            p_arm[BOUND_ARM] = blend({**lp, POISSON: mk, DIXON_COLES: mk}, weights, ALL_MEMBERS)
-            member_sum = sum(w_norm[m] * served_scoreline[m][idx] for m in SCORELINE_MEMBERS)
-            p_arm["oracle"] = oracle_blend(p_arm["served"], member_sum, y, member_weight)
+            p_arm = assemble_arms(lp, scoreline, mk, y, weights)
             for arm, p in p_arm.items():
                 c.add(f"p::{arm}", p)
             for m in LEARNED_MEMBERS:
@@ -889,7 +1042,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             "median_filled_values": n_filled,
             "fidelity_batch_max_abs": fidelity_batch,
             "fidelity_single_row_max_abs": fidelity_single,
-            "fidelity_single_row_sample": int(len(sample)),
+            "fidelity_single_row_sample": n_sample,
             "folds_requested": [f.label for f in folds],
             "skipped_folds": skipped,
             "fits": fits,
@@ -926,9 +1079,20 @@ def build_report(s: Dict[str, np.ndarray], meta: Dict[str, Any], out_dir: Option
     folds_arr = s["fold"]
     labels = list(dict.fromkeys(folds_arr.tolist()))
     arms = list(ARMS) + [BOUND_ARM, "oracle"]
-    briers = {a: ft.brier_multiclass(np.nan_to_num(s[f"p::{a}"]), y) for a in arms}
+    # Every arm but the bound must be finite on every row: a NaN scored as 0
+    # would be a Brier of 1.0 that fails nothing. The bound is NaN off the
+    # market rows by design, and is masked to exactly those rows.
+    scored = [a for a in arms if a != BOUND_ARM]
+    for a in scored:
+        require_finite(f"arm {a}", s[f"p::{a}"])
     has_market = np.isfinite(s["market"]).all(axis=1)
-    briers[BOUND_ARM] = np.where(has_market, briers[BOUND_ARM], np.nan)
+    bound_finite = np.isfinite(s[f"p::{BOUND_ARM}"]).all(axis=1)
+    if not np.array_equal(bound_finite, has_market):
+        raise RuntimeError(
+            f"{BOUND_ARM} is finite on {int(bound_finite.sum())} rows but the market on {int(has_market.sum())}"
+        )
+    briers = {a: ft.brier_multiclass(s[f"p::{a}"], y) for a in scored}
+    briers[BOUND_ARM] = np.where(has_market, ft.brier_multiclass(np.nan_to_num(s[f"p::{BOUND_ARM}"]), y), np.nan)
 
     def pair(a: str, b: str, mask: Optional[np.ndarray] = None, score: Optional[Dict[str, np.ndarray]] = None):
         sc = score or briers
@@ -965,11 +1129,13 @@ def build_report(s: Dict[str, np.ndarray], meta: Dict[str, Any], out_dir: Option
         "bound": {
             "members_as_market_vs_served": pair(BOUND_ARM, "served", mask=has_market),
             "refit_vs_served_on_market_rows": pair("refit", "served", mask=has_market),
+            "refit_vs_served_off_market_rows": pair("refit", "served", mask=~has_market),
             "drop_vs_served_on_market_rows": pair("drop", "served", mask=has_market),
             "market_alone_vs_served": _market_alone(s, y, briers, folds_arr, has_market),
             "oracle_vs_served": pair("oracle", "served"),
             "refit_abs_shift_mean": float(np.abs(s["p::refit"] - s["p::served"]).sum(axis=1).mean()),
             "refit_abs_shift_p99": float(np.quantile(np.abs(s["p::refit"] - s["p::served"]).sum(axis=1), 0.99)),
+            "in_sample_optimal_weights": in_sample_optimal_weights(s, y, float(briers["served"].mean())),
         },
         "strata": {
             name: {
@@ -1016,6 +1182,27 @@ def build_report(s: Dict[str, np.ndarray], meta: Dict[str, Any], out_dir: Option
     return report
 
 
+def in_sample_optimal_weights(s: Dict[str, np.ndarray], y: np.ndarray, brier_served: float) -> Dict[str, Any]:
+    """The BOUND on any linear re-weighting: for the learned members alone
+    and for each MEMBER_ARMS arm's five members, the simplex weights that
+    minimise the Brier on the eval rows themselves (optimal_simplex_weights).
+    Fitted on the rows it scores, so it is optimistic by construction and no
+    SE is attached: it is an upper bound, not a test."""
+    sets: Dict[str, List[Tuple[str, str]]] = {"learned_only": [("learned", m) for m in LEARNED_MEMBERS]}
+    for arm in MEMBER_ARMS:
+        sets[arm] = sets["learned_only"] + [(arm, m) for m in SCORELINE_MEMBERS]
+    out: Dict[str, Any] = {"note": "weights fitted on the eval rows themselves: optimistic upper bound, not a test"}
+    for name, cols in sets.items():
+        w, brier = optimal_simplex_weights([s[f"q::{src}::{m}"] for src, m in cols], y)
+        out[name] = {
+            "weights": {m: float(wi) for (_src, m), wi in zip(cols, w)},
+            "scoreline_weight": float(sum(wi for (_src, m), wi in zip(cols, w) if m in SCORELINE_MEMBERS)),
+            "brier": brier,
+            "delta_vs_served": brier - brier_served,
+        }
+    return out
+
+
 def _market_alone(s, y, briers, folds_arr, has_market) -> Dict[str, Any]:
     mb = np.where(has_market, ft.brier_multiclass(np.nan_to_num(s["market"]), y), np.nan)
     out = ft.paired_delta(mb[has_market], briers["served"][has_market], folds_arr[has_market])
@@ -1026,6 +1213,8 @@ def _market_alone(s, y, briers, folds_arr, has_market) -> Dict[str, Any]:
 def _derived_info(s, y_over, y_btts, folds_arr) -> Dict[str, Any]:
     out: Dict[str, Any] = {"note": "1x2-reconciled, no O/U-2.5 market anchor; information only, not gated"}
     for market, truth in (("over25", y_over), ("btts", y_btts)):
+        for a in ARMS:
+            require_finite(f"derived {market} ({a})", s[f"{market}::{a}"])
         sc = {a: ft.brier_binary(s[f"{market}::{a}"], truth) for a in ARMS}
         block: Dict[str, Any] = {
             "brier": {a: float(sc[a].mean()) for a in ARMS},
@@ -1105,9 +1294,20 @@ def format_report(r: Dict[str, Any]) -> str:
     L += ["", "head to head:"]
     L += [_pair_line(k, v) for k, v in r["head_to_head"].items()]
     b = r["bound"]
-    L += ["", "BOUND (how far the members can move the served 1x2 at their weight):"]
+    L += ["", "BOUND (diagnostic, not the verdict):"]
+    opt = b["in_sample_optimal_weights"]
+    L.append(f"  in-sample-optimal simplex weights ({opt['note']}):")
+    for name in ("learned_only",) + MEMBER_ARMS:
+        x = opt[name]
+        ws = " ".join(f"{k.split('_')[0][:4]} {v:.3f}" for k, v in x["weights"].items())
+        L.append(
+            f"    {name:<15} Brier {x['brier']:.5f}  vs served {_f(x['delta_vs_served'])}  "
+            f"scoreline weight {x['scoreline_weight']:.3f}   [{ws}]"
+        )
+    L.append("  members_as_market assumes no scoreline member beats the market; it covers the market rows only:")
     L.append(_pair_line("members_as_market - served", b["members_as_market_vs_served"]))
     L.append(_pair_line("refit - served (market rows)", b["refit_vs_served_on_market_rows"]))
+    L.append(_pair_line("refit - served (off market rows)", b["refit_vs_served_off_market_rows"]))
     L.append(_pair_line("drop - served (market rows)", b["drop_vs_served_on_market_rows"]))
     L.append(_pair_line("market alone - served", b["market_alone_vs_served"]))
     L.append(_pair_line("oracle - served", b["oracle_vs_served"]))
