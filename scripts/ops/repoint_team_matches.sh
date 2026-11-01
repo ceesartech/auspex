@@ -54,7 +54,7 @@
 # exits with the tool's own status; a pipe through tail would report tail's 0.
 # The second pass leaves 4 match_stats rows archive-only (the fd repair
 # archived the other club's stats of the 4 alias-merged fixtures): a
-# promote_raw run after it (runbook step 13, promote_raw_after_repair.sh) writes them again.
+# promote_raw run after it (runbook step 14, promote_raw_after_repair.sh) writes them again.
 #
 # RUN ORDER (scripts/ops/soccer_repair_runbook.sh runs it, each step through
 # its own wrapper): 1 THIS --pass 1, 2 migrate_027_outcome_trigger.sh,
@@ -196,7 +196,7 @@ log "NEXT (not run here; the runbook's step 10 recomputes every finished soccer 
 $DC exec -T api sh -c "grep -A1 'Refresh features' /tmp/repoint_team_apply.log | tail -1"
 if [ "$replan" = "0" ] && [ "$stamps" = "$STAMPS" ] && [ "$left" = "$LEFT_AFTER" ] && [ "$n_after" = "$n_before" ]; then
   if [ "$PASS" = "2" ]; then
-    log "DONE: 0 Liga MX rows left on santos/guadalajara. Runbook step 13 (scripts/ops/promote_raw_after_repair.sh) re-writes the 4 match_stats rows the fd repair archived."
+    log "DONE: 0 Liga MX rows left on santos/guadalajara. Runbook step 14 (scripts/ops/promote_raw_after_repair.sh) re-writes the 4 match_stats rows the fd repair archived."
   else
     log "DONE: 6 sides left for --pass 2 (after merge_soccer_teams and repair_football_data_kickoffs)"
   fi

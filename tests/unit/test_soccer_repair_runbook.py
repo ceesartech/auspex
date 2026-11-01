@@ -54,6 +54,7 @@ WRAPPERS = [
     "backfill_soccer_regulation_scores.sh",
     "backfill_season_labels.sh",
     "backfill_soccer_never_resulted.sh",
+    "repair_soccer_labels.sh",
     "promote_raw_after_repair.sh",
     "grade_folded_soccer_rows.sh",
 ]
@@ -90,6 +91,8 @@ EXPECTED_ORDER = [
     # re-run's own ceilings
     "backfill_soccer_never_resulted",
     "cleanup_soccer_orphans --after-never-resulted",
+    # step 13: the labels repair, before promote_raw (step 14), which exits 3 on the mis-decoded raw rows until then
+    "repair_soccer_labels",
     "promote_raw_after_repair",
     "grade_folded_soccer_rows",
 ]
@@ -208,9 +211,9 @@ def test_a_full_run_goes_through_every_step_in_order_and_restores_retrain(tmp_pa
         first_step = next(i for i, c in enumerate(calls) if "compute_features" in c)
         assert pause < first_step < unpause
     assert _paused(af) == {"retrain_models": False, "retrain_halftime_dc": False} and _markers(tmp_path) == []
-    for n in range(1, 16):
-        assert f"STEP {n}/15 START" in out and f"STEP {n}/15 DONE" in out
-    # two feature recomputes: step 10 after steps 1-9, step 15 after steps 12-13
+    for n in range(1, 17):
+        assert f"STEP {n}/16 START" in out and f"STEP {n}/16 DONE" in out
+    # two feature recomputes: step 10 after steps 1-9, step 16 after steps 12-14
     assert len([c for c in calls if "compute_features.py --backfill-finished soccer" in c]) == 2
     assert "re-grade: applying 135 change(s), pinned (--expect-changes 135)" in out
 
@@ -230,7 +233,7 @@ def test_from_and_only(tmp_path):
     assert not [c for c in calls if "compute_features" in c]
 
 
-@pytest.mark.parametrize("args", [["--from"], ["--from", "0"], ["--from", "16"], ["--only", "x"], ["--bogus"]])
+@pytest.mark.parametrize("args", [["--from"], ["--from", "0"], ["--from", "17"], ["--only", "x"], ["--bogus"]])
 def test_bad_arguments_exit_2(tmp_path, args):
     rc, out, steps, _, _ = _run(tmp_path, *args)
     assert rc == 2 and "usage" in out and steps == []
@@ -442,7 +445,7 @@ def test_a_re_run_records_already_done_steps(tmp_path):
     rc, out, steps, calls, _ = _run(tmp_path, REGRADE_CHANGES="0", **env)
     assert rc == 0, out
     recorded = state.read_text()
-    for n in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15):
+    for n in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15, 16):
         assert f"step={n} result=already_done" in recorded, recorded
     assert "step=11 result=checked" in recorded
     assert not [c for c in calls if "compute_features" in c or "--apply" in c]
@@ -510,7 +513,7 @@ def test_a_failed_corpus_step_is_not_forgotten_by_a_re_run_that_reads_it_already
     assert "step=1 result=failed" in (tmp_path / "state").read_text()
 
     rc, out = fd.run(RUNBOOK_IN(tmp_path), {**_env(tmp_path), "ALREADY_REPOINT_TEAM_MATCHES": "1"}, "--only", "1")
-    assert rc == 0 and "STEP 1/15 DONE (already_done)" in out, out
+    assert rc == 0 and "STEP 1/16 DONE (already_done)" in out, out
     assert "the repair is not complete" in out and "ALERT: retrain_models stays PAUSED" in out
     assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": True, "retrain_halftime_dc": True}
 
@@ -577,6 +580,10 @@ def test_the_scan_covers_every_repair_tool_the_runbook_drives(tmp_path):
         "backfill_soccer_regulation_scores",
         "regrade_predictions",
         "backfill_season_labels",
+        "backfill_never_resulted",
+        "repair_soccer_labels",
+        "promote_raw",
+        "grade_matches",
     ):
         assert f"*/app/scripts/{tool}[.]py*--apply*" in scan, tool
 
@@ -686,7 +693,7 @@ def test_a_run_killed_outright_during_a_corpus_step_is_not_forgotten(tmp_path):
     assert "step=1 result=started" in (tmp_path / "state").read_text()
 
     rc, out = fd.run(RUNBOOK_IN(tmp_path), {**env, "ALREADY_REPOINT_TEAM_MATCHES": "1"}, "--only", "1")
-    assert rc == 0 and "STEP 1/15 DONE (already_done)" in out and "the repair is not complete" in out, out
+    assert rc == 0 and "STEP 1/16 DONE (already_done)" in out and "the repair is not complete" in out, out
     assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": True, "retrain_halftime_dc": True}
 
     rc, out = fd.run(RUNBOOK_IN(tmp_path), _env(tmp_path), "--only", "10")
@@ -694,7 +701,7 @@ def test_a_run_killed_outright_during_a_corpus_step_is_not_forgotten(tmp_path):
     assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": False, "retrain_halftime_dc": False}
 
 
-# --- steps 12-15, after the 11-step runbook ---------------------------------------------------------------------------
+# --- steps 12-16, after the 11-step runbook ---------------------------------------------------------------------------
 
 # What a full run of the 11-step runbook (deployed at d592a4d) leaves in the state file: the same format.
 OLD_RUN_STATE = "".join(
@@ -714,13 +721,19 @@ def test_from_12_after_a_full_run_of_the_11_step_runbook_runs_only_the_new_steps
     assert rc == 0 and "ALL STEPS DONE (from step 12)" in out and "not complete" not in out, out
     assert "steps 1-11 are recorded complete" in out
     assert steps == NEW_STEPS
-    assert len([c for c in calls if "compute_features.py --backfill-finished soccer" in c]) == 1  # step 15 only
+    assert len([c for c in calls if "compute_features.py --backfill-finished soccer" in c]) == 1  # step 16 only
     assert _paused(af) == {"retrain_models": False, "retrain_halftime_dc": False} and _markers(tmp_path) == []
     state = (tmp_path / "state").read_text()
     assert state.startswith(OLD_RUN_STATE)  # appended to, in the same format
-    for n, r in ((12, "started"), (12, "changed"), (13, "started"), (13, "changed"), (14, "changed"), (15, "changed")):
+    for n, r in [(12, "started"), (12, "changed"), (13, "started"), (13, "changed"), (14, "started")] + [
+        (14, "changed"),
+        (15, "changed"),
+        (16, "changed"),
+    ]:
         assert f"step={n} result={r} at=" in state, state
-    assert "step=14 result=started" not in state  # predictions only: not a corpus step
+    assert "step=15 result=started" not in state  # predictions only: not a corpus step
+    # the labels repair (a corpus step) runs between the never_resulted backfill and promote_raw
+    assert state.index("step=13 result=started") < state.index("step=13 result=changed") < state.index("step=14 ")
 
 
 @pytest.mark.parametrize(
@@ -734,8 +747,8 @@ def test_from_12_after_a_full_run_of_the_11_step_runbook_runs_only_the_new_steps
     ],
     ids=["no-state-file", "step-11-unfinished", "step-7-cut-short", "step-4-failed-later", "step-9-never-ran"],
 )
-@pytest.mark.parametrize("args", [["--from", "12"], ["--only", "13"], ["--only", "15"]])
-def test_steps_12_to_15_refuse_to_start_unless_steps_1_to_11_are_recorded_complete(tmp_path, state, missing, args):
+@pytest.mark.parametrize("args", [["--from", "12"], ["--from", "13"], ["--only", "13"], ["--only", "16"]])
+def test_steps_12_to_16_refuse_to_start_unless_steps_1_to_11_are_recorded_complete(tmp_path, state, missing, args):
     if state is not None:
         (tmp_path / "state").write_text(state)
     rc, out, steps, calls, af = _run(tmp_path, *args)
@@ -745,8 +758,8 @@ def test_steps_12_to_15_refuse_to_start_unless_steps_1_to_11_are_recorded_comple
     assert _paused(af) == {"retrain_models": False, "retrain_halftime_dc": False}
 
 
-def test_a_run_from_step_1_reaches_steps_12_to_15_once_1_to_11_are_recorded(tmp_path):
-    """No state file (lost): the runbook from step 1 — finished steps read ALREADY DONE — records 1-11, then 12-15
+def test_a_run_from_step_1_reaches_steps_12_to_16_once_1_to_11_are_recorded(tmp_path):
+    """No state file (lost): the runbook from step 1 — finished steps read ALREADY DONE — records 1-11, then 12-16
     run in the same run."""
     env = {f"ALREADY_{w[:-3].upper()}": "1" for w in WRAPPERS[:8]}
     rc, out, steps, _, af = _run(tmp_path, REGRADE_CHANGES="0", **env)
@@ -761,7 +774,7 @@ def test_a_run_from_step_1_reaches_steps_12_to_15_once_1_to_11_are_recorded(tmp_
 )
 def test_step_12_records_already_done_only_when_both_its_wrappers_are(tmp_path, backfill_done, cleanup_done, want):
     """The backfill heals rows while the cleanup re-run finds nothing (or the other way round): either one's ALREADY
-    DONE alone must not record step 12 already_done — that would close its 'started' and let step 15 skip."""
+    DONE alone must not record step 12 already_done — that would close its 'started' and let step 16 skip."""
     (tmp_path / "state").write_text(OLD_RUN_STATE)
     env = {}
     if backfill_done:
@@ -769,39 +782,39 @@ def test_step_12_records_already_done_only_when_both_its_wrappers_are(tmp_path, 
     if cleanup_done:
         env["ALREADY_CLEANUP_SOCCER_ORPHANS"] = "1"
     rc, out, _, calls, _ = _run(tmp_path, "--only", "12", **env)
-    assert rc == 0 and f"STEP 12/15 DONE ({want})" in out, out
+    assert rc == 0 and f"STEP 12/16 DONE ({want})" in out, out
     assert f"step=12 result={want}" in (tmp_path / "state").read_text()
     if want == "changed":
         assert "the repair is not complete" in out and "ALERT: retrain_models stays PAUSED" in out
-        assert "re-run the runbook (--from N, or --only 15)" in out
-        rc, out = fd.run(RUNBOOK_IN(tmp_path), _env(tmp_path), "--only", "15")
+        assert "re-run the runbook (--from N, or --only 16)" in out
+        rc, out = fd.run(RUNBOOK_IN(tmp_path), _env(tmp_path), "--only", "16")
         assert rc == 0 and "not complete" not in out, out
         assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": False, "retrain_halftime_dc": False}
     else:
         assert "not complete" not in out
 
 
-def test_a_failing_step_12_keeps_the_retrains_paused_until_step_15(tmp_path):
+def test_a_failing_step_12_keeps_the_retrains_paused_until_step_16(tmp_path):
     (tmp_path / "state").write_text(OLD_RUN_STATE)
     rc, out, steps, calls, af = _run(tmp_path, "--from", "12", FAIL_BACKFILL_SOCCER_NEVER_RESULTED="1")
     assert rc == 1 and "STEP 12 FAILED (exit 1)" in out and "re-run with --from 12" in out, out
     assert steps == ["backfill_soccer_never_resulted"]  # the cleanup re-run is not reached
     assert "step=12 result=failed" in (tmp_path / "state").read_text()
-    assert "step 15 runs again before the retrain DAGs are unpaused" in out
-    assert "Unpause it only after step 15 has run: re-run the runbook (--from 12, or --only 15)" in out
+    assert "step 16 runs again before the retrain DAGs are unpaused" in out
+    assert "Unpause it only after step 16 has run: re-run the runbook (--from 12, or --only 16)" in out
     assert _paused(af) == {"retrain_models": True, "retrain_halftime_dc": True}
 
     env = {**_env(tmp_path), "ALREADY_BACKFILL_SOCCER_NEVER_RESULTED": "1", "ALREADY_CLEANUP_SOCCER_ORPHANS": "1"}
     rc, out = fd.run(RUNBOOK_IN(tmp_path), env, "--from", "12")
-    assert rc == 0 and "STEP 12/15 DONE (already_done)" in out and "not complete" not in out, out
-    assert "adopted" in out and "STEP 15/15 DONE (changed)" in out  # the failure is remembered: 15 recomputes
+    assert rc == 0 and "STEP 12/16 DONE (already_done)" in out and "not complete" not in out, out
+    assert "adopted" in out and "STEP 16/16 DONE (changed)" in out  # the failure is remembered: 16 recomputes
     assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": False, "retrain_halftime_dc": False}
 
 
 @pytest.mark.parametrize("rc_cleanup", ["1", "2"])
 def test_a_failing_cleanup_re_run_fails_step_12_and_keeps_the_retrains_paused(tmp_path, rc_cleanup):
     """The backfill applied, then the cleanup re-run failed (1) or ended INCOMPLETE (2): step 12 fails with its exit
-    code, is recorded 'failed', and the retrains stay paused until step 15 has run."""
+    code, is recorded 'failed', and the retrains stay paused until step 16 has run."""
     (tmp_path / "state").write_text(OLD_RUN_STATE)
     rc, out, steps, _, af = _run(tmp_path, "--from", "12", FAIL_CLEANUP_SOCCER_ORPHANS=rc_cleanup)
     assert rc == int(rc_cleanup) and f"STEP 12 FAILED (exit {rc_cleanup})" in out and "--from 12" in out, out
@@ -811,30 +824,75 @@ def test_a_failing_cleanup_re_run_fails_step_12_and_keeps_the_retrains_paused(tm
     assert _paused(af) == {"retrain_models": True, "retrain_halftime_dc": True}
 
 
-def test_a_failing_step_14_is_not_a_corpus_failure(tmp_path):
+def test_a_failing_step_15_is_not_a_corpus_failure(tmp_path):
     (tmp_path / "state").write_text(OLD_RUN_STATE)
-    rc, out, steps, _, af = _run(tmp_path, "--only", "14", FAIL_GRADE_FOLDED_SOCCER_ROWS="1")
-    assert rc == 1 and "STEP 14 FAILED" in out, out
+    rc, out, steps, _, af = _run(tmp_path, "--only", "15", FAIL_GRADE_FOLDED_SOCCER_ROWS="1")
+    assert rc == 1 and "STEP 15 FAILED" in out, out
     assert "result=failed" not in (tmp_path / "state").read_text()
     assert _paused(af) == {"retrain_models": False, "retrain_halftime_dc": False}
 
 
-def test_step_15_is_skipped_when_steps_12_and_13_changed_nothing(tmp_path):
+def test_step_16_is_skipped_when_steps_12_to_14_changed_nothing(tmp_path):
     (tmp_path / "state").write_text(OLD_RUN_STATE)
     env = {
         "ALREADY_BACKFILL_SOCCER_NEVER_RESULTED": "1",
         "ALREADY_CLEANUP_SOCCER_ORPHANS": "1",
+        "ALREADY_REPAIR_SOCCER_LABELS": "1",
         "ALREADY_PROMOTE_RAW_AFTER_REPAIR": "1",
         "ALREADY_GRADE_FOLDED_SOCCER_ROWS": "1",
     }
     rc, out, _, calls, _ = _run(tmp_path, "--from", "12", **env)
-    assert rc == 0 and "STEP 15/15 DONE (already_done)" in out, out
+    assert rc == 0 and "STEP 16/16 DONE (already_done)" in out, out
+    assert "STEP 13/16 DONE (already_done)" in out
     assert not [c for c in calls if "compute_features" in c]
 
 
-def test_step_15_recomputes_after_a_corpus_change_by_step_13(tmp_path):
-    changed = "step=13 result=started at=900 head=x\nstep=13 result=changed at=901 head=x\n"
+@pytest.mark.parametrize("step", ["13", "14"])
+def test_step_16_recomputes_after_a_corpus_change_by_step_13_or_14(tmp_path, step):
+    changed = f"step={step} result=started at=900 head=x\nstep={step} result=changed at=901 head=x\n"
     (tmp_path / "state").write_text(OLD_RUN_STATE + changed)
-    rc, out, _, calls, _ = _run(tmp_path, "--only", "15")
-    assert rc == 0 and "STEP 15/15 DONE (changed)" in out, out
+    rc, out, _, calls, _ = _run(tmp_path, "--only", "16")
+    assert rc == 0 and "STEP 16/16 DONE (changed)" in out, out
     assert [c for c in calls if "compute_features.py --backfill-finished soccer" in c]
+
+
+def test_only_the_labels_repair_records_a_corpus_change_that_step_16_must_follow(tmp_path):
+    """A labels repair that changed the corpus on its own (--only 13) keeps the retrains paused until step 16."""
+    (tmp_path / "state").write_text(OLD_RUN_STATE)
+    rc, out, steps, calls, af = _run(tmp_path, "--only", "13")
+    assert rc == 0 and steps == ["repair_soccer_labels"] and "STEP 13/16 DONE (changed)" in out, out
+    state = (tmp_path / "state").read_text()
+    assert "step=13 result=started" in state and "step=13 result=changed" in state
+    assert "the repair is not complete" in out and "re-run the runbook (--from N, or --only 16)" in out
+    assert _paused(af) == {"retrain_models": True, "retrain_halftime_dc": True}
+    assert not [c for c in calls if "compute_features" in c]
+    rc, out = fd.run(RUNBOOK_IN(tmp_path), _env(tmp_path), "--only", "16")
+    assert rc == 0 and "STEP 16/16 DONE (changed)" in out and "not complete" not in out, out
+    assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": False, "retrain_halftime_dc": False}
+
+
+def test_a_failing_labels_repair_stops_before_promote_raw_and_keeps_the_retrains_paused(tmp_path):
+    """Step 13 fails (its backup never lands, a pin drifts, its after-state fails): promote_raw (14) is not reached
+    — it would exit 3 on the mis-decoded raw rows anyway — step 13 is recorded 'failed', and only a later step 16
+    unpauses the retrains; --from 13 then finds the repair ALREADY DONE (or finishes it) and recomputes."""
+    (tmp_path / "state").write_text(OLD_RUN_STATE)
+    rc, out, steps, _, af = _run(tmp_path, "--from", "12", FAIL_REPAIR_SOCCER_LABELS="1")
+    assert rc == 1 and "STEP 13 FAILED (exit 1)" in out and "re-run with --from 13" in out, out
+    assert steps == EXPECTED_ORDER[9:12]  # the backfill, the cleanup re-run, the labels repair: nothing after it
+    state = (tmp_path / "state").read_text()
+    assert "step=13 result=failed" in state and "step=13 result=changed" not in state
+    assert "step 16 runs again before the retrain DAGs are unpaused" in out
+    assert _paused(af) == {"retrain_models": True, "retrain_halftime_dc": True}
+
+    env = {**_env(tmp_path), "ALREADY_REPAIR_SOCCER_LABELS": "1"}
+    rc, out = fd.run(RUNBOOK_IN(tmp_path), env, "--from", "13")
+    assert rc == 0 and "STEP 13/16 DONE (already_done)" in out and "not complete" not in out, out
+    assert "adopted" in out and "STEP 16/16 DONE (changed)" in out  # the failure is remembered: 16 recomputes
+    assert _paused(fd.airflow_state(tmp_path)) == {"retrain_models": False, "retrain_halftime_dc": False}
+
+
+def test_a_refused_from_13_on_an_incomplete_state_file_touches_nothing(tmp_path):
+    (tmp_path / "state").write_text(OLD_RUN_STATE.replace("step=11 result=checked", "step=11 result=started"))
+    rc, out, steps, calls, af = _run(tmp_path, "--from", "13")
+    assert rc == 1 and "REFUSED: steps 1-11 are not all recorded complete" in out and "11(started)" in out, out
+    assert steps == [] and not [c for c in calls if "dags pause" in c]

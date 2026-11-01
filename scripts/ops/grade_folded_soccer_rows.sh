@@ -4,7 +4,7 @@
 # Grade the rest of the predictions on the stale soccer rows
 # repair_football_data_kickoffs.sh (runbook step 4) folded a football-data
 # copy into, with scripts/grade_matches.py (pinned, one transaction).
-# Runbook step 14. The fold turned each row 'finished', and the outcome
+# Runbook step 15. The fold turned each row 'finished', and the outcome
 # trigger graded only the market types it knows (match_result, over_under,
 # btts); the rows sit outside the pipeline grader's 14-day window, so their
 # other predictions stay ungraded until this runs. It settles no rec: their
@@ -42,8 +42,8 @@
 # 7 cleanup_soccer_orphans.sh, 8 backfill_soccer_regulation_scores.sh,
 # 9 backfill_season_labels.sh, 10 compute_features --backfill-finished soccer,
 # 11 the merge's odds check, 12 backfill_soccer_never_resulted.sh (+ the
-# cleanup again), 13 promote_raw_after_repair.sh, 14 THIS,
-# 15 compute_features --backfill-finished soccer.
+# cleanup again), 13 repair_soccer_labels.sh, 14 promote_raw_after_repair.sh,
+# 15 THIS, 16 compute_features --backfill-finished soccer.
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/grade_folded_soccer_rows.sh 2>&1 | tee -a ~/grade_folded_soccer_rows.log
 # (AUSPEX_DIR and TMPDIR exist for tests and rehearsals.)

@@ -75,8 +75,9 @@
 # 7 cleanup_soccer_orphans.sh, 8 backfill_soccer_regulation_scores.sh,
 # 9 backfill_season_labels.sh, 10 compute_features --backfill-finished soccer,
 # 11 the merge's odds check, 12 THIS (then cleanup_soccer_orphans.sh again,
-# for the forks of the rows it healed), 13 promote_raw_after_repair.sh,
-# 14 grade_folded_soccer_rows.sh, 15 compute_features --backfill-finished soccer.
+# for the forks of the rows it healed), 13 repair_soccer_labels.sh,
+# 14 promote_raw_after_repair.sh, 15 grade_folded_soccer_rows.sh,
+# 16 compute_features --backfill-finished soccer.
 # It needs steps 1-11 done: the never_resulted class is the cleanup's, and
 # the rows it heals sit on the merged teams (the reviewed ids are the rows as
 # they stand after steps 1-11).

@@ -3,7 +3,7 @@
 # repairs need a verified backup first, which step 1 takes).
 # The first promote_raw run after the soccer repair, in checked mode
 # (scripts/promote_raw.py --dry-run / --apply --expect-plan: one transaction,
-# what it changed read back and pinned). Runbook step 13. promote_raw was
+# what it changed read back and pinned). Runbook step 14. promote_raw was
 # blocked from 2026-10-31 (check_legacy_kickoffs) until
 # repair_football_data_kickoffs.sh (runbook step 4) had run; that repair
 # archived, for the 4 Liga MX fixtures it alias-merged, the match_stats of
@@ -31,7 +31,7 @@
 # league and team rows the pipeline's soccer sweeps rewrite every 15 min nor
 # fails on them. A serialization error can only come from another session
 # changing a row this run changes, meanwhile: exit 1, nothing written —
-# re-run (the runbook: --from 13). Checked on the replica of a 05:15Z export
+# re-run (the runbook: --from 14). Checked on the replica of a 05:15Z export
 # (the same plan): a whole checked dry run beside 55 rounds of the
 # pipeline's ensure_league on all 41 football-data leagues, a team stamp
 # and a match_stats touch (3 s lock timeout each) — none waited, promote
@@ -60,8 +60,8 @@
 # 7 cleanup_soccer_orphans.sh, 8 backfill_soccer_regulation_scores.sh,
 # 9 backfill_season_labels.sh, 10 compute_features --backfill-finished soccer,
 # 11 the merge's odds check, 12 backfill_soccer_never_resulted.sh (+ the
-# cleanup again), 13 THIS, 14 grade_folded_soccer_rows.sh,
-# 15 compute_features --backfill-finished soccer.
+# cleanup again), 13 repair_soccer_labels.sh, 14 THIS,
+# 15 grade_folded_soccer_rows.sh, 16 compute_features --backfill-finished soccer.
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/promote_raw_after_repair.sh 2>&1 | tee -a ~/promote_raw_after_repair.log
 # (AUSPEX_DIR and TMPDIR exist for tests and rehearsals.)

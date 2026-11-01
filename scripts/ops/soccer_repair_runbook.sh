@@ -86,13 +86,13 @@
 #    re-pointed rows on purpose; 17 on the rehearsal). The plan and MERGED_AT
 #    come from /app/backups/merge_soccer_teams_last_apply.env.
 #
-# Steps 12-15 (added 2026-11-01, the follow-ups the runbook used to leave to
+# Steps 12-16 (added 2026-11-01, the follow-ups the runbook used to leave to
 # separate approvals) need steps 1-11 done: each one REFUSES unless the
 # state file records steps 1-11 complete (each one's last record 'changed',
 # 'already_done' or 'checked'). After a full run of the earlier, 11-step
 # runbook, run --from 12; with no such record (a lost state file), run the
 # runbook from step 1: a finished step re-plans read-only and records
-# ALREADY DONE, which verifies its effect, then 12-15 follow. Rehearsed
+# ALREADY DONE, which verifies its effect, then 12-16 follow. Rehearsed
 # 2026-11-01 on a read-only prod export taken 02:42Z, with real ESPN
 # scoreboards, through the shim: the 11-step runbook (d592a4d) from step 1
 # (every count above reproduced), then this one --from 12 on its state file;
@@ -118,19 +118,37 @@
 #    2026-06-15), which the cleanup re-run then merges (merge_cancel 1: it
 #    holds void recs; that re-run's ceilings are merges <= 1, no placeholder,
 #    no postponement); ESPN does not report the other 3 final. A corpus step.
-# 13 scripts/ops/promote_raw_after_repair.sh
+# 13 scripts/ops/repair_soccer_labels.sh
+#    The rows football-data's files filed under the wrong league or decoded
+#    wrongly (scripts/repair_soccer_labels.py, the reviewed map
+#    scripts/data/soccer_misfiled_division_rows.csv; one transaction, pinned
+#    on every PLAN key, write-once audit CSV and reversal SQL): leagues SC1 /
+#    SC2 created (or a code-less one of that name tagged: tag_league), the 10
+#    Scottish fixtures of 2026-08-01 and their raw rows relabelled from La
+#    Liga / La Liga 2, the 20 clubs on them moved to their Scottish league,
+#    'PreuÃ\x9fen MÃ¼nster' and its 68 raw rows renamed. Expect
+#    create_league 2, tag_league 0, relabel_raw 10, relabel_match 10,
+#    relabel_team 20, rename_team 1, rename_raw 68, refuse 0, mojibake_left 0,
+#    cross_country_after 0 (the repoint passes moved Guadalajara / Santos).
+#    A corpus step: matches.league_id feeds the per-league Dixon-Coles /
+#    Poisson baselines and the team name keys their teams (no feature value
+#    changes: compute_features reads neither). It must precede step 14: until
+#    it has run, promote_raw commits everything else and exits 3 on the 68
+#    mis-decoded raw rows (its screen), and step 14 aborts at its step 0.
+# 14 scripts/ops/promote_raw_after_repair.sh
 #    promote_raw in checked mode (scripts/promote_raw.py --dry-run, then
 #    --apply --expect-plan): re-writes the 4 match_stats rows step 4 archived
 #    for the alias-merged Liga MX fixtures (it refuses nothing once step 5 has
-#    run) and adds 13 closing odds; every other PLAN key 0. A corpus step.
-# 14 scripts/ops/grade_folded_soccer_rows.sh
+#    run, and screens out nothing once step 13 has) and adds 13 closing odds;
+#    every other PLAN key 0, refused_raw included. A corpus step.
+# 15 scripts/ops/grade_folded_soccer_rows.sh
 #    The rest of the predictions on the 26 rows step 4 folded
 #    (scripts/grade_matches.py, pinned, one transaction): 504 graded, 0 recs
 #    changed. Predictions only: not a corpus step.
-# 15 compute_features.py --backfill-finished soccer
-#    As step 10, after steps 12-13 changed the corpus (the same skip: when no
+# 16 compute_features.py --backfill-finished soccer
+#    As step 10, after steps 12-14 changed the corpus (the same skip: when no
 #    corpus change is recorded after the last feature recompute, step 10's or
-#    15's, it reads ALREADY DONE).
+#    16's, it reads ALREADY DONE).
 #
 # Before step 1 (read-only) it REFUSES TO START unless:
 #   * no other runbook run is going: it takes ~/.auspex_ops/soccer_repair_runbook.lock
@@ -151,8 +169,8 @@
 #     (repoint_team_matches, merge_soccer_teams, repair_football_data_kickoffs,
 #     repair_stranded_recs, repair_fixture_orphans,
 #     backfill_soccer_regulation_scores, regrade_predictions,
-#     backfill_season_labels, backfill_never_resulted, promote_raw,
-#     grade_matches): `docker compose exec -T` does not forward an
+#     backfill_season_labels, backfill_never_resulted, repair_soccer_labels,
+#     promote_raw, grade_matches): `docker compose exec -T` does not forward an
 #     interrupt, so an apply cut short on the host runs on in the container,
 #     and a re-run would race it. It lists them; `docker compose top api`
 #     shows when they have ended;
@@ -164,20 +182,20 @@
 #     an earlier runbook run that is gone (then it is adopted; a marker naming
 #     a run still going refuses the start).
 # They are unpaused when the runbook exits ONLY if the corpus is consistent:
-# no corpus step (1, 3, 4, 5, 7, 12, 13) failed or was cut short in this run,
-# and the state file records a feature recompute (step 10 or 15) after the
+# no corpus step (1, 3, 4, 5, 7, 12, 13, 14) failed or was cut short in this
+# run, and the state file records a feature recompute (step 10 or 16) after the
 # last corpus change (or no corpus change at all). A corpus change is a corpus
 # step's 'changed' record or its 'failed' one: a corpus step that fails or is
 # cut short is recorded 'failed' (it may have committed part of its change —
 # the repoint passes and the fd repair commit their apply before their
 # after-state), so a later run that reads that step ALREADY DONE does not
-# clear it; only the next completion of step 10 or 15 does. Each corpus step is also recorded 'started'
+# clear it; only the next completion of step 10 or 16 does. Each corpus step is also recorded 'started'
 # before it runs, so a run killed outright during one (kill -9, a host
 # crash: no trap, no 'failed') still leaves the change on record; a
 # read-only re-run closes its own 'started'. Otherwise — a failed or interrupted corpus
-# step, or a run that leaves step 10 (15 after steps 12-13) still to do — they
+# step, or a run that leaves step 10 (16 after steps 12-14) still to do — they
 # STAY PAUSED and the runbook prints an ALERT: unpause them only after that
-# recompute has run (re-run with --from N, or --only 10 / --only 15, which
+# recompute has run (re-run with --from N, or --only 10 / --only 16, which
 # unpauses them itself once it completes; the ALERT's command, for after
 # that, also removes the marker).
 # Unpaused now, either would start its missed run at once and train on a
@@ -185,7 +203,7 @@
 # then serves it and restarts the api). A later runbook run (--from N) adopts
 # them (their markers in ~/.auspex_ops, scripts/ops/_airflow_lib.sh) and
 # unpauses them once the recompute has completed. A failure in steps 2, 6, 8,
-# 9, 11 or 14 (none feeds the training corpus or its features) leaves that
+# 9, 11 or 15 (none feeds the training corpus or its features) leaves that
 # decision to the state file.
 # Every pause, unpause and ALERT is also appended to
 # ~/.auspex_ops/airflow_pauses.log, which survives a dropped terminal.
@@ -203,15 +221,15 @@
 # every wrapper's trap restores what it paused — but it stops the sequence):
 #   tmux new -s soccer_repair
 #   bash /opt/auspex/scripts/ops/soccer_repair_runbook.sh 2>&1 | tee -a ~/soccer_repair_runbook.log
-#   ... --from N     run steps N..15
+#   ... --from N     run steps N..16
 #   ... --only N     run step N alone
 # State: RUNBOOK_STATE (default ~/.soccer_repair_runbook.state) records each
 # step's completion, in order ("changed", "already_done", or "checked" for
 # step 11), each corpus step's start ("started") and each corpus step that
 # failed or was cut short ("failed"), one line per record, "step=N
 # result=R at=<epoch> head=<commit>" (the 11-step runbook's format, unchanged);
-# the feature steps' skip, the retrain unpause and steps 12-15's refusal read
-# it (a missing file means step 10 / 15 runs and steps 12-15 refuse; a record
+# the feature steps' skip, the retrain unpause and steps 12-16's refusal read
+# it (a missing file means step 10 / 16 runs and steps 12-16 refuse; a record
 # that cannot be written keeps the retrain DAGs paused at the end).
 # Read-only check on prod 2026-10-31 ~12:10Z (VM HEAD a071d6a, not deployed):
 # the preflight reads 22 relabelled / 4 cancelled, 39 Liga MX sides sit on
@@ -223,7 +241,7 @@ set -uo pipefail
 trap '' PIPE
 FROM=1
 ONLY=""
-usage() { echo "usage: $0 [--from N | --only N]   (N = 1..15; see the header)"; }
+usage() { echo "usage: $0 [--from N | --only N]   (N = 1..16; see the header)"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --from) [ $# -ge 2 ] || { usage; exit 2; }; FROM="$2"; shift 2 ;;
@@ -233,7 +251,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 for n in "$FROM" ${ONLY:+"$ONLY"}; do
-  if ! [[ "$n" =~ ^([1-9]|1[0-5])$ ]]; then usage; exit 2; fi
+  if ! [[ "$n" =~ ^([1-9]|1[0-6])$ ]]; then usage; exit 2; fi
 done
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
@@ -251,15 +269,15 @@ RETRAIN_DAGS="retrain_models retrain_halftime_dc"
 CURRENT_STEP=""
 STATE_WRITE_FAILED=""
 # The steps that change the training corpus or its features, and the steps that recompute the features after them.
-CORPUS_STEPS=" 1 3 4 5 7 12 13 "
-FEATURE_STEPS=" 10 15 "
-LAST_STEP=15
+CORPUS_STEPS=" 1 3 4 5 7 12 13 14 "
+FEATURE_STEPS=" 10 16 "
+LAST_STEP=16
 # One runbook run at a time, taken before anything this run could leave behind (a refused run exits here, with no
 # trap: it touches nothing of the run that holds the lock). finish releases it last; the merge wrapper takes its own
 # lock, so step 3 does not wait.
 af_lock soccer_repair_runbook || exit 1
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/soccer_runbook.XXXXXX") || { log "ABORT: mktemp failed"; af_unlock; exit 1; }
-# The state file's last corpus record (records are appended in order): a feature step (10 or 15), a corpus step, or
+# The state file's last corpus record (records are appended in order): a feature step (10 or 16), a corpus step, or
 # nothing. A feature step's completions count, and a corpus step's 'changed' and 'failed'. So does its 'started',
 # written before it runs, until the same step records a read-only result (ALREADY DONE / checked) right after it: a
 # run killed outright during a corpus step (kill -9, a host crash: finish never runs) leaves 'started' behind,
@@ -279,7 +297,7 @@ last_corpus_record() {
   ' "$STATE_FILE"
 }
 is_feature_step() { case "$FEATURE_STEPS" in *" $1 "*) return 0 ;; esac; return 1; }
-# 0 when a feature step (10 or 15) recomputed the features after the last corpus change.
+# 0 when a feature step (10 or 16) recomputed the features after the last corpus change.
 features_current() { is_feature_step "$(last_corpus_record)"; }
 # 0 when a retrain would fit a consistent corpus: no corpus step failed or was cut short in this run, the state
 # file was writable, and nothing changed the corpus after the last feature recompute (or nothing ever did).
@@ -290,10 +308,10 @@ corpus_consistent() {
   last=$(last_corpus_record)
   [ -z "$last" ] || is_feature_step "$last"
 }
-# The feature step that follows a corpus step: 10 after steps 1-9, 15 after 12-13 (both run the same recompute).
-feature_step_after() { if [ "${1:-0}" -ge 12 ] 2>/dev/null; then echo 15; else echo 10; fi; }
+# The feature step that follows a corpus step: 10 after steps 1-9, 16 after 12-14 (both run the same recompute).
+feature_step_after() { if [ "${1:-0}" -ge 12 ] 2>/dev/null; then echo 16; else echo 10; fi; }
 # Steps 1-11 whose last state-file record is not a completion ('changed', 'already_done', 'checked'), as
-# "N(last result)" words; nothing when all eleven are complete. Steps 12-15 run only then.
+# "N(last result)" words; nothing when all eleven are complete. Steps 12-16 run only then.
 old_steps_incomplete() {
   [ -r "$STATE_FILE" ] || { echo "all (no state file $STATE_FILE)"; return 0; }
   # seen[] apart from last[]: reading last[i] for a step never recorded creates it, so 'i in last' cannot tell.
@@ -310,13 +328,13 @@ old_steps_incomplete() {
     }
   ' "$STATE_FILE"
 }
-OLD_STEPS_HELP="steps 12-15 need steps 1-11 done: after the 11-step runbook's full run, its state file records them; otherwise run the runbook from step 1 (finished steps only re-plan, read-only, and record ALREADY DONE)"
+OLD_STEPS_HELP="steps 12-16 need steps 1-11 done: after the 11-step runbook's full run, its state file records them; otherwise run the runbook from step 1 (finished steps only re-plan, read-only, and record ALREADY DONE)"
 finish() {
   local rc=$?
   trap '' INT TERM HUP
   # A corpus step that failed or was cut short may have committed part of its change (the repoint passes and the fd
   # repair commit their apply, then check the after-state): recorded 'failed', only a later feature recompute (step
-  # 10 or 15) clears it — a re-run that reads that step ALREADY DONE writes no 'changed' record.
+  # 10 or 16) clears it — a re-run that reads that step ALREADY DONE writes no 'changed' record.
   local fs
   fs=$(feature_step_after "${CURRENT_STEP:-${ONLY:-$FROM}}")
   if [ -n "$CURRENT_STEP" ]; then
@@ -369,7 +387,7 @@ if ! git -C "$AUSPEX_DIR" diff --quiet HEAD -- scripts services; then
 fi
 log "this runbook is HEAD's version (VM HEAD $head, last changed in $self_commit); scripts/ and services/ are clean"
 # A run that starts at step 12 or later: steps 1-11 must be recorded complete before anything is paused (run_step
-# checks again before each of steps 12-15, for a run that reaches them).
+# checks again before each of steps 12-16, for a run that reaches them).
 if [ "${ONLY:-$FROM}" -ge 12 ]; then
   incomplete=$(old_steps_incomplete)
   if [ -n "$incomplete" ]; then
@@ -404,7 +422,7 @@ fi
 log "void_post_kickoff_recs has run ($relabelled relabelled) and fix_unplayed_soccer_rows has run (4/4 cancelled)"
 
 # An apply a run cut short may still be running in the api container: docker exec does not forward an interrupt.
-REPAIR_TOOLS="repoint_team_matches merge_soccer_teams repair_football_data_kickoffs repair_stranded_recs repair_fixture_orphans backfill_soccer_regulation_scores regrade_predictions backfill_season_labels backfill_never_resulted promote_raw grade_matches"
+REPAIR_TOOLS="repoint_team_matches merge_soccer_teams repair_football_data_kickoffs repair_stranded_recs repair_fixture_orphans backfill_soccer_regulation_scores regrade_predictions backfill_season_labels backfill_never_resulted repair_soccer_labels promote_raw grade_matches"
 # shellcheck disable=SC2086  # $REPAIR_TOOLS is a word list
 running=$(af_applies_running $REPAIR_TOOLS)
 case $? in
@@ -502,7 +520,7 @@ step8() {
   log "re-grade applied: $changes prediction row(s); a fresh dry run plans 0"
 }
 
-# Steps 10 and 15: the same recompute, skipped when a feature step's completion is the state file's last corpus record.
+# Steps 10 and 16: the same recompute, skipped when a feature step's completion is the state file's last corpus record.
 recompute_features() {
   if features_current; then
     log "ALREADY DONE: features were recomputed after the last data-changing step (state file $STATE_FILE)"
@@ -572,13 +590,14 @@ run_step 9 "backfill_season_labels" bash "$OPS/backfill_season_labels.sh"
 run_step 10 "compute_features --backfill-finished soccer" recompute_features
 run_step 11 "merge odds after-check" step11
 run_step 12 "never_resulted results backfill + grading, then the orphan cleanup again" step12
-run_step 13 "promote_raw, checked (the match_stats step 4 archived)" bash "$OPS/promote_raw_after_repair.sh"
-run_step 14 "grade the rows step 4 folded" bash "$OPS/grade_folded_soccer_rows.sh"
-run_step 15 "compute_features --backfill-finished soccer (after steps 12-13)" recompute_features
+run_step 13 "repair_soccer_labels (the Scottish fixtures filed under La Liga, the mis-decoded Preussen Muenster)" bash "$OPS/repair_soccer_labels.sh"
+run_step 14 "promote_raw, checked (the match_stats step 4 archived)" bash "$OPS/promote_raw_after_repair.sh"
+run_step 15 "grade the rows step 4 folded" bash "$OPS/grade_folded_soccer_rows.sh"
+run_step 16 "compute_features --backfill-finished soccer (after steps 12-14)" recompute_features
 scope="from step $FROM"
 [ -z "$ONLY" ] || scope="step $ONLY only"
 if corpus_consistent; then
   log "ALL STEPS DONE ($scope)"
 else
-  log "ALL STEPS DONE ($scope) — but no feature recompute (step 10 or 15) since the last corpus change: the repair is not complete"
+  log "ALL STEPS DONE ($scope) — but no feature recompute (step 10 or 16) since the last corpus change: the repair is not complete"
 fi

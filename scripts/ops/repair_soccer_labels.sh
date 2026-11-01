@@ -7,7 +7,9 @@
 # 2026-08-01 stored as La Liga / La Liga 2 (and the raw rows they came from),
 # the twenty clubs on them that carry a Spanish league, and 'PreuÃ\x9fen
 # MÃ¼nster' (one team, 68 raw rows) renamed 'Preußen Münster' — no
-# correctly spelled twin exists, so a rename, not a merge.
+# correctly spelled twin exists, so a rename, not a merge. Runbook step 13
+# (scripts/ops/soccer_repair_runbook.sh: after steps 1-12, before its
+# promote_raw step 14 and its final features recompute 16).
 # DEPLOY THE COMMIT THAT SHIPS scripts/text_encoding.py FIRST: until then both
 # football-data loaders read UTF-8 files as latin-1 and skip the Div check, and
 # promote_raw promotes such rows.
@@ -34,8 +36,8 @@
 #                      home, 34 away)
 #   refuse 0, mojibake_left 0; cross_country_after 2 (Guadalajara and Santos,
 #   whose Liga MX rows the runbook's repoint passes move; 0 after them).
-# The soccer repair runbook (scripts/ops/soccer_repair_runbook.sh) runs BEFORE
-# this and touches none of it: no merge pair, seed, repoint or postponed row
+# The soccer repair runbook's steps 1-12 (scripts/ops/soccer_repair_runbook.sh)
+# run BEFORE this and touch none of it: no merge pair, seed, repoint or postponed row
 # names these 21 teams (ids grepped in scripts/data/*.csv); the fd dedupe plan
 # folds none of their matches; step 4 shifts their kickoffs, which this finds
 # in promote_raw's own window either way; their season labels ('2026-2027',
@@ -81,14 +83,29 @@
 # No DAG is paused: the write is one short transaction on rows no scheduled
 # job writes (the 15-minute pipeline never touches football-data rows), and a
 # retrain reads either side of it.
-# AS A RUNBOOK STEP: exit 0 on success or ALREADY DONE (the line says so),
+# AS A RUNBOOK STEP (13): exit 0 on success or ALREADY DONE (the line says so),
 # non-zero with an ABORT / FAILED line otherwise. It CHANGES THE TRAINING
 # CORPUS (matches.league_id feeds the Dixon-Coles / Poisson per-league
-# baselines, and the team name keys their teams), so it is a corpus step, but
-# it changes no feature (compute_features reads team ids, odds and
-# match_stats, never a league or a name): before the runbook's step 10 it
-# needs nothing more; after it, the features rebuild it prints is optional
-# (it rewrites the same values). Re-runnable: a finished repair plans nothing.
+# baselines, and the team name keys their teams), so it is a corpus step:
+# the runbook records it 'started' before it runs and keeps the retrain DAGs
+# paused until its step 16 has recomputed the features after it, though it
+# changes no feature value (compute_features reads team ids, odds and
+# match_stats, never a league or a name). It must run before the runbook's
+# promote_raw step (14): until it has, promote_raw commits everything else
+# and exits 3 on the 68 mis-decoded raw rows. promote_raw keeps an existing
+# team's league since 2026-11-01, so a promote_raw run after this leaves the
+# twenty clubs on SC1 / SC2 and a re-run of this still reads ALREADY DONE.
+# Re-runnable: a finished repair plans nothing.
+#
+# RUN ORDER (scripts/ops/soccer_repair_runbook.sh runs it, each step through
+# its own wrapper): 1 repoint_team_matches.sh --pass 1, 2 migrate_027_outcome_trigger.sh,
+# 3 merge_soccer_teams.sh, 4 repair_football_data_kickoffs.sh,
+# 5 repoint_team_matches.sh --pass 2, 6 repair_stranded_recs_soccer.sh,
+# 7 cleanup_soccer_orphans.sh, 8 backfill_soccer_regulation_scores.sh,
+# 9 backfill_season_labels.sh, 10 compute_features --backfill-finished soccer,
+# 11 the merge's odds check, 12 backfill_soccer_never_resulted.sh (+ the
+# cleanup again), 13 THIS, 14 promote_raw_after_repair.sh,
+# 15 grade_folded_soccer_rows.sh, 16 compute_features --backfill-finished soccer.
 # REVERSAL: the apply writes /app/backups/soccer_labels_apply_<stamp>.reversal.sql
 # beside its CSV (one transaction; each statement raises if its row moved; a
 # tagged league only loses the code, a created one is dropped).
@@ -166,8 +183,8 @@ within() {  # within <comma list> <comma list>: every item of $1 is in $2 ('-' o
   for item in ${1//,/ }; do [[ ",$2," == *",$item,"* ]] || return 1; done
 }
 features_note() {
-  log "features: compute_features reads no league and no team name, so this repair changes no feature value; the"
-  log "  soccer repair runbook's step 10 rebuilds them if this ran before it; otherwise, to rebuild after this corpus"
+  log "features: compute_features reads no league and no team name, so this repair changes no feature value; run as"
+  log "  the soccer repair runbook's step 13, its step 16 rebuilds them; run on its own, to rebuild after this corpus"
   log "  change anyway: $FEATURES_CMD"
 }
 

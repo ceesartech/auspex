@@ -66,9 +66,13 @@ WHAT IT PLANS (from the database at run time; counts on the PLAN line)
                  the wrong league: league_id set.
   relabel_team   a team on one of those matches whose league is in another
                  country than the right league: league_id set to the right
-                 league of its latest mapped match. promote_raw, re-run, sets
-                 a team's league from the first raw row naming it; once the
-                 raw rows are relabelled that is a Scottish league either way.
+                 league of its latest mapped match. promote_raw, re-run,
+                 keeps an existing team's league (only a missing one is
+                 filled, since 2026-11-01), so the relabel holds; before
+                 that it re-set a team's league from the first raw row naming
+                 it, which, once the raw rows are relabelled, would have been
+                 a Scottish league either way (SC0 for the six established
+                 clubs).
   rename_team    a soccer team whose name looks mis-decoded
                  (text_encoding.looks_mojibake) and decodes cleanly
                  (text_encoding.repair_mojibake): name and normalized_name
@@ -120,7 +124,11 @@ It changes the training corpus (matches.league_id of the mapped fixtures, the
 renamed team's name, which keys the Dixon-Coles / Poisson members) but no
 feature: compute_features reads team ids, odds and match_stats, never a league
 or a name. scripts/ops/repair_soccer_labels.sh runs it (backup, pinned
-apply, after-state) and prints the features rebuild.
+apply, after-state) and prints the features rebuild; the soccer repair
+runbook (scripts/ops/soccer_repair_runbook.sh) runs that wrapper as its step
+13, inside its retrain pause, before its promote_raw step (14: promote_raw
+exits 3 on the mis-decoded raw rows until this has run) and its final
+features recompute (16).
 
 Usage (inside the api container):
     python /app/scripts/repair_soccer_labels.py                    # dry run
