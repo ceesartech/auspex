@@ -1,13 +1,16 @@
 """Train a Dixon-Coles model for NHL — into STAGING only.
 
-NOT PROMOTABLE. The served NHL artifact
-(/app/models/production/dixon_coles_nhl/1.0.0/model.bin) has never been gated,
-and neither has anything this script writes: its gate is
-scripts/ab_nhl_dixon_coles.py (pre-registered there, amended 2026-10-31 after a
-smoke run, not yet run over its full window). scripts/promote_dc_model.py has no
-"nhl" entry, and nothing staged here may be copied into production by hand.
-Until the gate passes, the config below stays the pinned legacy one and
-production keeps serving its current file.
+NOT PROMOTABLE. Nothing this script writes has passed a gate, and
+scripts/promote_dc_model.py has no "nhl" entry: nothing staged here may be
+copied into production by hand. Two gates, both DO-NOT-SHIP:
+  * scripts/ab_nhl_dixon_coles.py (2026-10-31): refits on FINAL scores (what
+    main() below fits) vs the served file — over 5.5 -0.0017, short of -0.005;
+  * scripts/ab_nhl_regulation_ties.py (2026-11-01): the regulation-scoreline
+    model (fit_regulation_model below, not called by main()) — regulation 1x2
+    -0.0172 vs served, far past the gate, but significantly worse on
+    clean_sheet_home / win_to_nil_home (+0.0004, lower bounds +0.00006).
+The config below stays the pinned legacy one and production keeps serving its
+current file (/app/models/production/dixon_coles_nhl/1.0.0/model.bin).
 
 Hockey scorelines are low-discrete just like soccer (modal ~3-2, median total
 ~5.5), so the same Dixon-Coles + Poisson machinery works directly. This trainer
@@ -193,6 +196,8 @@ def served_fixtures(frame: Any) -> Iterable[Tuple[str, str, None]]:
 # ── The regulation-scoreline model (predictors.hockey_regulation) ────
 # Gated by scripts/ab_nhl_regulation_ties.py, which fits its candidate arms
 # through fit_regulation_model below so the gate measures exactly this code.
+# 2026-11-01: DO-NOT-SHIP (see its RESULT). main() does not call it; nothing
+# here writes a regulation structure into any artifact.
 
 # The frame above plus metadata.regulation_winner ('home' / 'away', or 'tie' —
 # 'draw' on ESPN rows written before 2026-10 — when the game went past

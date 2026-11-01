@@ -42,7 +42,9 @@ nil) reads P_F — see market_derivation.derive_hockey_markets(P, final=...).
 
 An artifact whose payload has no ``regulation_structure`` serves exactly as
 before (one final-score matrix for every market). The structure is gated by
-scripts/ab_nhl_regulation_ties.py.
+scripts/ab_nhl_regulation_ties.py — 2026-11-01: DO-NOT-SHIP (regulation 1x2
+-0.0172 vs served, but clean sheet / win to nil home significantly worse), so
+no served artifact carries one; the code stays for that gate and its re-run.
 """
 
 from __future__ import annotations

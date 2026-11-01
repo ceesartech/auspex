@@ -136,6 +136,38 @@ FRESHNESS (confirmation, never decides)
          scored by no earlier NHL analysis.
   The primary is also split into the folds 2025-10..2026-02 and the rest.
 
+RESULT (2026-11-01, the committed harness run once, unamended, on a local
+replica of the 02:37Z export; 8 folds 2025-10..2026-10, n=1,611)
+  DECISION: DO-NOT-SHIP. reg_margin_frozen passes the primary by a wide
+  margin — regulation_1x2 -0.0172 vs served (fold-clustered -0.0168 +/-
+  0.0029, t-bound -0.0101; tie mass 21.5% vs served 15.4%, realised 24.6%)
+  — but is significantly worse on two blocking units: clean_sheet_home
+  +0.00043 (95% lower bound +0.00006) and win_to_nil_home +0.00047 (+0.00006).
+  It improves total_goals -0.0205, correct_score_grid -0.0093, over_4.5
+  -0.0014, double_chance -0.004..-0.007; over_5.5 -0.0012 and over_6.5 +0.0000
+  sit inside the noise.
+  Context only (never decides, so nothing ships on it): reg_diag_frozen (one
+  tie factor) reads -0.0171 (t-bound -0.0099) with NO blocking regression
+  (clean_sheet_home +0.00009, lower bound -0.00008); the walk-forward
+  reg_margin -0.0231 (t-bound -0.0166), no regression; reg_poisson_frozen
+  (the reframing alone) only -0.0076 — the tie factor, not the reframing,
+  carries the regulation gain (reg_diag - reg_poisson -0.0094, t-bound
+  -0.0059). Every structured arm still trails the per-season constant on
+  regulation_1x2 (frozen +0.0063, walk-forward +0.0003; inside the noise):
+  past the season's tie rate, team strength adds little to the 3-way.
+  Served vs base_season, the units where the constant is better beyond the
+  fold-clustered t bound: regulation_1x2 (-0.0235, upper -0.0081),
+  double_chance_12 (-0.0084, -0.0038), double_chance_X2 (-0.0080, -0.0006),
+  total_goals (-0.0197, -0.0123), over_4.5 (-0.0029, -0.0009),
+  correct_score_grid (-0.0093, -0.0070); puck line, clean sheet and win to
+  nil are inside the noise.
+  Freshness: 2026-27 (n=217) reg_margin_frozen regulation_1x2 -0.0060 +/-
+  0.0068 (same sign, inside the noise), total_goals -0.0144 +/- 0.0074, grid
+  -0.0093 +/- 0.0012, clean_sheet_home +0.0007 +/- 0.0004; the 8 games after
+  the previous gate: regulation_1x2 -0.031 +/- 0.042 — no information.
+  Per-game rows / grids / JSON / log: the closeout scratch dir
+  closeout/nhl_regtie/gate/ (ab_nhl_regtie_rows.csv recomputes every delta).
+
 Per-game output for an independent recomputation: --out-rows (CSV: per arm
 the regulation and over-line probabilities and every unit's per-game Brier),
 --out-grids (npz: per arm the 121-cell final grid per game).
