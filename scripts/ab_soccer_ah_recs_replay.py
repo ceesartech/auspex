@@ -637,7 +637,7 @@ def replay_match(
             SPORT, MARKET, odds=q.odds, ev=ev, model_prob=p_raw, market_prob=market_prob
         )
         if not allowed:
-            key = reason if str(reason).startswith("stream_disabled") else f"{MARKET}:{reason}"
+            key = str(reason) if str(reason).startswith("stream_disabled") else f"{MARKET}:{reason}"
             suppressed[key] = suppressed.get(key, 0) + 1
             continue
         f = gr.kelly_fraction(p_kelly, q.odds)
