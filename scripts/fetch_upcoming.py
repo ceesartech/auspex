@@ -1013,6 +1013,17 @@ LARGE_SHIFT_HOURS = 24
 #                   by its own scoring plays (see _record_result);
 #   status_refused  postponements / cancels not written: the ESPN id names a
 #                   row for another team pair (see _record_status_change);
+#   no_winner_refused     MMA results not written: ESPN's scoreboard and its
+#                   core API disagree on a bout with no winner (a draw against
+#                   a no contest), or the result would change the kind a
+#                   finished row was recorded with (the comment above
+#                   NO_WINNER_SPORTS);
+#   no_winner_unconfirmed MMA bouts the scoreboard shows with no winner that
+#                   ESPN's core API has still not confirmed
+#                   NO_WINNER_CONFIRM_HOURS after kickoff (no answer, no
+#                   result, a winning method, or a name this code does not
+#                   map): not written, and without this count the bout would
+#                   leave the 3-day window still 'scheduled';
 #   team_namesakes  a club whose name another ESPN team holds was inserted as
 #                   its own row (see ensure_team) — written, but a person must
 #                   confirm it is not a mis-stamped id; once only, since later
@@ -1029,6 +1040,8 @@ IDENTITY_STATS = {
     "same_team": 0,
     "score_mismatch": 0,
     "status_refused": 0,
+    "no_winner_refused": 0,
+    "no_winner_unconfirmed": 0,
     "team_namesakes": 0,
     "team_conflicts": 0,
 }
@@ -1908,18 +1921,65 @@ def _final_scores(cfg: SportConfig, home: dict, away: dict) -> tuple[int, int] |
 # = 'draw' | 'no_contest' (grading_outcomes.NO_WINNER_KEY: why NULL and not 0-0,
 # and the grading convention), but only when the scoreboard's reading and the
 # core API's result agree:
-#   * the core API naming a winning method, or no result yet: not recorded
-#     (WARNING; ESPN is still filling the result in, the next sweep retries);
-#   * the core API not answering: not recorded (ERROR; the next sweep retries,
-#     and past the 3-day window scripts/backfill_results.py records it);
+#   * the core API naming a winning method, no result yet, or a result name
+#     core_no_winner_kind does not map: not recorded (WARNING; ESPN is still
+#     filling the result in, the next sweep retries);
+#   * the core API not answering, or the bout's event or league unknown: not
+#     recorded (ERROR; the next sweep retries, and past the 3-day window
+#     scripts/backfill_results.py records it);
+#   * still not confirmed NO_WINNER_CONFIRM_HOURS after kickoff, for any of
+#     those reasons: still not recorded, but counted
+#     (IDENTITY_STATS['no_winner_unconfirmed'], exit 3), so the pipeline
+#     turns red while the bout is inside the sweep's 3-day window instead of
+#     the bout ageing out 'scheduled' with only log lines (the failure this
+#     code was written to end). A brief ESPN blip right after a fight stays
+#     green;
 #   * the two disagreeing (a draw against a no contest): refused and counted
-#     (exit 3).
+#     (IDENTITY_STATS['no_winner_refused'], exit 3).
 # And a row already finished keeps the KIND of result it was recorded with (a
 # winner, a draw, a no contest): its predictions were graded and its recs
 # settled on it, so ESPN reporting another kind later is refused and counted
-# (exit 3), never written over (_result_kind_allowed).
+# (no_winner_refused, exit 3), never written over (_result_kind_allowed).
 NO_WINNER_SPORTS = frozenset({"mma"})
 ESPN_CORE_BASE = "https://sports.core.api.espn.com/v2/sports"
+# A UFC bout's result is on the core API within minutes of the fight; one this
+# old that is still unconfirmed needs a person (see above). A card's last bout
+# starts about 6 hours after its first.
+NO_WINNER_CONFIRM_HOURS = 12
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _past_confirm_window(match_dt) -> bool:
+    """True when the bout kicked off NO_WINNER_CONFIRM_HOURS ago or more (a
+    naive kickoff is read as UTC)."""
+    if not isinstance(match_dt, datetime):
+        return False
+    kickoff = match_dt if match_dt.tzinfo is not None else match_dt.replace(tzinfo=timezone.utc)
+    return _utc_now() - kickoff >= timedelta(hours=NO_WINNER_CONFIRM_HOURS)
+
+
+def _not_confirmed(level: int, what: str, why: str, match_dt) -> tuple[None, bool]:
+    """A no-winner reading left unwritten this sweep: logged at `level`,
+    or, NO_WINNER_CONFIRM_HOURS after kickoff, at ERROR and counted
+    (IDENTITY_STATS['no_winner_unconfirmed']: this run exits 3)."""
+    if _past_confirm_window(match_dt):
+        IDENTITY_STATS["no_winner_unconfirmed"] += 1
+        logger.error(
+            "%s: %s — still unconfirmed %d hours or more after kickoff, so it is counted and this run exits %d. "
+            "Check ESPN's core API for this competition; once it names 'draw' or 'no-contest' the next sweep "
+            "records the bout (inside the 3-day window; later: scripts/backfill_results.py --sport mma --dates "
+            "<day>). If the core API names something this code does not map, extend core_no_winner_kind.",
+            what,
+            why,
+            NO_WINNER_CONFIRM_HOURS,
+            IDENTITY_EXIT_CODE,
+        )
+    else:
+        logger.log(level, "%s: %s", what, why)
+    return None, False
 
 
 class NoWinner(NamedTuple):
@@ -2040,7 +2100,9 @@ def _confirmed_no_winner(
     bout whose row is already finished with no winner of the same kind was
     confirmed when it was recorded: the core API is not asked again (each
     15-minute sweep rewrites the bout for 3 days), and already is True.
-    (None, False) otherwise, logged."""
+    (None, False) otherwise, logged; counted (exit 3) when ESPN's two APIs
+    disagree, or when the bout is still unconfirmed NO_WINNER_CONFIRM_HOURS
+    after kickoff."""
     reading = scoreboard_no_winner(cfg, comp, home, away)
     if reading is None:
         return None, False
@@ -2053,37 +2115,33 @@ def _confirmed_no_winner(
         if len(rows) == 1 and rows[0]["status"] == "finished" and rows[0]["no_winner"] == reading.kind:
             return reading, True
     if not (event_id and league_slug and espn_id):
-        logger.error(
-            "%s ended with no winner on the scoreboard (%s), but ESPN's core API cannot be asked to confirm it "
-            "(event %r, league %r, competition %r) — not recorded",
+        return _not_confirmed(
+            logging.ERROR,
             what,
-            reading.kind,
-            event_id,
-            league_slug,
-            espn_id,
+            f"ended with no winner on the scoreboard ({reading.kind}), but ESPN's core API cannot be asked to "
+            f"confirm it (event {event_id!r}, league {league_slug!r}, competition {espn_id!r}) — not recorded",
+            match_dt,
         )
-        return None, False
     name, answered = espn_core_result(cfg, league_slug, event_id, espn_id)
     if not answered:
-        logger.error(
-            "%s ended with no winner on the scoreboard (%s), but ESPN's core API did not answer — not recorded this "
-            "sweep; the next sweep retries (it looks 3 days back; older: scripts/backfill_results.py)",
+        return _not_confirmed(
+            logging.ERROR,
             what,
-            reading.kind,
+            f"ended with no winner on the scoreboard ({reading.kind}), but ESPN's core API did not answer — not "
+            "recorded this sweep; the next sweep retries (it looks 3 days back; older: scripts/backfill_results.py)",
+            match_dt,
         )
-        return None, False
     confirmed = core_no_winner_kind(name)
     if confirmed is None:
-        logger.warning(
-            "%s shows no winner on the scoreboard (reads %s) but ESPN's result is %r — not recorded yet (ESPN may "
-            "still be filling the result in; the next sweep retries)",
+        return _not_confirmed(
+            logging.WARNING,
             what,
-            reading.kind,
-            name,
+            f"shows no winner on the scoreboard (reads {reading.kind}) but ESPN's result is {name!r} — not "
+            "recorded yet (ESPN may still be filling the result in; the next sweep retries)",
+            match_dt,
         )
-        return None, False
     if confirmed != reading.kind:
-        IDENTITY_STATS["score_mismatch"] += 1
+        IDENTITY_STATS["no_winner_refused"] += 1
         logger.error(
             "Refusing %s: the scoreboard reads %s (judges' cards %s) but ESPN's core API says %r. Nothing written; "
             "check which is right. This run exits %d.",
@@ -2135,7 +2193,7 @@ def _result_kind_allowed(cur, cfg: SportConfig, home_id, away_id, match_dt, kind
     stored = no_winner_result(row.get("metadata"))
     if stored == kind:
         return True
-    IDENTITY_STATS["score_mismatch"] += 1
+    IDENTITY_STATS["no_winner_refused"] += 1
 
     def describe(no_winner: str | None, scores: str) -> str:
         return f"no winner ({no_winner})" if no_winner else f"a winner ({scores})"
@@ -3052,23 +3110,28 @@ def identity_exit_code(cfg: SportConfig) -> int:
     of the sweep has already been committed."""
     forks, same_team = IDENTITY_STATS["forks_refused"], IDENTITY_STATS["same_team"]
     scores, statuses = IDENTITY_STATS["score_mismatch"], IDENTITY_STATS["status_refused"]
+    nw_refused, nw_unconfirmed = IDENTITY_STATS["no_winner_refused"], IDENTITY_STATS["no_winner_unconfirmed"]
     namesakes, conflicts = IDENTITY_STATS["team_namesakes"], IDENTITY_STATS["team_conflicts"]
-    refused = forks + same_team + scores + statuses
+    refused = forks + same_team + scores + statuses + nw_refused + nw_unconfirmed
     if not (refused or namesakes or conflicts):
         return 0
     logger.error(
         "%s sweep REFUSED %d write(s): %d would have forked an ESPN-identified fixture, %d resolved both sides to "
         "one team, %d carried a header score its own scoring plays contradict, %d status change(s) named a row "
-        "for another team pair. %d club(s) were inserted as their own row because another ESPN team holds their "
-        "name; %d ESPN team id conflict(s). Everything else was written and committed; exiting %d so this run "
-        "fails until they are repaired, ESPN corrects them, or the team mapping is checked (details in the ERROR "
-        "lines above).",
+        "for another team pair, %d no-winner result(s) ESPN's two APIs disagree on or that would change a "
+        "recorded result's kind, %d no-winner bout(s) ESPN's core API has not confirmed %d hours after kickoff. "
+        "%d club(s) were inserted as their own row because another ESPN team holds their name; %d ESPN team id "
+        "conflict(s). Everything else was written and committed; exiting %d so this run fails until they are "
+        "repaired, ESPN corrects them, or the team mapping is checked (details in the ERROR lines above).",
         cfg.sport,
         refused,
         forks,
         same_team,
         scores,
         statuses,
+        nw_refused,
+        nw_unconfirmed,
+        NO_WINNER_CONFIRM_HOURS,
         namesakes,
         conflicts,
         IDENTITY_EXIT_CODE,

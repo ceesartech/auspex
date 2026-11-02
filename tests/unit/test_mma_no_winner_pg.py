@@ -290,7 +290,7 @@ class TestRecordAndGrade:
         assert _get(cur, "matches", draw_row, "status", "home_score", "away_score", "metadata") == before
         cur.execute("SELECT count(*) AS n FROM matches")
         assert cur.fetchone()["n"] == before_n
-        assert fu.IDENTITY_STATS["score_mismatch"] == 0
+        assert sum(fu.IDENTITY_STATS.values()) == 0
 
     def test_a_later_winner_is_refused_and_counted(self, cur):
         league, f, draw_row, win_row, rid, card = self._setup(cur)
@@ -299,7 +299,7 @@ class TestRecordAndGrade:
         assert fu.record_results(cur, MMA, league, [corrected], "ufc") == 0
         row = _get(cur, "matches", draw_row, "status", "home_score", "metadata")
         assert (row["status"], row["home_score"], row["metadata"]["no_winner"]) == ("finished", None, "draw")
-        assert fu.IDENTITY_STATS["score_mismatch"] == 1
+        assert fu.IDENTITY_STATS["no_winner_refused"] == 1
 
     def test_a_later_no_winner_over_a_recorded_winner_is_refused(self, cur):
         league, f, draw_row, win_row, rid, card = self._setup(cur)
@@ -308,14 +308,25 @@ class TestRecordAndGrade:
         assert fu.record_results(cur, MMA, league, [overturned], "ufc") == 0
         row = _get(cur, "matches", win_row, "home_score", "away_score", "metadata")
         assert (row["home_score"], row["away_score"]) == (1, 0) and "no_winner" not in row["metadata"]
-        assert fu.IDENTITY_STATS["score_mismatch"] == 1
+        assert fu.IDENTITY_STATS["no_winner_refused"] == 1
 
     def test_a_disagreeing_core_api_writes_nothing(self, cur, _core_says):
         league, f, draw_row, win_row, rid, card = self._setup(cur)
         _core_says["501"] = "no-contest"
         assert fu.record_results(cur, MMA, league, [card], "ufc") == 1
         assert _get(cur, "matches", draw_row, "status")["status"] == "scheduled"
-        assert fu.IDENTITY_STATS["score_mismatch"] == 1
+        assert fu.IDENTITY_STATS["no_winner_refused"] == 1
+
+    @pytest.mark.parametrize("answer", [None, "result-pending", "kotko"])
+    def test_a_bout_still_unconfirmed_two_days_on_stays_scheduled_and_fails_the_run(self, cur, _core_says, answer):
+        # The card is 2 days old (inside the 3-day window, past the 12-hour confirmation window): the bout is
+        # not written, but the run exits 3 instead of letting it age out 'scheduled' with only log lines.
+        league, f, draw_row, win_row, rid, card = self._setup(cur)
+        _core_says["501"] = answer
+        assert fu.record_results(cur, MMA, league, [card], "ufc") == 1
+        assert _get(cur, "matches", draw_row, "status")["status"] == "scheduled"
+        assert fu.IDENTITY_STATS["no_winner_unconfirmed"] == 1
+        assert fu.identity_exit_code(MMA) == fu.IDENTITY_EXIT_CODE
 
     def test_an_unseen_bout_is_inserted_finished_with_no_winner(self, cur):
         league = _league(cur)

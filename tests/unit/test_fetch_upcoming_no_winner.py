@@ -10,7 +10,11 @@ bouts, each with ESPN's core-API status result):
   * a bout is recorded finished with NULL scores and metadata.no_winner /
     no_winner_detail only when the core API confirms the reading; a winning
     method or no result leaves it for the next sweep, an unreachable core API
-    is logged at ERROR, and a disagreement is refused and counted (exit 3);
+    is logged at ERROR, and a disagreement is refused and counted
+    (no_winner_refused, exit 3);
+  * a bout still unconfirmed 12 hours after kickoff, for any reason, is
+    counted (no_winner_unconfirmed, exit 3) before it can age out of the
+    sweep's 3-day window still 'scheduled';
   * a finished row keeps the kind of result it was recorded with;
   * tennis (no draws) and decisive bouts are untouched.
 """
@@ -22,7 +26,7 @@ import importlib.util
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -47,6 +51,9 @@ TENNIS = fu.SPORT_CONFIGS["tennis"]
 COMPS = {c["id"]: c for c in json.loads(FIXTURE.read_text())["competitions"]}
 NO_WINNER_IDS = [cid for cid, c in COMPS.items() if not any(x["winner"] for x in c["competitors"])]
 GATTO = "401924511"  # Melissa Gatto v Ernesta Kareckaite, UFC 2026-10-10: a majority draw
+GATTO_KICKOFF = datetime(2026, 10, 10, 21, tzinfo=timezone.utc)
+FRESH = GATTO_KICKOFF + timedelta(hours=1)  # a sweep soon after the fight
+STALE = GATTO_KICKOFF + timedelta(hours=13)  # past NO_WINNER_CONFIRM_HOURS
 CONTEXT = {"event_id": "600061541", "league_slug": "ufc", "season_type": "regular"}
 
 
@@ -223,11 +230,12 @@ class _Recorder:
     insert_finished_match is captured. `existing` is the row the kind check
     reads at the triple (None: no row)."""
 
-    def __init__(self, monkeypatch, core=("draw", True), existing=None, reversed_listing=False):
+    def __init__(self, monkeypatch, core=("draw", True), existing=None, reversed_listing=False, now=FRESH):
         self.captured: dict = {}
         self.core_calls: list = []
         self.cur = MagicMock()
         self.cur.fetchone.return_value = existing
+        monkeypatch.setattr(fu, "_utc_now", lambda: now)
         monkeypatch.setattr(fu, "ensure_team", lambda cur, cfg, name, league_id, espn_id=None, alt_names=(): name)
         monkeypatch.setattr(fu, "_listed_reversed", lambda *a: reversed_listing)
         monkeypatch.setattr(fu, "_reconcile_match_row", lambda *a, **k: True)
@@ -266,7 +274,7 @@ class TestRecordResult:
             "no_winner_detail": "majority draw; judges 28-28, 27-29, 28-28; ended R3 5:00",
         }
         assert "finished with NO WINNER: draw" in caplog.text
-        assert fu.IDENTITY_STATS["score_mismatch"] == 0
+        assert sum(fu.IDENTITY_STATS.values()) == 0
 
     def test_a_confirmed_no_contest(self, monkeypatch):
         rec = _Recorder(monkeypatch, core=("no-contest", True))
@@ -284,8 +292,9 @@ class TestRecordResult:
         rec = _Recorder(monkeypatch, core=("kotko", True))
         with caplog.at_level(logging.WARNING):
             assert rec.run(_comp(GATTO)) is False
-        assert rec.captured == {} and fu.IDENTITY_STATS["score_mismatch"] == 0
+        assert rec.captured == {} and sum(fu.IDENTITY_STATS.values()) == 0
         assert "not recorded yet" in caplog.text
+        assert [r.levelname for r in caplog.records] == ["WARNING"]
 
     def test_no_result_yet_leaves_it_too(self, monkeypatch):
         rec = _Recorder(monkeypatch, core=(None, True))
@@ -295,7 +304,8 @@ class TestRecordResult:
         rec = _Recorder(monkeypatch, core=(None, False))
         with caplog.at_level(logging.ERROR):
             assert rec.run(_comp(GATTO)) is False
-        assert rec.captured == {} and fu.IDENTITY_STATS["score_mismatch"] == 0
+        assert rec.captured == {} and sum(fu.IDENTITY_STATS.values()) == 0
+        assert fu.identity_exit_code(MMA) == 0
         assert "did not answer" in caplog.text and "backfill_results" in caplog.text
 
     def test_a_disagreement_is_refused_and_counted(self, monkeypatch, caplog):
@@ -303,9 +313,12 @@ class TestRecordResult:
         with caplog.at_level(logging.ERROR):
             assert rec.run(_comp(GATTO)) is False
         assert rec.captured == {}
-        assert fu.IDENTITY_STATS["score_mismatch"] == 1
+        assert fu.IDENTITY_STATS == {**{k: 0 for k in fu.IDENTITY_STATS}, "no_winner_refused": 1}
         assert fu.identity_exit_code(MMA) == fu.IDENTITY_EXIT_CODE
         assert "the scoreboard reads draw" in caplog.text
+        summary = [r.getMessage() for r in caplog.records if "sweep REFUSED" in r.getMessage()]
+        assert "1 no-winner result(s) ESPN's two APIs disagree on" in summary[0]
+        assert "0 carried a header score" in summary[0]
 
     @pytest.mark.parametrize("missing", ["event_id", "league_slug"])
     def test_without_the_event_or_league_it_cannot_be_confirmed(self, monkeypatch, caplog, missing):
@@ -314,6 +327,55 @@ class TestRecordResult:
             assert rec.run(_comp(GATTO), context={k: v for k, v in CONTEXT.items() if k != missing}) is False
         assert rec.core_calls == [] and rec.captured == {}
         assert "cannot be asked to confirm" in caplog.text
+
+    @pytest.mark.parametrize(
+        "core, context",
+        [
+            (("kotko", True), CONTEXT),  # the core API names a win the scoreboard does not show
+            ((None, True), CONTEXT),  # no result yet
+            (("result-pending", True), CONTEXT),  # a name core_no_winner_kind does not map
+            ((None, False), CONTEXT),  # the core API down
+            (("draw", True), {k: v for k, v in CONTEXT.items() if k != "event_id"}),  # cannot be asked
+        ],
+        ids=["winning-method", "no-result", "unmapped-name", "core-api-down", "no-event-id"],
+    )
+    def test_still_unconfirmed_12_hours_after_kickoff_is_counted_and_exits_3(self, monkeypatch, caplog, core, context):
+        # Without the count the bout would leave the 3-day window still 'scheduled', with only log lines.
+        rec = _Recorder(monkeypatch, core=core, now=STALE)
+        with caplog.at_level(logging.WARNING):
+            assert rec.run(_comp(GATTO), context=context) is False
+        assert rec.captured == {}
+        assert fu.IDENTITY_STATS == {**{k: 0 for k in fu.IDENTITY_STATS}, "no_winner_unconfirmed": 1}
+        errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("still unconfirmed 12 hours or more after kickoff" in e and "exits 3" in e for e in errors), errors
+        assert fu.identity_exit_code(MMA) == fu.IDENTITY_EXIT_CODE
+        summary = [r.getMessage() for r in caplog.records if "sweep REFUSED" in r.getMessage()]
+        assert "1 no-winner bout(s) ESPN's core API has not confirmed 12 hours after kickoff" in summary[0]
+
+    @pytest.mark.parametrize("hours, counted", [(11.98, 0), (12, 1)])
+    def test_the_window_is_12_hours_from_kickoff(self, monkeypatch, hours, counted):
+        rec = _Recorder(monkeypatch, core=(None, False), now=GATTO_KICKOFF + timedelta(hours=hours))
+        assert rec.run(_comp(GATTO)) is False
+        assert fu.IDENTITY_STATS["no_winner_unconfirmed"] == counted
+        assert fu.identity_exit_code(MMA) == (fu.IDENTITY_EXIT_CODE if counted else 0)
+
+    def test_a_naive_kickoff_is_read_as_utc(self, monkeypatch):
+        monkeypatch.setattr(fu, "_utc_now", lambda: STALE)
+        assert fu._past_confirm_window(GATTO_KICKOFF.replace(tzinfo=None)) is True
+        monkeypatch.setattr(fu, "_utc_now", lambda: FRESH)
+        assert fu._past_confirm_window(GATTO_KICKOFF.replace(tzinfo=None)) is False
+        assert fu._past_confirm_window(None) is False
+
+    def test_a_bout_already_recorded_is_not_counted_however_old(self, monkeypatch):
+        rec = _Recorder(monkeypatch, core=(None, False), existing=TestTheKindOfAResultIsKept.DRAW, now=STALE)
+        rec.cur.fetchall.return_value = [{"status": "finished", "no_winner": "draw"}]
+        assert rec.run(_comp(GATTO)) is True
+        assert sum(fu.IDENTITY_STATS.values()) == 0
+
+    def test_a_disagreement_past_the_window_is_one_refusal_not_two(self, monkeypatch):
+        rec = _Recorder(monkeypatch, core=("no-contest", True), now=STALE)
+        assert rec.run(_comp(GATTO)) is False
+        assert fu.IDENTITY_STATS == {**{k: 0 for k in fu.IDENTITY_STATS}, "no_winner_refused": 1}
 
     def test_a_bout_already_recorded_as_that_kind_is_rewritten_without_asking_again(self, monkeypatch, caplog):
         # Each 15-minute sweep rewrites a bout for 3 days: the core API confirmed it when it was recorded.
@@ -372,24 +434,25 @@ class TestTheKindOfAResultIsKept:
         rec = _Recorder(monkeypatch, existing=self.WINNER)
         with caplog.at_level(logging.ERROR):
             assert rec.run(_comp(GATTO)) is False
-        assert rec.captured == {} and fu.IDENTITY_STATS["score_mismatch"] == 1
+        assert rec.captured == {} and fu.IDENTITY_STATS["no_winner_refused"] == 1
+        assert fu.IDENTITY_STATS["score_mismatch"] == 0
         assert "finished with a winner (1-0) and ESPN now reports no winner (draw)" in caplog.text
 
     def test_a_winner_over_a_recorded_draw_is_refused(self, monkeypatch, caplog):
         rec = _Recorder(monkeypatch, existing=self.DRAW)
         with caplog.at_level(logging.ERROR):
             assert rec.run(_comp("401924510")) is False
-        assert rec.captured == {} and fu.IDENTITY_STATS["score_mismatch"] == 1
+        assert rec.captured == {} and fu.IDENTITY_STATS["no_winner_refused"] == 1
         assert "finished with no winner (draw) and ESPN now reports a winner" in caplog.text
 
     def test_a_no_contest_over_a_recorded_draw_is_refused(self, monkeypatch):
         rec = _Recorder(monkeypatch, existing=self.DRAW, core=("no-contest", True))
         assert rec.run(_comp("401436433")) is False
-        assert fu.IDENTITY_STATS["score_mismatch"] == 1
+        assert fu.IDENTITY_STATS["no_winner_refused"] == 1
 
     def test_the_same_draw_again_is_rewritten(self, monkeypatch):
         rec = _Recorder(monkeypatch, existing=self.DRAW)
-        assert rec.run(_comp(GATTO)) is True and fu.IDENTITY_STATS["score_mismatch"] == 0
+        assert rec.run(_comp(GATTO)) is True and sum(fu.IDENTITY_STATS.values()) == 0
 
     def test_a_winner_over_a_recorded_winner_is_the_upserts_business(self, monkeypatch):
         rec = _Recorder(monkeypatch, existing=self.WINNER)

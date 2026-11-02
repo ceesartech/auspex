@@ -129,6 +129,14 @@ NFL_TOTAL_MODEL_NAME = "ensemble_nfl_tot"
 # turning a win into a no contest) usually leaves the settlement made on the
 # result announced at the event standing. The rec ledger is a model ledger,
 # not one book's statement.
+#
+# Known limit (fails safe): scripts/repair_stranded_recs.py and
+# scripts/repair_fixture_orphans.py look for a stale duplicate's played twin
+# only among finished rows with BOTH scores set. A stale duplicate of a bout
+# recorded with no winner therefore finds no twin: a pending rec on that
+# duplicate stays pending (it is never settled from the twin, and never voided
+# by this convention) until a person settles it. No such rec existed when this
+# was written (2026-11-02).
 NO_WINNER_KEY = "no_winner"
 NO_WINNER_DETAIL_KEY = "no_winner_detail"
 NO_WINNER_DRAW = "draw"

@@ -61,9 +61,14 @@ with DAG(
     # REFUSE a write that would corrupt a fixture — an ESPN id whose team
     # pair drifted (ForkRefused, forks_refused), both sides resolving to one
     # team (same_team), a soccer header score its own scoring plays
-    # contradict (score_mismatch), or a postponement / cancellation whose
-    # ESPN id names a row that drifted (status_refused) — or when team
-    # identity needs a person: a club inserted as its own row because
+    # contradict (score_mismatch), a postponement / cancellation whose
+    # ESPN id names a row that drifted (status_refused), or an MMA bout
+    # with no winner (a draw or a no contest) whose kind ESPN's two APIs
+    # disagree on or that would change a recorded result's kind
+    # (no_winner_refused) — or when an MMA bout the scoreboard shows with
+    # no winner is still unconfirmed by ESPN's core API 12 hours after
+    # kickoff (no_winner_unconfirmed; not written, retried every sweep), or
+    # when team identity needs a person: a club inserted as its own row because
     # another ESPN team holds its name (team_namesakes; written, counted
     # once), or an ESPN team id conflict (team_conflicts; that competition is
     # skipped). Either way only after committing everything else in the

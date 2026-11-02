@@ -219,3 +219,14 @@ def test_rec_outcomes_must_be_exactly_the_pinned_ones(entries, bad):
 def test_the_rec_pin_is_read_by_the_cli():
     args = bf.parse_args(["--sport", "mma", "--dates", "2026-06-06", "--expect-recs", str(REVIEWED)])
     assert len(args.expect_recs) == 21
+
+
+@pytest.mark.parametrize("key", sorted(bf.fu.IDENTITY_STATS))
+def test_identity_refused_counts_every_counter_the_sweep_exits_3_on(monkeypatch, key):
+    # The no-winner counters (refused, unconfirmed) were added after this count was written: a key it skipped
+    # would let a pinned apply plan identity_refused=0 while the results path refused a write.
+    for k in list(bf.fu.IDENTITY_STATS):
+        monkeypatch.setitem(bf.fu.IDENTITY_STATS, k, 0)
+    monkeypatch.setitem(bf.fu.IDENTITY_STATS, key, 1)
+    assert bf.identity_refused() == 1
+    assert "no_winner_unconfirmed" in bf.fu.IDENTITY_STATS and "no_winner_refused" in bf.fu.IDENTITY_STATS
