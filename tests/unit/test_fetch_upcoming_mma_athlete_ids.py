@@ -232,3 +232,99 @@ class TestCallSites:
         )
         assert fu.cancel_dropped_bouts(Cur(), MMA, UFC, [{"id": "600", "competitions": [comp]}]) == 0
         assert seen == [("Zach Reese", "5143223"), ("Opponent One", "5000001")]
+
+
+class TestOpponentPlaceholders:
+    """A UFC slot with no booked opponent ('Opponent TBA') is skipped before resolution, like TBD/TBA: resolved by
+    athlete id it would stamp the slot's id onto the 'Opponent TBA' row, and the next such slot (another id) would
+    be refused every sweep."""
+
+    @pytest.mark.parametrize("slot", ["Opponent TBA", "opponent tbd", " TBA  Opponent ", "TBD Opponent"])
+    def test_the_slot_is_skipped(self, slot):
+        comp = _comp({"id": "3895544", "athlete": {"displayName": "Bruno Silva"}}, {"id": "-1", "athlete": {}})
+        comp["competitors"][1]["athlete"]["displayName"] = slot
+        assert fu._is_placeholder_name(slot)
+        assert fu._competition_parts(comp, MMA) is None
+
+    def test_the_fixtures_path_never_resolves_it(self, monkeypatch):
+        seen: list = []
+        monkeypatch.setattr(fu, "ensure_team", lambda *a, **k: seen.append(a) or "x")
+        comp = _comp(
+            {"id": "3895544", "athlete": {"displayName": "Bruno Silva"}},
+            {"id": "9", "athlete": {"displayName": "Opponent TBA"}},
+        )
+        assert not fu._process_competition(None, MMA, UFC, comp)
+        assert seen == []
+
+    def test_a_real_name_containing_the_words_is_kept(self):
+        assert not fu._is_placeholder_name("Tba Opponentov")
+
+
+SCRIPTS = HERE.parents[1] / "scripts"
+
+
+@pytest.fixture
+def lmh(monkeypatch):
+    """scripts/load_mma_historical.py, bound to the fetch_upcoming these tests drive (other suites re-load it)."""
+    monkeypatch.setitem(sys.modules, "fetch_upcoming", fu)
+    spec = importlib.util.spec_from_file_location("load_mma_historical_athlete_ids", SCRIPTS / "load_mma_historical.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _ufc_fight(home: tuple[str, str], away: tuple[str, str], when="2024-10-26T14:00Z"):
+    """A finished bout as ESPN's UFC scoreboard carries it: the athlete id on the competitor, not on .athlete."""
+    return {
+        "date": when,
+        "status": {"type": {"state": "post"}},
+        "competitors": [
+            {"id": home[1], "winner": False, "athlete": {"displayName": home[0]}},
+            {"id": away[1], "winner": True, "athlete": {"displayName": away[0]}},
+        ],
+    }
+
+
+class TestHistoricalLoader:
+    """load_mma_historical resolves fighters as the pipeline does: by ESPN athlete id first. By name alone a re-load
+    of 2022-2024 would put Blindado's bouts back on Bulldog's row and undo the split."""
+
+    def _split_db(self):
+        return FakeDB(
+            [
+                fighter("bulldog", "Bruno Silva", espn="3895544"),
+                fighter("blindado", "Bruno Silva (ESPN 4333158)", espn="4333158", aliases=["Bruno Silva"]),
+                fighter("naurdiev", "Ismail Naurdiev", espn="4294504"),
+                fighter("durden", "Cody Durden", espn="4217396"),
+            ]
+        )
+
+    def test_the_parsed_fight_carries_both_athlete_ids(self, lmh):
+        parsed = lmh.extract_finished_fight(_ufc_fight(("Bruno Silva", "4333158"), ("Ismail Naurdiev", "4294504")))
+        assert (parsed["home_espn"], parsed["away_espn"]) == ("4333158", "4294504")
+        assert parsed["home_name"] == "Bruno Silva" and parsed["away_score"] == 1
+
+    def test_each_bruno_silva_resolves_to_his_own_row(self, lmh):
+        db = self._split_db()
+        blindado = lmh.extract_finished_fight(_ufc_fight(("Bruno Silva", "4333158"), ("Ismail Naurdiev", "4294504")))
+        bulldog = lmh.extract_finished_fight(
+            _ufc_fight(("Bruno Silva", "3895544"), ("Cody Durden", "4217396"), "2024-07-21T00:00Z")
+        )
+        assert lmh.resolve_fighters(db, MMA, UFC, blindado) == ("blindado", "naurdiev")
+        assert lmh.resolve_fighters(db, MMA, UFC, bulldog) == ("bulldog", "durden")
+        by_name = dict(blindado, home_espn=None, away_espn=None)  # what the loader did before
+        assert lmh.resolve_fighters(db, MMA, UFC, by_name)[0] == "bulldog"
+        assert db.writes() == [] and fu.IDENTITY_STATS["team_conflicts"] == 0
+
+    def test_a_third_bruno_silva_is_refused_and_the_run_exits_3(self, lmh, monkeypatch):
+        db = self._split_db()
+        third = lmh.extract_finished_fight(_ufc_fight(("Bruno Silva", "7777777"), ("Ismail Naurdiev", "4294504")))
+        assert lmh.resolve_fighters(db, MMA, UFC, third)[0] is None
+        assert fu.IDENTITY_STATS["team_conflicts"] == 1 and db.writes() == []
+        monkeypatch.setattr(lmh, "run", lambda *a, **k: {})
+        argv = ["--start-date", "2024-10-26", "--end-date", "2024-10-26", "--database-url", "postgresql:///x"]
+        assert lmh.main(argv) == fu.IDENTITY_EXIT_CODE
+
+    def test_a_clean_run_exits_0(self, lmh, monkeypatch):
+        monkeypatch.setattr(lmh, "run", lambda *a, **k: {})
+        assert lmh.main(["--start-date", "2024-10-26", "--end-date", "2024-10-26", "--database-url", "x"]) == 0

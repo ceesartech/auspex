@@ -1124,7 +1124,21 @@ def build_pair_index(cfg: SportConfig, events: list[dict]) -> dict[tuple[str, st
     return index
 
 
-_PLACEHOLDER_NAMES = {"tbd", "tba", "to be determined", "to be announced", "bye", "qualifier"}
+_PLACEHOLDER_NAMES = {
+    "tbd",
+    "tba",
+    "to be determined",
+    "to be announced",
+    "bye",
+    "qualifier",
+    # A UFC slot whose opponent is not booked yet (a 2026-07-29 sweep minted an 'Opponent TBA' fighter row). Skipped
+    # like TBD/TBA, and never resolved by ESPN athlete id: whatever id ESPN gives the slot would be stamped onto that
+    # row, and a different id on the next such slot would be refused every sweep (exit 3).
+    "opponent tba",
+    "opponent tbd",
+    "tba opponent",
+    "tbd opponent",
+}
 
 # Knockout-bracket slots ESPN publishes before the teams are known. Each name
 # is reused from tournament to tournament and fuzzy-matches its siblings

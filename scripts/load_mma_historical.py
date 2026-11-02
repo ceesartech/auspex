@@ -48,9 +48,11 @@ from fetch_upcoming import (  # noqa: E402
     ESPN_BASE,
     MMA_LEAGUES,
     SPORT_CONFIGS,
+    _competitor_espn_id,
     _competitor_name,
     ensure_league,
     ensure_team,
+    identity_exit_code,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
@@ -120,9 +122,15 @@ def extract_finished_fight(competition: dict) -> Optional[dict]:
     except (TypeError, ValueError):
         return None
 
+    # Each fighter's ESPN athlete id (None when ESPN leaves it out): fighters resolve by it first, as in
+    # fetch_upcoming (SportConfig.athlete_ids). By name alone, Blindado's 2024 'Bruno Silva' bouts would land on
+    # Bulldog's row again after the 2026-11-02 split (scripts/mma_identity_cleanup.py).
+    athlete_ids = SPORT_CONFIGS["mma"].athlete_ids
     return {
         "home_name": home_name,
         "away_name": away_name,
+        "home_espn": _competitor_espn_id(home, True, athlete_ids),
+        "away_espn": _competitor_espn_id(away, True, athlete_ids),
         "home_score": 1 if home_won else 0,
         "away_score": 1 if away_won else 0,
         "match_dt": match_dt,
@@ -148,6 +156,18 @@ def fetch_day(slug: str, day: date) -> list[dict]:
 
 
 # ── DB I/O ──────────────────────────────────────────────────────────
+
+
+def resolve_fighters(cur, cfg, league_id: str, parsed: dict) -> tuple[Optional[str], Optional[str]]:
+    """Both fighters' team rows, resolved as the pipeline resolves them
+    (fetch_upcoming.ensure_team): by ESPN athlete id first, by name and
+    aliases only when no row carries that id (stamping it onto the row the
+    name finds). A name that finds only other athletes' rows is refused
+    (None, counted in IDENTITY_STATS, logged as an ERROR): the fight is
+    skipped and the run exits 3."""
+    home_id = ensure_team(cur, cfg, parsed["home_name"], league_id, espn_id=parsed.get("home_espn"))
+    away_id = ensure_team(cur, cfg, parsed["away_name"], league_id, espn_id=parsed.get("away_espn"))
+    return home_id, away_id
 
 
 def upsert_finished_match(
@@ -216,8 +236,7 @@ def run(database_url: str, start: date, end: date, slug: str = DEFAULT_LEAGUE) -
                         if parsed is None:
                             counts["skipped"] += 1
                             continue
-                        home_id = ensure_team(cur, cfg, parsed["home_name"], league_id)
-                        away_id = ensure_team(cur, cfg, parsed["away_name"], league_id)
+                        home_id, away_id = resolve_fighters(cur, cfg, league_id, parsed)
                         if not (home_id and away_id):
                             counts["skipped"] += 1
                             continue
@@ -285,7 +304,8 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("--end-date must be >= --start-date")
         return 2
     run(args.database_url, start, end, args.league)
-    return 0
+    # 3 when a fighter was refused (or anything else needs a person): the ERROR lines above name the rows.
+    return identity_exit_code(SPORT_CONFIGS["mma"])
 
 
 _ = Json  # forward-compat (unused; suppress lint)
