@@ -245,6 +245,7 @@ def test_the_reviewed_set_still_closes_with_recs_beyond_the_pin_named(tmp_path):
     "kw",
     [
         {"dry": "PLAN candidates=8 races=3 settle=0 void=8 unmatched=0 errors=0"},  # more candidates than reviewed
+        {"dry": "PLAN candidates=8 races=3 settle=4 void=4 unmatched=0 errors=0"},  # ... with settle and void inside
         {"dry": "PLAN candidates=7 races=4 settle=0 void=7 unmatched=0 errors=0"},  # more races
         {"dry": "PLAN candidates=8 races=3 settle=8 void=0 unmatched=0 errors=0"},  # more settles
         {"dry": "PLAN candidates=7 races=3 settle=0 void=6 unmatched=1 errors=0"},  # unmatched
