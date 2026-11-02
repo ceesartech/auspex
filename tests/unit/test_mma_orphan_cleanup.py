@@ -9,7 +9,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -281,3 +281,10 @@ def test_main_refuses_a_list_naming_a_row_of_another_mma_list_before_connecting(
     lst = _write(tmp_path, [f"{stamped},Someone,,why"])
     # an unreachable database: the refusal comes before any connection
     assert moc.main(["--list", str(lst), "--database-url", "postgresql://nobody@127.0.0.1:1/none"]) == 2
+
+
+def test_the_digest_does_not_depend_on_the_session_time_zone():
+    denver = timezone(timedelta(hours=-7))
+    local = _doc(_row(created_at=CREATED.astimezone(denver), updated_at=CREATED.astimezone(denver)))
+    assert local["digest"] == _doc()["digest"]
+    assert local["rows"][0]["observed"]["created_at"].utcoffset() == timedelta(0)

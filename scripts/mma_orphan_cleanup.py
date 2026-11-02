@@ -292,6 +292,12 @@ class RowPlan:
     observed: dict = field(default_factory=dict)  # the row as the plan saw it (delete only)
 
 
+def _utc(v: Any) -> Any:
+    """A timestamp in UTC (the same instant: the guard compares it exactly), so the plan and its digest do not
+    depend on the database session's time zone; any other value as it is."""
+    return v.astimezone(timezone.utc) if isinstance(v, datetime) and v.tzinfo is not None else v
+
+
 def _espn(row: dict) -> str:
     ext = row.get("external_ids")
     return str(ext.get("espn") or "") if isinstance(ext, dict) else ""
@@ -336,7 +342,7 @@ def plan_row(o: Orphan, state: State) -> RowPlan:
             f"MMA row(s) {', '.join(claims)} claim {o.team_name!r} as an alias — re-review",
         )
     return RowPlan(
-        o.team_id, o.team_name, "delete", f"delete bout-less {o.team_name!r}", {k: t.get(k) for k in OBSERVED}
+        o.team_id, o.team_name, "delete", f"delete bout-less {o.team_name!r}", {k: _utc(t.get(k)) for k in OBSERVED}
     )
 
 
