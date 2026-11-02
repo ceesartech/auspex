@@ -56,6 +56,7 @@ def _rules(
     ids_pre=REVIEWED,
     ids_dry=REVIEWED,
     ufc="0|none",
+    verify_rc=0,
 ):
     psql = [ufc, states[0], as_planned] + ([finished] if races else []) + [states[1]]
     return [
@@ -74,23 +75,29 @@ def _rules(
         {"match": r"/tmp/race_closeout_apply\.log 2>&1", "out": f"tool exit {apply_rc}", "rc": apply_rc},
         {"match": r"api python -c import csv, sys; rows = \[r for r", "out": triples},
         {"match": r"api python -c import csv, sys; print\(','\.join\(sorted", "out": races},
-        {"match": r"/tmp/race_closeout_verify\.log 2>&1", "out": "tool exit 0"},
+        {"match": r"/tmp/race_closeout_verify\.log 2>&1", "out": f"tool exit {verify_rc}", "rc": verify_rc},
         {"match": r"grep -o 'PLAN candidates=\.\*' /tmp/race_closeout_verify\.log", "out": after},
         *({"match": r"postgres sh -c psql", "out": out, "times": 1} for out in psql),
         {"match": r"postgres rm -f", "out": ""},
     ]
 
 
+# Every scripts/ops wrapper but this one, by file name: what the wrapper's own check matches on.
+OTHER_OPS = sorted(p.name for p in WRAPPER.parent.glob("*.sh") if p.name != WRAPPER.name)
+
+
 def _install_ps(tmp_path):
-    """A `ps` whose process list is the real one minus every other scripts/ops process (a parallel test run's), plus
-    the lines of fake/ps_extra; fake/ps_fail makes the list fail. `ps -p` (the lock's liveness check) is real."""
+    """A `ps` whose process list is the real one minus every other scripts/ops process (a parallel test run's, by
+    path or by file name), plus the lines of fake/ps_extra; fake/ps_fail makes the list fail. `ps -p` (the lock's
+    liveness check) is real."""
     real = shutil.which("ps")
+    others = "|".join(re.escape(n).replace("/", "\\/") for n in OTHER_OPS)
     script = tmp_path / "bin" / "ps"
     script.write_text(
         "#!/bin/bash\n"
         'if [ "$1" = "-eo" ]; then\n'
         '  [ -f "$FAKE_DIR/ps_fail" ] && exit 1\n'
-        f"  {real} \"$@\" | awk '!/scripts\\/ops\\// || /close_out_stranded_race_recs\\.sh/'\n"
+        f"  {real} \"$@\" | awk '!/scripts\\/ops\\/|{others}/ || /close_out_stranded_race_recs\\.sh/'\n"
         '  [ -f "$FAKE_DIR/ps_extra" ] && cat "$FAKE_DIR/ps_extra"\n'
         "  exit 0\n"
         "fi\n"
@@ -110,6 +117,11 @@ def _run(tmp_path, rules, airflow=None, ps_extra=None, ps_fail=False, workdir_fi
         (tmp_path / "fake" / "ps_fail").write_text("")
     rc, out = fd.run(WRAPPER, env)
     return rc, out, fd.calls(tmp_path)
+
+
+def _last_line(out):
+    """The wrapper's own last line: through `| tee` the operator's $? is tee's, so the run names its exit status."""
+    return out.rstrip("\n").splitlines()[-1]
 
 
 def _tool_runs(calls, flag="--apply"):
@@ -135,7 +147,8 @@ def _as_of(call):
 def test_the_second_run_voids_the_seven_pinned_to_one_instant_and_checks_the_exact_after_state(tmp_path):
     rc, out, calls = _run(tmp_path, _rules())
     assert rc == 0 and "DONE: 0 rec(s) settled" in out and "7 voided" in out, out
-    assert "PARTIAL" not in out and "NOTE" not in out
+    assert "PARTIAL" not in out and "NOTE" not in out and "NOT FINISHED" not in out
+    assert re.fullmatch(r"\[[0-9T:-]+Z\] exit 0: done \(or already done\)", _last_line(out)), out
     assert not [c for c in fd.calls(tmp_path) if c.startswith("UNMATCHED")]
     (apply_,) = _tool_runs(calls)
     assert "--expect-plan candidates=7,races=3,settle=0,void=7,unmatched=0,errors=0" in apply_
@@ -189,10 +202,13 @@ def test_an_early_run_closes_what_left_the_window_and_says_when_to_rerun(tmp_pat
     )
     rc, out, calls = _run(tmp_path, rules)
     assert rc == 3, out
-    assert "DONE: 0 rec(s) settled from their race's result, 4 voided" in out
+    # Never "DONE" while recs are left: an operator who stops reading there must not cancel the subscription.
+    assert "DONE" not in out and "CLOSED, NOT FINISHED: 0 rec(s) settled from their race's result, 4 voided" in out
     assert "NOTE: 3 rec(s) on 2 race(s) before 2026-11-01T00:00:00Z are still inside the drain's 3-day window" in out
     assert "in window: rec w1" in out  # named before anything is written
     assert "PARTIAL: 3 rec(s) on 2 race(s)" in out and "re-run this script after 2026-11-03T19:25:00+00:00" in out
+    assert "do not cancel the Racing API subscription yet" in out
+    assert re.search(r"\] exit 3: not finished — re-run after the time named above", _last_line(out)), out
     (apply_,) = _tool_runs(calls)
     assert "--expect-plan candidates=4,races=1,settle=0,void=4,unmatched=0,errors=0" in apply_
 
@@ -214,14 +230,14 @@ def test_nothing_out_of_the_window_yet_is_not_yet_without_a_backup_or_a_write(tm
     window = "IN_WINDOW recs=7 races=3 until=2026-11-03T19:25:00+00:00"
     rc, out, calls = _run(tmp_path, _rules(pre=ZERO, window_pre=window))
     assert rc == 3 and "NOT YET" in out and "re-run after 2026-11-03T19:25:00+00:00" in out, out
-    assert "ALREADY DONE" not in out and "in window: rec w1" in out
+    assert "ALREADY DONE" not in out and "in window: rec w1" in out and "] exit 3: not finished" in _last_line(out)
     assert _no_write(tmp_path, calls) and not _tool_runs(calls, "race_closeout_dry")
 
 
 def test_nothing_left_exits_0_without_a_backup_or_a_write(tmp_path):
     rc, out, calls = _run(tmp_path, _rules(pre=ZERO))
     assert rc == 0 and "ALREADY DONE" in out, out
-    assert "NOTE" not in out and "NEW PIN" not in out and "NOT YET" not in out
+    assert "NOTE" not in out and "NEW PIN" not in out and "NOT YET" not in out and "] exit 0: done" in _last_line(out)
     assert _no_write(tmp_path, calls)
 
 
@@ -312,11 +328,14 @@ def test_a_precheck_outside_the_gate_aborts_before_the_backup(tmp_path, kw):
         {"triples": "not a csv;drop table"},  # unreadable apply CSV
         {"beyond_after": ""},  # the verify run's BEYOND_PIN line is missing
         {"window_after": ""},  # the verify run's IN_WINDOW line is missing
+        # The verify re-plan failed: what its log holds may be a run before this one's (the file outlives each run).
+        {"verify_rc": 1},
     ],
 )
 def test_a_wrong_after_state_fails(tmp_path, kw):
     rc, out, _ = _run(tmp_path, _rules(**kw))
     assert rc == 1 and "FAILED after-state" in out, out
+    assert "DONE" not in out and "] exit 1: refused, aborted or failed" in _last_line(out)
 
 
 def test_a_settled_race_not_finished_fails_the_after_state(tmp_path):
@@ -351,7 +370,18 @@ def test_a_failed_apply_aborts_at_step_3(tmp_path):
 def test_an_unreadable_or_failed_precheck_aborts_before_the_backup(tmp_path, kw):
     rc, out, calls = _run(tmp_path, _rules(**kw))
     assert rc == 1 and "ABORT at step 0" in out, out
-    assert _no_write(tmp_path, calls)
+    assert _no_write(tmp_path, calls) and "] exit 1: " in _last_line(out)
+    # Only an API error points at the subscription.
+    assert ("IF THE SUBSCRIPTION ENDS FIRST" in out) == ("errors=1" in kw.get("pre", ""))
+
+
+def test_a_lapsed_subscription_aborts_before_the_backup_and_says_so(tmp_path):
+    # Every race answering 401: the tool plans errors=7 and refuses; the wrapper aborts at step 0 and names the cause.
+    lapsed = "PLAN candidates=7 races=3 settle=0 void=0 unmatched=0 errors=7"
+    rc, out, calls = _run(tmp_path, _rules(pre=lapsed, pre_rc=1))
+    assert rc == 1 and "ABORT at step 0" in out, out
+    assert "NOTE: 7 race(s) could not be asked about" in out and "the subscription has ended" in out
+    assert _no_write(tmp_path, calls) and not _tool_runs(calls, "race_closeout_dry")
 
 
 def test_a_backup_that_does_not_land_aborts_before_any_write(tmp_path):
@@ -368,12 +398,37 @@ def test_a_backup_that_does_not_land_aborts_before_any_write(tmp_path):
     [
         "4242 bash /opt/auspex/scripts/ops/soccer_repair_runbook.sh",
         "4243 /bin/bash scripts/ops/repair_stranded_recs_mma.sh --retire-stale-rows",
+        # Started from inside scripts/ops: no 'scripts/ops/' in the command line.
+        "4245 bash soccer_repair_runbook.sh",
+        "4246 ./merge_mma_fighters.sh",
+        "4247 bash -c 'cd /opt/auspex/scripts/ops && bash repair_stranded_recs_mma.sh'",
     ],
 )
 def test_another_ops_process_refuses_before_anything(tmp_path, line):
     rc, out, calls = _run(tmp_path, _rules(), ps_extra=line)
     assert rc == 1 and "REFUSED: another scripts/ops process" in out and line in out, out
     assert _no_write(tmp_path, calls) and not [c for c in calls if "close_out_stranded_race_recs.py" in c]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "4250 tee -a /root/soccer_repair_runbook.log",  # another wrapper's log, not the wrapper
+        "4251 bash /home/x/soccer_repair_runbook.sh.bak",
+        "4252 bash x_merge_mma_fighters.sh",
+    ],
+)
+def test_a_process_that_only_resembles_an_ops_wrapper_is_not_one(tmp_path, line):
+    rc, out, _ = _run(tmp_path, _rules(), ps_extra=line)
+    assert rc == 0 and "DONE" in out and "REFUSED" not in out, out
+
+
+def test_every_ops_wrapper_is_seen_by_its_file_name(tmp_path):
+    # Each wrapper in scripts/ops (this one aside) started from inside the directory refuses this run.
+    lines = "\n".join(f"{5000 + i} bash {name}" for i, name in enumerate(OTHER_OPS))
+    rc, out, _ = _run(tmp_path, _rules(), ps_extra=lines)
+    assert rc == 1 and "REFUSED: another scripts/ops process" in out, out
+    assert all(f"bash {name}" in out for name in OTHER_OPS) and "soccer_repair_runbook.sh" in OTHER_OPS
 
 
 def test_its_own_processes_do_not_count_as_another_ops_run(tmp_path):
@@ -435,6 +490,7 @@ def test_a_live_run_holding_the_lock_refuses(tmp_path):
         holder.kill()
         holder.wait()
     assert rc == 1 and "REFUSED: another run holds" in out, out
+    assert "] exit 1: refused, aborted or failed" in _last_line(out)
     assert not calls  # not one docker call
     assert (lock / "holder").read_text().startswith(str(holder.pid))  # the holder's lock is left alone
 

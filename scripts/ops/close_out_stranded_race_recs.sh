@@ -18,10 +18,12 @@
 #
 # THIS RUN (the second) closes the last 7: Southwell (AW) 31 Oct 17:40 (4
 # recs, racing_api_race_id rac_32302997831), 18:50 (2, rac_32303001705) and
-# 19:25 (1, rac_32303003642). The fixture was abandoned for fog after its
-# third race: the day's full, paginated /results list (59 results, 2 pages,
-# read 2026-11-02 06:21Z) has Southwell 16:00, 16:35 and 17:05 only, and
-# /results/{race_id} answers 404 "Result not found - race <id>" for all three.
+# 19:25 (1, rac_32303003642). The evening card is reported abandoned for fog
+# after its third race — search snippets only (the racecourse on X, 18:51Z
+# that night; pages not opened); the void rests on the feed alone: the day's
+# full, paginated /results list (59 results, 2 pages, read 2026-11-02 06:21Z)
+# has Southwell 16:00, 16:35 and 17:05 only, and /results/{race_id} answers
+# 404 "Result not found - race <id>" for all three.
 # The drain asks about each race until it is 3 days old (load_racing_api
 # DRAIN_DAYS), so each becomes a candidate here only after
 # 2026-11-03 17:40Z, 18:50Z and 19:25Z.
@@ -37,7 +39,12 @@
 # PARTIAL (2 voided, 1 left); 19:30Z DONE (1 voided); 19:40Z ALREADY DONE.
 # With every race answering 401 (the subscription gone first): ABORT at
 # step 0, before the backup. All of it again with this commit's code on the
-# 2026-11-02T07:51:57Z export: the same.
+# 2026-11-02T07:51:57Z export: the same. And again after the review fixes, on
+# the 2026-11-02T08:47:14Z export (the drain's 08:45Z tick: the three races
+# still 404): the same counts and after-state; the early runs' summaries read
+# "CLOSED, NOT FINISHED" (never "DONE") before their PARTIAL line, every run
+# ends "exit N: ...", the lapsed run names the subscription, and a wrapper
+# started as `cd scripts/ops && bash soccer_repair_runbook.sh` is refused.
 #
 # WHEN: at or after 2026-11-03 19:30Z, and before the Racing API subscription
 # is cancelled (the plan asks the API about every race; without it every race
@@ -47,6 +54,20 @@
 # refuses (step 0) while a UFC card is being fought, while another
 # scripts/ops wrapper or the soccer runbook runs on this host, and while an
 # apply of a scripts/ops tool is still running in the api container.
+# Cancel the subscription only after a run here ends "DONE" and "exit 0" (no
+# PARTIAL line) and a read-only check shows 0 race recs pending — and check in
+# the vendor's dashboard whether cancelling ends access at once or at the end
+# of the billing period.
+#
+# IF THE SUBSCRIPTION ENDS FIRST: every race is an API error (401/402/403),
+# the plan carries errors=7, and this wrapper aborts at step 0 — before the
+# backup, nothing changed — on every run from then on. Nothing is lost: the 7
+# recs stay 'pending', which the API (its feed lists races not yet off), the
+# frontend and the accuracy figures (settled recs on finished races only) all
+# leave out. Until 2026-11-03 19:25Z the drain fails every tick (it still asks
+# about the races in its window: an alert each tick); after that it logs one
+# stranded WARNING per tick. Closing them then needs a separately reviewed
+# void that does not ask the API, limited to REVIEWED_RACES — not this script.
 #
 # The gate (step 0 and, binding, step 2): candidates <= 7, unmatched = 0,
 # errors = 0, settle + void = candidates (so settle and void are <= 7 too),
@@ -94,13 +115,27 @@
 #      time after which a re-run closes them.
 # Exit: 0 done (or already done); 1 refused, aborted, or an after-state
 # failed; 3 not finished yet — re-run after the time it names (NOT YET:
-# nothing changed; PARTIAL: what was eligible is closed and verified).
+# nothing changed; PARTIAL: what was eligible is closed and verified, its
+# summary line reads "CLOSED, NOT FINISHED", never "DONE"). The last line of
+# every run is "exit N: <what it means>": through `| tee` the shell's $? is
+# tee's, not this script's.
 # Each tool step writes its output to a log file inside the api container and
 # exits with the tool's own status.
 # Run on the VM host:
 #   bash /opt/auspex/scripts/ops/close_out_stranded_race_recs.sh 2>&1 | tee -a ~/close_out_stranded_race_recs.log
 # (AUSPEX_DIR, TMPDIR and AF_STATE_DIR exist for tests and rehearsals.)
 set -uo pipefail
+# exit_line <status>: the last line of every run (an EXIT trap; from a subshell, so a dead terminal costs nothing).
+exit_line() {
+  local what
+  case "$1" in
+    0) what="done (or already done)" ;;
+    3) what="not finished — re-run after the time named above; do not cancel the Racing API subscription yet" ;;
+    *) what="refused, aborted or failed — read the lines above (nothing was written unless they name step 3 or 4/4)" ;;
+  esac
+  ( echo "[$(date -u +%FT%TZ)] exit $1: $what" ) 2>/dev/null
+}
+trap 'exit_line $?' EXIT
 OPS=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || { echo "ABORT: cannot find scripts/ops — nothing changed"; exit 1; }
 cd "${AUSPEX_DIR:-/opt/auspex}" || { echo "ABORT: cannot cd to ${AUSPEX_DIR:-/opt/auspex} — nothing changed"; exit 1; }
 DC="docker compose"
@@ -110,9 +145,11 @@ log() { echo "[$(date -u +%FT%TZ)] $*"; }
 af_lock close_out_stranded_race_recs || exit 1
 W=$(mktemp -d "${TMPDIR:-/tmp}/race_closeout.XXXXXX") || { log "ABORT: mktemp failed — nothing changed"; af_unlock; exit 1; }
 cleanup() {
+  local rc=$?
   rm -rf "$W"
   $DC exec -T postgres rm -f /tmp/race_closeout_q.sql >/dev/null 2>&1
   af_unlock
+  exit_line "$rc"
 }
 trap cleanup EXIT
 latest_dump() {
@@ -182,16 +219,26 @@ gate() {
 }
 
 log "0/4 preconditions (read only)"
-# Another scripts/ops wrapper (or the soccer runbook) on this host. This script's own processes and subshells carry
-# its name; a second run of it is the lock's job. The list is read from here-strings, not `echo | grep -q`: grep -q
-# stops at its first match, and under pipefail (SIGPIPE is ignored: _airflow_lib.sh) the echo's write error on a long
-# list would read as "cannot list".
+# Another scripts/ops wrapper (or the soccer runbook) on this host: a process with an argument whose file name is one
+# of scripts/ops/*.sh, however it was started (an absolute path, `cd scripts/ops && bash x.sh`, `./x.sh`). This
+# script's own processes and subshells carry its name; a second run of it is the lock's job. The list is read from
+# here-strings, not `echo | grep -q`: grep -q stops at its first match, and under pipefail (SIGPIPE is ignored:
+# _airflow_lib.sh) the echo's write error on a long list would read as "cannot list".
 self=$(basename "$0")
 procs=$(ps -eo pid=,args= 2>/dev/null)
 if ! grep -q "^ *$$ " <<< "$procs"; then
   log "REFUSED: cannot list this host's processes (ps) to rule out another scripts/ops run — nothing changed"; exit 1
 fi
-others=$(awk -v self="$self" '$0 ~ /scripts\/ops\/[A-Za-z0-9_.-]+\.sh/ && index($0, self) == 0' <<< "$procs")
+ops_names=""
+for f in "$OPS"/*.sh; do [ "${f##*/}" = "$self" ] || ops_names="$ops_names ${f##*/}"; done
+# Each argument after the pid, stripped of quotes and shell punctuation at its ends, is compared by its last path part.
+others=$(awk -v names="$ops_names" -v self="$self" '
+  BEGIN { n = split(names, a, " "); for (i = 1; i <= n; i++) other[a[i]] = 1 }
+  index($0, self) { next }
+  { for (i = 2; i <= NF; i++) {
+      t = $i; gsub(/^[^A-Za-z0-9_.\/~-]+|[^A-Za-z0-9_.\/~-]+$/, "", t); k = split(t, part, "/")
+      if (k > 0 && (part[k] in other)) { print; next }
+  } }' <<< "$procs")
 if [ -n "$others" ]; then
   log "REFUSED: another scripts/ops process is running on this host — wait for it to end, then re-run; nothing changed:"
   echo "$others"
@@ -233,6 +280,9 @@ read_plan "$pre"
 if [ "$rc" -ne 0 ] || [ "$p_candidates" = missing ] || [ "$beyond" = missing ] || [ "$win_recs" = missing ] \
    || [ "$win_races" = missing ] || [ -z "$win_until" ] || [ "$p_unmatched" != "0" ] || [ "$p_errors" != "0" ]; then
   log "ABORT at step 0: the pre-check (exit $rc) plan '${pre:-unreadable}' (beyond the pin: $beyond; in the window: $win_recs) is unreadable or carries unmatched / errors — review the precheck CSV and /tmp/race_closeout_pre.log in the api container; nothing changed"
+  if [[ "$p_errors" =~ ^[1-9][0-9]*$ ]]; then
+    log "NOTE: $p_errors race(s) could not be asked about (the ERROR lines above). An HTTP 401, 402 or 403 there means The Racing API refused the credentials or the plan — the subscription has ended: this wrapper cannot close these recs without it (header: IF THE SUBSCRIPTION ENDS FIRST). Anything else (a 5xx, a timeout): re-run later"
+  fi
   exit 1
 fi
 if [ "$beyond" != "0" ]; then
@@ -339,22 +389,28 @@ want_finished=0
 state=$(psql_at "$W/state.sql" | tr -d '[:space:]')
 IFS='|' read -r stranded1 recs1 <<< "$state"
 run_tool race_closeout_verify --as-of "$T0" --out-csv /app/backups/closed_out_race_recs_verify_$STAMP.csv
+vrc=$?  # its log is read below only when this run of it succeeded (the file outlives each run)
 replan=$(plan_of race_closeout_verify)
 beyond1=$(beyond_of race_closeout_verify)
 window_of race_closeout_verify
 want_stranded=$((stranded0 - p_candidates))
-log "after: recs as planned $as_planned (expected $p_candidates), settled races finished $finished (expected $want_finished), stranded as of T0 $stranded1 (expected $want_stranded), race recs created before T0 $recs1 (expected $recs0), re-plan as of T0 '$replan' (expected candidates=0; beyond the pin $beyond1; still in the window $win_recs)"
-if [ "$as_planned" = "$p_candidates" ] && [ "$finished" = "$want_finished" ] && [ "$stranded1" = "$want_stranded" ] \
+log "after: recs as planned $as_planned (expected $p_candidates), settled races finished $finished (expected $want_finished), stranded as of T0 $stranded1 (expected $want_stranded), race recs created before T0 $recs1 (expected $recs0), re-plan as of T0 (exit $vrc) '$replan' (expected exit 0, candidates=0; beyond the pin $beyond1; still in the window $win_recs)"
+if [ "$vrc" = 0 ] && [ "$as_planned" = "$p_candidates" ] && [ "$finished" = "$want_finished" ] && [ "$stranded1" = "$want_stranded" ] \
    && [ "$recs1" = "$recs0" ] && [ "$(plan_num "$replan" candidates)" = "0" ] && [ "$beyond1" != missing ] \
    && [ "$win_recs" != missing ] && [ -n "$win_until" ]; then
-  log "DONE: $p_settle rec(s) settled from their race's result, $p_void voided (no result: abandoned) — the apply CSV $APPLY_CSV, its .reversal.jsonl and .inserted.jsonl are the record"
+  # "DONE" only when nothing in the reviewed set is left: with recs still in the window the same summary reads
+  # "CLOSED, NOT FINISHED" and the run ends PARTIAL (exit 3).
+  summary="DONE"
+  [ "$win_recs" = "0" ] || summary="CLOSED, NOT FINISHED"
+  log "$summary: $p_settle rec(s) settled from their race's result, $p_void voided (no result: abandoned) — the apply CSV $APPLY_CSV, its .reversal.jsonl and .inserted.jsonl are the record"
   if [ "$beyond1" != "0" ]; then
     log "NOTE: $beyond1 stranded race rec(s) on races at or after $RACED_BEFORE are still pending (not part of this run) — a re-run exits 1 (NEW PIN NEEDED) until RACED_BEFORE, MAX_CANDIDATES and REVIEWED_RACES are moved to a new reviewed pin"
   fi
   if [ "$win_recs" != "0" ]; then
-    log "PARTIAL: $win_recs rec(s) on $win_races race(s) before $RACED_BEFORE were still inside the drain's window at $T0 and are still pending — re-run this script after $win_until to close them (exit 3)"
+    log "PARTIAL: $win_recs rec(s) on $win_races race(s) before $RACED_BEFORE were still inside the drain's window at $T0 and are still pending — re-run this script after $win_until to close them (exit 3); do not cancel the Racing API subscription yet"
     exit 3
   fi
+  exit 0
 else
   log "FAILED after-state — inspect (the apply CSV $APPLY_CSV, its .reversal.jsonl and .inserted.jsonl are the reversal record)"
   exit 1
