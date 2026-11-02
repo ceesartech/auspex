@@ -42,6 +42,17 @@ Features written per fight (all numeric, all pre-fight — no leakage):
 Stored in features_cache.features as JSONB keyed on
 (match_id, feature_set='mma_baseline', feature_version='v1').
 
+A bout recorded with NO WINNER (a draw or a no contest: finished, NULL
+scores, metadata.no_winner; grading_outcomes.NO_WINNER_KEY) counts in no
+feature here: not in form, not in head-to-head, not as the fighter's last
+fight for rest/activity, and it gets no feature row of its own. That keeps
+serve-time features exactly what the model was trained on: no such bout was
+ever stored as finished before 2026-11 (load_mma_historical and the results
+path both skipped them), so the training features never saw one. Counting a
+draw as a fight (for rest, or as half a win) would be a model change: it goes
+through the validation gate (CLAUDE.md non-negotiable 2) before this rule
+changes.
+
 v1 scope: no weight class, striker vs grappler classification, reach,
 age, southpaw stance. Those layer in as v2 features once we have
 fighter-profile data (UFCStats.com scrape is the obvious source).
@@ -81,6 +92,10 @@ logger = logging.getLogger("compute_features_mma")
 
 FEATURE_SET = "mma_baseline"
 FEATURE_VERSION = "v1"
+
+# TRUE for a matches row (alias m) that is NOT a bout recorded with no winner
+# (see the module docstring). grading_outcomes.NO_WINNER_KEY is the key.
+COUNTS_AS_FIGHT_SQL = "(m.metadata->>'no_winner') IS NULL"
 
 # 5-fight rolling window. UFC fighters fight ~3-4 times/year so 5
 # fights covers ~14-18 months — long enough to track recent form,
@@ -163,11 +178,12 @@ def list_target_matches(conn, days: int, force: bool, all_finished: bool, match_
 
         if all_finished:
             cur.execute(
-                """
+                f"""
                 SELECT m.id::text AS id FROM matches m
                 JOIN leagues l ON l.id = m.league_id
                 WHERE l.sport = 'mma' AND m.status = 'finished'
                   AND m.home_score IS NOT NULL AND m.away_score IS NOT NULL
+                  AND {COUNTS_AS_FIGHT_SQL}
                 ORDER BY m.match_date ASC
                 """
             )
@@ -257,9 +273,10 @@ def fetch_closing_odds(cur, match_id: str) -> dict:
 
 def fetch_fighter_rolling(cur, fighter_id: str, before_date) -> dict:
     """Last-N-fights rolling form for one fighter. Same shape as
-    tennis but with the MMA WINDOW (5)."""
+    tennis but with the MMA WINDOW (5). A bout with no winner is no fight
+    here (module docstring), never a loss for either side."""
     cur.execute(
-        """
+        f"""
         WITH last_fights AS (
             SELECT m.id, m.match_date, m.home_team_id, m.away_team_id,
                    m.home_score, m.away_score
@@ -268,6 +285,7 @@ def fetch_fighter_rolling(cur, fighter_id: str, before_date) -> dict:
             WHERE l.sport = 'mma'
               AND m.status = 'finished'
               AND m.home_score IS NOT NULL AND m.away_score IS NOT NULL
+              AND {COUNTS_AS_FIGHT_SQL}
               AND (m.home_team_id = %s OR m.away_team_id = %s)
               AND m.match_date < %s
             ORDER BY m.match_date DESC
@@ -297,9 +315,10 @@ def fetch_fighter_rolling(cur, fighter_id: str, before_date) -> dict:
 
 def fetch_head_to_head(cur, home_id: str, away_id: str, before_date) -> dict:
     """Career head-to-head between this specific fighter pair. Rare in
-    MMA — most matchups are first meetings."""
+    MMA — most matchups are first meetings. A bout with no winner is not
+    counted (module docstring)."""
     cur.execute(
-        """
+        f"""
         SELECT
             SUM(CASE
                     WHEN home_team_id = %s AND home_score > away_score THEN 1
@@ -317,6 +336,7 @@ def fetch_head_to_head(cur, home_id: str, away_id: str, before_date) -> dict:
         WHERE l.sport = 'mma'
           AND m.status = 'finished'
           AND m.home_score IS NOT NULL AND m.away_score IS NOT NULL
+          AND {COUNTS_AS_FIGHT_SQL}
           AND (
             (m.home_team_id = %s AND m.away_team_id = %s)
             OR (m.home_team_id = %s AND m.away_team_id = %s)
@@ -347,14 +367,16 @@ def fetch_head_to_head(cur, home_id: str, away_id: str, before_date) -> dict:
 def fetch_fighter_schedule(cur, fighter_id: str, before_date) -> dict:
     """Days since this fighter's last fight + active flag (fought in
     last 365 days). MMA fight cadence is way slower than tennis so
-    the active threshold is much higher."""
+    the active threshold is much higher. A bout with no winner is not the
+    last fight here (module docstring: training never saw one)."""
     cur.execute(
-        """
+        f"""
         SELECT m.match_date
         FROM matches m
         JOIN leagues l ON l.id = m.league_id
         WHERE l.sport = 'mma'
           AND m.status IN ('finished', 'live')
+          AND {COUNTS_AS_FIGHT_SQL}
           AND (m.home_team_id = %s OR m.away_team_id = %s)
           AND m.match_date < %s
         ORDER BY m.match_date DESC
