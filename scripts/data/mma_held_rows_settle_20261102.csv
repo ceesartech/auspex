@@ -1,0 +1,17 @@
+# The two UFC rows run B of scripts/ops/repair_stranded_recs_mma.sh held for the user's decision
+# (scripts/data/mma_stale_rows_hold_20261101.csv), and what scripts/settle_mma_held_rows.py does with each.
+# USER DECISION 2026-11-02: "We can just make the system record it? But we can delete it." Read as: the system
+# records MMA draws and no contests (fetch_upcoming, this commit), so Gatto v Kareckaite is kept and recorded through
+# that code path; the replaced-fighter row Valesca Machado v Melissa Amaya is deleted, archived first.
+# Re-verified 2026-11-02 read only: prod rows (06:25Z), ESPN's UFC scoreboard for 2026-09-26 and 2026-10-10, ESPN's
+# core-API status of 401924511, and ESPN's search ('Valesca Machado': no MMA athlete; 'Tina Black': athlete 4836549).
+#   record_no_winner: record the bout as finished with no winner of kind `expect` (grading_outcomes.NO_WINNER_KEY),
+#     through fetch_upcoming._record_result on ESPN's live competition (the core API must confirm it), then grade it
+#     with grade_completed_matches.grade_match (predictions recorded with is_correct NULL, open recs voided).
+#   delete_replaced: delete the row and every row under it (archived first; nothing moves to the replacement row),
+#     then the replaced fighter's team row when no other bout references it. Refused if any rec or betting_history
+#     row references it (those foreign keys do not cascade).
+# prediction_ids pins every prediction on the row (';'-separated): any other prediction refuses the run.
+match_id,action,expect,espn_event_id,espn_competition_id,scoreboard_date,kickoff,home,away,replaced_side,replaced_team_id,replaced_by,replacement_match_id,prediction_ids,evidence
+b7f16d27-42a1-41b0-a6f6-6e8e9837da47,record_no_winner,draw,600061541,401924511,2026-10-10,2026-10-10T21:00:00+00:00,Melissa Gatto,Ernesta Kareckaite,,,,,eeb51fd3-2b59-407a-85c4-638a40930834;9d183eaf-3900-4840-b0a4-8b64fefecc55,"ESPN 401924511 (event 600061541, the row's own competition id, fighters and kickoff): STATUS_FINAL R3 5:00, winner=false on both fighters; core-API result 'draw'; judges 28-28, 27-29, 28-28 (Gatto first): a majority draw. The row holds 2 predictions (both 'away'), no odds, no recs."
+787bd68e-2ce8-4beb-b346-c9f422c42574,delete_replaced,replaced,600061266,401914464,2026-09-26,2026-09-27T00:00:00+00:00,Valesca Machado,Melissa Amaya,home,108423d1-7f54-43ba-8039-43e5ef23b8bf,Tina Black,588fc028-7a2d-4fa1-a061-6ebd2e9aa15e,f9fa6232-90a1-4de6-a679-c70d946e33ce;f3d5a58a-000c-40f3-ac1d-f58e6be7727d,"ESPN kept competition 401914464 (event 600061266) at this row's kickoff and lists Tina Black (athlete 4836549) v Melissa Amaya (5169699), Tina Black winning R2 3:19; the row was last updated 2026-09-21 20:45Z and the finished row 588fc028 Tina Black v Melissa Amaya was created 21:00Z, five days before the card; ESPN has no athlete named Valesca Machado. A replacement: the row priced a matchup that never happened. It holds 2 predictions and 2 feature rows, no odds, no snapshots, no recs; the 'Valesca Machado' team row holds no other bout."

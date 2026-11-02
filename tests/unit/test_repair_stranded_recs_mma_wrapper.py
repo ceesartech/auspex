@@ -366,7 +366,7 @@ def test_b_before_a_is_refused(tmp_path):
 
 def test_b_done_and_verified_is_already_done_without_a_backup(tmp_path):
     rc, out, calls = _run(
-        tmp_path, _rules(pre_a=DONE_A, pre_b=DONE_B, states=("21", "0|49", "9|49")), "--retire-stale-rows"
+        tmp_path, _rules(pre_a=DONE_A, pre_b=DONE_B, states=("21", "0|49", "9|49", "held|held")), "--retire-stale-rows"
     )
     assert rc == 0 and "ALREADY DONE" in out, out
     assert _backups(tmp_path) == 0 and not _applies(calls)
@@ -521,6 +521,78 @@ def test_verify_a_reads_the_database_only(tmp_path, states, rc_want):
     assert ("A VERIFIED" in out) == (rc_want == 0) and ("A NOT VERIFIED" in out) == (rc_want == 1)
     assert not [c for c in calls if "/app/scripts/" in c or "airflow" in c]
     assert len([c for c in calls if "postgres sh -c psql" in c]) == 2
+
+
+# ── B's done state with its held rows held or settled, and --verify-b ──
+
+DONE_B_LEFT = {n: DONE_B.replace("left=9", f"left={n}") for n in (7, 8, 9)}
+HELD_IDS = ("b7f16d27-42a1-41b0-a6f6-6e8e9837da47", "787bd68e-2ce8-4beb-b346-c9f422c42574")
+
+
+@pytest.mark.parametrize(
+    "left, held",
+    [
+        (7, "settled|settled"),  # after scripts/ops/settle_mma_held_rows.sh
+        (8, "settled|held"),  # a re-fetch recorded the draw first; the Machado row still held
+        (8, "held|settled"),
+        (9, "held|held"),  # B as it ran (also the existing done test above)
+    ],
+)
+def test_b_done_with_its_held_rows_held_or_settled_is_already_done(tmp_path, left, held):
+    rc, out, calls = _run(
+        tmp_path,
+        _rules(pre_a=DONE_A, pre_b=DONE_B_LEFT[left], states=("21", "0|49", f"{left}|49", held)),
+        "--retire-stale-rows",
+    )
+    assert rc == 0 and "ALREADY DONE" in out and f"held rows (draw|replaced row) {held}" in out, out
+    assert ("settled as decided 2026-11-02" in out) == (left != 9)
+    assert _backups(tmp_path) == 0 and not _applies(calls)
+    held_sql = _sent_sql(tmp_path)[-1]
+    assert all(i in held_sql for i in HELD_IDS) and "metadata->>'no_winner' = 'draw'" in held_sql
+
+
+@pytest.mark.parametrize(
+    "left, states",
+    [
+        (7, ("21", "0|49", "9|49", "settled|settled")),  # the stale count of the unsettled state
+        (7, ("21", "0|49", "7|49", "held|settled")),  # one still held: B would leave 8
+        (9, ("21", "0|49", "7|49", "settled|settled")),  # settled, but B's plan leaves 9
+        (7, ("21", "0|49", "7|49", "other|settled")),  # the draw row in some other state
+        (7, ("21", "0|49", "7|49", "")),  # unreadable
+        (7, ("21", "0|49", "7|48", "settled|settled")),  # a rec gone
+    ],
+)
+def test_b_done_plan_with_a_database_that_does_not_match_aborts(tmp_path, left, states):
+    rc, out, calls = _run(tmp_path, _rules(pre_a=DONE_A, pre_b=DONE_B_LEFT[left], states=states), "--retire-stale-rows")
+    assert rc == 1 and "B looks done" in out, out
+    assert _backups(tmp_path) == 0 and not _applies(calls)
+
+
+@pytest.mark.parametrize(
+    "pre_b, states, rc_want",
+    [
+        (DONE_B, ("21", "0|49", "9|49", "held|held"), 0),
+        (DONE_B_LEFT[7], ("21", "0|49", "7|49", "settled|settled"), 0),
+        (DONE_B_LEFT[8], ("21", "0|49", "8|49", "settled|held"), 0),
+        (DONE_B, ("21", "0|49", "8|49", "held|held"), 1),
+        (DONE_B_LEFT[7], ("21", "0|49", "7|49", "settled|other"), 1),
+        (PLAN_B, ("21", "0|49"), 1),  # B not run
+        (DONE_B, ("20", "0|49"), 1),  # A not verified
+    ],
+)
+def test_verify_b_is_bs_done_check_read_only(tmp_path, pre_b, states, rc_want):
+    rc, out, calls = _run(tmp_path, _rules(pre_b=pre_b, states=states), "--verify-b")
+    assert rc == rc_want, out
+    assert ("B VERIFIED" in out) == (rc_want == 0) and ("B NOT VERIFIED" in out) == (rc_want == 1)
+    assert _backups(tmp_path) == 0 and not _applies(calls)
+    assert not [c for c in calls if "backfill_results" in c or "airflow" in c]  # no ESPN, no backup
+
+
+def test_verify_b_needs_the_fighter_merge(tmp_path):
+    rc, out, _ = _run(
+        tmp_path, _rules(pre_b=DONE_B, states=("21", "0|49", "9|49", "held|held"), merge_after_rc=1), "--verify-b"
+    )
+    assert rc == 1 and "the fighter merge is not done and verified" in out, out
 
 
 # ── the row check itself (CHECK_B_PY, run for real on audit CSVs) ─────

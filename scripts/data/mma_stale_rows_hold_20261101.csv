@@ -1,4 +1,7 @@
 # Stale UFC rows that run B of scripts/ops/repair_stranded_recs_mma.sh must NOT delete until the user decides
+# DECIDED 2026-11-02: scripts/ops/settle_mma_held_rows.sh records Gatto v Kareckaite as the draw it was (fetch_upcoming
+# now records MMA draws and no contests) and deletes Valesca Machado v Melissa Amaya, a replaced matchup
+# (scripts/data/mma_held_rows_settle_20261102.csv). B's done check accepts each row still held or settled so.
 # (B passes this file as repair_fixture_orphans --hold-list: each row is left alone, reason held_for_decision, and
 # counted in B's left=9). Reviewed 2026-11-01 from the read-only prod exports of 2026-11-01 (21:06:57Z and 22:47:06Z)
 # and ESPN's UFC scoreboard. B does not touch these rows, so nothing archives or changes them; each holds 2
