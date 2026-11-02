@@ -3,8 +3,8 @@
 Two-tier backup strategy:
   * Local (always): writes a compressed `pg_dump` to /app/backups/
     inside the api container, which is bind-mounted to
-    /opt/auspex/backups/ on the host. Keeps the last
-    --local-retention-days files for quick restore (default 7).
+    /opt/auspex/backups/ on the host, for quick restore. See LOCAL
+    ROTATION below for how many are kept.
   * Remote (optional): if BACKUP_S3_BUCKET env var is set, also
     uploads the dump to S3-compatible storage. Backblaze B2 is the
     recommended target (set BACKUP_S3_ENDPOINT_URL to the B2 endpoint;
@@ -16,18 +16,46 @@ Two-tier backup strategy:
     the full B2 setup + DR restore procedure.
 
 Dump format: pg_dump custom format (-Fc), which is compressed by
-default and supports parallel restore via pg_restore -j. Single
-.dump file per day, named with ISO timestamp:
-    auspex-prod-2026-06-07T020000Z.dump
+default and supports parallel restore via pg_restore -j. One .dump
+file per run, named <database>-<UTC stamp>.dump:
+    betting_system-2026-11-02T020001Z.dump
+
+LOCAL ROTATION (after every run, only this database's
+<database>-<stamp>.dump files; audit CSVs, archives and any other
+file in the directory are never touched):
+  * The dump this run just wrote is never deleted, so the newest dump
+    always stays on disk.
+  * With BACKUP_S3_BUCKET set: keep at most --local-keep dumps (the
+    newest N, default 3) and none older than --local-retention-days
+    (default 7). An older dump is deleted ONLY after a HEAD on its B2
+    copy (same key as its upload) shows the same byte size. If B2
+    cannot be reached, or the copy is missing or a different size,
+    the file is kept and an ERROR names it (fail closed), and the run
+    exits 3 so the DAG turns red.
+  * Without BACKUP_S3_BUCKET the local copy is the only copy: only the
+    age rule applies (--local-keep is ignored), as before.
+Why 3: every older dump is already in B2 before its local copy goes,
+so local copies are a convenience for a fast restore, not the disaster
+copy. A restore after a bad write wants the dump taken just before
+that write (every ops wrapper takes one), so the newest three cover the
+last write, the one before it and the previous run, at ~380 MB each
+(2026-11). Ops days took 21 dumps in one day under the age-only rule
+and filled the disk.
+
+Exit codes: 0 ok; 1 pg_dump failed (no dump kept); 2 the offsite upload
+failed (local dump kept); 3 the dump and upload succeeded but rotation
+kept a dump it would have deleted (see the ERROR lines).
 
 Restore (full DR, see OPERATIONS.md for details):
-    pg_restore -h HOST -U USER -d auspex_prod --clean --if-exists \\
-        auspex-prod-YYYY-MM-DDTHHMMSSZ.dump
+    pg_restore -h HOST -U USER -d betting_system --clean --if-exists \\
+        betting_system-YYYY-MM-DDTHHMMSSZ.dump
 
 Env vars consumed:
     DATABASE_URL              — postgres connection string
     BACKUP_LOCAL_DIR          — local dump directory (default /app/backups)
     BACKUP_LOCAL_RETENTION    — days of local backups to keep (default 7)
+    BACKUP_LOCAL_KEEP         — max local dumps to keep when B2 is set
+                                (default 3; ignored without B2)
     BACKUP_S3_BUCKET          — optional; enables S3/B2 upload
     BACKUP_S3_PREFIX          — optional; key prefix (default "postgres/")
     BACKUP_S3_ENDPOINT_URL    — optional; B2/Hetzner/Wasabi endpoint
@@ -137,11 +165,10 @@ def _derive_region(endpoint_url: Optional[str]) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def upload_to_s3(local_path: Path, bucket: str, key: str, endpoint_url: Optional[str]) -> None:
-    """Upload via boto3, then HEAD the object to confirm it landed.
-    Imports lazy so backups still run when boto3 isn't installed
-    (local-only mode). Raises on any failure so the caller can flag a
-    broken offsite backup."""
+def make_s3_client(endpoint_url: Optional[str]):
+    """boto3 S3 client for B2 (or any S3-compatible store). Imports lazy
+    so backups still run when boto3 isn't installed (local-only mode).
+    Raises on any failure; callers decide what that means."""
     try:
         import boto3
     except ImportError:
@@ -176,7 +203,15 @@ def upload_to_s3(local_path: Path, bucket: str, key: str, endpoint_url: Optional
     os.environ.setdefault("AWS_REQUEST_CHECKSUM_CALCULATION", "when_required")
     os.environ.setdefault("AWS_RESPONSE_CHECKSUM_VALIDATION", "when_required")
 
-    s3 = boto3.client("s3", **client_kwargs)
+    return boto3.client("s3", **client_kwargs)
+
+
+def upload_to_s3(local_path: Path, bucket: str, key: str, endpoint_url: Optional[str], s3=None) -> None:
+    """Upload via boto3, then HEAD the object to confirm it landed.
+    Raises on any failure so the caller can flag a broken offsite
+    backup."""
+    if s3 is None:
+        s3 = make_s3_client(endpoint_url)
     logger.info("Uploading → s3://%s/%s", bucket, key)
     s3.upload_file(str(local_path), bucket, key)
 
@@ -190,23 +225,151 @@ def upload_to_s3(local_path: Path, bucket: str, key: str, endpoint_url: Optional
     logger.info("Upload verified: %d bytes in s3://%s/%s", remote_size, bucket, key)
 
 
-def rotate_local_backups(local_dir: Path, retention_days: int) -> int:
-    """Delete .dump files older than retention_days. Returns count
-    of files deleted."""
-    if retention_days <= 0:
-        return 0
-    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-    deleted = 0
-    for f in local_dir.glob("*.dump"):
-        if datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc) < cutoff:
-            logger.info("Rotating out old backup: %s", f.name)
+DUMP_STAMP_FORMAT = "%Y-%m-%dT%H%M%SZ"
+
+
+def s3_key_for(prefix: str, filename: str) -> str:
+    """The object key a dump is uploaded under (and verified at)."""
+    return f"{prefix.rstrip('/')}/{filename}"
+
+
+def local_dumps(local_dir: Path, db_name: str) -> list[tuple[datetime, Path]]:
+    """This database's dumps in local_dir, newest first, ordered by the
+    UTC stamp in the name. Only files named exactly
+    <db_name>-YYYY-MM-DDTHHMMSSZ.dump count: audit CSVs, archives and
+    other databases' dumps are never rotation candidates."""
+    pattern = re.compile(re.escape(db_name) + r"-(\d{4}-\d{2}-\d{2}T\d{6}Z)\.dump")
+    out: list[tuple[datetime, Path]] = []
+    for f in local_dir.iterdir():
+        m = pattern.fullmatch(f.name)
+        if not m or not f.is_file():
+            continue
+        stamp = datetime.strptime(m.group(1), DUMP_STAMP_FORMAT).replace(tzinfo=timezone.utc)
+        out.append((stamp, f))
+    out.sort(key=lambda t: (t[0], t[1].name), reverse=True)
+    return out
+
+
+def plan_rotation(
+    dumps: list[tuple[datetime, Path]],
+    *,
+    current: Path,
+    now: datetime,
+    retention_days: int,
+    keep: Optional[int],
+) -> list[tuple[Path, str]]:
+    """(dump, reason) for every dump the rules would delete, oldest
+    last. `dumps` is newest first (local_dumps). keep=None means no
+    count cap (no B2: the age rule alone). The current dump is never
+    planned, whatever its stamp."""
+    cutoff = now - timedelta(days=retention_days) if retention_days > 0 else None
+    planned: list[tuple[Path, str]] = []
+    for rank, (stamp, f) in enumerate(dumps):
+        if f.resolve() == current.resolve():
+            continue
+        reasons = []
+        if keep is not None and rank >= keep:
+            reasons.append(f"beyond the newest {keep}")
+        if cutoff is not None and stamp < cutoff:
+            reasons.append(f"older than {retention_days} days")
+        if reasons:
+            planned.append((f, " and ".join(reasons)))
+    return planned
+
+
+def remote_copy_problem(s3, bucket: str, key: str, local_size: int) -> Optional[str]:
+    """None when s3://bucket/key exists with exactly local_size bytes,
+    else why not. Any failure (missing object, auth, network) is a
+    problem: the caller then keeps the local file."""
+    try:
+        head = s3.head_object(Bucket=bucket, Key=key)
+    except Exception as e:  # botocore raises several unrelated types; every one means "not verified"
+        return f"HEAD s3://{bucket}/{key} failed: {type(e).__name__}: {e}"
+    remote_size = head.get("ContentLength") if isinstance(head, dict) else None
+    if remote_size != local_size:
+        return f"s3://{bucket}/{key} is {remote_size} bytes, the local file {local_size}"
+    return None
+
+
+def rotate_local_backups(
+    local_dir: Path,
+    db_name: str,
+    *,
+    current: Path,
+    retention_days: int,
+    keep: int,
+    s3_bucket: Optional[str] = None,
+    s3_prefix: str = "postgres/",
+    s3_endpoint_url: Optional[str] = None,
+    s3_client_factory=None,
+    now: Optional[datetime] = None,
+) -> tuple[list[Path], list[Path]]:
+    """Apply the LOCAL ROTATION rules (module docstring). Returns
+    (deleted, kept_with_error): kept_with_error are dumps the rules
+    wanted gone but that stayed because their B2 copy was not verified
+    or the delete failed; each was logged at ERROR by name."""
+    if keep < 1:
+        raise ValueError(f"keep must be >= 1, got {keep}")
+    now = now or datetime.now(timezone.utc)
+    dumps = local_dumps(local_dir, db_name)
+    if s3_bucket:
+        planned = plan_rotation(dumps, current=current, now=now, retention_days=retention_days, keep=keep)
+    else:
+        logger.info(
+            "No BACKUP_S3_BUCKET: the local dumps are the only copies — applying only the %d-day age rule "
+            "(--local-keep is ignored).",
+            retention_days,
+        )
+        planned = plan_rotation(dumps, current=current, now=now, retention_days=retention_days, keep=None)
+    logger.info("Rotation: %d local dump(s) of %s, %d to rotate out.", len(dumps), db_name, len(planned))
+
+    deleted: list[Path] = []
+    kept: list[Path] = []
+    s3 = None
+    client_error: Optional[str] = None
+    if planned and s3_bucket:
+        try:
+            s3 = s3_client_factory() if s3_client_factory else make_s3_client(s3_endpoint_url)
+        except Exception as e:  # no boto3, bad creds/config: nothing can be verified
+            client_error = f"could not create the S3 client: {type(e).__name__}: {e}"
+
+    for f, reason in planned:
+        try:
+            size = f.stat().st_size
+        except OSError as e:
+            logger.error("KEPT %s (%s) — could not stat it: %s", f, reason, e)
+            kept.append(f)
+            continue
+        if s3_bucket:
+            key = s3_key_for(s3_prefix, f.name)
+            problem = client_error or remote_copy_problem(s3, s3_bucket, key, size)
+            if problem:
+                logger.error("KEPT %s (%s) — its B2 copy is not verified: %s", f, reason, problem)
+                kept.append(f)
+                continue
+            why = f"{reason}; B2 copy verified, {size} bytes at s3://{s3_bucket}/{key}"
+        else:
+            why = reason
+        try:
             f.unlink()
-            deleted += 1
-    return deleted
+        except OSError as e:
+            logger.error("KEPT %s (%s) — the delete failed: %s", f, why, e)
+            kept.append(f)
+            continue
+        logger.info("Rotated out %s (%s)", f.name, why)
+        deleted.append(f)
+    return deleted, kept
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+def _positive_int(value: str) -> int:
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
+    return n
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     parser.add_argument(
         "--local-dir",
@@ -217,6 +380,18 @@ def main() -> int:
         "--local-retention-days",
         type=int,
         default=int(os.environ.get("BACKUP_LOCAL_RETENTION", "7")),
+        help="Delete this database's local dumps older than this many days (default 7, env "
+        "BACKUP_LOCAL_RETENTION; 0 disables the age rule). With B2 set, only after the B2 copy is verified.",
+    )
+    parser.add_argument(
+        "--local-keep",
+        type=_positive_int,
+        default=os.environ.get("BACKUP_LOCAL_KEEP", "3"),
+        help="With BACKUP_S3_BUCKET set: keep at most this many local dumps of this database, the newest "
+        "(default 3, env BACKUP_LOCAL_KEEP; >= 1). An older one is deleted only after its B2 copy is "
+        "confirmed with the same byte size; when that cannot be confirmed the file is kept and the run "
+        "exits 3. Ignored without BACKUP_S3_BUCKET: the local copy is then the only copy, so only the "
+        "age rule applies.",
     )
     parser.add_argument(
         "--s3-bucket",
@@ -242,7 +417,7 @@ def main() -> int:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     logger.setLevel(args.log_level)
 
     if not args.database_url:
@@ -255,7 +430,7 @@ def main() -> int:
     # Filename includes UTC timestamp + DB name from URL — makes
     # multi-DB setups distinguish naturally.
     db_name = parse_database_url(args.database_url)["dbname"]
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
+    ts = datetime.now(timezone.utc).strftime(DUMP_STAMP_FORMAT)
     filename = f"{db_name}-{ts}.dump"
     local_path = local_dir / filename
 
@@ -277,17 +452,27 @@ def main() -> int:
     # transient B2 outages).
     s3_failed = False
     if args.s3_bucket and not args.skip_upload:
-        s3_key = f"{args.s3_prefix.rstrip('/')}/{filename}"
+        s3_key = s3_key_for(args.s3_prefix, filename)
         try:
             upload_to_s3(local_path, args.s3_bucket, s3_key, args.s3_endpoint_url)
         except Exception as e:
             logger.error("S3 upload FAILED (local backup retained): %s", e)
             s3_failed = True
 
-    # Rotate old local backups (always — local retention is independent
-    # of the remote-upload outcome).
-    deleted = rotate_local_backups(local_dir, args.local_retention_days)
-    logger.info("Rotation: %d old backup(s) deleted.", deleted)
+    # Rotate old local backups (always — even after a failed upload: an
+    # older dump goes only once its own B2 copy is verified, and this
+    # run's dump is never a candidate).
+    deleted, kept = rotate_local_backups(
+        local_dir,
+        db_name,
+        current=local_path,
+        retention_days=args.local_retention_days,
+        keep=args.local_keep,
+        s3_bucket=args.s3_bucket,
+        s3_prefix=args.s3_prefix,
+        s3_endpoint_url=args.s3_endpoint_url,
+    )
+    logger.info("Rotation: %d old backup(s) deleted, %d kept on an ERROR.", len(deleted), len(kept))
 
     if s3_failed:
         logger.error(
@@ -296,6 +481,14 @@ def main() -> int:
             "Exiting non-zero so the failure is visible."
         )
         return 2
+    if kept:
+        logger.error(
+            "Backup and upload OK, but rotation kept %d dump(s) it would have deleted (ERROR lines above: "
+            "%s). Exiting 3 so the disk does not fill silently.",
+            len(kept),
+            ", ".join(f.name for f in kept),
+        )
+        return 3
 
     logger.info("Backup run complete.")
     return 0
