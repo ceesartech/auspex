@@ -276,11 +276,30 @@ def test_its_own_process_and_the_scan_itself_do_not_count(tmp_path):
     assert rc == 0, out
 
 
-def test_an_apply_still_running_in_the_api_container_refuses(tmp_path):
-    airflow = {"procs": ["python /app/scripts/backfill_results.py --sport mma --dates 2026-10-10 --apply"]}
-    rc, out, calls = _run(tmp_path, _rules(), airflow=airflow)
-    assert rc == 1 and "still running in the api container" in out and "backfill_results" in out, out
+@pytest.mark.parametrize(
+    "proc",
+    [
+        "python /app/scripts/backfill_results.py --sport mma --dates 2026-10-10 --apply",
+        # the sibling MMA stream's tool, left running after its host wrapper was killed
+        "python /app/scripts/mma_identity_cleanup.py --apply --expect-plan x",
+        # any other tool's apply: the scan takes '*' too
+        "python /app/scripts/repair_soccer_labels.py --apply --expect-rows 3",
+    ],
+)
+def test_an_apply_still_running_in_the_api_container_refuses(tmp_path, proc):
+    rc, out, calls = _run(tmp_path, _rules(), airflow={"procs": [proc]})
+    assert rc == 1 and "still running in the api container" in out and proc in out, out
     assert _tool_calls(calls) == [] and _backups(tmp_path) == 0
+
+
+def test_a_tool_running_without_apply_does_not_block(tmp_path):
+    procs = ["python /app/scripts/mma_identity_cleanup.py --check-after", "python /app/scripts/backfill_results.py"]
+    rc, out, calls = _run(tmp_path, _rules(), airflow={"procs": procs})
+    assert rc == 0, out
+    scan = [c for c in fd.calls(tmp_path, scans=True) if fd.is_scan(c)]
+    # every UFC writer by name, mma_identity_cleanup among them, and the quoted '*' (never globbed by the shell)
+    assert len(scan) == 1 and "*/app/scripts/mma_identity_cleanup[.]py*--apply*" in scan[0], scan
+    assert "*/app/scripts/*[.]py*--apply*" in scan[0], scan
 
 
 def test_an_unreadable_process_scan_refuses(tmp_path):
@@ -310,6 +329,19 @@ def test_another_run_holding_the_lock_refuses(tmp_path):
         holder.kill()
     assert rc == 1 and "another run holds" in out, out
     assert _tool_calls(fd.calls(tmp_path)) == [] and _backups(tmp_path) == 0
+
+
+def test_a_clean_run_removes_the_tool_logs_in_the_api_container(tmp_path):
+    rc, out, calls = _run(tmp_path, _rules())
+    assert rc == 0, out
+    assert calls[-1] == "compose exec -T api sh -c rm -f /tmp/settle_mma_*.log", calls[-3:]
+
+
+@pytest.mark.parametrize("kw", [{"apply_rc": 1}, {"pre": ""}])
+def test_a_failed_run_keeps_the_tool_logs_for_inspection(tmp_path, kw):
+    rc, out, calls = _run(tmp_path, _rules(**kw))
+    assert rc == 1, out
+    assert not [c for c in calls if "settle_mma_*.log" in c]
 
 
 def test_the_lock_is_released_at_the_end(tmp_path):
@@ -379,3 +411,13 @@ def test_with_the_real_b_and_merge_wrappers_before_and_after(tmp_path):
     assert rc == 0 and out.count("B VERIFIED") == 2 and "MERGE VERIFIED" in out, out
     assert "held rows (draw|replaced row) held|held" in out and "settled as decided 2026-11-02" in out, out
     assert "DONE: Gatto v Kareckaite" in out and _backups(tmp_path) == 1
+    # B's stale|recs count, both times: only the UFC recs created before its AS_OF, so a rec the pipeline writes
+    # for a later card (between step 0 and step 4: the backup wait is up to 20 minutes) never fails step 4.
+    # test_settle_mma_held_rows_pg.py runs this SQL on a real database.
+    state_b = [
+        f.read_text()
+        for f in (tmp_path / "fake" / "cp").glob("[0-9]*_stranded_mma_q.sql")
+        if " AS stale" in f.read_text()
+    ]
+    assert len(state_b) == 2 and all("br.created_at < TIMESTAMPTZ '2026-11-01T00:00:00Z'" in q for q in state_b)
+    assert "UFC recs created before 2026-11-01T00:00:00Z 7|49" in out, out

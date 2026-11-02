@@ -490,6 +490,14 @@ def plan_delete(cur, e: Entry, schema: mmf.Schema) -> EntryPlan:
     return p
 
 
+def recorded_fighters(p: EntryPlan) -> list[str]:
+    """The two team rows of a row to record (the results path may stamp ESPN
+    athlete ids on them once an athlete-id resolver is deployed), else []."""
+    if p.entry.action != ACTION_RECORD or not p.row:
+        return []
+    return sorted({p.row["home_team_id"], p.row["away_team_id"]})
+
+
 def plan_entries(cur, entries: list[Entry], schema: mmf.Schema, lock: bool) -> list[EntryPlan]:
     """Plan every listed row; with lock, the rows (and the replacement rows and
     team rows) are locked FOR UPDATE first."""
@@ -661,14 +669,7 @@ def fingerprint(cur, plans: list[EntryPlan]) -> dict:
     resolver that reads ESPN athlete ids may stamp their external_ids)."""
     rows = sorted(p.entry.match_id for p in plans)
     teams = sorted({p.entry.replaced_team_id for p in plans} - {""})
-    fighters = sorted(
-        {
-            t
-            for p in plans
-            if p.entry.action == ACTION_RECORD and p.row
-            for t in (p.row["home_team_id"], p.row["away_team_id"])
-        }
-    )
+    fighters = sorted({t for p in plans for t in recorded_fighters(p)})
     cur.execute(FINGERPRINT_SQL, {"rows": rows, "teams": teams, "fighters": fighters})
     return dict(cur.fetchone())
 
@@ -685,7 +686,9 @@ def _j(v: Any) -> str:
 def write_archive(cur, path: Path, plans: list[EntryPlan], schema: mmf.Schema) -> int:
     """gzip JSONL of every row the run changes or deletes, before its first
     write: each listed row with every row under it (every child table), every
-    rec on it, and each replaced fighter's team row."""
+    rec on it, each replaced fighter's team row (role team_before), and the
+    two team rows of a row to record (role fighter_before: the results path
+    may stamp ESPN athlete ids on them, which the fingerprint tolerates)."""
     n = 0
     path.parent.mkdir(parents=True, exist_ok=True)
     with gzip.open(path, "xt", encoding="utf-8") as fh:
@@ -714,14 +717,18 @@ def write_archive(cur, path: Path, plans: list[EntryPlan], schema: mmf.Schema) -
             if p.team_delete:
                 cur.execute("SELECT * FROM teams WHERE id = %s", (p.entry.replaced_team_id,))
                 emit("teams", "team_before", cur.fetchall())
+            if p.record:
+                cur.execute("SELECT * FROM teams WHERE id = ANY(%s::uuid[]) ORDER BY id", (recorded_fighters(p),))
+                emit("teams", "fighter_before", cur.fetchall())
     return n
 
 
 def snapshot(cur, plans: list[EntryPlan]) -> dict[tuple[str, str], dict]:
     """(table, id) -> row (JSON-ready), for every row the audit CSV reports on:
     each listed row, its pinned predictions, the recs on it, every row under a
-    row to delete, and each replaced fighter's team row. A row that no longer
-    exists is absent."""
+    row to delete, each replaced fighter's team row, and the two team rows of
+    a row to record (so a stamp the results path makes shows). A row that no
+    longer exists is absent."""
     out: dict[tuple[str, str], dict] = {}
 
     def take(table: str, sql: str, params) -> None:
@@ -742,6 +749,8 @@ def snapshot(cur, plans: list[EntryPlan]) -> dict[tuple[str, str], dict]:
             take(table, f"SELECT * FROM {table} WHERE id = ANY(%s::uuid[])", (ids,))
         if p.entry.replaced_team_id:
             take("teams", "SELECT * FROM teams WHERE id = %s", (p.entry.replaced_team_id,))
+        if recorded_fighters(p):
+            take("teams", "SELECT * FROM teams WHERE id = ANY(%s::uuid[])", (recorded_fighters(p),))
     return out
 
 
@@ -756,6 +765,8 @@ def audit_rows(plans: list[EntryPlan], before: dict, after: dict) -> list[dict]:
                 owner[(table, i)] = p
         if p.entry.replaced_team_id:
             owner[("teams", p.entry.replaced_team_id)] = p
+        for t in recorded_fighters(p):
+            owner[("teams", t)] = p
     rows = []
     for key in sorted(set(before) | set(after)):
         b, a = before.get(key), after.get(key)

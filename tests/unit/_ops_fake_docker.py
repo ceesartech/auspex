@@ -22,7 +22,8 @@ bin first on PATH. Every docker call is logged to calls.log, one per line.
 * The api container's process scan (scripts/ops/_airflow_lib.sh
   af_applies_running: `sh -c "for f in /proc/...; echo PROC_SCAN_OK"`) lists
   each command line in airflow.json's `procs` that runs one of the scanned
-  tools with --apply; `proc_scan_fails` makes the scan exit 1 with no output.
+  tools (a scanned '*' is any /app/scripts tool) with --apply;
+  `proc_scan_fails` makes the scan exit 1 with no output.
 * `write_fails` [path] makes a container-file write to that path exit 1.
 * `compose cp <file> postgres:/tmp/<name>` copies the file to cp/<name> and
   cp/<n>_<name> (so a test can read every SQL a wrapper sent, in order).
@@ -124,11 +125,12 @@ def _proc_scan(fake: Path, joined: str) -> tuple[str, int]:
     st = json.loads((fake / "airflow.json").read_text())
     if st.get("proc_scan_fails"):
         return "", 1
-    tools = re.findall(r"\*/app/scripts/(\w+)\[\.\]py\*--apply\*", joined)
+    # A tool name, or '*' (af_applies_running ... '*': any /app/scripts tool's --apply).
+    tools = re.findall(r"\*/app/scripts/(\w+|\*)\[\.\]py\*--apply\*", joined)
     lines = [
         f"APPLY_RUNNING pid {100 + i}: {c}"
         for i, c in enumerate(st.get("procs", []))
-        if any(re.search(rf"/app/scripts/{t}\.py .*--apply", c) for t in tools)
+        if any(re.search(rf"/app/scripts/{r'[^ /]+' if t == '*' else t}\.py .*--apply", c) for t in tools)
     ]
     return "\n".join(lines + ["PROC_SCAN_OK"]), 0
 

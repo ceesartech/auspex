@@ -588,6 +588,18 @@ def test_verify_b_is_bs_done_check_read_only(tmp_path, pre_b, states, rc_want):
     assert not [c for c in calls if "backfill_results" in c or "airflow" in c]  # no ESPN, no backup
 
 
+def test_bs_done_check_counts_only_the_ufc_recs_created_before_as_of(tmp_path):
+    # generate_recommendations_mma prices every upcoming UFC card every 15 minutes: a rec written after AS_OF
+    # must not turn B (or settle_mma_held_rows.sh, which calls --verify-b at its steps 0 and 4) into "not done".
+    # test_settle_mma_held_rows_pg.py runs this SQL on a real database with such a rec.
+    rc, out, _ = _run(tmp_path, _rules(pre_b=DONE_B, states=("21", "0|49", "9|49", "held|held")), "--verify-b")
+    assert rc == 0 and "UFC recs created before 2026-11-01T00:00:00Z 9|49" in out, out
+    state_b = [q for q in _sent_sql(tmp_path) if " AS stale" in q]
+    assert len(state_b) == 1
+    recs = state_b[0].split(") AS stale,")[1]
+    assert "br.created_at < TIMESTAMPTZ '2026-11-01T00:00:00Z'" in recs, recs
+
+
 def test_verify_b_needs_the_fighter_merge(tmp_path):
     rc, out, _ = _run(
         tmp_path, _rules(pre_b=DONE_B, states=("21", "0|49", "9|49", "held|held"), merge_after_rc=1), "--verify-b"

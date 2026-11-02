@@ -28,7 +28,10 @@
 # --verify-b: A's committed state, merge_mma_fighters.sh --verify, B's done
 # plan with its database state). Afterwards B's done check reads the
 # 'settled' form of B's done state (left=7, 7 stale UFC rows), so a re-run of
-# B, of the merge, or of this script prints ALREADY DONE / VERIFIED.
+# B, of the merge, or of this script prints ALREADY DONE / VERIFIED. B's done
+# check counts only the UFC recs created before 2026-11-01 (49): the UFC recs
+# the pipeline writes for the cards ahead never make it, or this script, read
+# "not done".
 # Safe in either order with the mma_identity wrapper (Bruno Silva split,
 # aliases, ESPN athlete ids): this script touches neither the Bruno Silva,
 # Raffael Cerqueira nor José Luiz / José Montanha rows, and checks that the
@@ -59,10 +62,12 @@
 # Steps:
 #   0. refuse while it cannot run safely, nothing changed (no backup):
 #      another run of this script (scripts/ops/_airflow_lib.sh af_lock), another
-#      scripts/ops/ wrapper or the soccer runbook running on the host, an
-#      apply of a tool that writes UFC rows still running in the api
-#      container, a UFC card in progress (a UFC kickoff in the last 8 hours or
-#      the next hour), the reviewed list missing; then B's done check
+#      scripts/ops/ wrapper or the soccer runbook running on the host, any
+#      tool's --apply still running in the api container (the UFC writers by
+#      name, mma_identity_cleanup among them, and every other one: an apply
+#      whose host wrapper was killed keeps running there, out of the host's
+#      process list), a UFC card in progress (a UFC kickoff in the last 8
+#      hours or the next hour), the reviewed list missing; then B's done check
 #      (repair_stranded_recs_mma.sh --verify-b, read only) must pass. Already
 #      done? The tool's pre-check (the whole transaction, rolled back) must
 #      plan exactly the reviewed plan (or one of its reviewed variants), or
@@ -81,8 +86,16 @@
 # No follow-ups: the grading runs inside the apply, and no feature changes
 # (compute_features_mma counts no bout without a winner; the deleted row was
 # never finished, so no history counted it).
-#   --verify (read only): the done plan and --check-after — exit 0 when the two
-#   rows are settled, else 1.
+#   --verify (commits nothing): the tool's dry run (the whole transaction,
+#   rolled back) must plan the done plan, and --check-after (read only) must
+#   hold — exit 0 when the two rows are settled, else 1. Before the settle
+#   has run, that dry run locks the two rows FOR UPDATE while it runs, asks
+#   ESPN (the scoreboard and the core API) and runs the results path and the
+#   deletes before rolling them back; every call writes an audit CSV under
+#   /app/backups (empty once settled).
+# Logs: each tool run writes /tmp/settle_mma_<step>.log in the api container;
+# a run that exits 0 removes them, a failed one leaves them for inspection
+# (the next run overwrites them).
 # Exit: 0 done (or already done, or verified); 1 aborted or an after-state failed.
 # WHEN: not while a UFC card is being fought (next: Saturday 2026-11-07); step 0
 # refuses then.
@@ -105,8 +118,11 @@ log() { echo "[$(date -u +%FT%TZ)] $*"; }
 . "$OPS/_airflow_lib.sh" || { log "ABORT: cannot load $OPS/_airflow_lib.sh — nothing changed"; exit 1; }
 W=$(mktemp -d "${TMPDIR:-/tmp}/settle_mma.XXXXXX") || { log "ABORT: mktemp failed — nothing changed"; exit 1; }
 cleanup() {
+  local rc=$?
   rm -rf "$W"
   $DC exec -T postgres rm -f /tmp/settle_mma_q.sql >/dev/null 2>&1
+  # The tool logs in the api container: kept after a failure (the messages above point at them).
+  [ "$rc" = 0 ] && $DC exec -T api sh -c 'rm -f /tmp/settle_mma_*.log' >/dev/null 2>&1
   af_unlock
 }
 trap cleanup EXIT
@@ -137,8 +153,9 @@ PLAN_S="record=1 record_done=0 record_predictions=2 record_recs_void=0 delete=1 
 PLAN_S_RECORDED="record=0 record_done=1 record_predictions=2 record_recs_void=0 delete=1 delete_done=0 delete_predictions=2 delete_odds=0 delete_snapshots=0 delete_features=2 delete_other_rows=0 teams_delete=1 refuse=0"
 PLAN_S_GRADED="record=0 record_done=1 record_predictions=0 record_recs_void=0 delete=1 delete_done=0 delete_predictions=2 delete_odds=0 delete_snapshots=0 delete_features=2 delete_other_rows=0 teams_delete=1 refuse=0"
 DONE_S="record=0 record_done=1 record_predictions=0 record_recs_void=0 delete=0 delete_done=1 delete_predictions=0 delete_odds=0 delete_snapshots=0 delete_features=0 delete_other_rows=0 teams_delete=0 refuse=0"
-# Tools whose --apply writes UFC rows: none may be running in the api container meanwhile.
-UFC_WRITERS="settle_mma_held_rows backfill_results repair_fixture_orphans merge_mma_fighters repair_stranded_recs grade_matches"
+# Tools whose --apply writes UFC rows: none may be running in the api container meanwhile. The scan also takes
+# '*' (any /app/scripts tool's --apply, as scripts/ops/mma_identity_cleanup.sh scans), passed quoted below.
+UFC_WRITERS="settle_mma_held_rows backfill_results repair_fixture_orphans merge_mma_fighters repair_stranded_recs grade_matches mma_identity_cleanup"
 # The host's process list (overridable for tests and rehearsals only).
 SETTLE_PS="${SETTLE_PS:-ps -eo pid=,args=}"
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)_$$  # the process id too: the audit files are write-once
@@ -175,9 +192,10 @@ if [ -n "$others" ]; then
   echo "$others"
   exit 1
 fi
-running=$(af_applies_running $UFC_WRITERS)
+# shellcheck disable=SC2086  # the tool names split on purpose; the '*' is quoted so the shell never globs it
+running=$(af_applies_running $UFC_WRITERS '*')
 case $? in
-  0) log "REFUSED: a tool that writes UFC rows is still running in the api container — wait for it; nothing changed (no backup):"; echo "$running"; exit 1 ;;
+  0) log "REFUSED: a tool's --apply is still running in the api container (a UFC writer, or another repair) — wait for it; nothing changed (no backup):"; echo "$running"; exit 1 ;;
   1) ;;
   *) log "REFUSED: could not scan the api container for running applies — nothing changed (no backup)"; exit 1 ;;
 esac

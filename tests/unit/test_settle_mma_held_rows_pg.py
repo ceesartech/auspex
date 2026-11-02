@@ -15,7 +15,13 @@ answer):
     reviewed, a core API that disagrees, or a write outside the listed rows:
     nothing is committed;
   * the other order (the sweep already recorded the draw, the replaced row
-    already cancelled as re-drawn) settles to the same after-state.
+    already cancelled as re-drawn) settles to the same after-state;
+  * the archive and the audit CSV cover the recorded bout's two fighter rows
+    (an athlete-id resolver may stamp them through the results path);
+  * run B's done check (scripts/ops/repair_stranded_recs_mma.sh: its SQL, read
+    out of the wrapper) reads the held rows 'held' before and 'settled' after
+    a real apply, and counts only the UFC recs created before its AS_OF, so a
+    rec the pipeline writes for a later card never makes it read "not done".
 
 Skipped where no Postgres server binaries are on PATH (initdb, pg_ctl).
 """
@@ -43,6 +49,7 @@ from psycopg2.extras import RealDictCursor  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO / "scripts"
+B_WRAPPER = SCRIPTS_DIR / "ops" / "repair_stranded_recs_mma.sh"
 MIGRATIONS = REPO / "services" / "data-ingestion" / "db" / "migrations"
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "espn_ufc_no_winner.json"
 
@@ -335,6 +342,7 @@ class TestTheReviewedRun:
             ("predictions", "child_before"): 4,
             ("features_cache", "child_before"): 4,
             ("teams", "team_before"): 1,
+            ("teams", "fighter_before"): 2,
         }
         assert _check_after(db) == 0
 
@@ -468,6 +476,36 @@ class TestNothingIsCommitted:
         assert rc == 1 and _state(db) == before
         assert "after the results path the row reads" in caplog.text
 
+    def test_a_grader_that_reports_other_counts_than_the_plan_rolls_back(self, db, tmp_path, caplog, monkeypatch):
+        # The database ends right, but the grader's own count disagrees with the plan: the apply trusts neither.
+        real = st.gcm.grade_match
+
+        def grade_and_miscount(cur, match, stats=None):
+            out = real(cur, match, stats)
+            stats["no_winner_predictions"] -= 1
+            return out
+
+        monkeypatch.setattr(st.gcm, "grade_match", grade_and_miscount)
+        before = _state(db)
+        rc, _, _ = _run(db, tmp_path, apply=True, expect=REVIEWED)
+        assert rc == 1 and _state(db) == before
+        assert "the grader recorded 1 prediction(s) and voided 0 rec(s); the plan says 2 and 0" in caplog.text
+
+    def test_a_re_plan_inside_the_transaction_that_is_not_done_rolls_back(self, db, tmp_path, caplog, monkeypatch):
+        real = st.plan_entries
+
+        def plan(cur, entries, schema, lock):
+            plans = real(cur, entries, schema, lock)
+            if not lock:  # only the in-transaction re-plan
+                plans[0].record = True
+            return plans
+
+        monkeypatch.setattr(st, "plan_entries", plan)
+        before = _state(db)
+        rc, _, _ = _run(db, tmp_path, apply=True, expect=REVIEWED)
+        assert rc == 1 and _state(db) == before
+        assert "the re-plan is not done: record=1" in caplog.text
+
     def test_a_team_with_another_bout_is_kept_and_the_plan_says_so(self, db, tmp_path, caplog):
         team = {r["name"]: r["id"] for r in _q(db, "SELECT id::text, name FROM teams")}
         _x(
@@ -504,3 +542,126 @@ class TestTheOtherOrder:
         assert _check_after(db) == 0
         preds = _q(db, "SELECT actual_outcome, is_correct FROM predictions WHERE match_id = %s", (GATTO.match_id,))
         assert preds == [{"actual_outcome": "draw", "is_correct": None}] * 2
+
+
+class TestTheFighterRows:
+    def test_a_stamp_the_results_path_makes_is_archived_and_audited(self, db, tmp_path, monkeypatch):
+        # With the mma_identity resolver deployed, the results path stamps ESPN athlete ids on the two fighters
+        # (prod rehearsal: {} -> {"espn": "4420893"} / {"espn": "5149147"}). The fingerprint tolerates it; the
+        # reversal record and the audit CSV must show it.
+        real = fu._record_result
+        gatto_team = _q(db, "SELECT id::text AS id FROM teams WHERE name = 'Melissa Gatto'")[0]["id"]
+
+        def record_and_stamp(cur, cfg, league_id, comp, ctx):
+            ok = real(cur, cfg, league_id, comp, ctx)
+            cur.execute('UPDATE teams SET external_ids = \'{"espn": "4420893"}\'::jsonb WHERE id = %s', (gatto_team,))
+            return ok
+
+        monkeypatch.setattr(fu, "_record_result", record_and_stamp)
+        rc, out, arch = _run(db, tmp_path, apply=True, expect=REVIEWED)
+        assert rc == 0
+        rows = [r for r in __import__("csv").DictReader(out.open()) if r["table"] == "teams"]
+        stamped = [r for r in rows if r["row_id"] == gatto_team]
+        assert len(stamped) == 1 and stamped[0]["change"] == "updated"
+        assert stamped[0]["match_id"] == GATTO.match_id and stamped[0]["action"] == "record_no_winner"
+        assert json.loads(stamped[0]["before"])["external_ids"] in ({}, None)
+        assert json.loads(stamped[0]["after"])["external_ids"] == {"espn": "4420893"}
+        with gzip.open(arch, "rt") as fh:
+            fighters = [json.loads(line)["row"] for line in fh if json.loads(line)["role"] == "fighter_before"]
+        assert sorted(r["name"] for r in fighters) == ["Ernesta Kareckaite", "Melissa Gatto"]
+
+    def test_without_a_stamp_the_fighter_rows_are_not_in_the_audit_csv(self, db, tmp_path):
+        rc, out, _ = _run(db, tmp_path)
+        assert rc == 0
+        teams = [r for r in __import__("csv").DictReader(out.open()) if r["table"] == "teams"]
+        assert [r["row_id"] for r in teams] == [MACHADO.replaced_team_id]
+
+
+# ── run B's done check, its own SQL, on the same database ─────────────
+
+
+def _b_sql(name: str) -> str:
+    """One of run B's SQL files as the wrapper writes it: the heredoc body, with the wrapper's own values for
+    the variables it expands."""
+    text = B_WRAPPER.read_text()
+    m = re.search(r'cat > "\$W/' + name + r'\.sql" <<SQLEOF\n(.*?)\nSQLEOF', text, re.S)
+    assert m, name
+    values = dict(re.findall(r"^(AS_OF|SETTLED_DRAW_ID|SETTLED_DELETED_ID)=(\S+)", text, re.M))
+    sql = m.group(1)
+    for k, v in values.items():
+        sql = sql.replace("$" + k, v)
+    assert "$" not in sql, sql
+    return sql
+
+
+def _b_state(dsn) -> str:
+    c = _connect(dsn)
+    try:
+        with c.cursor() as cur:
+            cur.execute(_b_sql("state_b"))
+            stale, recs = cur.fetchone()
+            cur.execute(_b_sql("held"))
+            held = cur.fetchone()[0]
+        return f"{stale}|{recs} {held}"
+    finally:
+        c.rollback()
+        c.close()
+
+
+class TestRunBsDoneCheck:
+    def _recs(self, dsn):
+        """A UFC rec written before run B's AS_OF (2026-11-01) on a fought bout, and one the pipeline writes
+        today for a card ahead."""
+        league = _q(dsn, "SELECT league_id::text AS l FROM matches WHERE id = %s", (GATTO.match_id,))[0]["l"]
+        team = {r["name"]: r["id"] for r in _q(dsn, "SELECT id::text, name FROM teams")}
+        old_row = _q(dsn, "SELECT id::text AS id FROM matches WHERE external_ids->>'espn' = 'x1'")[0]["id"]  # _seed
+        new_row = str(uuid.uuid4())
+        _x(
+            dsn,
+            "INSERT INTO matches (id, league_id, home_team_id, away_team_id, match_date, status, season) "
+            "VALUES (%s, %s, %s, %s, NOW() + interval '5 days', 'scheduled', '2026')",
+            (new_row, league, team["Other"], team["Melissa Amaya"]),
+        )
+        for mid, created in ((old_row, "2026-08-29T00:00:00Z"), (new_row, None)):
+            pid = str(uuid.uuid4())
+            _x(
+                dsn,
+                "INSERT INTO predictions (id, match_id, model_name, model_version, prediction_type, predicted_outcome,"
+                " confidence, probabilities) VALUES (%s, %s, 'ensemble_mma_ml', 'v', 'moneyline', 'home', 0.6,"
+                " '{}'::jsonb)",
+                (pid, mid),
+            )
+            _x(
+                dsn,
+                "INSERT INTO betting_recommendations (prediction_id, match_id, bet_type, selection,"
+                " odds_at_recommendation, bookmaker, recommended_stake, status, created_at)"
+                " VALUES (%s, %s, 'moneyline', 'home', 1.9, 'b', 10, 'pending', COALESCE(%s::timestamptz, NOW()))",
+                (pid, mid, created),
+            )
+        assert _q(dsn, "SELECT count(*) AS n FROM betting_recommendations")[0]["n"] == 2
+
+    def test_held_before_and_settled_after_a_real_apply_and_new_recs_do_not_count(self, db, tmp_path):
+        self._recs(db)
+        # Before: both held rows stale and held; 1 UFC rec created before AS_OF (today's rec not counted).
+        assert _b_state(db) == "2|1 held|held"
+        assert _run(db, tmp_path, apply=True, expect=REVIEWED)[0] == 0
+        # After: neither row stale any more, both settled as decided; the recs untouched.
+        assert _b_state(db) == "0|1 settled|settled"
+
+    def test_the_other_order_reads_one_settled_and_one_held(self, db):
+        # A deep re-fetch recorded the draw first and cancelled the Machado row as a re-drawn slot.
+        _x(
+            db,
+            "UPDATE matches SET status = 'finished', metadata = metadata || %s::jsonb WHERE id = %s",
+            (json.dumps({"no_winner": "draw", "no_winner_detail": "majority draw"}), GATTO.match_id),
+        )
+        _x(db, "UPDATE matches SET status = 'cancelled' WHERE id = %s", (MACHADO.match_id,))
+        assert _b_state(db) == "1|0 settled|held"
+
+    def test_a_recorded_winner_on_the_draw_row_is_other(self, db):
+        _x(
+            db,
+            "UPDATE matches SET status = 'finished', home_score = 1, away_score = 0 WHERE id = %s",
+            (GATTO.match_id,),
+        )
+        assert _b_state(db).endswith(" other|held")

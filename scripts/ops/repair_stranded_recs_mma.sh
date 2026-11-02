@@ -98,8 +98,8 @@
 #      scripts/data/mma_stale_rows_retire_20261101.csv and holding back
 #      exactly the rows of scripts/data/mma_stale_rows_hold_20261101.csv, or
 #      exactly its done plan (0 writes, left=9, with 9 stale UFC rows and the
-#      49 UFC recs in the database: ALREADY DONE, exit 0, no backup); anything
-#      else aborts;
+#      49 UFC recs created before AS_OF in the database: ALREADY DONE, exit 0,
+#      no backup); anything else aborts;
 #   1. verified backup (B2) — abort if it does not land;
 #   2. T0 = now; before-state + A's dry run (write-once audit CSV) — abort
 #      unless the 21 reviewed recs are all still pending, the plan is exactly
@@ -121,8 +121,8 @@
 #   7. B's after-state: the apply's own audit CSV plans exactly the reviewed
 #      rows and the 2 held rows; the stale UFC rows (as of AS_OF) fell by
 #      exactly merge_delete + delete_no_twin + delete_placeholder; the UFC
-#      recs are all still there; a fresh dry run plans exactly B's done plan
-#      (DONE_B);
+#      recs created before AS_OF are all still there; a fresh dry run plans
+#      exactly B's done plan (DONE_B);
 #   8. follow-ups (derived data only): compute_features_mma --all-finished
 #      --force (A: 44 new results change fighter histories; B: twins received
 #      prices), then grade the ungraded predictions of finished UFC rows
@@ -142,7 +142,11 @@
 #      state that goes with it — exit 0 when verified, else 1.
 #   B's done state: B's dry run writes nothing and leaves the 7 rows a rec
 #   references plus every held row still held — left=7+H with 7+H stale UFC
-#   rows, where H (0-2) counts the held rows still 'scheduled' or 'cancelled'.
+#   rows, where H (0-2) counts the held rows still 'scheduled' or 'cancelled',
+#   and the 49 UFC recs created before AS_OF all there. Recs written after
+#   AS_OF (generate_recommendations_mma prices every upcoming UFC card every 15
+#   minutes) are not counted: a new rec must not make B, or the scripts that
+#   call --verify-b, read "not done".
 #   Each held row is either still held, or settled as the user decided on
 #   2026-11-02 (scripts/ops/settle_mma_held_rows.sh): Gatto v Kareckaite
 #   finished as a draw (NULL scores, metadata.no_winner 'draw'), Valesca
@@ -342,12 +346,14 @@ SELECT (SELECT count(*) FROM betting_recommendations br JOIN matches m ON m.id =
           JOIN leagues l ON l.id = m.league_id
          WHERE l.sport = 'mma' AND br.created_at < TIMESTAMPTZ '$AS_OF') AS recs;
 SQLEOF
+# recs: only those created before AS_OF, as state_done.sql counts them (B's done state, the header).
 cat > "$W/state_b.sql" <<SQLEOF
 SELECT (SELECT count(*) FROM matches m JOIN leagues l ON l.id = m.league_id
          WHERE l.sport = 'mma' AND m.status IN ('scheduled', 'cancelled')
            AND m.match_date < TIMESTAMPTZ '$AS_OF' - interval '96 hours') AS stale,
        (SELECT count(*) FROM betting_recommendations br JOIN matches m ON m.id = br.match_id
-          JOIN leagues l ON l.id = m.league_id WHERE l.sport = 'mma') AS recs;
+          JOIN leagues l ON l.id = m.league_id
+         WHERE l.sport = 'mma' AND br.created_at < TIMESTAMPTZ '$AS_OF') AS recs;
 SQLEOF
 # Each held row: 'held' (still a stale candidate), 'settled' (as the user decided) or 'other'.
 cat > "$W/held.sql" <<SQLEOF
@@ -377,7 +383,8 @@ verify_a_done() {
 # is_done_b_plan <PLAN line>: B writes nothing (its left= is checked by b_done_verified).
 is_done_b_plan() { same_plan "$1" "$DONE_B_WRITES" && [ "$(plan_num "$1" left)" != missing ]; }
 # b_done_verified <B's done plan>: B's committed state in the database (the header): each held row still held or
-# settled, left=7+H in the plan and 7+H stale UFC rows, the UFC recs all there. Sets B_DONE_NOTE (what holds) and
+# settled, left=7+H in the plan and 7+H stale UFC rows, the UFC recs created before AS_OF all there. Sets
+# B_DONE_NOTE (what holds) and
 # B_DONE_WHY (what does not).
 b_done_verified() {
   local state held h want
@@ -393,14 +400,14 @@ b_done_verified() {
       ;;
   esac
   want=$((LEFT_WITH_RECS + h))
-  B_DONE_NOTE="stale UFC rows|UFC recs $state; held rows (draw|replaced row) $held"
+  B_DONE_NOTE="stale UFC rows|UFC recs created before $AS_OF $state; held rows (draw|replaced row) $held"
   [ "$h" = 2 ] || B_DONE_NOTE="$B_DONE_NOTE — settled as decided 2026-11-02 (scripts/ops/settle_mma_held_rows.sh)"
   if [ "$(plan_num "$1" left)" != "$want" ]; then
     B_DONE_WHY="its plan leaves $(plan_num "$1" left), not $want ($LEFT_WITH_RECS rec-held rows + $h held row(s) still held: $held)"
     return 1
   fi
   if [ "$state" != "$want|$RECS_BEFORE_AS_OF" ]; then
-    B_DONE_WHY="the database shows stale UFC rows|UFC recs '${state:-unreadable}', not '$want|$RECS_BEFORE_AS_OF'"
+    B_DONE_WHY="the database shows stale UFC rows|UFC recs created before $AS_OF '${state:-unreadable}', not '$want|$RECS_BEFORE_AS_OF'"
     return 1
   fi
   return 0
@@ -591,7 +598,7 @@ log "5/8 B's before-state + dry run (as of $AS_OF)"
 state=$(read_state "$W/state_b.sql" 2)
 if [ -z "$state" ]; then log "ABORT at step 5: the before-state query failed — nothing changed"; exit 1; fi
 IFS='|' read -r stale0 recsb0 <<< "$state"
-log "before: stale UFC rows (as of $AS_OF)=$stale0, UFC recs=$recsb0"
+log "before: stale UFC rows (as of $AS_OF)=$stale0, UFC recs created before $AS_OF=$recsb0"
 run_tool stranded_mma_b_dry "$TOOL_B --out-csv /app/backups/fixture_orphans_mma_dryrun_$STAMP.csv"
 rc=$?
 plan=$(plan_of stranded_mma_b_dry)
@@ -622,9 +629,9 @@ IFS='|' read -r stale1 recsb1 <<< "$state"
 run_tool stranded_mma_b_verify "$TOOL_B --out-csv /app/backups/fixture_orphans_mma_verify_$STAMP.csv"
 replan=$(plan_of stranded_mma_b_verify)
 want_stale=$((stale0 - md - dn - dp))
-log "after: the apply's rows '$applied_rows' (expected '$ROWS_OK'), stale UFC rows ${stale1:-?} (expected $want_stale), UFC recs ${recsb1:-?} (expected $recsb0), re-plan '$replan' (expected $DONE_B)"
+log "after: the apply's rows '$applied_rows' (expected '$ROWS_OK'), stale UFC rows ${stale1:-?} (expected $want_stale), UFC recs created before $AS_OF ${recsb1:-?} (expected $recsb0), re-plan '$replan' (expected $DONE_B)"
 if [ "$applied_rows" != "$ROWS_OK" ] || [ "${stale1:-}" != "$want_stale" ] || [ "${recsb1:-}" != "$recsb0" ] || ! same_plan "$replan" "$DONE_B"; then
-  log "FAILED after-state at step 7 — inspect (the archive and audit CSVs are in /app/backups); a re-run refuses unless B's dry run plans exactly its done plan with $STALE_AFTER_B stale UFC rows and the $RECS_BEFORE_AS_OF UFC recs in the database"
+  log "FAILED after-state at step 7 — inspect (the archive and audit CSVs are in /app/backups); a re-run refuses unless B's dry run plans exactly its done plan with $STALE_AFTER_B stale UFC rows and the $RECS_BEFORE_AS_OF UFC recs created before $AS_OF in the database"
   exit 1
 fi
 
