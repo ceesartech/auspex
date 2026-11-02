@@ -409,3 +409,33 @@ def test_check_after_counts_a_row_that_lost_its_athlete_id(conn, tmp_path):
     conn.rollback()
     assert out["ids_missing"] == 1 and not mic.after_state_ok(out)
     assert mic.run_check_after(conn, tmp_path / "dry.plan.json", res, None) == 1
+
+
+def test_a_team_write_in_flight_fails_the_apply_with_nothing_written(conn, dsn, tmp_path, monkeypatch):
+    """The apply takes SHARE ROW EXCLUSIVE on teams before it reads: a sweep holding a team row (an uncommitted
+    stamp) makes it give up after lock_timeout with nothing written, instead of planning around a write it cannot
+    see."""
+    w = _world(conn)
+    rc, dry = _run(conn, w, tmp_path, tag="dry")
+    monkeypatch.setattr(mic, "LOCK_TIMEOUT", "300ms")
+    res, _ = mic.load_resolvers()
+    sweep = psycopg2.connect(**dsn)
+    try:
+        with sweep.cursor() as cur:
+            cur.execute("UPDATE teams SET updated_at = now() WHERE id = %s", (w["garry"],))
+        before = _fingerprint(conn)
+        rc = mic.run(
+            conn,
+            True,
+            w["lists"],
+            tmp_path / "a.csv",
+            tmp_path / "a.jsonl.gz",
+            res,
+            plan_out=tmp_path / "a.json",
+            expect_plan=dry,
+        )
+    finally:
+        sweep.rollback()
+        sweep.close()
+    assert rc == 2 and _fingerprint(conn) == before
+    assert not (tmp_path / "a.jsonl.gz").exists() and not (tmp_path / "a.json").exists()

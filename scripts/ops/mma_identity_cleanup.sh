@@ -179,7 +179,7 @@ others_running() {
     [ -n "$pid" ] && [ "$pid" != "$$" ] || continue
     [ -n "$me" ] && [ "$args" = "$me" ] && continue
     case "$args" in
-      *scripts/ops/* | *soccer_repair_runbook*) echo "  pid $pid: $args"; found=0 ;;
+      *scripts/ops/*.sh* | *soccer_repair_runbook.sh*) echo "  pid $pid: $args"; found=0 ;;
     esac
   done < <($PS_CMD 2>/dev/null)
   return $found

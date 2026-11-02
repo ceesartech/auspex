@@ -189,9 +189,13 @@ def test_the_soccer_runbook_running_refuses(tmp_path):
     assert rc == 1 and "soccer_repair_runbook" in out and not _tool(calls)
 
 
-def test_this_runs_own_subshells_are_not_another_wrapper(tmp_path):
+def test_this_runs_own_subshells_and_log_tails_are_not_another_wrapper(tmp_path):
     script = _script(tmp_path)
-    ps = f"1 /sbin/launchd\n99999 bash {script}\n123 tee -a /home/auspex/mma_identity_cleanup.log\n"
+    ps = (
+        f"1 /sbin/launchd\n99999 bash {script}\n123 tee -a /home/auspex/mma_identity_cleanup.log\n"
+        "124 tail -f /home/auspex/soccer_repair_runbook.log\n"
+        "125 python /app/scripts/fetch_upcoming.py --sport mma --results\n"
+    )
     rc, out, calls = _run(tmp_path, _rules(), ps=ps)
     assert rc == 0, out
 
@@ -213,7 +217,7 @@ def test_an_unreadable_process_scan_refuses(tmp_path):
 def test_a_ufc_card_on_refuses(tmp_path):
     card = "0d6e...|2026-11-07 22:00:00+00|scheduled\nCARD_CHECK_OK"
     rc, out, calls = _run(tmp_path, _rules(card=card))
-    assert rc == 1 and "a UFC card is on" in out and "2026-11-07 22:00:00+00|scheduled" in out, out
+    assert rc == 1 and "ABORT at step 0: a UFC card is on" in out and "2026-11-07 22:00:00+00|scheduled" in out, out
     assert not _tool(calls) and _backups(tmp_path) == 0
 
 
