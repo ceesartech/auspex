@@ -50,3 +50,10 @@ inhibit_rules:
     target_matchers:
       - severity = "warning"
     equal: ['alertname', 'component']
+  # The two disk alerts have different names, so the rule above does not pair
+  # them: under 10% free only DiskSpaceLow (critical) speaks.
+  - source_matchers:
+      - alertname = "DiskSpaceLow"
+    target_matchers:
+      - alertname = "DiskSpaceWarning"
+    equal: ['component']

@@ -422,10 +422,18 @@ services:
       - prometheus_data:/prometheus
     depends_on:
       - alertmanager
+    # Retention: 30 days OR 4GB (Prometheus units are base 2: 4 GiB), whichever
+    # binds first; the oldest blocks go first. Healthy ingest is ~55-60 MB/day
+    # (Oct 25-Nov 2), so 30 days fit in ~1.8 GB and the size cap never binds.
+    # It binds on a cardinality blow-up like Oct 21-25 (~700 MB/day from the
+    # api's raw-path labels), which would otherwise fill ~21 GB in 30 days —
+    # there the cap keeps ~6 days. The prometheus_data volume survives the
+    # container recreate a flag change causes.
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=30d'
+      - '--storage.tsdb.retention.size=4GB'
       - '--web.console.libraries=/etc/prometheus/console_libraries'
       - '--web.console.templates=/etc/prometheus/consoles'
       - '--web.enable-lifecycle'
