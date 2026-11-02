@@ -286,6 +286,28 @@ def _state(dsn):
     }
 
 
+def _audit(out) -> list[dict]:
+    return list(__import__("csv").DictReader(out.open()))
+
+
+def _athlete_id_stamps(rows: list[dict]) -> list[dict]:
+    """The audit rows of the recorded bout's two fighter rows, each checked to be nothing but an ESPN athlete id
+    stamped by the results path (the mma_identity stream's resolver does that once both MMA streams are merged;
+    without it there are none)."""
+    fighters = [r for r in rows if r["table"] == "teams" and r["action"] == "record_no_winner"]
+    for r in fighters:
+        before, after = json.loads(r["before"]), json.loads(r["after"])
+        assert r["change"] == "updated" and r["match_id"] == GATTO.match_id, r
+        assert {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)} <= {
+            "external_ids",
+            "updated_at",
+        }
+        b_ids, a_ids = before.get("external_ids") or {}, after.get("external_ids") or {}
+        assert {k: v for k, v in a_ids.items() if k != "espn"} == b_ids and "espn" not in b_ids and a_ids.get("espn")
+    assert len(fighters) <= 2
+    return fighters
+
+
 def _plan_logged(caplog) -> dict:
     line = [r.getMessage() for r in caplog.records if r.getMessage().startswith("PLAN ")][-1]
     return {k: int(v) for k, v in (kv.split("=") for kv in line.split()[1:])}
@@ -299,7 +321,9 @@ class TestTheReviewedRun:
         assert rc == 0 and _plan_logged(caplog) == REVIEWED
         assert "DRY RUN: the whole transaction ran and was ROLLED BACK" in caplog.text
         assert _state(db) == before and not arch.exists()
-        changes = Counter((r["table"], r["change"]) for r in __import__("csv").DictReader(out.open()))
+        rows = _audit(out)
+        stamps = _athlete_id_stamps(rows)
+        changes = Counter((r["table"], r["change"]) for r in rows if r not in stamps)
         assert changes == {
             ("matches", "updated"): 1,
             ("predictions", "updated"): 2,
@@ -560,7 +584,7 @@ class TestTheFighterRows:
         monkeypatch.setattr(fu, "_record_result", record_and_stamp)
         rc, out, arch = _run(db, tmp_path, apply=True, expect=REVIEWED)
         assert rc == 0
-        rows = [r for r in __import__("csv").DictReader(out.open()) if r["table"] == "teams"]
+        rows = [r for r in _audit(out) if r["table"] == "teams"]
         stamped = [r for r in rows if r["row_id"] == gatto_team]
         assert len(stamped) == 1 and stamped[0]["change"] == "updated"
         assert stamped[0]["match_id"] == GATTO.match_id and stamped[0]["action"] == "record_no_winner"
@@ -570,11 +594,13 @@ class TestTheFighterRows:
             fighters = [json.loads(line)["row"] for line in fh if json.loads(line)["role"] == "fighter_before"]
         assert sorted(r["name"] for r in fighters) == ["Ernesta Kareckaite", "Melissa Gatto"]
 
-    def test_without_a_stamp_the_fighter_rows_are_not_in_the_audit_csv(self, db, tmp_path):
+    def test_the_fighter_rows_are_in_the_audit_csv_only_when_stamped(self, db, tmp_path):
         rc, out, _ = _run(db, tmp_path)
         assert rc == 0
-        teams = [r for r in __import__("csv").DictReader(out.open()) if r["table"] == "teams"]
-        assert [r["row_id"] for r in teams] == [MACHADO.replaced_team_id]
+        rows = _audit(out)
+        stamps = _athlete_id_stamps(rows)  # none on this branch alone; Gatto's and Kareckaite's once merged
+        teams = [r for r in rows if r["table"] == "teams" and r not in stamps]
+        assert [(r["row_id"], r["change"]) for r in teams] == [(MACHADO.replaced_team_id, "deleted")]
 
 
 # ── run B's done check, its own SQL, on the same database ─────────────
