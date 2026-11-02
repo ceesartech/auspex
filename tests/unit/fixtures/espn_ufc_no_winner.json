@@ -1,0 +1,2443 @@
+{
+ "_source": "ESPN UFC scoreboard (site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard?dates=YYYYMMDD) and core API status (sports.core.api.espn.com/v2/sports/mma/leagues/ufc/events/{event}/competitions/{comp}/status), fetched read-only 2026-11-01/02; trimmed to the fields fetch_upcoming reads. Every UFC competition of 2022-2026 in those scoreboards that ended with winner=false on both competitors (27), plus 4 decisive bouts (one of them 401914464, Tina Black v Melissa Amaya, the competition that replaced Valesca Machado).",
+ "competitions": [
+  {
+   "event_id": "600015541",
+   "id": "401436433",
+   "date": "2022-07-03T02:00Z",
+   "status": {
+    "clock": 189.0,
+    "displayClock": "3:09",
+    "period": 2,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "T-Mobile Arena"
+   },
+   "competitors": [
+    {
+     "id": "3045734",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Pedro Munhoz",
+      "fullName": "Pedro Munhoz"
+     }
+    },
+    {
+     "id": "4205093",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Sean O'Malley",
+      "fullName": "Sean O'Malley"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest"
+   }
+  },
+  {
+   "event_id": "600020707",
+   "id": "401440755",
+   "date": "2022-07-31T00:00Z",
+   "status": {
+    "clock": 300.0,
+    "displayClock": "5:00",
+    "period": 3,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "American Airlines Center"
+   },
+   "competitors": [
+    {
+     "id": "4249193",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Don'Tale Mayes",
+      "fullName": "Don'Tale Mayes"
+     },
+     "linescores": [
+      {
+       "value": 85.0,
+       "displayValue": "85.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "5078213",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Hamdy Abdelwahab",
+      "fullName": "Hamdy Abdelwahab"
+     },
+     "linescores": [
+      {
+       "value": 86.0,
+       "displayValue": "86.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        },
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest"
+   }
+  },
+  {
+   "event_id": "600022153",
+   "id": "401465716",
+   "date": "2022-08-13T20:00Z",
+   "status": {
+    "clock": 300.0,
+    "displayClock": "5:00",
+    "period": 3,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Pechanga Arena"
+   },
+   "competitors": [
+    {
+     "id": "4351319",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Youssef Zalal",
+      "fullName": "Youssef Zalal"
+     },
+     "linescores": [
+      {
+       "value": 85.0,
+       "displayValue": "85.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "4409558",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Da'Mon Blackshear",
+      "fullName": "Da'Mon Blackshear"
+     },
+     "linescores": [
+      {
+       "value": 84.0,
+       "displayValue": "84.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "core_status_result": {
+    "id": 269,
+    "name": "draw",
+    "displayName": "Draw",
+    "shortDisplayName": "Draw"
+   }
+  },
+  {
+   "event_id": "600021776",
+   "id": "401451145",
+   "date": "2022-08-21T00:00Z",
+   "status": {
+    "clock": 300.0,
+    "displayClock": "5:00",
+    "period": 3,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Delta Center"
+   },
+   "competitors": [
+    {
+     "id": "3074813",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Luis Saldana",
+      "fullName": "Luis Saldana"
+     },
+     "linescores": [
+      {
+       "value": 84.0,
+       "displayValue": "84.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 27.0,
+         "displayValue": "27",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "4566991",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Sean Woodson",
+      "fullName": "Sean Woodson"
+     },
+     "linescores": [
+      {
+       "value": 84.0,
+       "displayValue": "84.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 27.0,
+         "displayValue": "27",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "core_status_result": {
+    "id": 269,
+    "name": "draw",
+    "displayName": "Draw",
+    "shortDisplayName": "Draw"
+   }
+  },
+  {
+   "event_id": "600025607",
+   "id": "401499752",
+   "date": "2022-12-11T03:00Z",
+   "status": {
+    "clock": 300.0,
+    "displayClock": "5:00",
+    "period": 5,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 5
+    }
+   },
+   "venue": {
+    "fullName": "T-Mobile Arena"
+   },
+   "competitors": [
+    {
+     "id": "2506250",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Jan Blachowicz",
+      "fullName": "Jan Blachowicz"
+     },
+     "linescores": [
+      {
+       "value": 141.0,
+       "displayValue": "141.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 48.0,
+         "displayValue": "48",
+         "period": 0
+        },
+        {
+         "value": 46.0,
+         "displayValue": "46",
+         "period": 0
+        },
+        {
+         "value": 47.0,
+         "displayValue": "47",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "4273399",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Magomed Ankalaev",
+      "fullName": "Magomed Ankalaev"
+     },
+     "linescores": [
+      {
+       "value": 142.0,
+       "displayValue": "142.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 47.0,
+         "displayValue": "47",
+         "period": 0
+        },
+        {
+         "value": 48.0,
+         "displayValue": "48",
+         "period": 0
+        },
+        {
+         "value": 47.0,
+         "displayValue": "47",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "core_status_result": {
+    "id": 269,
+    "name": "draw",
+    "displayName": "Draw",
+    "shortDisplayName": "Draw"
+   }
+  },
+  {
+   "event_id": "600027632",
+   "id": "401513588",
+   "date": "2023-02-05T06:00Z",
+   "status": {
+    "clock": 300.0,
+    "displayClock": "5:00",
+    "period": 3,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Meta APEX"
+   },
+   "competitors": [
+    {
+     "id": "3093026",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Dooho Choi",
+      "fullName": "Dooho Choi"
+     },
+     "linescores": [
+      {
+       "value": 85.0,
+       "displayValue": "85.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "4408436",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Kyle Nelson",
+      "fullName": "Kyle Nelson"
+     },
+     "linescores": [
+      {
+       "value": 83.0,
+       "displayValue": "83.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 27.0,
+         "displayValue": "27",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "core_status_result": {
+    "id": 269,
+    "name": "draw",
+    "displayName": "Draw",
+    "shortDisplayName": "Draw"
+   }
+  },
+  {
+   "event_id": "600025531",
+   "id": "401504390",
+   "date": "2023-02-12T03:00Z",
+   "status": {
+    "clock": 300.0,
+    "displayClock": "5:00",
+    "period": 3,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "RAC Arena (AUS)"
+   },
+   "competitors": [
+    {
+     "id": "3948876",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Alonzo Menifield",
+      "fullName": "Alonzo Menifield"
+     },
+     "linescores": [
+      {
+       "value": 83.0,
+       "displayValue": "83.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 27.0,
+         "displayValue": "27",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "4354420",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Jimmy Crute",
+      "fullName": "Jimmy Crute"
+     },
+     "linescores": [
+      {
+       "value": 85.0,
+       "displayValue": "85.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "core_status_result": {
+    "id": 269,
+    "name": "draw",
+    "displayName": "Draw",
+    "shortDisplayName": "Draw"
+   }
+  },
+  {
+   "event_id": "600027407",
+   "id": "401524593",
+   "date": "2023-03-18T16:30Z",
+   "status": {
+    "clock": 300.0,
+    "displayClock": "5:00",
+    "period": 3,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "O2 Arena (ENG)"
+   },
+   "competitors": [
+    {
+     "id": "4078246",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Jai Herbert",
+      "fullName": "Jai Herbert"
+     },
+     "linescores": [
+      {
+       "value": 85.0,
+       "displayValue": "85.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "4193694",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Ludovit Klein",
+      "fullName": "Ludovit Klein"
+     },
+     "linescores": [
+      {
+       "value": 83.0,
+       "displayValue": "83.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 27.0,
+         "displayValue": "27",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "core_status_result": {
+    "id": 269,
+    "name": "draw",
+    "displayName": "Draw",
+    "shortDisplayName": "Draw"
+   }
+  },
+  {
+   "event_id": "600030732",
+   "id": "401535771",
+   "date": "2023-04-22T23:00Z",
+   "status": {
+    "clock": 275.0,
+    "displayClock": "4:35",
+    "period": 1,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Meta APEX"
+   },
+   "competitors": [
+    {
+     "id": "2502364",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "King Green",
+      "fullName": "King Green"
+     }
+    },
+    {
+     "id": "3894823",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Jared Gordon",
+      "fullName": "Jared Gordon"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest"
+   }
+  },
+  {
+   "event_id": "600032952",
+   "id": "401542731",
+   "date": "2023-06-11T00:00Z",
+   "status": {
+    "clock": 184.0,
+    "displayClock": "3:04",
+    "period": 2,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Rogers Arena"
+   },
+   "competitors": [
+    {
+     "id": "2984770",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Chris Curtis",
+      "fullName": "Chris Curtis"
+     }
+    },
+    {
+     "id": "4690539",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Nassourdine Imavov",
+      "fullName": "Nassourdine Imavov"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest"
+   }
+  },
+  {
+   "event_id": "600033395",
+   "id": "401549959",
+   "date": "2023-06-17T23:00Z",
+   "status": {
+    "clock": 140.0,
+    "displayClock": "2:20",
+    "period": 1,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Meta APEX"
+   },
+   "competitors": [
+    {
+     "id": "4231391",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Ronnie Lawrence",
+      "fullName": "Ronnie Lawrence"
+     }
+    },
+    {
+     "id": "4815973",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Dan Argueta",
+      "fullName": "Dan Argueta"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest"
+   }
+  },
+  {
+   "event_id": "600033394",
+   "id": "401546080",
+   "date": "2023-06-24T19:00Z",
+   "status": {
+    "clock": 29.0,
+    "displayClock": "0:29",
+    "period": 1,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "VyStar Veterans Memorial Arena"
+   },
+   "competitors": [
+    {
+     "id": "2223033",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Austen Lane",
+      "fullName": "Austen Lane"
+     }
+    },
+    {
+     "id": "4566145",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Justin Tafa",
+      "fullName": "Justin Tafa"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest"
+   }
+  },
+  {
+   "event_id": "600033932",
+   "id": "401547761",
+   "date": "2023-07-16T02:00Z",
+   "status": {
+    "clock": 38.0,
+    "displayClock": "0:38",
+    "period": 2,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 5
+    }
+   },
+   "venue": {
+    "fullName": "Meta APEX"
+   },
+   "competitors": [
+    {
+     "id": "3028404",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Holly Holm",
+      "fullName": "Holly Holm"
+     }
+    },
+    {
+     "id": "4371001",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Mayra Bueno Silva",
+      "fullName": "Mayra Bueno Silva"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest",
+    "target": {
+     "id": 122,
+     "name": "head",
+     "description": "Head",
+     "displayDescription": "Head"
+    }
+   }
+  },
+  {
+   "event_id": "600035912",
+   "id": "401575164",
+   "date": "2023-09-16T23:00Z",
+   "status": {
+    "clock": 227.0,
+    "displayClock": "3:47",
+    "period": 1,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "T-Mobile Arena"
+   },
+   "competitors": [
+    {
+     "id": "4895772",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Daniel Lacerda",
+      "fullName": "Daniel Lacerda"
+     }
+    },
+    {
+     "id": "5076027",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Édgar Cháirez",
+      "fullName": "Édgar Cháirez"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest"
+   }
+  },
+  {
+   "event_id": "600035912",
+   "id": "401562505",
+   "date": "2023-09-17T02:00Z",
+   "status": {
+    "clock": 300.0,
+    "displayClock": "5:00",
+    "period": 5,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 5
+    }
+   },
+   "venue": {
+    "fullName": "T-Mobile Arena"
+   },
+   "competitors": [
+    {
+     "id": "2554705",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Valentina Shevchenko",
+      "fullName": "Valentina Shevchenko"
+     },
+     "linescores": [
+      {
+       "value": 142.0,
+       "displayValue": "142.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 47.0,
+         "displayValue": "47",
+         "period": 0
+        },
+        {
+         "value": 47.0,
+         "displayValue": "47",
+         "period": 0
+        },
+        {
+         "value": 48.0,
+         "displayValue": "48",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "3136287",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Alexa Grasso",
+      "fullName": "Alexa Grasso"
+     },
+     "linescores": [
+      {
+       "value": 142.0,
+       "displayValue": "142.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 48.0,
+         "displayValue": "48",
+         "period": 0
+        },
+        {
+         "value": 47.0,
+         "displayValue": "47",
+         "period": 0
+        },
+        {
+         "value": 47.0,
+         "displayValue": "47",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "core_status_result": {
+    "id": 269,
+    "name": "draw",
+    "displayName": "Draw",
+    "shortDisplayName": "Draw"
+   }
+  },
+  {
+   "event_id": "600036497",
+   "id": "401591072",
+   "date": "2023-09-20T00:00Z",
+   "status": {
+    "clock": 300.0,
+    "displayClock": "5:00",
+    "period": 3,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Meta APEX"
+   },
+   "competitors": [
+    {
+     "id": "5139556",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Talita Alencar",
+      "fullName": "Talita Alencar"
+     },
+     "linescores": [
+      {
+       "value": 84.0,
+       "displayValue": "84.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "5145495",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Stephanie Luciano",
+      "fullName": "Stephanie Luciano"
+     },
+     "linescores": [
+      {
+       "value": 84.0,
+       "displayValue": "84.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "core_status_result": {
+    "id": 269,
+    "name": "draw",
+    "displayName": "Draw",
+    "shortDisplayName": "Draw"
+   }
+  },
+  {
+   "event_id": "600037292",
+   "id": "401581370",
+   "date": "2023-09-23T20:00Z",
+   "status": {
+    "clock": 300.0,
+    "displayClock": "5:00",
+    "period": 3,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Meta APEX"
+   },
+   "competitors": [
+    {
+     "id": "4010864",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Miles Johns",
+      "fullName": "Miles Johns"
+     },
+     "linescores": [
+      {
+       "value": 89.0,
+       "displayValue": "89.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        },
+        {
+         "value": 30.0,
+         "displayValue": "30",
+         "period": 0
+        },
+        {
+         "value": 30.0,
+         "displayValue": "30",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "4815973",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Dan Argueta",
+      "fullName": "Dan Argueta"
+     },
+     "linescores": [
+      {
+       "value": 82.0,
+       "displayValue": "82.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 27.0,
+         "displayValue": "27",
+         "period": 0
+        },
+        {
+         "value": 27.0,
+         "displayValue": "27",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest"
+   }
+  },
+  {
+   "event_id": "600031832",
+   "id": "401600944",
+   "date": "2023-10-21T16:00Z",
+   "status": {
+    "clock": 15.0,
+    "displayClock": "0:15",
+    "period": 2,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Etihad Arena"
+   },
+   "competitors": [
+    {
+     "id": "3114234",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Victor Henry",
+      "fullName": "Victor Henry"
+     }
+    },
+    {
+     "id": "4867357",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Javid Basharat",
+      "fullName": "Javid Basharat"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest"
+   }
+  },
+  {
+   "event_id": "600031832",
+   "id": "401597349",
+   "date": "2023-10-21T18:00Z",
+   "status": {
+    "clock": 193.0,
+    "displayClock": "3:13",
+    "period": 1,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Etihad Arena"
+   },
+   "competitors": [
+    {
+     "id": "3146944",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Johnny Walker",
+      "fullName": "Johnny Walker"
+     }
+    },
+    {
+     "id": "4273399",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Magomed Ankalaev",
+      "fullName": "Magomed Ankalaev"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest"
+   }
+  },
+  {
+   "event_id": "600037492",
+   "id": "401587766",
+   "date": "2023-11-04T22:00Z",
+   "status": {
+    "clock": 300.0,
+    "displayClock": "5:00",
+    "period": 3,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Ginasio Do Ibirapuera"
+   },
+   "competitors": [
+    {
+     "id": "3039886",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Elizeu Zaleski dos Santos",
+      "fullName": "Elizeu Zaleski dos Santos"
+     },
+     "linescores": [
+      {
+       "value": 84.0,
+       "displayValue": "84.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "4712980",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Rinat Fakhretdinov",
+      "fullName": "Rinat Fakhretdinov"
+     },
+     "linescores": [
+      {
+       "value": 85.0,
+       "displayValue": "85.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "core_status_result": {
+    "id": 269,
+    "name": "draw",
+    "displayName": "Draw",
+    "shortDisplayName": "Draw"
+   }
+  },
+  {
+   "event_id": "600036292",
+   "id": "401610479",
+   "date": "2023-11-12T01:00Z",
+   "status": {
+    "clock": 300.0,
+    "displayClock": "5:00",
+    "period": 3,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": true
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Madison Square Garden"
+   },
+   "competitors": [
+    {
+     "id": "4877915",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Viacheslav Borshchev",
+      "fullName": "Viacheslav Borshchev"
+     },
+     "linescores": [
+      {
+       "value": 84.0,
+       "displayValue": "84.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "5074130",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Nazim Sadykhov",
+      "fullName": "Nazim Sadykhov"
+     },
+     "linescores": [
+      {
+       "value": 85.0,
+       "displayValue": "85.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "core_status_result": {
+    "id": 269,
+    "name": "draw",
+    "displayName": "Draw",
+    "shortDisplayName": "Draw"
+   }
+  },
+  {
+   "event_id": "600037752",
+   "id": "401608548",
+   "date": "2023-11-18T19:00Z",
+   "status": {
+    "clock": 191.0,
+    "displayClock": "3:11",
+    "period": 3,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Meta APEX"
+   },
+   "competitors": [
+    {
+     "id": "3897242",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Nikolas Motta",
+      "fullName": "Nikolas Motta"
+     }
+    },
+    {
+     "id": "4294378",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Trey Ogden",
+      "fullName": "Trey Ogden"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest"
+   }
+  },
+  {
+   "event_id": "600040373",
+   "id": "401619049",
+   "date": "2024-02-04T00:00Z",
+   "status": {
+    "clock": 11.0,
+    "displayClock": "0:11",
+    "period": 1,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Meta APEX"
+   },
+   "competitors": [
+    {
+     "id": "4045420",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Aliaskhab Khizriev",
+      "fullName": "Aliaskhab Khizriev"
+     }
+    },
+    {
+     "id": "4426130",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Makhmud Muradov",
+      "fullName": "Makhmud Muradov"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest"
+   }
+  },
+  {
+   "event_id": "600040033",
+   "id": "401620759",
+   "date": "2024-02-10T21:00Z",
+   "status": {
+    "clock": 208.0,
+    "displayClock": "3:28",
+    "period": 2,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Meta APEX"
+   },
+   "competitors": [
+    {
+     "id": "4389085",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Aoriqileng",
+      "fullName": "Aoriqileng"
+     }
+    },
+    {
+     "id": "5088886",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Daniel Marcos",
+      "fullName": "Daniel Marcos"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest"
+   }
+  },
+  {
+   "event_id": "600041993",
+   "id": "401634801",
+   "date": "2024-03-16T23:00Z",
+   "status": {
+    "clock": 60.0,
+    "displayClock": "1:00",
+    "period": 2,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Meta APEX"
+   },
+   "competitors": [
+    {
+     "id": "4815998",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Bryan Battle",
+      "fullName": "Bryan Battle"
+     }
+    },
+    {
+     "id": "4875506",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Ange Loosa",
+      "fullName": "Ange Loosa"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest"
+   }
+  },
+  {
+   "event_id": "600046021",
+   "id": "401676938",
+   "date": "2024-07-14T02:00Z",
+   "status": {
+    "clock": 37.0,
+    "displayClock": "0:37",
+    "period": 1,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Ball Arena"
+   },
+   "competitors": [
+    {
+     "id": "3926500",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Abdul Razak Alhassan",
+      "fullName": "Abdul Razak Alhassan"
+     }
+    },
+    {
+     "id": "4684474",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Cody Brundage",
+      "fullName": "Cody Brundage"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 277,
+    "name": "no-contest",
+    "displayName": "No Contest",
+    "shortDisplayName": "No Contest"
+   }
+  },
+  {
+   "event_id": "600061266",
+   "id": "401914464",
+   "date": "2026-09-27T00:00Z",
+   "status": {
+    "clock": 199.0,
+    "displayClock": "3:19",
+    "period": 2,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 4
+    }
+   },
+   "venue": {
+    "fullName": "Meta APEX"
+   },
+   "competitors": [
+    {
+     "id": "4836549",
+     "type": "athlete",
+     "order": 2,
+     "winner": true,
+     "athlete": {
+      "displayName": "Tina Black",
+      "fullName": "Tina Black"
+     }
+    },
+    {
+     "id": "5169699",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Melissa Amaya",
+      "fullName": "Melissa Amaya"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 356,
+    "name": "kotko",
+    "displayName": "KO/TKO",
+    "description": "Punches",
+    "displayDescription": "Punches",
+    "shortDisplayName": "KO/TKO",
+    "target": {
+     "id": 122,
+     "name": "head",
+     "description": "Head",
+     "displayDescription": "Head"
+    }
+   }
+  },
+  {
+   "event_id": "600061541",
+   "id": "401916277",
+   "date": "2026-10-10T21:00Z",
+   "status": {
+    "clock": 263.0,
+    "displayClock": "4:23",
+    "period": 1,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Meta APEX"
+   },
+   "competitors": [
+    {
+     "id": "3093513",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Ismael Bonfim",
+      "fullName": "Ismael Bonfim"
+     }
+    },
+    {
+     "id": "5123216",
+     "type": "athlete",
+     "order": 1,
+     "winner": true,
+     "athlete": {
+      "displayName": "Francisco Prado",
+      "fullName": "Francisco Prado"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 356,
+    "name": "kotko",
+    "displayName": "KO/TKO",
+    "description": "Punches",
+    "displayDescription": "Punches",
+    "shortDisplayName": "KO/TKO",
+    "target": {
+     "id": 122,
+     "name": "head",
+     "description": "Head",
+     "displayDescription": "Head"
+    }
+   }
+  },
+  {
+   "event_id": "600061541",
+   "id": "401924511",
+   "date": "2026-10-10T21:00Z",
+   "status": {
+    "clock": 300.0,
+    "displayClock": "5:00",
+    "period": 3,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Meta APEX"
+   },
+   "competitors": [
+    {
+     "id": "4420893",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Melissa Gatto",
+      "fullName": "Melissa Gatto"
+     },
+     "linescores": [
+      {
+       "value": 83.0,
+       "displayValue": "83.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 27.0,
+         "displayValue": "27",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "5149147",
+     "type": "athlete",
+     "order": 1,
+     "winner": false,
+     "athlete": {
+      "displayName": "Ernesta Kareckaite",
+      "fullName": "Ernesta Kareckaite"
+     },
+     "linescores": [
+      {
+       "value": 85.0,
+       "displayValue": "85.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "core_status_result": {
+    "id": 269,
+    "name": "draw",
+    "displayName": "Draw",
+    "shortDisplayName": "Draw"
+   }
+  },
+  {
+   "event_id": "600061541",
+   "id": "401927418",
+   "date": "2026-10-10T21:00Z",
+   "status": {
+    "clock": 179.0,
+    "displayClock": "2:59",
+    "period": 1,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Meta APEX"
+   },
+   "competitors": [
+    {
+     "id": "5327626",
+     "type": "athlete",
+     "order": 1,
+     "winner": true,
+     "athlete": {
+      "displayName": "Allen Frye Jr.",
+      "fullName": "Allen Frye Jr."
+     }
+    },
+    {
+     "id": "5369555",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "RJ Harris",
+      "fullName": "RJ Harris"
+     }
+    }
+   ],
+   "core_status_result": {
+    "id": 356,
+    "name": "kotko",
+    "displayName": "KO/TKO",
+    "description": "Punches",
+    "displayDescription": "Punches",
+    "shortDisplayName": "KO/TKO",
+    "target": {
+     "id": 122,
+     "name": "head",
+     "description": "Head",
+     "displayDescription": "Head"
+    }
+   }
+  },
+  {
+   "event_id": "600061541",
+   "id": "401924510",
+   "date": "2026-10-11T00:00Z",
+   "status": {
+    "clock": 300.0,
+    "displayClock": "5:00",
+    "period": 3,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    },
+    "featured": false
+   },
+   "format": {
+    "regulation": {
+     "periods": 3
+    }
+   },
+   "venue": {
+    "fullName": "Meta APEX"
+   },
+   "competitors": [
+    {
+     "id": "4566308",
+     "type": "athlete",
+     "order": 2,
+     "winner": false,
+     "athlete": {
+      "displayName": "Ketlen Souza",
+      "fullName": "Ketlen Souza"
+     },
+     "linescores": [
+      {
+       "value": 84.0,
+       "displayValue": "84.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        },
+        {
+         "value": 28.0,
+         "displayValue": "28",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "4700617",
+     "type": "athlete",
+     "order": 1,
+     "winner": true,
+     "athlete": {
+      "displayName": "Loopy Godínez",
+      "fullName": "Loopy Godínez"
+     },
+     "linescores": [
+      {
+       "value": 87.0,
+       "displayValue": "87.0",
+       "period": 0,
+       "linescores": [
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        },
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        },
+        {
+         "value": 29.0,
+         "displayValue": "29",
+         "period": 0
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "core_status_result": {
+    "id": 263,
+    "name": "decision---unanimous",
+    "displayName": "Decision - Unanimous",
+    "shortDisplayName": "U Dec"
+   }
+  }
+ ]
+}

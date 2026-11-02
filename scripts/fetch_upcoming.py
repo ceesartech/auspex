@@ -29,6 +29,10 @@ ESPN itself reported stays correctable (espn_cancelled); one recorded on
 purpose (an operator, a duplicate, a re-drawn slot) is final. ESPN reports no
 status at all for a bout it drops from a fight card, so results mode cancels
 the stale rows a finished card no longer lists (cancel_dropped_bouts, MMA).
+A UFC bout that ended with no winner (a draw or a no contest) is recorded
+finished with NULL scores and metadata.no_winner once ESPN's core API confirms
+it, and a finished row keeps the kind of result it was recorded with (the
+comment above NO_WINNER_SPORTS; grading_outcomes.NO_WINNER_KEY for how it grades).
 """
 
 from __future__ import annotations
@@ -52,6 +56,13 @@ from psycopg2.extras import Json, RealDictCursor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import soccer_seasons  # noqa: E402
 import team_identity  # noqa: E402
+from grading_outcomes import (  # noqa: E402
+    NO_WINNER_DETAIL_KEY,
+    NO_WINNER_DRAW,
+    NO_WINNER_KEY,
+    NO_WINNER_NO_CONTEST,
+    no_winner_result,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 logger = logging.getLogger("fetch_upcoming")
@@ -851,8 +862,8 @@ def insert_finished_match(
     away_id,
     match_dt,
     venue,
-    home_score: int,
-    away_score: int,
+    home_score: int | None,
+    away_score: int | None,
     result_meta: dict,
     halftime: tuple[int, int] | None = None,
     season: str | None = None,
@@ -864,7 +875,8 @@ def insert_finished_match(
     as a fixture (grows the corpus). grade_completed_matches
     (already on the 15-min cadence) settles predictions + recs from here.
     Score columns follow the corpus conventions: real scores for team
-    sports, winner-flag 1/0 for tennis/MMA. `halftime` (soccer) fills
+    sports, winner-flag 1/0 for tennis/MMA, NULL for an MMA bout with no
+    winner (metadata.no_winner says which). `halftime` (soccer) fills
     half_time_home/away only while that pair is empty: a football-data load
     may already hold it, and the pair is never split. `season` labels an
     inserted row, as in insert_scheduled_match.
@@ -1001,6 +1013,17 @@ LARGE_SHIFT_HOURS = 24
 #                   by its own scoring plays (see _record_result);
 #   status_refused  postponements / cancels not written: the ESPN id names a
 #                   row for another team pair (see _record_status_change);
+#   no_winner_refused     MMA results not written: ESPN's scoreboard and its
+#                   core API disagree on a bout with no winner (a draw against
+#                   a no contest), or the result would change the kind a
+#                   finished row was recorded with (the comment above
+#                   NO_WINNER_SPORTS);
+#   no_winner_unconfirmed MMA bouts the scoreboard shows with no winner that
+#                   ESPN's core API has still not confirmed
+#                   NO_WINNER_CONFIRM_HOURS after kickoff (no answer, no
+#                   result, a winning method, or a name this code does not
+#                   map): not written, and without this count the bout would
+#                   leave the 3-day window still 'scheduled';
 #   team_namesakes  a club whose name another ESPN team holds was inserted as
 #                   its own row (see ensure_team) — written, but a person must
 #                   confirm it is not a mis-stamped id; once only, since later
@@ -1017,6 +1040,8 @@ IDENTITY_STATS = {
     "same_team": 0,
     "score_mismatch": 0,
     "status_refused": 0,
+    "no_winner_refused": 0,
+    "no_winner_unconfirmed": 0,
     "team_namesakes": 0,
     "team_conflicts": 0,
 }
@@ -1856,11 +1881,334 @@ def _final_scores(cfg: SportConfig, home: dict, away: dict) -> tuple[int, int] |
             return 1, 0
         if aw is True:
             return 0, 1
-        return None  # walkover / unknown — don't guess
+        return None  # walkover / unknown — don't guess (an MMA draw / no contest: _confirmed_no_winner)
     try:
         return int(float(home.get("score"))), int(float(away.get("score")))
     except (TypeError, ValueError):
         return None
+
+
+# ── MMA bouts that end with no winner ─────────────────────────────────
+#
+# A UFC bout can end without a winner: a DRAW (the judges' cards give neither
+# fighter a majority of judges: a unanimous, majority or split draw, or a
+# technical draw when an accidental foul stops a fight after it has gone far
+# enough to be scored) or a NO CONTEST (an accidental foul ends it early, or a
+# result is overturned later, e.g. after a failed drug test).
+#
+# How ESPN signals it (checked 2026-11-02 on every UFC no-winner bout in the
+# 2022-2026 scoreboards fetched for the fighter merge: 11 draws, 16 no
+# contests; tests/unit/fixtures/espn_ufc_no_winner.json):
+#   * the scoreboard (site API) signals both the SAME way: status
+#     STATUS_FINAL, completed, 'Final', and winner=false on BOTH competitors.
+#     It names no method;
+#   * ESPN's core API names it: .../events/{event}/competitions/{comp}/status
+#     carries result.name 'draw' (displayName 'Draw') or 'no-contest' ('No
+#     Contest'); a win carries its method ('decision---unanimous', 'kotko',
+#     ...). Neither API names the kind of draw;
+#   * on the scoreboard the difference shows only in the judges' cards
+#     (competitor.linescores[0].linescores, one total per judge): a draw has
+#     cards on which neither fighter wins a majority of judges (3 judges:
+#     28-28 / 28-28 / 28-28 unanimous, 29-28 / 28-28 / 28-28 majority, 29-28 /
+#     28-29 / 28-28 split); a no contest has no cards (stopped early) or
+#     cards a fighter won (an overturned decision). This rule reproduces the
+#     core API's result on all 27 bouts.
+#
+# Until 2026-11 _final_scores returned None for such a bout and it was never
+# recorded: its row stayed 'scheduled' for good and later looked stale (Melissa
+# Gatto v Ernesta Kareckaite, UFC 2026-10-10, ESPN 401924511, a majority
+# draw). It is now recorded as finished with NULL scores and metadata.no_winner
+# = 'draw' | 'no_contest' (grading_outcomes.NO_WINNER_KEY: why NULL and not 0-0,
+# and the grading convention), but only when the scoreboard's reading and the
+# core API's result agree:
+#   * the core API naming a winning method, no result yet, or a result name
+#     core_no_winner_kind does not map: not recorded (WARNING; ESPN is still
+#     filling the result in, the next sweep retries);
+#   * the core API not answering, or the bout's event or league unknown: not
+#     recorded (ERROR; the next sweep retries, and past the 3-day window
+#     scripts/backfill_results.py records it);
+#   * still not confirmed NO_WINNER_CONFIRM_HOURS after kickoff, for any of
+#     those reasons: still not recorded, but counted
+#     (IDENTITY_STATS['no_winner_unconfirmed'], exit 3), so the pipeline
+#     turns red while the bout is inside the sweep's 3-day window instead of
+#     the bout ageing out 'scheduled' with only log lines (the failure this
+#     code was written to end). A brief ESPN blip right after a fight stays
+#     green;
+#   * the two disagreeing (a draw against a no contest): refused and counted
+#     (IDENTITY_STATS['no_winner_refused'], exit 3).
+# And a row already finished keeps the KIND of result it was recorded with (a
+# winner, a draw, a no contest): its predictions were graded and its recs
+# settled on it, so ESPN reporting another kind later is refused and counted
+# (no_winner_refused, exit 3), never written over (_result_kind_allowed).
+NO_WINNER_SPORTS = frozenset({"mma"})
+ESPN_CORE_BASE = "https://sports.core.api.espn.com/v2/sports"
+# A UFC bout's result is on the core API within minutes of the fight; one this
+# old that is still unconfirmed needs a person (see above). A card's last bout
+# starts about 6 hours after its first.
+NO_WINNER_CONFIRM_HOURS = 12
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _past_confirm_window(match_dt) -> bool:
+    """True when the bout kicked off NO_WINNER_CONFIRM_HOURS ago or more (a
+    naive kickoff is read as UTC)."""
+    if not isinstance(match_dt, datetime):
+        return False
+    kickoff = match_dt if match_dt.tzinfo is not None else match_dt.replace(tzinfo=timezone.utc)
+    return _utc_now() - kickoff >= timedelta(hours=NO_WINNER_CONFIRM_HOURS)
+
+
+def _not_confirmed(level: int, what: str, why: str, match_dt) -> tuple[None, bool]:
+    """A no-winner reading left unwritten this sweep: logged at `level`,
+    or, NO_WINNER_CONFIRM_HOURS after kickoff, at ERROR and counted
+    (IDENTITY_STATS['no_winner_unconfirmed']: this run exits 3)."""
+    if _past_confirm_window(match_dt):
+        IDENTITY_STATS["no_winner_unconfirmed"] += 1
+        logger.error(
+            "%s: %s — still unconfirmed %d hours or more after kickoff, so it is counted and this run exits %d. "
+            "Check ESPN's core API for this competition; once it names 'draw' or 'no-contest' the next sweep "
+            "records the bout (inside the 3-day window; later: scripts/backfill_results.py --sport mma --dates "
+            "<day>). If the core API names something this code does not map, extend core_no_winner_kind.",
+            what,
+            why,
+            NO_WINNER_CONFIRM_HOURS,
+            IDENTITY_EXIT_CODE,
+        )
+    else:
+        logger.log(level, "%s: %s", what, why)
+    return None, False
+
+
+class NoWinner(NamedTuple):
+    """A no-winner reading of one competition, in ESPN's competitor order."""
+
+    kind: str  # grading_outcomes.NO_WINNER_DRAW | NO_WINNER_NO_CONTEST
+    cards: tuple[tuple[float, float], ...]  # judges' totals (first competitor, second); () when none
+    draw_type: str | None  # 'unanimous' | 'majority' | 'split' for a draw, else None
+
+
+def judges_cards(home: dict, away: dict) -> tuple[tuple[float, float], ...] | None:
+    """The judges' totals from ESPN's linescores, one (home, away) pair per
+    judge, or None when either side carries none (a fight stopped before the
+    cards) or the two do not line up."""
+
+    def card(competitor: dict) -> list[float] | None:
+        outer = competitor.get("linescores") or []
+        if not outer or not isinstance(outer[0], dict):
+            return None
+        totals = []
+        for judge in outer[0].get("linescores") or []:
+            try:
+                totals.append(float(judge.get("value")))
+            except (AttributeError, TypeError, ValueError):
+                return None
+        return totals or None
+
+    h, a = card(home), card(away)
+    if not h or not a or len(h) != len(a):
+        return None
+    return tuple(zip(h, a))
+
+
+def scoreboard_no_winner(cfg: SportConfig, comp: dict, home: dict, away: dict) -> NoWinner | None:
+    """The scoreboard's own reading of a completed bout that names no winner
+    (see the comment above NO_WINNER_SPORTS), or None: not a no-winner sport,
+    not completed, or a winner flag that is not explicitly false on both sides
+    (a missing flag is not evidence of a draw)."""
+    if cfg.sport not in NO_WINNER_SPORTS:
+        return None
+    status_type = comp.get("status", {}).get("type", {})
+    if (status_type.get("state") or "").lower() != "post" or not status_type.get("completed", False):
+        return None
+    if home.get("winner") is not False or away.get("winner") is not False:
+        return None
+    cards = judges_cards(home, away)
+    if cards:
+        home_judges = sum(1 for h, a in cards if h > a)
+        away_judges = sum(1 for h, a in cards if h < a)
+        if 2 * home_judges <= len(cards) and 2 * away_judges <= len(cards):
+            if home_judges == away_judges == 0:
+                draw_type = "unanimous"
+            elif home_judges == away_judges:
+                draw_type = "split"
+            else:
+                draw_type = "majority"
+            return NoWinner(NO_WINNER_DRAW, cards, draw_type)
+    return NoWinner(NO_WINNER_NO_CONTEST, cards or (), None)
+
+
+def core_no_winner_kind(result_name: str | None) -> str | None:
+    """ESPN core-API result.name -> 'draw' / 'no_contest', or None for a
+    winning method ('kotko', 'decision---split', ...) or no result."""
+    name = (result_name or "").strip().lower()
+    if name == "draw" or name.startswith("draw-"):
+        return NO_WINNER_DRAW
+    if name in ("no-contest", "nc") or name.startswith("no-contest"):
+        return NO_WINNER_NO_CONTEST
+    return None
+
+
+def espn_core_result(cfg: SportConfig, league_slug: str, event_id, comp_id) -> tuple[str | None, bool]:
+    """(result.name, answered) from ESPN's core API status of one
+    competition. answered is False when every attempt failed (logged by the
+    caller); result.name is None when ESPN answered without a result."""
+    url = f"{ESPN_CORE_BASE}/{cfg.espn_path}/leagues/{league_slug}/events/{event_id}/competitions/{comp_id}/status"
+    last_error = ""
+    for attempt in range(FETCH_ATTEMPTS):
+        if attempt:
+            time.sleep(FETCH_BACKOFF_SECONDS[min(attempt - 1, len(FETCH_BACKOFF_SECONDS) - 1)])
+        try:
+            r = requests.get(url, params={"lang": "en", "region": "us"}, timeout=20)
+            r.raise_for_status()
+            payload = r.json()
+        except (requests.RequestException, ValueError) as e:  # ValueError: a non-JSON body
+            last_error = str(e)[:200]
+            continue
+        result = (payload or {}).get("result") or {}
+        name = result.get("name") if isinstance(result, dict) else None
+        return (str(name) if name else None), True
+    logger.error("ESPN core API FAILED after %d attempts for %s: %s", FETCH_ATTEMPTS, url, last_error)
+    return None, False
+
+
+# The row of one ESPN competition, to see whether it is already recorded with no winner (_confirmed_no_winner).
+RECORDED_NO_WINNER_SQL = """
+    SELECT m.status, m.metadata->>'no_winner' AS no_winner
+      FROM matches m
+      JOIN leagues l ON l.id = m.league_id
+     WHERE m.external_ids->>'espn' = %s
+       AND l.sport = %s
+"""
+
+
+def _confirmed_no_winner(
+    cur,
+    cfg: SportConfig,
+    comp: dict,
+    home: dict,
+    away: dict,
+    event_context: dict | None,
+    home_name,
+    away_name,
+    match_dt,
+) -> tuple[NoWinner | None, bool]:
+    """(the scoreboard's no-winner reading when ESPN's core API confirms it
+    (the rules: the comment above NO_WINNER_SPORTS), already recorded). A
+    bout whose row is already finished with no winner of the same kind was
+    confirmed when it was recorded: the core API is not asked again (each
+    15-minute sweep rewrites the bout for 3 days), and already is True.
+    (None, False) otherwise, logged; counted (exit 3) when ESPN's two APIs
+    disagree, or when the bout is still unconfirmed NO_WINNER_CONFIRM_HOURS
+    after kickoff."""
+    reading = scoreboard_no_winner(cfg, comp, home, away)
+    if reading is None:
+        return None, False
+    ctx = event_context or {}
+    event_id, league_slug, espn_id = ctx.get("event_id"), ctx.get("league_slug"), comp.get("id")
+    what = f"{cfg.sport} {home_name} vs {away_name} at {match_dt} (ESPN {espn_id})"
+    if espn_id:
+        cur.execute(RECORDED_NO_WINNER_SQL, (str(espn_id), cfg.sport))
+        rows = cur.fetchall() or []
+        if len(rows) == 1 and rows[0]["status"] == "finished" and rows[0]["no_winner"] == reading.kind:
+            return reading, True
+    if not (event_id and league_slug and espn_id):
+        return _not_confirmed(
+            logging.ERROR,
+            what,
+            f"ended with no winner on the scoreboard ({reading.kind}), but ESPN's core API cannot be asked to "
+            f"confirm it (event {event_id!r}, league {league_slug!r}, competition {espn_id!r}) — not recorded",
+            match_dt,
+        )
+    name, answered = espn_core_result(cfg, league_slug, event_id, espn_id)
+    if not answered:
+        return _not_confirmed(
+            logging.ERROR,
+            what,
+            f"ended with no winner on the scoreboard ({reading.kind}), but ESPN's core API did not answer — not "
+            "recorded this sweep; the next sweep retries (it looks 3 days back; older: scripts/backfill_results.py)",
+            match_dt,
+        )
+    confirmed = core_no_winner_kind(name)
+    if confirmed is None:
+        return _not_confirmed(
+            logging.WARNING,
+            what,
+            f"shows no winner on the scoreboard (reads {reading.kind}) but ESPN's result is {name!r} — not "
+            "recorded yet (ESPN may still be filling the result in; the next sweep retries)",
+            match_dt,
+        )
+    if confirmed != reading.kind:
+        IDENTITY_STATS["no_winner_refused"] += 1
+        logger.error(
+            "Refusing %s: the scoreboard reads %s (judges' cards %s) but ESPN's core API says %r. Nothing written; "
+            "check which is right. This run exits %d.",
+            what,
+            reading.kind,
+            list(reading.cards) or "none",
+            name,
+            IDENTITY_EXIT_CODE,
+        )
+        return None, False
+    return reading, False
+
+
+def no_winner_detail(reading: NoWinner, cards: tuple[tuple[float, float], ...], comp: dict) -> str:
+    """metadata.no_winner_detail: the kind of draw (or 'no contest'), the
+    judges' cards in the ROW's order (home-away), and where it ended."""
+    label = f"{reading.draw_type} draw" if reading.kind == NO_WINNER_DRAW else "no contest"
+    parts = [label]
+    if cards:
+        parts.append("judges " + ", ".join(f"{h:g}-{a:g}" for h, a in cards))
+    status = comp.get("status") or {}
+    if status.get("period") is not None:
+        parts.append(f"ended R{status.get('period')} {status.get('displayClock') or '?'}")
+    return "; ".join(parts)
+
+
+# A finished MMA row's recorded result, read (and locked until the sweep
+# commits) before a result is written over it: _result_kind_allowed.
+RESULT_KIND_SQL = """
+    SELECT id, status, home_score, away_score, metadata
+      FROM matches
+     WHERE home_team_id = %s AND away_team_id = %s AND match_date = %s
+       FOR UPDATE
+"""
+
+
+def _result_kind_allowed(cur, cfg: SportConfig, home_id, away_id, match_dt, kind: str | None, what: str) -> bool:
+    """False (logged, counted: exit 3) when the row at (home, away, match_dt)
+    is already 'finished' with another KIND of result than `kind` (None: a
+    winner; else the no-winner kind): see the comment above NO_WINNER_SPORTS.
+    No-winner sports only; a winner replacing a winner is the upsert's
+    business, as for every sport."""
+    if cfg.sport not in NO_WINNER_SPORTS:
+        return True
+    cur.execute(RESULT_KIND_SQL, (home_id, away_id, match_dt))
+    row = cur.fetchone()
+    if row is None or row["status"] != "finished":
+        return True
+    stored = no_winner_result(row.get("metadata"))
+    if stored == kind:
+        return True
+    IDENTITY_STATS["no_winner_refused"] += 1
+
+    def describe(no_winner: str | None, scores: str) -> str:
+        return f"no winner ({no_winner})" if no_winner else f"a winner ({scores})"
+
+    logger.error(
+        "Refusing %s: row %s is finished with %s and ESPN now reports %s. The sweep never changes the kind of a "
+        "recorded result (its predictions were graded and its recs settled on it): nothing written — check ESPN "
+        "and repair the row by hand if ESPN is right. This run exits %d.",
+        what,
+        row["id"],
+        describe(stored, f"{row['home_score']}-{row['away_score']}"),
+        describe(kind, "home or away"),
+        IDENTITY_EXIT_CODE,
+    )
+    return False
 
 
 _EXTRA_TIME_TOKENS = ("/OT", "/SO", "/2OT", "OVERTIME", "SHOOTOUT", "AET", "PEN")
@@ -2247,6 +2595,12 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
         (grading_outcomes.settlement_scores). Until 2026-10-31 they graded
         on the post-extra-time score.
 
+    MMA, a bout that ended with no winner (a draw or a no contest) is
+    recorded finished with NULL scores and metadata.no_winner /
+    no_winner_detail once ESPN's core API confirms the scoreboard's reading;
+    a finished row keeps the kind of result it was recorded with (the
+    comment above NO_WINNER_SPORTS).
+
     ESPN's postponed / cancelled / abandoned statuses go to
     _record_status_change instead (the existing row only)."""
     parts = _competition_parts(comp, cfg)
@@ -2264,11 +2618,21 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
         return False
 
     scores = _final_scores(cfg, home, away)
+    no_winner: NoWinner | None = None
+    already_recorded = False
+    home_score: int | None
+    away_score: int | None
     if scores is None:
-        return False
-    home_score, away_score = scores
+        no_winner, already_recorded = _confirmed_no_winner(
+            cur, cfg, comp, home, away, event_context, home_name, away_name, match_dt
+        )
+        if no_winner is None:
+            return False
+        home_score = away_score = None  # NULL, never 0-0: grading_outcomes.NO_WINNER_KEY
+    else:
+        home_score, away_score = scores
 
-    if cfg.sport == "soccer":
+    if cfg.sport == "soccer" and scores is not None:
         tally = scoring_play_tally(comp, home, away)
         if tally is not None and tally != (home_score, away_score, 0):
             _log_score_mismatch(cfg, espn_id, home_name, away_name, match_dt, scores, tally, comp)
@@ -2278,14 +2642,14 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
     went_extra = any(tok in detail for tok in _EXTRA_TIME_TOKENS)
 
     result_meta: dict = {"result_detail": detail or "FINAL", "result_source": "espn_scoreboard"}
-    if cfg.sport == "nhl":
+    if cfg.sport == "nhl" and scores is not None:
         # 'tie', not 'draw': the regulation model's labels, its training
         # query (regulation_winner IN ('home','tie','away')), the NHL loader
         # and the DB outcome trigger all use 'tie'. Writing 'draw' (until
         # 2026-10) graded every correct tie pick as a miss and silently
         # dropped every live-season regulation tie from the training frame.
-        result_meta["regulation_winner"] = "tie" if went_extra else ("home" if home_score > away_score else "away")
-    if cfg.sport == "soccer" and _soccer_went_past_90(status_type, detail):
+        result_meta["regulation_winner"] = "tie" if went_extra else ("home" if scores[0] > scores[1] else "away")
+    if cfg.sport == "soccer" and scores is not None and _soccer_went_past_90(status_type, detail):
         regulation = regulation_scores(comp, home, away, scores)
         if regulation is None:
             logger.warning(
@@ -2307,7 +2671,7 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
     # Soccer half-time goes to matches.half_time_home/away, where the HT
     # trainers, the match API and the HT-market grader read it; None when
     # the plays don't reproduce the final score.
-    ht = halftime_scores(comp, home, away, scores) if cfg.sport == "soccer" else None
+    ht = halftime_scores(comp, home, away, scores) if cfg.sport == "soccer" and scores is not None else None
 
     teams = _resolve_teams(
         cur,
@@ -2328,11 +2692,18 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
     # The names in the ids' order, for the logs below; home_name / away_name
     # stay in ESPN's order (the healing key).
     log_home, log_away = home_name, away_name
-    if _listed_reversed(cur, cfg, espn_id, home_id, away_id, match_dt):
+    reversed_listing = _listed_reversed(cur, cfg, espn_id, home_id, away_id, match_dt)
+    if reversed_listing:
         # The row's order, and the winner flags with it (1v1: no half-time score).
         home_id, away_id = away_id, home_id
         home_score, away_score = away_score, home_score
         log_home, log_away = away_name, home_name
+    what = f"{cfg.sport} result for {log_home} vs {log_away} at {match_dt} (ESPN {espn_id})"
+    if no_winner is not None:
+        # The judges' cards in the row's order, as the scores would be.
+        cards = tuple((a, h) for h, a in no_winner.cards) if reversed_listing else no_winner.cards
+        result_meta[NO_WINNER_KEY] = no_winner.kind
+        result_meta[NO_WINNER_DETAIL_KEY] = no_winner_detail(no_winner, cards, comp)
 
     # The RESULTS path fragments fixtures too: 20 of the 119 prod twins were
     # inserted here, after kickoff, because ESPN had moved the time since we
@@ -2351,6 +2722,8 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
         )
     except ForkRefused as refusal:
         _log_refused_fork(cur, cfg, espn_id, refusal, log_home, home_id, log_away, away_id, match_dt)
+        return False
+    if not _result_kind_allowed(cur, cfg, home_id, away_id, match_dt, no_winner.kind if no_winner else None, what):
         return False
     written = bool(
         insert_finished_match(
@@ -2377,17 +2750,26 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
         # the match was abandoned at 58' and awarded.
         logger.warning(
             "Left %s %s vs %s at %s (ESPN %s) as it is: the existing row is 'cancelled' but ESPN reports a final "
-            "%d-%d (%s) — check which is right",
+            "%s (%s) — check which is right",
             cfg.sport,
             log_home,
             log_away,
             match_dt,
             espn_id,
-            home_score,
-            away_score,
+            f"{home_score}-{away_score}" if no_winner is None else f"with no winner ({no_winner.kind})",
             result_meta["result_detail"],
         )
         return False
+    if no_winner is not None and already_recorded:
+        logger.info("Rewrote the %s: already finished with no winner (%s)", what, no_winner.kind)
+    elif no_winner is not None:
+        logger.warning(
+            "Recorded the %s as finished with NO WINNER: %s (%s) — grade_completed_matches records its predictions "
+            "ungraded (is_correct NULL) and voids its recs",
+            what,
+            no_winner.kind,
+            result_meta[NO_WINNER_DETAIL_KEY],
+        )
     _stamp_identity(cur, home_id, away_id, match_dt, espn_id if identity_safe else None, season_type)
     if espn_id and not identity_safe:
         logger.error(
@@ -2728,23 +3110,28 @@ def identity_exit_code(cfg: SportConfig) -> int:
     of the sweep has already been committed."""
     forks, same_team = IDENTITY_STATS["forks_refused"], IDENTITY_STATS["same_team"]
     scores, statuses = IDENTITY_STATS["score_mismatch"], IDENTITY_STATS["status_refused"]
+    nw_refused, nw_unconfirmed = IDENTITY_STATS["no_winner_refused"], IDENTITY_STATS["no_winner_unconfirmed"]
     namesakes, conflicts = IDENTITY_STATS["team_namesakes"], IDENTITY_STATS["team_conflicts"]
-    refused = forks + same_team + scores + statuses
+    refused = forks + same_team + scores + statuses + nw_refused + nw_unconfirmed
     if not (refused or namesakes or conflicts):
         return 0
     logger.error(
         "%s sweep REFUSED %d write(s): %d would have forked an ESPN-identified fixture, %d resolved both sides to "
         "one team, %d carried a header score its own scoring plays contradict, %d status change(s) named a row "
-        "for another team pair. %d club(s) were inserted as their own row because another ESPN team holds their "
-        "name; %d ESPN team id conflict(s). Everything else was written and committed; exiting %d so this run "
-        "fails until they are repaired, ESPN corrects them, or the team mapping is checked (details in the ERROR "
-        "lines above).",
+        "for another team pair, %d no-winner result(s) ESPN's two APIs disagree on or that would change a "
+        "recorded result's kind, %d no-winner bout(s) ESPN's core API has not confirmed %d hours after kickoff. "
+        "%d club(s) were inserted as their own row because another ESPN team holds their name; %d ESPN team id "
+        "conflict(s). Everything else was written and committed; exiting %d so this run fails until they are "
+        "repaired, ESPN corrects them, or the team mapping is checked (details in the ERROR lines above).",
         cfg.sport,
         refused,
         forks,
         same_team,
         scores,
         statuses,
+        nw_refused,
+        nw_unconfirmed,
+        NO_WINNER_CONFIRM_HOURS,
         namesakes,
         conflicts,
         IDENTITY_EXIT_CODE,

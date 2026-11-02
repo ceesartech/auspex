@@ -39,6 +39,16 @@ cancelled'), except on a cancelled duplicate of a played fixture
 (metadata.orphan_of), which is logged at ERROR for repair_stranded_recs.
 Both voids are guarded on the rec's and the match's status.
 
+A bout with no winner (an MMA draw or no contest: fetch_upcoming records it
+finished with NULL scores and metadata.no_winner, see
+grading_outcomes.NO_WINNER_KEY) is graded by convention: its predictions are
+neither right nor wrong (actual_outcome 'draw' / 'no_contest', is_correct
+NULL, logged once when written; such a row is not read back afterwards), and
+its open recs are VOIDED (profit 0, actual_result 'void: draw' / 'void: no
+contest'), as most books void a two-way fight moneyline. A recorded no-winner
+kind this script does not know is logged at ERROR and nothing on that match is
+graded or settled.
+
 Phantom-line guard: NBA/NFL spread + total grade against the closing
 line stored in features_cache, but compute_features_{nba,nfl}.py write
 NEUTRAL_DEFAULTS (spread 0.0, total 45.0) for matches no book ever
@@ -85,6 +95,9 @@ from psycopg2.extras import RealDictCursor
 sys.path.insert(0, os.path.dirname(__file__))
 
 from grading_outcomes import (  # noqa: E402
+    NO_WINNER_KEY,
+    NO_WINNER_KINDS,
+    NO_WINNER_VOID_RESULTS,
     REC_HALF_LOST,
     REC_HALF_WON,
     REC_LOST,
@@ -101,6 +114,7 @@ from grading_outcomes import (  # noqa: E402
     is_nfl_spread,
     is_nfl_total,
     is_push,
+    no_winner_result,
     rec_status_and_pl,
     regulation_scores,
     soccer_went_past_90,
@@ -138,6 +152,12 @@ ORPHAN_OF_KEY = "orphan_of"
 SCORE_INDEPENDENT_VOID_PREFIX = "void:"
 REC_OUTCOMES = frozenset({REC_WON, REC_LOST, REC_PUSH, REC_HALF_WON, REC_HALF_LOST})
 
+# A prediction on a bout with no winner is recorded once (actual_outcome set,
+# is_correct NULL for good) and never read back: without this, the 14-day
+# listing below would re-visit the match, and re-log it, every 15 minutes.
+# m is the prediction's match.
+NO_WINNER_RECORDED_SQL = f"(m.metadata->>'{NO_WINNER_KEY}' IS NOT NULL AND p.actual_outcome IS NOT NULL)"
+
 
 # ── DB I/O ────────────────────────────────────────────────────────────
 
@@ -168,7 +188,7 @@ def list_finished_matches(cur, days: int, match_id: Optional[str]) -> list[dict]
         return [dict(r) for r in cur.fetchall()]
 
     cur.execute(
-        """
+        f"""
         SELECT m.id::text AS match_id, m.match_date, l.sport,
                m.home_score, m.away_score, m.status, m.metadata, m.half_time_home, m.half_time_away
         FROM matches m
@@ -179,6 +199,7 @@ def list_finished_matches(cur, days: int, match_id: Optional[str]) -> list[dict]
               EXISTS (
                   SELECT 1 FROM predictions p
                   WHERE p.match_id = m.id AND p.is_correct IS NULL
+                    AND NOT {NO_WINNER_RECORDED_SQL}
               )
               OR EXISTS (
                   SELECT 1 FROM betting_recommendations br
@@ -216,9 +237,12 @@ def list_ungraded_predictions(cur, match_id: str) -> list[dict]:
     the --days window; a wide run would have folded them into accuracy.
 
     `probabilities` is needed to grade a correct_score 'other' pick, which
-    covers whatever that prediction did not list."""
+    covers whatever that prediction did not list.
+
+    A prediction already recorded on a bout with no winner (actual_outcome
+    set, is_correct NULL for good: NO_WINNER_RECORDED_SQL) is not read back."""
     cur.execute(
-        """
+        f"""
         SELECT p.id::text AS prediction_id,
                p.prediction_type, p.model_name, p.predicted_outcome,
                p.probabilities,
@@ -226,6 +250,7 @@ def list_ungraded_predictions(cur, match_id: str) -> list[dict]:
         FROM predictions p
         JOIN matches m ON m.id = p.match_id
         WHERE p.match_id = %s AND p.is_correct IS NULL
+          AND NOT {NO_WINNER_RECORDED_SQL}
         """,
         (match_id,),
     )
@@ -873,6 +898,16 @@ def compute_prediction_grade(pred: dict, match: dict, ctx: dict) -> tuple[Option
     if pred.get("after_kickoff"):
         return SKIP_AFTER_KICKOFF, None, None
 
+    # A bout with no winner (an MMA draw / no contest): no pick is right or
+    # wrong. The row records what happened, with a NULL verdict, as a push
+    # does (grading_outcomes.NO_WINNER_KEY); a kind this code does not know
+    # is left alone (grade_match logs it at ERROR).
+    no_winner = no_winner_result(match.get("metadata"))
+    if no_winner is not None:
+        if no_winner not in NO_WINNER_KINDS:
+            return SKIP_UNGRADABLE, None, None
+        return None, no_winner, None
+
     # PHANTOM-LINE GUARD. A line-dependent prediction is only
     # gradable if a real book priced that market: otherwise the
     # closing_spread_home / closing_total_line sitting in
@@ -919,13 +954,29 @@ def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
     recs_settled), 'postponed_rec_voids' (recs priced before a postponement
     longer than POSTPONED_VOID_HOURS; not counted either),
     'regulation_regrades' (graded predictions rewritten on the 90-minute
-    score) and 'regulation_resettles' (money-settled recs re-settled on it).
+    score), 'regulation_resettles' (money-settled recs re-settled on it),
+    'no_winner_predictions' (predictions recorded on a bout with no winner,
+    is_correct NULL; not counted in predictions_graded) and
+    'no_winner_rec_voids' (recs voided on such a bout; not counted in
+    recs_settled).
     run() passes one so it can log a single summary line;
     callers that don't care omit it.
     """
     counts = {"predictions_graded": 0, "predictions_skipped": 0, "recs_settled": 0}
     stats = stats if stats is not None else {}
     meta = match.get("metadata") or {}
+    no_winner = no_winner_result(meta)
+    if no_winner is not None and no_winner not in NO_WINNER_KINDS:
+        logger.error(
+            "Match %s is recorded with no winner of an unknown kind (metadata.%s=%r, expected one of %s): none of "
+            "its predictions is graded and none of its recs settled — fix the marker, then re-grade it with "
+            "--match-id",
+            match["match_id"],
+            NO_WINNER_KEY,
+            no_winner,
+            ", ".join(NO_WINNER_KINDS),
+        )
+    no_winner_recorded = 0
     is_soccer = (match.get("sport") or "soccer") == "soccer"
     # Decided after 90 minutes but without the 90-minute score (the plays
     # could not give it): its full-time markets grade on the final score.
@@ -956,10 +1007,25 @@ def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
                 stats[f"{skip}_skips"] = stats.get(f"{skip}_skips", 0) + 1
             continue
         update_prediction(cur, pred["prediction_id"], actual, correct)
+        if no_winner is not None:
+            # Recorded, not graded: is_correct stays NULL (compute_prediction_grade).
+            no_winner_recorded += 1
+            continue
         counts["predictions_graded"] += 1
         # A push stays is_correct NULL and is re-read every tick; only a
         # verdict counts, so the warning below fires once per match.
         full_time_graded += correct is not None and pred["prediction_type"] in SOCCER_FT_TYPES
+    if no_winner_recorded:
+        stats["no_winner_predictions"] = stats.get("no_winner_predictions", 0) + no_winner_recorded
+        logger.warning(
+            "Match %s ended with no winner (%s; %s): %d prediction(s) recorded with actual_outcome %r and left "
+            "ungraded (is_correct NULL) — a two-way pick has no winner to be right or wrong about",
+            match["match_id"],
+            no_winner,
+            meta.get("no_winner_detail") or "no detail",
+            no_winner_recorded,
+            no_winner,
+        )
 
     # Recs join to predictions for the actual_outcome — the prediction
     # update we just did is visible in the same txn via the join.
@@ -1003,6 +1069,38 @@ def grade_match(cur, match: dict, stats: Optional[dict] = None) -> dict:
             settle_recommendation(cur, rec["rec_id"], "void", POSTPONED_VOID_RESULT, Decimal("0"))
             stats["postponed_rec_voids"] = stats.get("postponed_rec_voids", 0) + 1
             continue
+        # A bout with no winner: the two-way moneyline is void, stake returned
+        # (grading_outcomes.NO_WINNER_KEY: the convention, and the books that
+        # differ). Only an open rec: one that is already won/lost/void without
+        # a profit_loss was settled by something else and needs a person.
+        if no_winner is not None:
+            if no_winner not in NO_WINNER_KINDS:
+                continue  # logged above, once per match
+            if rec.get("status") not in ("pending", "placed"):
+                logger.error(
+                    "Rec %s (match %s, %s %s) is %r without a profit_loss on a bout that ended with no winner (%s) "
+                    "— left as it is: nothing should have settled it; check what did",
+                    rec["rec_id"],
+                    match["match_id"],
+                    rec.get("bet_type"),
+                    rec.get("selection"),
+                    rec.get("status"),
+                    no_winner,
+                )
+                continue
+            logger.warning(
+                "Voiding rec %s (match %s, %s %s, status %s): the bout ended with no winner (%s) — a two-way "
+                "moneyline is void, stake returned",
+                rec["rec_id"],
+                match["match_id"],
+                rec.get("bet_type"),
+                rec.get("selection"),
+                rec.get("status"),
+                no_winner,
+            )
+            settle_recommendation(cur, rec["rec_id"], "void", NO_WINNER_VOID_RESULTS[no_winner], Decimal("0"))
+            stats["no_winner_rec_voids"] = stats.get("no_winner_rec_voids", 0) + 1
+            continue
         if match["home_score"] is None or match["away_score"] is None:
             continue
         outcome = grade_rec_selection(
@@ -1045,6 +1143,8 @@ STAT_KEYS = (
     "cancelled_orphan_recs",
     "regulation_regrades",
     "regulation_resettles",
+    "no_winner_predictions",
+    "no_winner_rec_voids",
 )
 
 
@@ -1109,6 +1209,17 @@ def run(database_url: str, days: int, match_id: Optional[str]) -> dict:
         logger.error(
             "Re-settled %d recommendation(s) that had settled on the post-extra-time score (ids above)",
             stats["regulation_resettles"],
+        )
+    if stats["no_winner_rec_voids"]:
+        logger.warning(
+            "Voided %d recommendation(s) on bouts that ended with no winner (a draw or a no contest; %s)",
+            stats["no_winner_rec_voids"],
+            " / ".join(repr(v) for v in NO_WINNER_VOID_RESULTS.values()),
+        )
+    if stats["no_winner_predictions"]:
+        logger.warning(
+            "Recorded %d prediction(s) on bouts that ended with no winner, left ungraded (is_correct NULL)",
+            stats["no_winner_predictions"],
         )
     if stats["post_kickoff_rec_voids"]:
         # ERROR, not WARNING: rec generation must never write a rec for a

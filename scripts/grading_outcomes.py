@@ -38,6 +38,10 @@ is_correct NULL and the grading script tries again on the next run.
 Push semantics: actual_outcome="push" → grading marks
 betting_recommendations status='void' with profit_loss=0; predictions
 is_correct stays NULL (a push isn't right or wrong).
+No-winner semantics: a bout recorded with metadata.no_winner (an MMA draw or
+no contest) has no outcome here for any market; grade_completed_matches
+records actual_outcome 'draw' / 'no_contest' with is_correct NULL and voids
+its recs (see NO_WINNER_KEY for the convention).
 
 Markets not in the dispatch table (player_prop, lottery) are NOT
 graded — they pass through with actual_outcome=None. The derived
@@ -95,6 +99,60 @@ NBA_TOTAL_MODEL_NAME = "ensemble_nba_tot"
 # leave the row ungraded via nhl_moneyline_outcome's None return.
 NFL_SPREAD_MODEL_NAME = "ensemble_nfl_sp"
 NFL_TOTAL_MODEL_NAME = "ensemble_nfl_tot"
+
+
+# ── Bouts that end with no winner (MMA draws and no contests) ─────────
+#
+# fetch_upcoming records a UFC bout that ends without a winner as
+# status='finished' with home_score / away_score NULL and metadata.no_winner
+# = 'draw' | 'no_contest' (metadata.no_winner_detail adds the draw's kind, the
+# judges' cards and the round). Why NULL and not 0-0: every reader of an MMA
+# score already skips a NULL pair (the MMA training query, compute_features_mma,
+# backtest_recommendations, actual_outcome below, the grader's rec loop), while
+# 0-0 would read as an AWAY WIN in the training label (`CASE WHEN home_score >
+# away_score THEN 0 ELSE 1`) and as a lost moneyline rec in grade_rec_selection
+# (0-0 is soccer's 'draw'). The marker, not the NULLs, is what every reader
+# checks explicitly.
+#
+# Grading convention (grade_completed_matches.grade_match):
+#   * a prediction on such a bout is neither right nor wrong: a two-way
+#     moneyline has no winner to pick. is_correct stays NULL and
+#     actual_outcome records 'draw' / 'no_contest' (as a push records 'push'),
+#     so it counts in no accuracy, calibration or Brier figure (every one of
+#     them reads is_correct IS NOT NULL);
+#   * a rec on it is VOID: stake returned, profit_loss 0, actual_result
+#     'void: draw' / 'void: no contest'.
+# That is how most books settle a two-way fight moneyline on a draw or a no
+# contest. Not every book does: a book that also prices the draw (a three-way
+# market), or whose house rules say so, can settle a two-way bet on a drawn
+# fight as a loss; and a result overturned after the event (a failed drug test
+# turning a win into a no contest) usually leaves the settlement made on the
+# result announced at the event standing. The rec ledger is a model ledger,
+# not one book's statement.
+#
+# Known limit (fails safe): scripts/repair_stranded_recs.py and
+# scripts/repair_fixture_orphans.py look for a stale duplicate's played twin
+# only among finished rows with BOTH scores set. A stale duplicate of a bout
+# recorded with no winner therefore finds no twin: a pending rec on that
+# duplicate stays pending (it is never settled from the twin, and never voided
+# by this convention) until a person settles it. No such rec existed when this
+# was written (2026-11-02).
+NO_WINNER_KEY = "no_winner"
+NO_WINNER_DETAIL_KEY = "no_winner_detail"
+NO_WINNER_DRAW = "draw"
+NO_WINNER_NO_CONTEST = "no_contest"
+NO_WINNER_KINDS = (NO_WINNER_DRAW, NO_WINNER_NO_CONTEST)
+NO_WINNER_VOID_RESULTS = {NO_WINNER_DRAW: "void: draw", NO_WINNER_NO_CONTEST: "void: no contest"}
+
+
+def no_winner_result(metadata: Optional[dict]) -> Optional[str]:
+    """metadata.no_winner of a match recorded as finished without a winner
+    ('draw' / 'no_contest'), else None. A value outside NO_WINNER_KINDS is
+    returned as it is: callers treat it as "no winner, kind unknown" (never
+    graded, never settled, logged at ERROR), so a marker nobody understands
+    can never turn into a verdict."""
+    value = (metadata or {}).get(NO_WINNER_KEY)
+    return None if value is None else str(value)
 
 
 def is_nhl_regulation(model_name: str) -> bool:
@@ -586,7 +644,13 @@ def actual_outcome(
     NBA spread/total to read the closing line the model conditioned
     on (which is also the line the bet was effectively placed at).
     NHL fixed lines and other markets ignore it.
+
+    A bout recorded with no winner (metadata.no_winner, see NO_WINNER_KEY)
+    has no outcome for any market here: None, whatever the score columns
+    hold. grade_completed_matches records it explicitly instead.
     """
+    if no_winner_result(metadata) is not None:
+        return None
     # NHL regulation gets scored from metadata, not the goal columns —
     # check it FIRST since it shares prediction_type='match_result'
     # with soccer 1X2.
@@ -833,7 +897,18 @@ def grade_rec_selection(
         2026-10-31). The prediction grader reads metadata.regulation_winner;
         this function only sees the final score.
       * correct_score 'other': it covers whatever that prediction did not
-        list, and the rec does not carry the prediction's key set."""
+        list, and the rec does not carry the prediction's key set.
+    A bout recorded with no winner (metadata.no_winner) is never settled
+    here either: grade_completed_matches voids its recs (NO_WINNER_KEY)."""
+    if no_winner_result(metadata) is not None:
+        logger.warning(
+            "grade_rec_selection(%r, %r) on a bout recorded with no winner (%s): not settled here — "
+            "grade_completed_matches voids such a rec",
+            bet_type,
+            selection,
+            no_winner_result(metadata),
+        )
+        return None
     if metadata is None and (sport or "soccer").strip().lower() == "soccer" and not is_nhl_model(model_name):
         logger.warning(
             "grade_rec_selection(%r, %r) on a soccer match without its metadata: a tie decided after 90 minutes "

@@ -14,10 +14,15 @@ homeAway is missing, and read the winner boolean to set
 home_score / away_score = 1 / 0 (binary winner flag). MMA fights
 always produce a winner (or a draw — see below).
 
-Draws: MMA does have draws (~1% of decisions). When both winner
-booleans are false (no winner declared) or both true (data quality
-issue), the parser skips the row — the catchup grading path
-handles draws by leaving is_correct NULL.
+Draws: MMA does have draws (~1% of decisions) and no contests. When both
+winner booleans are false (no winner declared) or both true (data quality
+issue), this HISTORICAL loader skips the row, on purpose: the MMA training
+corpus has never held a bout without a winner, and loading them would change
+the features computed for the fights after them (a model change: CLAUDE.md
+non-negotiable 2). The live results path (fetch_upcoming --results) records a
+bout with no winner since 2026-11, as finished with NULL scores and
+metadata.no_winner; every model input excludes it explicitly
+(grading_outcomes.NO_WINNER_KEY).
 
 Volume vs other sports: UFC schedules ~40-45 cards/year × ~12
 fights/card = ~500-540 fights/year. Three seasons ≈ 1500 fights.
@@ -84,7 +89,8 @@ def extract_finished_fight(competition: dict) -> Optional[dict]:
     * Competitors use .athlete.displayName.
     * Each competitor carries a `winner` boolean — exactly one True
       for a decisive finish. Both-True or both-False rows are skipped
-      (draws + data quality issues stay ungraded).
+      (draws, no contests and data quality issues: see the module
+      docstring for why the historical corpus keeps skipping them).
     * No homeAway field — positional ordering (index 0 → home).
     """
     state = (competition.get("status", {}).get("type", {}).get("state") or "").lower()

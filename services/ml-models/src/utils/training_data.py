@@ -1776,9 +1776,17 @@ def get_tennis_moneyline_feature_columns(frame: pd.DataFrame, target: str = TENN
 
 # ── MMA (Phase 12) ────────────────────────────────────────────────────
 # MMA shares the 1v1 / single-moneyline-market shape with tennis. Same
-# tie-exclusion filter (defensive — draws/data-corruption rows are
-# already dropped at the ingest layer, but the WHERE keeps anything
-# weird out of training).
+# tie-exclusion filter (defensive: a tie is never a winner flag).
+#
+# A bout that ended with NO WINNER (a draw or a no contest) never reaches
+# training, as before 2026-11 when no such bout was stored as finished at all.
+# Since then fetch_upcoming records one as finished with NULL scores and
+# metadata.no_winner (scripts/grading_outcomes.py NO_WINNER_KEY): the NULL-score
+# filter already drops it, and the explicit no_winner clause says so.
+# prepare_mma_moneyline_frame refuses a frame that holds one anyway (an
+# --input-csv frame, or a query edited later): its label would be a fabricated
+# away win (`CASE WHEN home_score > away_score THEN 0 ELSE 1`). Training on
+# such bouts would be a model change (CLAUDE.md non-negotiable 2).
 
 MMA_MONEYLINE_TARGET = "mma_moneyline"
 
@@ -1818,6 +1826,7 @@ MMA_MONEYLINE_TRAINING_QUERY = """
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
       AND m.home_score <> m.away_score
+      AND (m.metadata->>'no_winner') IS NULL
     ORDER BY m.match_date ASC
 """
 MMA_MONEYLINE_TRAINING_QUERY = prematch_odds(
@@ -1869,7 +1878,28 @@ def _load_mma(query: str, prepare, database_url: Optional[str] = None, input_csv
     return prepare(raw)
 
 
+def assert_no_mma_no_winner_rows(frame: pd.DataFrame) -> None:
+    """Raise ValueError when a frame holds a bout without a winner: a
+    missing or tied score pair (an MMA draw / no contest is stored with NULL
+    scores), or a no_winner value. See the comment above
+    MMA_MONEYLINE_TARGET."""
+    bad = pd.Series(False, index=frame.index)
+    if {"home_score", "away_score"}.issubset(frame.columns):
+        home = pd.to_numeric(frame["home_score"], errors="coerce")
+        away = pd.to_numeric(frame["away_score"], errors="coerce")
+        bad |= home.isna() | away.isna() | (home == away)
+    if "no_winner" in frame.columns:
+        bad |= frame["no_winner"].notna()
+    if bool(bad.any()):
+        ids = frame.loc[bad, "match_id"].astype(str).head(5).tolist() if "match_id" in frame.columns else []
+        raise ValueError(
+            f"{int(bad.sum())} MMA bout(s) without a winner reached the training frame (first: {ids}); a draw or "
+            "no contest has no moneyline label — the training query must exclude it"
+        )
+
+
 def prepare_mma_moneyline_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    assert_no_mma_no_winner_rows(raw)
     frame = _flatten_mma_frame(raw)
     if MMA_MONEYLINE_TARGET not in frame.columns and {"home_score", "away_score"}.issubset(frame.columns):
         frame[MMA_MONEYLINE_TARGET] = np.where(frame["home_score"] > frame["away_score"], 0, 1)

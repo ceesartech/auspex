@@ -467,22 +467,25 @@ def settle(cur, before_matches: dict[str, dict], mid_matches: dict[str, dict]) -
         voided += gcm.void_open_rec(cur, rec, "cancelled", gcm.CANCELLED_VOID_RESULT)
     logger.info(
         "Graded %d prediction(s) and settled %d rec(s) on %d newly finished row(s); voided %d rec(s) on %d newly "
-        "cancelled row(s); post-kickoff voids %d",
+        "cancelled row(s); post-kickoff voids %d; on bouts with no winner (grading_outcomes.NO_WINNER_KEY) %d "
+        "prediction(s) recorded ungraded and %d rec(s) voided",
         graded,
         settled,
         len(finished),
         voided,
         len(cancelled),
         stats.get("post_kickoff_rec_voids", 0),
+        stats.get("no_winner_predictions", 0),
+        stats.get("no_winner_rec_voids", 0),
     )
     return stats
 
 
 def identity_refused() -> int:
-    s = fu.IDENTITY_STATS
-    return sum(s[k] for k in ("forks_refused", "same_team", "score_mismatch", "status_refused")) + (
-        s["team_namesakes"] + s["team_conflicts"]
-    )
+    """Every refusal or team problem the results path counted: all of
+    fetch_upcoming.IDENTITY_STATS (each key makes a sweep exit 3), so a key
+    added there is never missing from this plan count."""
+    return sum(fu.IDENTITY_STATS.values())
 
 
 def run(

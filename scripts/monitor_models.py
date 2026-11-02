@@ -310,7 +310,9 @@ MARKET_DISPLAY = {
 # percent preseason).
 #
 # Pushes stay excluded via is_correct IS NOT NULL: they are neither
-# right nor wrong and would distort calibration.
+# right nor wrong and would distort calibration. So does every prediction on
+# a bout that ended with no winner (an MMA draw / no contest): the grader
+# records it with is_correct NULL for good (grading_outcomes.NO_WINNER_KEY).
 _DEDUPED_GRADED_PREDICTIONS_SQL = f"""        SELECT DISTINCT ON (p.match_id, p.prediction_type)
                p.match_id,
                p.created_at,

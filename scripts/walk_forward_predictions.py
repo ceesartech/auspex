@@ -283,7 +283,12 @@ def train_snapshot(
 def list_test_matches(conn, bundle: str, split_date: str) -> list[dict]:
     """Finished matches with match_date >= split_date for this bundle's
     sport. Each row carries the features_cache JSON needed for
-    prediction — INNER JOIN so we skip matches without features."""
+    prediction — INNER JOIN so we skip matches without features.
+
+    A bout recorded with no winner (an MMA draw / no contest:
+    metadata.no_winner, grading_outcomes.NO_WINNER_KEY) is left out: it has
+    no outcome to score a prediction against, and the training frame
+    excludes it too."""
     sport = bundle.split("_")[0]  # soccer / nhl / nba / nfl
     feature_set = BUNDLE_TO_FEATURE_SET[bundle]
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -308,6 +313,7 @@ def list_test_matches(conn, bundle: str, split_date: str) -> list[dict]:
             ) fc ON true
             WHERE l.sport = %s
               AND m.status = 'finished'
+              AND (m.metadata->>'no_winner') IS NULL
               AND m.match_date >= %s::date
             ORDER BY m.match_date ASC
             """,

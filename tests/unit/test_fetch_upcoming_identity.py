@@ -726,6 +726,8 @@ NO_REFUSALS = {
     "same_team": 0,
     "score_mismatch": 0,
     "status_refused": 0,
+    "no_winner_refused": 0,
+    "no_winner_unconfirmed": 0,
     "team_namesakes": 0,
     "team_conflicts": 0,
 }
@@ -872,8 +874,9 @@ class TestExitCode:
     def test_an_espn_team_id_conflict_exits_3(self, monkeypatch, identity_stats):
         assert self._main(monkeypatch, refuse="team_conflicts") == 3
 
-    def test_the_counters_are_the_six_the_merged_branches_count(self):
-        # Fixture identity and the results path (forks, same team, score, status) plus team identity.
+    def test_the_counters_are_the_eight_the_merged_branches_count(self):
+        # Fixture identity and the results path (forks, same team, score, status), the MMA no-winner results
+        # (refused, unconfirmed) plus team identity.
         assert set(fu.IDENTITY_STATS) == set(NO_REFUSALS)
 
     def test_the_pipeline_dag_comment_names_every_counter(self):
@@ -895,6 +898,8 @@ class TestExitCode:
             "same_team": "1 resolved both sides to one team",
             "score_mismatch": "1 carried a header score",
             "status_refused": "1 status change(s)",
+            "no_winner_refused": "1 no-winner result(s) ESPN's two APIs disagree on",
+            "no_winner_unconfirmed": "1 no-winner bout(s) ESPN's core API has not confirmed",
             "team_namesakes": "1 club(s) were inserted",
             "team_conflicts": "1 ESPN team id conflict(s)",
         }[key]

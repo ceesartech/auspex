@@ -156,7 +156,12 @@ def list_upcoming_mma(cur, days: int, min_fighter_history: int = 3) -> list[str]
     is 3 (not soccer/tennis's 10): UFC fighters average far fewer corpus
     fights than tennis players have matches, so 10 would gate most of the
     card — 3 targets exactly the debutant/short-notice fighters whose
-    features are prior-shaped."""
+    features are prior-shaped.
+
+    A bout recorded with no winner (a draw or a no contest:
+    metadata.no_winner, grading_outcomes.NO_WINNER_KEY) is not counted: the
+    gate counts the fights compute_features_mma builds a fighter's features
+    from, and those exclude it."""
     cur.execute(
         """
         WITH fighter_history AS (
@@ -165,6 +170,7 @@ def list_upcoming_mma(cur, days: int, min_fighter_history: int = 3) -> list[str]
             LEFT JOIN matches h
               ON (h.home_team_id = t.id OR h.away_team_id = t.id)
              AND h.status = 'finished'
+             AND (h.metadata->>'no_winner') IS NULL
             GROUP BY t.id
         )
         SELECT m.id::text AS match_id,

@@ -35,6 +35,7 @@ from utils.training_data import (  # noqa: E402
     MMA_MONEYLINE_NON_FEATURE_COLUMNS,
     MMA_MONEYLINE_TARGET,
     MMA_MONEYLINE_TRAINING_QUERY,
+    assert_no_mma_no_winner_rows,
     get_mma_moneyline_feature_columns,
     prepare_mma_moneyline_frame,
 )
@@ -53,9 +54,15 @@ class TestQueryScopedToMma:
         assert "away_score IS NOT NULL" in MMA_MONEYLINE_TRAINING_QUERY
 
     def test_tie_filter_present_defensively(self):
-        # MMA draws are dropped at the ingest layer (extract_finished_fight
-        # skips them) but the WHERE keeps any data corruption out.
+        # A tie is never a winner flag; the WHERE keeps any data corruption out.
         assert "m.home_score <> m.away_score" in MMA_MONEYLINE_TRAINING_QUERY
+
+    def test_no_winner_bouts_never_reach_training(self):
+        # Since 2026-11 the live results path records an MMA draw / no contest
+        # as finished with NULL scores and metadata.no_winner. Training never
+        # saw one before, and must not now (a model change): the NULL-score
+        # filter drops it, and the explicit clause says so.
+        assert "(m.metadata->>'no_winner') IS NULL" in MMA_MONEYLINE_TRAINING_QUERY
 
 
 class TestPrepareMmaMoneylineFrame:
@@ -86,6 +93,37 @@ class TestPrepareMmaMoneylineFrame:
         frame = prepare_mma_moneyline_frame(raw)
         assert frame.loc[0, "feature__odds_home_ml"] == 1.65
         assert frame.loc[0, "feature__h2h_balance"] == 0.0
+
+
+class TestNoWinnerBoutsRefused:
+    """A draw / no contest (NULL scores, metadata.no_winner) has no moneyline
+    label: CASE WHEN home_score > away_score THEN 0 ELSE 1 would call it an
+    away win. A frame holding one is refused, never trained on."""
+
+    @pytest.mark.parametrize(
+        "home_score,away_score",
+        [(None, None), (1, None), (0, 0), (1, 1)],
+    )
+    def test_a_missing_or_tied_score_pair_is_refused(self, home_score, away_score):
+        raw = pd.DataFrame(
+            {
+                "match_id": ["ok", "bad"],
+                "home_score": [1, home_score],
+                "away_score": [0, away_score],
+                "match_date": ["2026-10-10", "2026-10-10"],
+            }
+        )
+        with pytest.raises(ValueError, match=r"1 MMA bout\(s\) without a winner .*'bad'"):
+            prepare_mma_moneyline_frame(raw)
+
+    def test_a_no_winner_marker_is_refused(self):
+        raw = pd.DataFrame({"match_id": ["m"], "home_score": [1], "away_score": [0], "no_winner": ["draw"]})
+        with pytest.raises(ValueError, match="without a winner"):
+            assert_no_mma_no_winner_rows(raw)
+
+    def test_decisive_bouts_pass(self):
+        raw = pd.DataFrame({"home_score": [1, 0], "away_score": [0, 1], "no_winner": [None, None]})
+        assert_no_mma_no_winner_rows(raw)  # no raise
 
 
 class TestFeatureColumnExclusion:
