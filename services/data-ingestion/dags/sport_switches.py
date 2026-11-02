@@ -47,9 +47,11 @@ recs follow within that tick. The frontend change ships with the next CI
 image build. Before that, check:
   * the Racing API subscription still exists (THE_RACING_API_USER/PASS in
     the prod .env) — without it fetch_horse_racing_upcoming and
-    fetch_horse_racing_results exit 1 every tick (missing credentials, no
-    racecards tier answering, or a 401/402/403 from /results), and nothing
-    downstream of them runs;
+    fetch_horse_racing_results exit 1 every tick (missing credentials,
+    every racecards tier refusing, or a 401/402/403 from /results), and
+    nothing downstream of them runs. A racecards outage (no answer or a
+    5xx) is not that: the tick logs an ERROR, has no cards, and the results
+    fetch still runs;
   * the ranker in /app/models/horse_racing_ranker_v1 is as old as the
     dormancy; retrain with scripts/train_horse_racing_win.py if that is
     more than a few weeks;

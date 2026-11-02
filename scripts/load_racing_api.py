@@ -41,9 +41,12 @@ fails loudly where there is work it cannot do and stays quiet where there
 is none: --drain makes no call and exits 0 while no race in its window
 carries a pending rec, and exits 1 when one does (missing credentials, or a
 401/402/403 from /results/{race_id}, is an error, never "no result");
---upcoming and --results exit 1 on missing credentials, on racecards that no
-tier serves, and on a /results page refused with 401/402/403 (other failed
-/results pages are logged at ERROR and the next run re-reads the day).
+--upcoming and --results exit 1 on missing credentials, on racecards refused
+by every tier (401/402/403/422), and on a /results page refused with
+401/402/403. An outage is not a refusal: a racecards probe that gets no
+answer or a 5xx leaves that tick without cards (logged at ERROR; the
+results fetch still runs), and other failed /results pages are logged at
+ERROR and the next run re-reads the day.
 
 Lazy entity creation: horses / jockeys / trainers get one DB row
 per unique normalized_name. Same horse appearing in many races
@@ -179,6 +182,8 @@ class RacingApiError(RuntimeError):
 
 # The statuses a plan or credential refusal comes back with (a lapsed subscription included).
 _REFUSED_STATUSES = frozenset({401, 402, 403})
+# ... and, probing the racecards tiers, also 422: that tier will not serve this request on these credentials.
+_TIER_REFUSED_STATUSES = _REFUSED_STATUSES | {422}
 
 
 # Plan-aware fetcher caches the highest-tier endpoint that works on
@@ -223,6 +228,7 @@ def fetch_racecards(day: date, auth: HTTPBasicAuth) -> list[dict]:
         return cards
 
     answers = []
+    refused = True  # every tier turned the credentials or the plan away (not an outage)
     for path in ("/racecards/pro", "/racecards/standard", "/racecards/basic"):
         send_date = path in _PATHS_THAT_ACCEPT_DATE
         status, cards = _try_racecards_endpoint(path, day, auth, send_date)
@@ -231,15 +237,24 @@ def fetch_racecards(day: date, auth: HTTPBasicAuth) -> list[dict]:
             logger.info("Racing API tier detected: %s", path)
             return cards
         answers.append(f"{path} -> {status or 'no answer'}")
-        if status not in (401, 402, 403, 422):
+        if status not in _TIER_REFUSED_STATUSES:
             # Network error / unexpected — log and keep probing.
+            refused = False
             logger.warning("Racing API %s returned %s", path, status)
-    # Not an empty card (that is a 200 with no racecards): no tier answered at all. Before 2026-11-02 this returned
-    # [] and the task stayed green with no racecards — what a lapsed subscription would have looked like.
-    raise RacingApiError(
-        f"Racing API: no racecards tier answered 200 for {day} ({'; '.join(answers)}). Check THE_RACING_API_USER / "
-        "THE_RACING_API_PASS and that the subscription is still active."
+    if refused:
+        # Every tier refused: the credentials or the plan are gone (what a lapsed subscription looks like).
+        # Before 2026-11-02 this returned [] and the task stayed green with no racecards. It raises, and
+        # --upcoming exits 1, every tick until the subscription is back.
+        raise RacingApiError(
+            f"Racing API: every racecards tier refused for {day} ({'; '.join(answers)}). Check THE_RACING_API_USER "
+            "/ THE_RACING_API_PASS and that the subscription is still active."
+        )
+    # An outage (no answer, a 5xx) on a tier: no card this tick, logged at ERROR, and the run goes on — so the results
+    # fetch downstream of it in the DAG still runs; the next tick probes again.
+    logger.error(
+        "Racing API: no racecards tier answered 200 for %s (%s) — no racecards this tick", day, "; ".join(answers)
     )
+    return []
 
 
 def fetch_results(day: date, auth: HTTPBasicAuth) -> list[dict]:

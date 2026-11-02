@@ -9,8 +9,9 @@
   (each mirrors grade_completed_races.settle_recommendations), what the
   CLI refuses, and its clock (--as-of never later than the database's);
 * after the Racing API subscription ends: --upcoming and --results exit 1
-  (missing credentials, no racecards tier answering, a /results page
+  (missing credentials, every racecards tier refusing, a /results page
   refused with 401/402/403) instead of staying green with nothing fetched;
+  a racecards outage (no answer, a 5xx) is logged, not raised;
 * monitor_models: horse slices stop paging once no race prediction has
   been created for HORSE_DORMANT_AFTER_HOURS, and only then.
 """
@@ -401,6 +402,39 @@ def test_racecards_refused_on_every_tier_raise(monkeypatch, status):
     with pytest.raises(lra.RacingApiError, match="subscription"):
         lra.fetch_racecards(lra.date(2026, 11, 2), auth=None)
     assert [u.rsplit("/", 1)[1] for u in calls] == ["pro", "standard", "basic"] and lra._CACHED_RACECARDS_PATH is None
+
+
+def test_a_tier_that_will_not_serve_the_request_counts_as_refused(monkeypatch):
+    # 422 is a tier turning this request down on these credentials (the probe skipped it before 2026-11-02 too).
+    answers = {"pro": 422, "standard": 401, "basic": 401}
+    monkeypatch.setattr(lra.requests, "get", lambda url, **k: FakeResponse(answers[url.rsplit("/", 1)[1]], {}))
+    monkeypatch.setattr(lra, "_CACHED_RACECARDS_PATH", None)
+    with pytest.raises(lra.RacingApiError, match="every racecards tier refused"):
+        lra.fetch_racecards(lra.date(2026, 11, 2), auth=None)
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        {"pro": 503, "standard": 503, "basic": 503},  # the API is down
+        {"pro": 403, "standard": 502, "basic": 403},  # the subscribed tier is down, the others not on the plan
+        {"pro": 401, "standard": 401, "basic": "timeout"},  # one tier did not answer at all
+    ],
+)
+def test_a_racecards_outage_is_logged_not_raised(monkeypatch, caplog, answers):
+    # An outage is not a lapsed subscription: no card this tick, an ERROR, and --upcoming exits 0 — so the results
+    # fetch downstream of it in the DAG (all_success) still runs.
+    def get(url, params=None, auth=None, timeout=None):
+        answer = answers[url.rsplit("/", 1)[1]]
+        if answer == "timeout":
+            raise lra.requests.Timeout("read timed out")
+        return FakeResponse(answer, {"detail": "x"})
+
+    monkeypatch.setattr(lra.requests, "get", get)
+    monkeypatch.setattr(lra, "_CACHED_RACECARDS_PATH", None)
+    with caplog.at_level(logging.ERROR, logger="load_racing_api"):
+        assert lra.fetch_racecards(lra.date(2026, 11, 2), auth=None) == []
+    assert "no racecards tier answered 200" in caplog.text and lra._CACHED_RACECARDS_PATH is None
 
 
 def test_an_empty_card_is_not_an_error(monkeypatch):
