@@ -1,0 +1,14 @@
+# Spellings ESPN uses for an existing MMA fighter row, added to teams.metadata.aliases by
+# scripts/mma_identity_cleanup.py (reviewed 2026-11-02) so a name lookup never mints a second row.
+#   'Rafael Cerqueira' (one bout, Ibo Aslan v Rafael Cerqueira 2024-10-26): ESPN athlete 5212598's record and
+#   scoreboard name is 'Raffael Cerqueira' (sports.core.api.espn.com/v2/sports/mma/athletes/5212598: 'The Lion',
+#   light heavyweight, born 1990-03-15), the competitor of that bout. The row is also stamped with 5212598
+#   (mma_fighter_athlete_ids_20261102.csv), so the athlete-id resolver finds it first either way.
+# Not an alias: 'José Luiz' / 'José Montanha' - the athlete behind 'José Luiz' (ESPN 2026-06-06, v Jhonata Diniz
+#   2026-06-20, a bout ESPN later dropped; our rows of it carried no competition id) cannot be established from
+#   ESPN any more: event 600059467 no longer lists the bout, and ESPN's athletes named Jose Luiz are 3097880
+#   (bantamweight, 132 lb) and 4010689 (Jose Luiz Domingues da Silva), while José Montanha is 5351808
+#   (heavyweight, 258 lb). Unknowable, so no alias: the bout-less 'José Luiz' row is deleted
+#   (mma_orphan_fighters_20261102.csv); José Montanha keeps his row (his 2026-08-08 bout v Louie Sutherland).
+team_id,team_name,alias,espn_athlete_id,evidence
+b6752be3-3585-4bae-9e7a-2c8b2064c61e,Rafael Cerqueira,Raffael Cerqueira,5212598,"ESPN competition 401710997 (Ibo Aslan v Raffael Cerqueira, 2024-10-26) and athlete record 5212598 'Raffael Cerqueira'"
