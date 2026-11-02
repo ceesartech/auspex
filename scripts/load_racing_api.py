@@ -36,6 +36,15 @@ race_entrants.scratched: 0 of 36,800 entrants in 60 days).
 
 Auth: HTTP Basic with THE_RACING_API_USER + THE_RACING_API_PASS.
 
+After the subscription ends (or with the credentials unset), every mode
+fails loudly where there is work it cannot do and stays quiet where there
+is none: --drain makes no call and exits 0 while no race in its window
+carries a pending rec, and exits 1 when one does (missing credentials, or a
+401/402/403 from /results/{race_id}, is an error, never "no result");
+--upcoming and --results exit 1 on missing credentials, on racecards that no
+tier serves, and on a /results page refused with 401/402/403 (other failed
+/results pages are logged at ERROR and the next run re-reads the day).
+
 Lazy entity creation: horses / jockeys / trainers get one DB row
 per unique normalized_name. Same horse appearing in many races
 resolves to one horses.id, letting rolling-form features be cheap
@@ -163,6 +172,15 @@ def parse_offdt(raw: Optional[str]) -> Optional[datetime]:
 # ── HTTP fetchers ──────────────────────────────────────────────────
 
 
+class RacingApiError(RuntimeError):
+    """A Racing API answer that is neither a result nor 'no result for this race', or one that refuses the
+    credentials or the plan."""
+
+
+# The statuses a plan or credential refusal comes back with (a lapsed subscription included).
+_REFUSED_STATUSES = frozenset({401, 402, 403})
+
+
 # Plan-aware fetcher caches the highest-tier endpoint that works on
 # the current credentials. Saves a probe call on every request once
 # the tier is known.
@@ -204,6 +222,7 @@ def fetch_racecards(day: date, auth: HTTPBasicAuth) -> list[dict]:
         _, cards = _try_racecards_endpoint(_CACHED_RACECARDS_PATH, day, auth, send_date)
         return cards
 
+    answers = []
     for path in ("/racecards/pro", "/racecards/standard", "/racecards/basic"):
         send_date = path in _PATHS_THAT_ACCEPT_DATE
         status, cards = _try_racecards_endpoint(path, day, auth, send_date)
@@ -211,11 +230,16 @@ def fetch_racecards(day: date, auth: HTTPBasicAuth) -> list[dict]:
             _CACHED_RACECARDS_PATH = path
             logger.info("Racing API tier detected: %s", path)
             return cards
+        answers.append(f"{path} -> {status or 'no answer'}")
         if status not in (401, 402, 403, 422):
             # Network error / unexpected — log and keep probing.
             logger.warning("Racing API %s returned %s", path, status)
-    logger.error("Racing API: none of pro/standard/basic worked. " "Check THE_RACING_API_USER + THE_RACING_API_PASS.")
-    return []
+    # Not an empty card (that is a 200 with no racecards): no tier answered at all. Before 2026-11-02 this returned
+    # [] and the task stayed green with no racecards — what a lapsed subscription would have looked like.
+    raise RacingApiError(
+        f"Racing API: no racecards tier answered 200 for {day} ({'; '.join(answers)}). Check THE_RACING_API_USER / "
+        "THE_RACING_API_PASS and that the subscription is still active."
+    )
 
 
 def fetch_results(day: date, auth: HTTPBasicAuth) -> list[dict]:
@@ -239,6 +263,14 @@ def fetch_results(day: date, auth: HTTPBasicAuth) -> list[dict]:
         except requests.RequestException as e:
             logger.error("Racing API results %s page %d failed after %d result(s): %s", day, page, len(out), e)
             return out
+        if r.status_code in _REFUSED_STATUSES:
+            # The credentials or the plan were refused: no later page or day can succeed, and returning what
+            # arrived would leave the task green.
+            raise RacingApiError(
+                f"Racing API results {day} page {page} -> HTTP {r.status_code}: {(r.text or '')[:200]} — the "
+                "credentials or the plan were refused (check THE_RACING_API_USER / THE_RACING_API_PASS and that "
+                "the subscription is still active)"
+            )
         if r.status_code >= 400:
             body_snippet = r.text[:200] if r.text else ""
             logger.error(
@@ -261,10 +293,6 @@ def fetch_results(day: date, auth: HTTPBasicAuth) -> list[dict]:
         "Racing API results %s: stopped after %d pages with %d of %s result(s)", day, MAX_RESULTS_PAGES, len(out), total
     )
     return out
-
-
-class RacingApiError(RuntimeError):
-    """A Racing API answer that is neither a result nor 'no result for this race'."""
 
 
 def _is_no_result(r, api_race_id: str) -> bool:
@@ -1192,10 +1220,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         totals = run_drain(args.database_url, dry_run=args.dry_run)
         return 1 if totals["errors"] else 0
     if args.upcoming is not None:
-        today = date.today()
-        end = today + timedelta(days=args.upcoming - 1)
-        run(args.database_url, "upcoming", today, end)
+        kind = "upcoming"
+        start = date.today()
+        end = start + timedelta(days=args.upcoming - 1)
     else:
+        kind = "results"
         if not (args.start and args.end):
             logger.error("--start and --end are required with --results")
             return 2
@@ -1208,8 +1237,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         if end < start:
             logger.error("--end must be >= --start")
             return 2
-        run(args.database_url, "results", start, end)
-    return 0
+    try:
+        totals = run(args.database_url, kind, start, end)
+    except RacingApiError as e:
+        logger.error("%s — exit 1 (the days before this one are committed)", e)
+        return 1
+    # Missing credentials: run() wrote nothing. Before 2026-11-02 this still exited 0.
+    return 1 if totals.get("error") else 0
 
 
 if __name__ == "__main__":

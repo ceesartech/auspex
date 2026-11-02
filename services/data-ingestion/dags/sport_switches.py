@@ -15,6 +15,10 @@ False (dormant), in auspex_pipeline:
     when nothing is pending — then grade_completed_races.py settles them.
     Recs on races older than that are stranded and only logged; they are
     closed by scripts/ops/close_out_stranded_race_recs.sh (operator-run);
+    once no rec is pending, cancelling the Racing API subscription changes
+    nothing here: the drain makes no call and needs no credentials, so the
+    task stays green (it fails only if a race in its window still carries a
+    pending rec it can no longer ask about — close those out first);
   * every other sport is untouched; send_pipeline_digest fans in the six
     other recommendation tasks.
 Nothing else schedules horse racing: retrain_models has no horse bundle
@@ -42,7 +46,10 @@ tick fetches today's racecards (the Standard tier serves today only) and
 recs follow within that tick. The frontend change ships with the next CI
 image build. Before that, check:
   * the Racing API subscription still exists (THE_RACING_API_USER/PASS in
-    the prod .env) — without it every horse task fails loudly;
+    the prod .env) — without it fetch_horse_racing_upcoming and
+    fetch_horse_racing_results exit 1 every tick (missing credentials, no
+    racecards tier answering, or a 401/402/403 from /results), and nothing
+    downstream of them runs;
   * the ranker in /app/models/horse_racing_ranker_v1 is as old as the
     dormancy; retrain with scripts/train_horse_racing_win.py if that is
     more than a few weeks;

@@ -20,13 +20,28 @@ Asked one by one (/results/{race_id}, the endpoint the drain uses):
     races on 26 Jun, 6 Jul, 20 Aug, 28 Aug, 4 Sep, 29 Sep. The feed drops
     an abandoned race without a status, so nothing ever told the pipeline.
     A bookmaker voids a bet on an abandoned race.
+The first run (2026-11-02 03:50Z) settled those 10 and voided those 32.
+Seven more recs were still inside the drain's window then: Southwell (AW)
+31 Oct 17:40 (4 recs), 18:50 (2) and 19:25 (1), an evening card abandoned
+for fog after its third race (the day's paginated results list has
+Southwell 16:00, 16:35 and 17:05 only; /results/{race_id} answers 404
+"Result not found" for all three). They become candidates one race at a
+time once each is DRAIN_DAYS old: 2026-11-03 17:40Z, 18:50Z and 19:25Z.
 
 WHAT THIS DOES
 --------------
 Candidates: pending/placed race recs whose race is not finished /
-cancelled / abandoned, went off more than load_racing_api.DRAIN_DAYS ago
-— outside the drain's window, so the drain and this tool never act on the
-same race — and before --raced-before (the reviewed set; required).
+cancelled / abandoned, went off more than load_racing_api.DRAIN_DAYS before
+the clock — outside the drain's window, so the drain and this tool never act
+on the same race — and before --raced-before (the reviewed set; required).
+
+The clock is the database's own NOW(). --as-of pins it to an earlier instant
+(the wrapper pins every step of one run to the same T0, so the dry run, the
+apply and the re-plan see the same set). It can only move the clock BACK: a
+future --as-of is refused (exit 2) before anything is read, because moving
+the clock forward would make candidates of races the drain still asks
+about. Nothing in this file moves it forward; the tests and the rehearsal
+harness do that by replacing db_now().
 Per race, GET /results/{racing_api_race_id}:
   200   -> settle. The result is ingested exactly as the results pass does
            (load_racing_api.ingest_race: the race goes 'finished', runners
@@ -59,14 +74,21 @@ void is guarded on the rec still being pending/placed.
 
 The PLAN line (what scripts/ops/close_out_stranded_race_recs.sh pins):
     PLAN candidates=N races=N settle=N void=N unmatched=N errors=N
-and, on its own line, the stranded recs --raced-before keeps out (listed
-one per line, never touched; they need a new reviewed pin):
-    BEYOND_PIN recs=N
+and, each on its own line (never touched, listed one per line below it):
+    BEYOND_PIN recs=N            stranded recs --raced-before keeps out: they
+                                 need a new reviewed pin;
+    IN_WINDOW recs=N races=N until=<instant|none>
+                                 pending recs on races before --raced-before
+                                 that are still inside the drain's window:
+                                 the drain asks about them every tick, and a
+                                 run after <until> (the last of them leaves
+                                 the window then) makes them candidates.
 
 Usage (inside the api container):
     python /app/scripts/close_out_stranded_race_recs.py --raced-before 2026-11-01T00:00:00Z
-    python /app/scripts/close_out_stranded_race_recs.py --raced-before 2026-11-01T00:00:00Z --apply \\
-        --expect-plan candidates=42,races=30,settle=10,void=32,unmatched=0,errors=0
+    python /app/scripts/close_out_stranded_race_recs.py --raced-before 2026-11-01T00:00:00Z \\
+        --as-of 2026-11-03T19:30:00Z --apply \\
+        --expect-plan candidates=7,races=3,settle=0,void=7,unmatched=0,errors=0
 """
 
 from __future__ import annotations
@@ -79,7 +101,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Optional
@@ -154,7 +176,7 @@ CANDIDATES_SQL = """
     JOIN horses h ON h.id = e.horse_id
     WHERE rec.status IN ('pending', 'placed')
       AND r.status NOT IN ('finished', 'cancelled', 'abandoned')
-      AND r.race_date < NOW() - make_interval(days => %(drain_days)s)
+      AND r.race_date < %(as_of)s - make_interval(days => %(drain_days)s)
       AND r.race_date < %(raced_before)s
     ORDER BY r.race_date, rec.id
 """
@@ -174,8 +196,33 @@ BEYOND_PIN_SQL = """
     JOIN horses h ON h.id = e.horse_id
     WHERE rec.status IN ('pending', 'placed')
       AND r.status NOT IN ('finished', 'cancelled', 'abandoned')
-      AND r.race_date < NOW() - make_interval(days => %(drain_days)s)
+      AND r.race_date < %(as_of)s - make_interval(days => %(drain_days)s)
       AND r.race_date >= %(raced_before)s
+    ORDER BY r.race_date, rec.id
+"""
+
+# Pending recs in the reviewed set (before --raced-before) that are not
+# candidates YET: their race is still inside the drain's window (or not off).
+# Reported (IN_WINDOW), never touched; each becomes a candidate once its race
+# is DRAIN_DAYS old (candidate_after, worked out in SQL so it uses the same
+# interval arithmetic as the window). A run that closes the candidates while
+# any of these remain has not finished the reviewed set.
+IN_WINDOW_SQL = """
+    SELECT rec.id::text AS rec_id,
+           rec.race_id::text AS race_id,
+           r.race_date,
+           r.track_name,
+           rec.bet_type,
+           h.normalized_name AS horse,
+           r.race_date + make_interval(days => %(drain_days)s) AS candidate_after
+    FROM race_recommendations rec
+    JOIN races r ON r.id = rec.race_id
+    JOIN race_entrants e ON e.id = rec.entrant_id
+    JOIN horses h ON h.id = e.horse_id
+    WHERE rec.status IN ('pending', 'placed')
+      AND r.status NOT IN ('finished', 'cancelled', 'abandoned')
+      AND r.race_date >= %(as_of)s - make_interval(days => %(drain_days)s)
+      AND r.race_date < %(raced_before)s
     ORDER BY r.race_date, rec.id
 """
 
@@ -228,6 +275,19 @@ ARCHIVE_FROM = {
 
 class ApplyMismatch(RuntimeError):
     """The database did not end up where the plan said; the transaction is rolled back."""
+
+
+class FutureAsOf(ValueError):
+    """--as-of is later than the database's clock: refused before anything is read."""
+
+
+def db_now(cur) -> datetime:
+    """The clock every window is measured from: the database's own NOW() (the
+    drain measures its window from the same clock). The tests and the
+    rehearsal harness replace this function to move the clock forward;
+    nothing else can (run() refuses a future --as-of)."""
+    cur.execute("SELECT NOW() AS now")
+    return cur.fetchone()["now"]
 
 
 def plan_line(totals: dict[str, int]) -> str:
@@ -321,11 +381,18 @@ def plan_race_settlement(recs: list[dict], payload: dict, field: list[dict]) -> 
     return out
 
 
-def build_plan(cur, raced_before: datetime, fetch) -> tuple[list[dict], dict[str, dict], dict[str, int]]:
+def window_params(raced_before: datetime, as_of: datetime) -> dict[str, Any]:
+    return {"drain_days": lra.DRAIN_DAYS, "raced_before": raced_before, "as_of": as_of}
+
+
+def build_plan(
+    cur, raced_before: datetime, fetch, as_of: datetime
+) -> tuple[list[dict], dict[str, dict], dict[str, int]]:
     """Read-only. Returns (entries, {race_id: payload} for the races to
     settle, PLAN totals). `fetch(api_race_id)` is
-    load_racing_api.fetch_race_result with the credentials bound."""
-    cur.execute(CANDIDATES_SQL, {"drain_days": lra.DRAIN_DAYS, "raced_before": raced_before})
+    load_racing_api.fetch_race_result with the credentials bound; it is
+    called once per candidate race, so no candidate means no API call."""
+    cur.execute(CANDIDATES_SQL, window_params(raced_before, as_of))
     candidates = [dict(r) for r in cur.fetchall()]
     by_race: dict[str, list[dict]] = {}
     for rec in candidates:
@@ -563,6 +630,10 @@ def summarize(entries: list[dict]) -> None:
         )
 
 
+def _utc(ts: datetime) -> str:
+    return ts.astimezone(timezone.utc).isoformat()
+
+
 def run(
     conn,
     raced_before: datetime,
@@ -570,14 +641,31 @@ def run(
     apply_changes: bool = False,
     out_csv: Optional[str] = None,
     expect_plan: Optional[dict[str, int]] = None,
+    as_of: Optional[datetime] = None,
 ) -> dict[str, Any]:
     out_csv = out_csv or default_out_csv()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        entries, payloads, totals = build_plan(cur, raced_before, fetch)
-        cur.execute(BEYOND_PIN_SQL, {"drain_days": lra.DRAIN_DAYS, "raced_before": raced_before})
+        now = db_now(cur)
+        if as_of is None:
+            as_of = now
+        elif as_of > now:
+            conn.rollback()
+            raise FutureAsOf(
+                f"--as-of {_utc(as_of)} is after the database's clock ({_utc(now)}): measured from the future, "
+                "the window would make candidates of races the drain still asks about"
+            )
+        entries, payloads, totals = build_plan(cur, raced_before, fetch, as_of)
+        cur.execute(BEYOND_PIN_SQL, window_params(raced_before, as_of))
         beyond = [dict(r) for r in cur.fetchall()]
+        cur.execute(IN_WINDOW_SQL, window_params(raced_before, as_of))
+        waiting = [dict(r) for r in cur.fetchall()]
     conn.rollback()  # close the read snapshot before any write
     write_csv(out_csv, entries)
+    logger.info(
+        "AS_OF %s — the clock the drain window is measured from: candidates went off before %s",
+        _utc(as_of),
+        _utc(as_of - timedelta(days=lra.DRAIN_DAYS)),
+    )
     logger.info("%s", plan_line(totals))
     summarize(entries)
     # Its own line, not a PLAN key: the wrapper pins every PLAN key, and these are not part of the reviewed set.
@@ -595,6 +683,30 @@ def run(
             b["track_name"],
             b["bet_type"],
             b["horse"],
+        )
+    until = _utc(max(w["candidate_after"] for w in waiting)) if waiting else "none"
+    # Its own line too: these are in the reviewed set but not candidates yet, so a run that leaves any has not
+    # finished it (the wrapper never reports ALREADY DONE while this is above 0).
+    logger.info(
+        "IN_WINDOW recs=%d races=%d until=%s — pending rec(s) on races before --raced-before still inside the "
+        "drain's %d-day window as of %s: the drain asks about them every tick; each becomes a candidate once its "
+        "race is %d days old. Not touched",
+        len(waiting),
+        len({w["race_id"] for w in waiting}),
+        until,
+        lra.DRAIN_DAYS,
+        _utc(as_of),
+        lra.DRAIN_DAYS,
+    )
+    for w in waiting:
+        logger.info(
+            "  in window: rec %s  %s %s %s/%s — a candidate after %s",
+            w["rec_id"],
+            _utc(w["race_date"])[:16],
+            w["track_name"],
+            w["bet_type"],
+            w["horse"],
+            _utc(w["candidate_after"]),
         )
     mismatch = "; ".join(
         f"{totals[k]} {k}, expected {n}" for k, n in sorted((expect_plan or {}).items()) if totals[k] != n
@@ -619,6 +731,9 @@ def run(
     return {
         "plan": totals,
         "beyond_pin": len(beyond),
+        "in_window": len(waiting),
+        "in_window_until": max(w["candidate_after"] for w in waiting) if waiting else None,
+        "as_of": as_of,
         "plan_mismatch": bool(mismatch),
         "refused": bool(refused),
         "applied": applied,
@@ -631,6 +746,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--raced-before",
         required=True,
         help="Only races off before this UTC instant (ISO 8601) are candidates: the reviewed set.",
+    )
+    p.add_argument(
+        "--as-of",
+        default=None,
+        help="Measure the drain window from this UTC instant (ISO 8601 with a zone) instead of the database's "
+        "NOW(); refused when it is later than the database's clock. The wrapper pins one run's steps to one T0.",
     )
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     p.add_argument(
@@ -654,6 +775,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         p.error(f"--raced-before {args.raced_before!r} is not an ISO 8601 instant")
     if args.raced_before.tzinfo is None:
         p.error("--raced-before needs a timezone (e.g. 2026-11-01T00:00:00Z)")
+    if args.as_of is not None:
+        try:
+            args.as_of = datetime.fromisoformat(args.as_of.replace("Z", "+00:00"))
+        except ValueError:
+            p.error(f"--as-of {args.as_of!r} is not an ISO 8601 instant")
+        if args.as_of.tzinfo is None:
+            p.error("--as-of needs a timezone (e.g. 2026-11-03T19:30:00Z)")
     if args.expect_plan is not None:
         try:
             args.expect_plan = parse_expect_plan(args.expect_plan)
@@ -687,7 +815,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             apply_changes=args.apply,
             out_csv=args.out_csv,
             expect_plan=args.expect_plan,
+            as_of=args.as_of,
         )
+    except FutureAsOf as exc:
+        logger.error("REFUSED: %s — nothing read or written", exc)
+        return 2
     except ApplyMismatch as exc:
         logger.error("%s", exc)
         return 1
