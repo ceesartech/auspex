@@ -446,9 +446,11 @@ def test_the_resolver_must_be_the_athlete_id_one(monkeypatch):
     res, why = mic.load_resolvers()
     assert why is None and res is not None
     import dataclasses
+    import importlib
 
-    plain = dataclasses.replace(fu.SPORT_CONFIGS["mma"], athlete_ids=False)
-    monkeypatch.setitem(fu.SPORT_CONFIGS, "mma", plain)
+    deployed = importlib.import_module("fetch_upcoming")  # the module load_resolvers reads (other tests re-load it)
+    plain = dataclasses.replace(deployed.SPORT_CONFIGS["mma"], athlete_ids=False)
+    monkeypatch.setitem(deployed.SPORT_CONFIGS, "mma", plain)
     res, why = mic.load_resolvers()
     assert res is None and "athlete id" in why
 
