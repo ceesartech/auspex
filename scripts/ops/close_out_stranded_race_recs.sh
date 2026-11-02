@@ -35,6 +35,9 @@
 # 7). Run early on the same replica: 07:00Z on 11-02 NOT YET; 18:00Z on
 # 11-03 PARTIAL (4 voided, 3 left until 19:25Z); 18:30Z NOT YET; 19:00Z
 # PARTIAL (2 voided, 1 left); 19:30Z DONE (1 voided); 19:40Z ALREADY DONE.
+# With every race answering 401 (the subscription gone first): ABORT at
+# step 0, before the backup. All of it again with this commit's code on the
+# 2026-11-02T07:51:57Z export: the same.
 #
 # WHEN: at or after 2026-11-03 19:30Z, and before the Racing API subscription
 # is cancelled (the plan asks the API about every race; without it every race
