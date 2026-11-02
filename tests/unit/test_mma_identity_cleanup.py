@@ -11,7 +11,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -294,6 +294,8 @@ def test_the_done_split_is_recognised_and_tolerates_new_bouts():
         ("alias_claimed", "already claimed"),
         ("move_athlete_elsewhere", "already on team"),
         ("bout_side_changed", "not as reviewed"),
+        ("bout_kickoff_changed", "not as reviewed"),
+        ("bout_status_changed", "not as reviewed"),
         ("bout_missing", "not on either row"),
         ("renamed", "is named"),
         ("half_done", "not complete"),
@@ -319,6 +321,10 @@ def test_the_split_refuses(case, why):
         teams.append(team("x", "Someone", espn=MOVE))
     elif case == "bout_side_changed":
         matches[M1] = {**matches[M1], "home": T, "away": OPP}
+    elif case == "bout_kickoff_changed":  # a kept bout: only the per-bout check reads it
+        matches[M2] = {**matches[M2], "match_date": K2 + timedelta(hours=1)}
+    elif case == "bout_status_changed":
+        matches[M2] = {**matches[M2], "status": "cancelled"}
     elif case == "bout_missing":
         del matches[M3]
     elif case == "renamed":
@@ -329,6 +335,18 @@ def test_the_split_refuses(case, why):
     assert sp.action == "refuse" and why in sp.reason, sp.reason
     if case in ("rec_on_moved", "history_on_moved"):
         assert mic.summarize(mic.RunPlan(sp, [], [], []))["recs_on_moved"] == 1
+
+
+def test_a_half_done_split_with_a_moved_bout_still_on_the_old_row_refuses_not_done():
+    teams = [
+        team(T, "Bruno Silva", espn=KEEP),
+        team(N, "Bruno Silva (ESPN 4333158)", espn=MOVE, aliases=["Bruno Silva"]),
+        team(OPP, "Opponent"),
+    ]
+    matches = bouts_on(moved_to=N)
+    matches[M1] = {**matches[M1], "away": T}  # one Blindado bout was never re-pointed
+    sp = mic.plan_split(split_list(), state(teams=teams, matches=matches), resolvers())
+    assert sp.action == "refuse" and "1 moved bout(s) still on the split row" in sp.reason, sp.reason
 
 
 # ── alias, orphan, ids ───────────────────────────────────────────────
@@ -429,6 +447,39 @@ def test_the_digest_moves_with_a_decision():
     assert changed["digest"] != before["digest"]
     assert mic.plan_difference(before, changed) is not None
     assert mic.plan_difference({"tool": "merge_mma_fighters", "digest": "x"}, before).startswith("the expected plan")
+
+
+def test_a_difference_only_the_digest_sees_still_refuses():
+    """Same actions everywhere, but the split row's metadata (which the guarded stamp writes back) changed: only
+    the digest differs, and that alone must refuse the apply."""
+    before = _doc(state())
+    teams = [
+        team(T, "Bruno Silva", note="edited"),
+        team(RAF, "Rafael Cerqueira"),
+        team(JOSE, "José Luiz"),
+        team(ZACH, "Zach Reese", espn="5143223", aliases=["Zachary Reese"]),
+        team(OPP, "Opponent"),
+    ]
+    changed = _doc(state(teams=teams))
+    assert changed["summary"] == before["summary"] and changed["digest"] != before["digest"]
+    assert mic.plan_difference(before, changed) == "the plan digest differs from the expected plan"
+    assert (
+        mic.plan_difference(dict(before, digest="0" * 64), before) == "the plan digest differs from the expected plan"
+    )
+
+
+def test_plan_difference_names_an_id_that_changed():
+    before = _doc(state())
+    teams = [
+        team(T, "Bruno Silva"),
+        team(RAF, "Rafael Cerqueira"),
+        team(JOSE, "José Luiz"),
+        team(ZACH, "Zach Reese", espn="1", aliases=["Zachary Reese"]),
+        team(OPP, "Opponent"),
+    ]
+    assert mic.plan_difference(before, _doc(state(teams=teams))) == (
+        f"ids {ZACH}: the planned athlete id differs from the expected plan"
+    )
 
 
 def test_summary_and_refusals():

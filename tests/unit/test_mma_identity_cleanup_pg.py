@@ -13,9 +13,13 @@ built from services/data-ingestion/db/migrations, one database per test):
     written; so does a rec on a bout to move; an in-transaction after-state
     that fails rolls everything back; an archive that already exists stops
     it before any write;
-  * the SQL guards: a bout, an orphan or a team row that changed after the
-    plan stops the write (GuardError);
-  * --check-after counts a row that lost its athlete id.
+  * the SQL guards: a bout, an orphan, a team row, the split row (its ESPN
+    id or metadata), a row taking the moved athlete's id, or an id stamped on
+    the orphan after the plan stops the write (GuardError); an expected plan
+    that differs only in its digest refuses the apply;
+  * the dry run's transaction is READ ONLY;
+  * --check-after counts a row that lost its athlete id, an alias that no
+    longer resolves, and one athlete id on two rows.
 
 Skipped where no Postgres server binaries are on PATH (initdb, pg_ctl).
 """
@@ -373,7 +377,9 @@ def test_an_existing_archive_stops_the_apply_before_any_write(conn, tmp_path):
     assert rc == 1 and _fingerprint(conn) == before and archive.read_bytes() == b"x"
 
 
-@pytest.mark.parametrize("change", ["bout", "orphan", "stamped", "alias"])
+@pytest.mark.parametrize(
+    "change", ["bout", "orphan", "stamped", "alias", "split_espn", "split_metadata", "move_athlete_taken", "orphan_id"]
+)
 def test_the_sql_guards_stop_a_write_on_a_changed_row(conn, change):
     w = _world(conn)
     res, _ = mic.load_resolvers()
@@ -390,6 +396,16 @@ def test_the_sql_guards_stop_a_write_on_a_changed_row(conn, change):
             cur.execute(
                 'UPDATE teams SET metadata = \'{"aliases": ["R. Cerqueira"]}\'::jsonb WHERE id = %s', (w["raf"],)
             )
+        elif change == "split_espn":  # the split row picked up an id (the stamp's observed-espn guard)
+            cur.execute('UPDATE teams SET external_ids = \'{"espn": "1"}\'::jsonb WHERE id = %s', (w["bruno"],))
+        elif change == "split_metadata":  # its metadata changed (the stamp writes metadata back whole)
+            cur.execute('UPDATE teams SET metadata = \'{"note": "x"}\'::jsonb WHERE id = %s', (w["bruno"],))
+        elif change == "move_athlete_taken":  # a row took the moved athlete's id (the INSERT's NOT EXISTS guard)
+            cur.execute(
+                'UPDATE teams SET external_ids = \'{"espn": "%s"}\'::jsonb WHERE id = %%s' % MOVE, (w["weidman"],)
+            )
+        elif change == "orphan_id":  # the orphan got an identity (the DELETE's no-ESPN-id guard)
+            cur.execute('UPDATE teams SET external_ids = \'{"espn": "3097880"}\'::jsonb WHERE id = %s', (w["jose"],))
         with pytest.raises(mic.GuardError, match="touched 0 row"):
             mic.apply_writes(cur, plan, w["lists"], state, res)
     conn.rollback()
@@ -409,6 +425,75 @@ def test_check_after_counts_a_row_that_lost_its_athlete_id(conn, tmp_path):
     conn.rollback()
     assert out["ids_missing"] == 1 and not mic.after_state_ok(out)
     assert mic.run_check_after(conn, tmp_path / "dry.plan.json", res, None) == 1
+
+
+def test_an_expected_plan_differing_only_in_its_digest_refuses_with_nothing_written(conn, tmp_path):
+    w = _world(conn)
+    rc, dry = _run(conn, w, tmp_path, tag="dry")
+    assert rc == 0
+    before = _fingerprint(conn)
+    rc, _ = _run(conn, w, tmp_path, apply=True, expect=dict(dry, digest="0" * 64), tag="apply")
+    assert rc == 2 and _fingerprint(conn) == before
+    assert not (tmp_path / "apply.jsonl.gz").exists()
+
+
+def test_the_dry_run_reads_in_a_read_only_transaction(conn, tmp_path, monkeypatch):
+    w = _world(conn)
+    seen = []
+    real = mic.load_state
+
+    def spy(cur, lists, lock=False):
+        cur.execute("SHOW transaction_read_only")
+        seen.append(cur.fetchone()["transaction_read_only"])
+        return real(cur, lists, lock)
+
+    monkeypatch.setattr(mic, "load_state", spy)
+    rc, dry = _run(conn, w, tmp_path, tag="dry")
+    assert rc == 0 and seen == ["on"]
+    rc, _ = _run(conn, w, tmp_path, apply=True, expect=dry, tag="apply")
+    assert rc == 0 and seen == ["on", "off"]
+
+
+def _applied(conn, w, tmp_path):
+    rc, dry = _run(conn, w, tmp_path, tag="dry")
+    rc, _ = _run(conn, w, tmp_path, apply=True, expect=dry, tag="apply")
+    assert rc == 0
+    return dry
+
+
+def _after(conn, dry):
+    res, _ = mic.load_resolvers()
+    with _cur(conn) as cur:
+        out = mic.check_after(cur, dry, res)
+    conn.rollback()
+    return out
+
+
+def test_check_after_counts_an_alias_that_no_longer_resolves(conn, tmp_path):
+    w = _world(conn)
+    dry = _applied(conn, w, tmp_path)
+    assert mic.after_state_ok(_after(conn, dry))
+    with _cur(conn) as cur:  # a row minted under ESPN's spelling: the plain-name lookup now finds it first
+        _fighter(cur, "Raffael Cerqueira", espn="9999999")
+    conn.commit()
+    out = _after(conn, dry)
+    assert out["alias_resolver_misses"] == 1 and out["alias_missing"] == 0 and not mic.after_state_ok(out), out
+
+
+def test_check_after_counts_one_athlete_id_on_two_rows(conn, tmp_path):
+    w = _world(conn)
+    dry = _applied(conn, w, tmp_path)
+    with _cur(conn) as cur:  # two rows the lists never name
+        cur.execute(
+            'UPDATE teams SET external_ids = \'{"espn": "8888888"}\'::jsonb WHERE id = ANY(%s::uuid[])',
+            ([w["weidman"], w["durden"]],),
+        )
+    conn.commit()
+    out = _after(conn, dry)
+    assert out["athlete_ids_on_two_rows"] == 1 and not mic.after_state_ok(out), out
+    assert {k: v for k, v in out.items() if k not in ("athlete_ids_on_two_rows",) + mic.AFTER_INFO} == {
+        k: 0 for k in mic.AFTER_KEYS if k not in ("athlete_ids_on_two_rows",) + mic.AFTER_INFO
+    }
 
 
 def test_a_team_write_in_flight_fails_the_apply_with_nothing_written(conn, dsn, tmp_path, monkeypatch):

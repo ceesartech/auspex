@@ -2,7 +2,8 @@
 # scripts/mma_identity_cleanup.py stamps it on teams.external_ids.espn, the id fetch_upcoming now resolves MMA
 # fighters by first. Built read-only from the prod export of 2026-11-02T06:22:51Z and ESPN's UFC scoreboards
 # (site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard?dates=YYYYMMDD) for every date holding an MMA row,
-# the day before and the day after (714 days, fetched 2026-11-02).
+# the day before and the day after (714 dates), plus the next 45 days for the upcoming cards: 744 scoreboards,
+# fetched 2026-11-02.
 # Method: each matches row finds its ESPN competition by the id it carries (external_ids.espn or
 # metadata.cancelled_espn_id / redrawn_espn_id; method competition_id) or, failing that, as the ONE competition
 # within 18 h whose two competitors' accent- and punctuation-folded names are the row's two fighters' names or
