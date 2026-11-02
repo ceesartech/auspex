@@ -3,9 +3,10 @@ stale copies of their fought bouts into the finished rows.
 
 THE BUG THIS REPAIRS
 --------------------
-MMA fighters are team rows (sport 'mma', one row per fighter), and
-fetch_upcoming resolves an ESPN competitor by name: an individual sport's ESPN
-athlete id is not read (_competitor_espn_id returns None for one). When ESPN
+MMA fighters are team rows (sport 'mma', one row per fighter), and until
+2026-11-02 fetch_upcoming resolved an ESPN competitor by name: an individual
+sport's ESPN athlete id was not read (it is since: SportConfig.athlete_ids,
+and scripts/mma_identity_cleanup.py stamped the ids it keys on). When ESPN
 changed a fighter's display name ('Zachary Reese' -> 'Zach Reese', 'Cristian
 Perez' -> 'Cristian Pérez', 'Ce Liu' -> 'Liu Ce'), the next sweep found no row
 of that name and inserted a second one. The bout scheduled under the old name
@@ -73,8 +74,9 @@ WHAT A RUN DOES (ONE transaction: any failure rolls all of it back)
    {team_id, name, normalized_name, espn_athlete_id, merged_at}. The ESPN
    athlete id is stamped on the kept row (external_ids.espn, through
    team_identity.stamp_espn_id's guard: the row holds none and no other MMA
-   row holds it). Today's MMA resolver does not read it (see above); it is the
-   identity a future athlete-id resolver keys on, and the record of the merge.
+   row holds it). It is the identity the MMA resolver keys on first since
+   2026-11-02 (fetch_upcoming SportConfig.athlete_ids), and the record of the
+   merge.
 4. Delete the merged row (guarded: same name, nothing references it under any
    foreign key to teams; matches -> teams cascades, so this runs after the
    re-point and a reference check).

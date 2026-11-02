@@ -2,8 +2,8 @@
 
 Populates the `matches` table with future (status='scheduled') fixtures
 for the configured leagues of the chosen sport. Matched to existing
-teams by ESPN team id, then name (see find_team); new teams are inserted
-on the fly.
+teams by ESPN team id (for MMA, the fighter's ESPN athlete id), then name
+(see find_team); new teams are inserted on the fly.
 
 ESPN's scoreboard endpoint returns the current scoring window (a few
 days) plus you can pass ?dates=YYYYMMDD to walk forward up to ~2 weeks.
@@ -166,6 +166,16 @@ class SportConfig:
     # Not tennis: a tournament event spans weeks and a day's scoreboard
     # carries only some of its matches.
     card_events: bool = False
+    # True when an individual sport resolves a competitor by ESPN's ATHLETE
+    # id first (teams.external_ids.espn on the athlete's row), by name and
+    # aliases only when no row carries that id, stamping the id onto the row
+    # its name finds; a name that finds only rows of OTHER athletes is
+    # refused, never given a second row (ensure_team). MMA since 2026-11-02:
+    # ESPN changed 9 UFC fighters' display names and the name-only resolver
+    # gave each a second row (scripts/merge_mma_fighters.py). Not tennis yet:
+    # its rows carry no athlete ids (a follow-up, like MMA's: a reviewed
+    # backfill first, scripts/ops/mma_identity_cleanup.sh).
+    athlete_ids: bool = False
 
 
 # ── Soccer config ─────────────────────────────────────────────────────
@@ -335,6 +345,7 @@ SPORT_CONFIGS: dict[str, SportConfig] = {
         # labeling.
         is_individual=True,
         card_events=True,
+        athlete_ids=True,
     ),
 }
 
@@ -459,7 +470,17 @@ def ensure_team(
     IDENTITY_STATS['team_namesakes'] so it exits 3 once; later sweeps resolve
     it by id. None only on an ESPN-id conflict (the id on two rows, the
     seeded row holding another id, a stamp refused on a new row), counted in
-    IDENTITY_STATS['team_conflicts'] — the competition is then skipped."""
+    IDENTITY_STATS['team_conflicts'] — the competition is then skipped.
+
+    An athlete-id sport (cfg.athlete_ids: MMA) has no namesake rows: one row
+    is one ESPN athlete. A fighter whose athlete id no row carries and whose
+    name (or alias) resolves only to rows carrying OTHER athlete ids is
+    refused the same way (team_conflicts, the competition skipped, exit 3):
+    a second athlete under a name a fighter already holds, or a stamp that
+    is wrong, needs a person (scripts/ops/mma_identity_cleanup.sh split the
+    two Bruno Silvas into 'Bruno Silva' and 'Bruno Silva (ESPN 4333158)').
+    On rows that carry no athlete id it resolves exactly as by name alone,
+    and stamps the id onto the row it found."""
     espn_id = str(espn_id) if espn_id else None
     label = f"{cfg.sport} {name!r}"
     found = _find_team(cur, cfg, name, league_id, espn_id)
@@ -472,6 +493,9 @@ def ensure_team(
         return found.team_id
     if found.how == "refused":
         IDENTITY_STATS["team_conflicts"] += 1
+        return None
+    if found.how == "namesake" and cfg.athlete_ids:
+        _refuse_other_athletes_row(cfg, name, espn_id, found, "the competition is skipped")
         return None
 
     insert_name = name
@@ -522,6 +546,26 @@ def ensure_team(
     return row["id"]
 
 
+def _refuse_other_athletes_row(cfg: SportConfig, name: str, espn_id: str | None, found: TeamLookup, what: str) -> None:
+    """Count and log an athlete-id sport's refusal (see ensure_team): no row
+    carries ESPN athlete `espn_id`, and every row `name` resolves to carries
+    another athlete's id (found.blocked)."""
+    IDENTITY_STATS["team_conflicts"] += 1
+    logger.error(
+        "Refusing %s athlete %r (ESPN athlete id %s): no row carries that id, and the name resolves only to %s — "
+        "another athlete under the same name, or a wrong stamp. Not merged and not inserted as a second row: %s, "
+        "and this run exits %d. A new athlete under a taken name gets its own row stamped with its id (named "
+        "'<name> (ESPN <id>)', as scripts/mma_identity_cleanup.py split Bruno Silva); a wrong stamp is repaired on "
+        "its row.",
+        cfg.sport,
+        name,
+        espn_id,
+        "; ".join(f"team {tid} ({tier} match, ESPN athlete {held})" for tier, tid, held in found.blocked),
+        what,
+        IDENTITY_EXIT_CODE,
+    )
+
+
 def namesake_name(cur, cfg: SportConfig, name: str, espn_id: str | None, alt_names: tuple[str, ...] = ()) -> str:
     """A name for the row of a club whose display name another ESPN team
     holds, free under UNIQUE(normalized_name, sport) and in every name tier.
@@ -558,7 +602,8 @@ def find_team(cur, cfg: SportConfig, name: str, league_id: str | None, espn_id: 
     football-data "Tottenham"), and a miss mints a twin with no history, so
     the lookup runs in tiers (the shared rules live in team_identity):
 
-      1. The ESPN team id, when the caller has one (teams.external_ids.espn).
+      1. The ESPN team id, when the caller has one (teams.external_ids.espn);
+         for an athlete-id sport (cfg.athlete_ids: MMA) the ESPN athlete id.
          The id on two rows is corruption: refused, never resolved by name.
       1b. Soccer: the seed (team_identity.seed_entry) — ESPN ids whose names
          collide, pinned to their rows ('Santos' FC vs Santos Laguna).
@@ -921,13 +966,19 @@ def _competitor_name(competitor: dict, is_individual: bool) -> str | None:
     return team.get("displayName") or team.get("name")
 
 
-def _competitor_espn_id(competitor: dict, is_individual: bool) -> str | None:
-    """ESPN's id for a team-sport competitor's team (.team.id, else the
-    competitor's own .id, which ESPN sets to the same value), as a string.
-    None for an individual sport: athlete rows are not keyed by ESPN id."""
+def _competitor_espn_id(competitor: dict, is_individual: bool, athlete_ids: bool = False) -> str | None:
+    """ESPN's id for a competitor, as a string: a team sport's team (.team.id,
+    else the competitor's own .id, which ESPN sets to the same value); an
+    individual sport's athlete (.athlete.id, else the competitor's own .id:
+    the UFC scoreboard carries the athlete id only there) when the sport
+    resolves by athlete id (SportConfig.athlete_ids: MMA). None for another
+    individual sport (tennis): its rows are not keyed by ESPN id."""
     if is_individual:
-        return None
-    raw = (competitor.get("team") or {}).get("id") or competitor.get("id")
+        if not athlete_ids:
+            return None
+        raw = (competitor.get("athlete") or {}).get("id") or competitor.get("id")
+    else:
+        raw = (competitor.get("team") or {}).get("id") or competitor.get("id")
     return str(raw) if raw not in (None, "") else None
 
 
@@ -1029,7 +1080,9 @@ LARGE_SHIFT_HOURS = 24
 #                   confirm it is not a mis-stamped id; once only, since later
 #                   sweeps resolve it by its id;
 #   team_conflicts  ESPN team id conflicts (the id on two rows, the seed and a
-#                   stamp disagreeing, a guarded stamp refused); a side left
+#                   stamp disagreeing, a guarded stamp refused), and an MMA
+#                   fighter whose athlete id no row carries while his name
+#                   resolves only to rows of other athletes; a side left
 #                   unresolved skips its competition.
 # The rest of the sweep is still written and committed. An ERROR line alone
 # was not enough: from 2026-09-29 to 2026-10-10 the soccer fixtures path
@@ -1096,7 +1149,21 @@ def build_pair_index(cfg: SportConfig, events: list[dict]) -> dict[tuple[str, st
     return index
 
 
-_PLACEHOLDER_NAMES = {"tbd", "tba", "to be determined", "to be announced", "bye", "qualifier"}
+_PLACEHOLDER_NAMES = {
+    "tbd",
+    "tba",
+    "to be determined",
+    "to be announced",
+    "bye",
+    "qualifier",
+    # A UFC slot whose opponent is not booked yet (a 2026-07-29 sweep minted an 'Opponent TBA' fighter row). Skipped
+    # like TBD/TBA, and never resolved by ESPN athlete id: whatever id ESPN gives the slot would be stamped onto that
+    # row, and a different id on the next such slot would be refused every sweep (exit 3).
+    "opponent tba",
+    "opponent tbd",
+    "tba opponent",
+    "tbd opponent",
+}
 
 # Knockout-bracket slots ESPN publishes before the teams are known. Each name
 # is reused from tournament to tournament and fuzzy-matches its siblings
@@ -1823,8 +1890,8 @@ def _process_competition(cur, cfg: SportConfig, league_id: str, comp: dict, even
         away_name,
         espn_id,
         match_dt,
-        home_espn=_competitor_espn_id(home, cfg.is_individual),
-        away_espn=_competitor_espn_id(away, cfg.is_individual),
+        home_espn=_competitor_espn_id(home, cfg.is_individual, cfg.athlete_ids),
+        away_espn=_competitor_espn_id(away, cfg.is_individual, cfg.athlete_ids),
         home_alt=_competitor_alt_names(home, cfg.is_individual),
         away_alt=_competitor_alt_names(away, cfg.is_individual),
     )
@@ -2494,10 +2561,15 @@ def _existing_side(cur, cfg: SportConfig, name: str, league_id: str, competitor:
     fixture row 'drifted' and was refused every sweep. An ESPN-id conflict
     (the id on two rows, the seed and a stamp disagreeing) leaves the side
     unresolved and is counted in IDENTITY_STATS['team_conflicts'], as
-    ensure_team counts it: a postponed competition never reaches ensure_team."""
-    found = _find_team(cur, cfg, name, league_id, _competitor_espn_id(competitor, cfg.is_individual))
+    ensure_team counts it: a postponed competition never reaches ensure_team.
+    So is an athlete-id sport's athlete whose name resolves only to rows of
+    other athletes (ensure_team's refusal)."""
+    espn_id = _competitor_espn_id(competitor, cfg.is_individual, cfg.athlete_ids)
+    found = _find_team(cur, cfg, name, league_id, espn_id)
     if found.how == "refused":
         IDENTITY_STATS["team_conflicts"] += 1
+    elif found.how == "namesake" and cfg.athlete_ids:
+        _refuse_other_athletes_row(cfg, name, espn_id, found, "its status change is not recorded")
     return found.team_id
 
 
@@ -2681,8 +2753,8 @@ def _record_result(cur, cfg: SportConfig, league_id: str, comp: dict, event_cont
         away_name,
         espn_id,
         match_dt,
-        home_espn=_competitor_espn_id(home, cfg.is_individual),
-        away_espn=_competitor_espn_id(away, cfg.is_individual),
+        home_espn=_competitor_espn_id(home, cfg.is_individual, cfg.athlete_ids),
+        away_espn=_competitor_espn_id(away, cfg.is_individual, cfg.athlete_ids),
         home_alt=_competitor_alt_names(home, cfg.is_individual),
         away_alt=_competitor_alt_names(away, cfg.is_individual),
     )
@@ -2909,8 +2981,13 @@ def cancel_dropped_bouts(cur, cfg: SportConfig, league_id: str, events: list[dic
             if parts is None:
                 unparsed = True
                 break
-            home_id = find_team(cur, cfg, parts[2], league_id)
-            away_id = find_team(cur, cfg, parts[3], league_id)
+            # Resolved as the sweep resolves them (an MMA fighter by athlete id first); never written.
+            home_id = find_team(
+                cur, cfg, parts[2], league_id, _competitor_espn_id(parts[0], cfg.is_individual, cfg.athlete_ids)
+            )
+            away_id = find_team(
+                cur, cfg, parts[3], league_id, _competitor_espn_id(parts[1], cfg.is_individual, cfg.athlete_ids)
+            )
             ids = {str(t) for t in (home_id, away_id) if t}
             fighters |= ids
             if len(ids) == 2:

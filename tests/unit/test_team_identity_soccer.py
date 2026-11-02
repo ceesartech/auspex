@@ -523,14 +523,15 @@ class TestCallSitesPassTheEspnId:
         assert fu._process_competition(None, SOCCER, BR, comp)
         assert self.alts == [("Athletico Paranaense",), ("Santos",)]
 
-    @pytest.mark.parametrize("sport", ["tennis", "mma"])
-    def test_athlete_paths_pass_no_espn_id(self, calls, sport):
+    @pytest.mark.parametrize("sport, ids", [("tennis", (None, None)), ("mma", ("3623", "3782"))])
+    def test_athlete_paths_pass_an_athlete_id_only_for_mma(self, calls, sport, ids):
+        """MMA resolves fighters by ESPN athlete id since 2026-11-02 (test_fetch_upcoming_mma_athlete_ids.py)."""
         comp = _comp(
             {"id": "3623", "athlete": {"id": "3623", "displayName": "Carlos Alcaraz"}},
             {"id": "3782", "athlete": {"id": "3782", "displayName": "Jannik Sinner"}},
         )
         assert fu._process_competition(None, fu.SPORT_CONFIGS[sport], "lg", comp)
-        assert calls == [("Carlos Alcaraz", None), ("Jannik Sinner", None)]
+        assert calls == [("Carlos Alcaraz", ids[0]), ("Jannik Sinner", ids[1])]
 
     def test_an_athlete_resolution_issues_no_espn_or_fuzzy_sql(self):
         db = FakeDB([team("p1", "Carlos Alcaraz", sport="tennis")])

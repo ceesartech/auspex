@@ -1,0 +1,13 @@
+# Bout-less MMA fighter rows scripts/mma_identity_cleanup.py deletes (archived first; reviewed 2026-11-02).
+#   'José Luiz' (created 2026-06-06 by the ESPN sweep for Jhonata Diniz v 'José Luiz', 2026-06-20, which ESPN
+#   dropped from the card; run B of repair_stranded_recs_mma.sh deleted that bout 2026-11-02 as a no-twin row,
+#   archive fixture_orphans_mma_20261102T043520Z.jsonl.gz). Which ESPN athlete it was cannot be established (see
+#   mma_fighter_aliases_20261102.csv), so it is not aliased to José Montanha; with no bout, no ESPN id and no
+#   reference under any foreign key to teams, the row only lets a future 'José Luiz' resolve to a stranger.
+# Not listed: 'Valesca Machado' (the parallel stream mma_draws_held owns it) and 8 other bout-less rows
+#   (Rodrigo Vera, Max Gimenis, Ramiro Jimenez, Uran Satybaldiev, Henrique da Silva Lopes, Ethyn Ewing, and the
+#   placeholders 'TBA' and 'Opponent TBA'): not part of the reviewed cleanup. fetch_upcoming skips both names as
+#   placeholders before resolving a fighter (TBA always; 'Opponent TBA' since 2026-11-02), so nothing resolves
+#   to those two rows or stamps an athlete id on them.
+team_id,team_name,created_at,evidence
+83681ac6-0fa1-49b9-b8f4-65dedd68a8a0,José Luiz,2026-06-07T00:00:01+00:00,"no bout (Jhonata Diniz v José Luiz fb14d227, 2026-06-20, deleted by run B 2026-11-02); ESPN athlete unknowable; no ESPN id, no alias, no reference"
