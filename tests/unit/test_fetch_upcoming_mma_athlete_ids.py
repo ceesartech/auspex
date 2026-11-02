@@ -172,6 +172,8 @@ class TestCallSites:
         monkeypatch.setattr(fu, "insert_scheduled_match", lambda *a, **k: 1)
         monkeypatch.setattr(fu, "insert_finished_match", lambda *a, **k: 1)
         monkeypatch.setattr(fu, "_stamp_identity", lambda *a, **k: True)
+        # The parallel stream mma_draws_held adds this read to the results path; absent here (raising=False).
+        monkeypatch.setattr(fu, "_result_kind_allowed", lambda *a, **k: True, raising=False)
         return seen
 
     def test_the_fixtures_path_passes_mma_athlete_ids(self, calls):
