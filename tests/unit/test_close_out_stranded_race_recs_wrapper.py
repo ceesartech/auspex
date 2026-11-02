@@ -365,6 +365,14 @@ def test_its_own_processes_do_not_count_as_another_ops_run(tmp_path):
     assert rc == 0 and "DONE" in out, out
 
 
+def test_a_long_process_list_is_read_whole(tmp_path):
+    # ~1 MB after this script's own line: `echo "$procs" | grep -q` under pipefail failed here (grep stops at the
+    # match, the echo's write fails) and read as "cannot list".
+    filler = "\n".join(f"{90000 + i} /usr/sbin/some-daemon --flag {'x' * 40}" for i in range(16000))
+    rc, out, _ = _run(tmp_path, _rules(), ps_extra=filler)
+    assert rc == 0 and "DONE" in out, out[-2000:]
+
+
 def test_an_unreadable_process_list_refuses(tmp_path):
     rc, out, calls = _run(tmp_path, _rules(), ps_fail=True)
     assert rc == 1 and "REFUSED: cannot list this host's processes" in out, out

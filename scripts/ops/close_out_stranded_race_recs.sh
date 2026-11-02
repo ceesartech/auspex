@@ -182,13 +182,15 @@ gate() {
 
 log "0/4 preconditions (read only)"
 # Another scripts/ops wrapper (or the soccer runbook) on this host. This script's own processes and subshells carry
-# its name; a second run of it is the lock's job.
+# its name; a second run of it is the lock's job. The list is read from here-strings, not `echo | grep -q`: grep -q
+# stops at its first match, and under pipefail (SIGPIPE is ignored: _airflow_lib.sh) the echo's write error on a long
+# list would read as "cannot list".
 self=$(basename "$0")
 procs=$(ps -eo pid=,args= 2>/dev/null)
-if ! echo "$procs" | grep -q "^ *$$ "; then
+if ! grep -q "^ *$$ " <<< "$procs"; then
   log "REFUSED: cannot list this host's processes (ps) to rule out another scripts/ops run — nothing changed"; exit 1
 fi
-others=$(echo "$procs" | awk -v self="$self" '$0 ~ /scripts\/ops\/[A-Za-z0-9_.-]+\.sh/ && index($0, self) == 0')
+others=$(awk -v self="$self" '$0 ~ /scripts\/ops\/[A-Za-z0-9_.-]+\.sh/ && index($0, self) == 0' <<< "$procs")
 if [ -n "$others" ]; then
   log "REFUSED: another scripts/ops process is running on this host — wait for it to end, then re-run; nothing changed:"
   echo "$others"
