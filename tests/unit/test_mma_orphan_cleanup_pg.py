@@ -481,3 +481,24 @@ def test_check_after_counts_a_deleted_row_that_came_back(conn, tmp_path):
         row["league_id"],
     )
     assert moc.run_check_after(conn, tmp_path / "dry.plan.json") == 1
+
+
+def test_a_delete_whose_guard_no_longer_matches_stops_at_that_delete(conn, tmp_path, monkeypatch, caplog):
+    """Each DELETE must touch exactly one row: one that touches none (the row differs from what the plan saw)
+    stops the run right there, and nothing is committed."""
+    w = _world(conn)
+    rc, dry = _run(conn, w, tmp_path, tag="dry")
+    real = moc.delete_params
+
+    def stale(p):
+        params = real(p)
+        if p.team_id == w["tba"]:
+            params["updated_at"] = params["updated_at"] - timedelta(seconds=1)
+        return params
+
+    monkeypatch.setattr(moc, "delete_params", stale)
+    before = _fingerprint(conn)
+    with caplog.at_level("ERROR"):
+        rc, _ = _run(conn, w, tmp_path, apply=True, expect=dry, tag="apply")
+    assert rc == 1 and _fingerprint(conn) == before
+    assert "touched 0 row(s), expected 1" in caplog.text and "delete 'TBA'" in caplog.text

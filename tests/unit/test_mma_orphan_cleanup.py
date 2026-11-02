@@ -274,3 +274,10 @@ def test_expect_plan_without_apply_is_refused(capsys):
 def test_no_database_url_is_refused(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     assert moc.main(["--database-url", ""]) == 2
+
+
+def test_main_refuses_a_list_naming_a_row_of_another_mma_list_before_connecting(tmp_path):
+    stamped = next(k for k, v in moc.other_list_ids().items() if "athlete-id" in v)
+    lst = _write(tmp_path, [f"{stamped},Someone,,why"])
+    # an unreachable database: the refusal comes before any connection
+    assert moc.main(["--list", str(lst), "--database-url", "postgresql://nobody@127.0.0.1:1/none"]) == 2
