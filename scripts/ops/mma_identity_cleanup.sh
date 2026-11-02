@@ -37,9 +37,12 @@
 #   A re-run plans the done plan (DONE_P below).
 # Steps:
 #   0. refuse while another scripts/ops wrapper or the soccer runbook runs on
-#      this host, while an apply of a scripts/ tool still runs in the api
-#      container, or while a UFC card is on (a UFC bout kicked off within the
-#      last $CARD_BEFORE_H h or starts within $CARD_AFTER_H h, or one is 'live');
+#      this host (a shell running one; this run's own parents, such as sudo,
+#      tmux or the `bash -c` of an ssh one-liner, and its subshells never
+#      count; an unreadable process list refuses), while an apply of a
+#      scripts/ tool still runs in the api container, or while a UFC card is
+#      on (a UFC bout kicked off within the last $CARD_BEFORE_H h or starts
+#      within $CARD_AFTER_H h, or one is 'live');
 #      refuse unless the fighter merge is done and verified
 #      (scripts/ops/merge_mma_fighters.sh --verify, read only).
 #      Already done? The tool's read-only dry run must plan exactly the
@@ -75,7 +78,18 @@
 # the pre-image of every row it changed or deleted (restore the bouts first,
 # then the team rows) and the row it inserted (delete it last).
 # Needs this commit on the VM (scripts/ is bind-mounted: a git pull is enough).
-# Run on the VM host, after scripts/ops/merge_mma_fighters.sh:
+# WHEN: soon after the deploy, and not during a UFC card (step 0). From the
+# deploy on, every sweep stamps the athlete id onto the fighters it finds by
+# name. The pipeline's windows (results 3 days back, fixtures 14 days ahead)
+# never reach either Bruno Silva, but a manual re-fetch of OLD UFC dates
+# between the deploy and this run (backfill_results.py --dates,
+# load_mma_historical.py, fetch_upcoming.py --results over dates before
+# 2026-11) would stamp Blindado's id 4333158 onto the 'Bruno Silva' row, and
+# this run would then refuse at step 0 ('the split row carries ESPN athlete
+# 4333158' or 'bout(s) the list does not assign'): the split list needs a new
+# review. Run none of those in between.
+# Run on the VM host, after scripts/ops/merge_mma_fighters.sh (an interactive
+# shell is the usual way; sudo or an ssh one-liner work too):
 #   bash /opt/auspex/scripts/ops/mma_identity_cleanup.sh 2>&1 | tee -a ~/mma_identity_cleanup.log
 # (AUSPEX_DIR, TMPDIR, AF_STATE_DIR and MMA_IDENTITY_PS exist for tests and rehearsals.)
 set -uo pipefail
@@ -131,7 +145,7 @@ CARD_AFTER_H=3
 STATE_FILE=/app/backups/mma_identity_cleanup_last_apply.env
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)_$$
 PLAN_FILE=/app/backups/mma_identity_cleanup_dryrun_$STAMP.plan.json
-PS_CMD="${MMA_IDENTITY_PS:-ps -eo pid=,args=}"
+PS_CMD="${MMA_IDENTITY_PS:-ps -eo pid=,ppid=,args=}"
 
 reviewed_plan() {  # reviewed_plan <PLAN line>: the reviewed plan, ids_stamp + ids_done = EXPECTED_IDS
   local s d
@@ -141,7 +155,7 @@ reviewed_plan() {  # reviewed_plan <PLAN line>: the reviewed plan, ids_stamp + i
 }
 # run_tool <log name> <command>: the command in the api container; prints its summary lines and exit
 run_tool() {
-  $DC exec -T api sh -c "$2 > /tmp/$1.log 2>&1; rc=\$?; grep -E 'PLAN |PLAN_FILE|AFTER|APPLIED|Archived|WRITTEN|ROLLED BACK|REFUSED|ERROR|Traceback|Error' /tmp/$1.log | tail -30; echo \"tool exit \$rc\"; exit \$rc" </dev/null
+  $DC exec -T api sh -c "$2 > /tmp/$1.log 2>&1; rc=\$?; grep -E 'PLAN |PLAN_FILE|PLAN_DIGEST|AFTER|APPLIED|Archived|WRITTEN|ROLLED BACK|REFUSED|ERROR|Traceback|Error' /tmp/$1.log | tail -30; echo \"tool exit \$rc\"; exit \$rc" </dev/null
 }
 plan_of() { $DC exec -T api sh -c "grep -oE 'PLAN [a-z_]+=[0-9]+( [a-z_]+=[0-9]+)*' /tmp/$1.log | tail -1" </dev/null; }
 read_state_file() { REC=$($DC exec -T api sh -c "cat $STATE_FILE 2>/dev/null" </dev/null); }
@@ -169,20 +183,47 @@ incomplete() {
   exit 2
 }
 
-# others_running: prints every OTHER scripts/ops wrapper or soccer runbook process on this host; 0 when there is one.
-# This run and its own subshells (the same command line) are not others; a second run of this script is held off by
-# its lock (af_lock), not here.
+# others_running: prints every OTHER run of a scripts/ops wrapper or the soccer runbook on this host; 0 when there is
+# one, 1 when there is none, 2 when the process list ($PS_CMD: "pid ppid args" lines) cannot be read.
+# A run is a SHELL (sh, bash, dash, zsh, any path, options allowed) whose script word is a scripts/ops/*.sh path or
+# names one of the wrappers in this directory (a run from inside scripts/ops) or the soccer runbook. Not a run: an
+# editor or pager open on a wrapper, `tail -f` on a log, tee, tmux/screen/sudo themselves (their shell child is the
+# run). This run's own process tree is never 'other': its ancestors (sudo, the `bash -c "... | tee"` of an ssh
+# one-liner, a tmux server, a wrapper that called this one) and its descendants (its subshells). A second run of
+# this script is another run (af_lock holds it off as well).
 others_running() {
-  local me pid args found=1
-  me=$(ps -p $$ -o args= 2>/dev/null)
-  while read -r pid args; do
-    [ -n "$pid" ] && [ "$pid" != "$$" ] || continue
-    [ -n "$me" ] && [ "$args" = "$me" ] && continue
-    case "$args" in
-      *scripts/ops/*.sh* | *soccer_repair_runbook.sh*) echo "  pid $pid: $args"; found=0 ;;
-    esac
-  done < <($PS_CMD 2>/dev/null)
-  return $found
+  local names out
+  names="soccer_repair_runbook.sh $(cd "$OPS" && ls -- *.sh 2>/dev/null | tr '\n' ' ')"
+  out=$($PS_CMD 2>/dev/null) || return 2
+  [ -n "$out" ] || return 2
+  out=$(echo "$out" | awk -v self="$$" -v parent="$PPID" -v names="$names" '
+    function script_of(a,   r) {
+      if (!match(a, /^([^ ]*\/)?(ba|da|z)?sh( +-o +[A-Za-z]+| +-[A-Za-z]+)* +/)) return ""
+      r = substr(a, RSTART + RLENGTH); sub(/ .*/, "", r); return r
+    }
+    BEGIN { n = split(names, nm, " "); for (i = 1; i <= n; i++) known[nm[i]] = 1 }
+    /^[ \t]*[0-9]+[ \t]+[0-9]+/ {
+      a = $0; sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]*/, "", a)
+      par[$1] = $2; cmd[$1] = a; order[++cnt] = $1
+    }
+    END {
+      mine[self] = 1
+      p = parent; hops = 0
+      while (p != "" && p != "0" && !(p in mine) && hops++ < 500) { mine[p] = 1; if (!(p in par)) break; p = par[p] }
+      for (i = 1; i <= cnt; i++) {
+        q = order[i]; c = q; hops = 0
+        while ((c in par) && hops++ < 500) { if (par[c] == self) { mine[q] = 1; break }; c = par[c] }
+      }
+      for (i = 1; i <= cnt; i++) {
+        q = order[i]
+        if (q in mine) continue
+        s = script_of(cmd[q]); b = s; sub(/.*\//, "", b)
+        if (s != "" && (s ~ /(^|\/)scripts\/ops\/[^\/]+\.sh$/ || (b in known))) print "  pid " q ": " cmd[q]
+      }
+    }')
+  [ -n "$out" ] || return 1
+  echo "$out"
+  return 0
 }
 # ufc_card_on: prints the UFC bouts that make a card 'on' now; 0 when there is one, 1 when none, 2 unreadable.
 ufc_card_on() {
@@ -205,10 +246,12 @@ SQL
 
 if [ "$MODE" != verify ]; then
   log "0/5 nothing else running? (scripts/ops wrappers, the soccer runbook, applies in the api container, a UFC card)"
-  if others_running; then
-    log "ABORT at step 0: the process(es) above run a scripts/ops wrapper or the soccer runbook — wait for them to end; nothing changed (no backup)"
-    exit 1
-  fi
+  others_running
+  case $? in
+    0) log "ABORT at step 0: the process(es) above run a scripts/ops wrapper or the soccer runbook — wait for them to end; nothing changed (no backup)"; exit 1 ;;
+    1) ;;
+    *) log "ABORT at step 0: could not list this host's processes ($PS_CMD) — nothing changed (no backup)"; exit 1 ;;
+  esac
   af_lock mma_identity_cleanup || { log "ABORT at step 0: another run of this script holds its lock — nothing changed"; exit 1; }
   af_applies_running mma_identity_cleanup merge_mma_fighters repair_fixture_orphans backfill_results '*'
   case $? in
