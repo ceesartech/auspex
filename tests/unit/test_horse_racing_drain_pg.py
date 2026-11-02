@@ -848,6 +848,31 @@ def test_a_past_as_of_only_shrinks_the_set(dsn, db, tmp_path):
     conn.close()
 
 
+def test_a_rec_on_a_finished_race_the_grader_has_not_reached_is_still_in_the_window(dsn, db, tmp_path, caplog):
+    # The drain has ingested the result (race 'finished') but the grader has not run yet: the rec is pending, so a
+    # run must not let the wrapper report ALREADY DONE — it counts in IN_WINDOW, named as the grader's, and is never
+    # a candidate. Once the grader settles it, nothing is left.
+    race = _race(db, NOW - timedelta(hours=3), status="finished")
+    entrant = _entrant(db, race, "Graded Soon", 1)
+    db.execute("UPDATE race_entrants SET finish_position = 1 WHERE id = %s", (entrant,))
+    rec = _rec(db, race, entrant, "Graded Soon")
+    api = FakeApi({})
+    conn = _conn(dsn)
+    with caplog.at_level("INFO", logger="close_out_stranded_race_recs"):
+        before = cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "before.csv"))
+    assert before["plan"]["candidates"] == 0 and before["in_window"] == 1 and api.calls == []
+    assert before["in_window_until"] == _leaves_window(db, race)
+    (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("  in window: rec ")]
+    assert (
+        line.startswith(f"  in window: rec {rec} ") and "race finished, rec not settled yet: the race grader's" in line
+    )
+    gcr.run(dsn, 14, None)  # drain_horse_racing's second step
+    assert _rec_row(db, rec)[0] == "won"
+    after = cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "after.csv"))
+    assert (after["plan"]["candidates"], after["in_window"], after["beyond_pin"]) == (0, 0, 0)
+    conn.close()
+
+
 def test_beyond_the_pin_is_measured_from_the_same_clock(dsn, db, tmp_path, monkeypatch):
     races, recs, api = _window_world(db)
     pin = races[1]["off"] - timedelta(minutes=30)  # the first race is before it; the other two at or after

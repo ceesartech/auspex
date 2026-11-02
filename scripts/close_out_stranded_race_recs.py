@@ -79,10 +79,13 @@ and, each on its own line (never touched, listed one per line below it):
                                  need a new reviewed pin;
     IN_WINDOW recs=N races=N until=<instant|none>
                                  pending recs on races before --raced-before
-                                 that are still inside the drain's window:
-                                 the drain asks about them every tick, and a
-                                 run after <until> (the last of them leaves
-                                 the window then) makes them candidates.
+                                 that are still inside the drain's window,
+                                 whatever the race's status: the drain asks
+                                 about the open ones every tick, the race
+                                 grader settles the ones on a finished race,
+                                 and a run after <until> (the last of them
+                                 leaves the window then) makes any still
+                                 open candidates.
 
 Usage (inside the api container):
     python /app/scripts/close_out_stranded_race_recs.py --raced-before 2026-11-01T00:00:00Z
@@ -133,6 +136,8 @@ gcr = _load("grade_completed_races")
 
 PLAN_KEYS = ("candidates", "races", "settle", "void", "unmatched", "errors")
 VOID_LABEL = "void: no result in The Racing API feed (abandoned)"
+# A race in one of these is never a candidate (CANDIDATES_SQL); a rec still pending on one is the race grader's.
+FINAL_RACE_STATUSES = frozenset({"finished", "cancelled", "abandoned"})
 CENT = Decimal("0.01")
 
 CSV_COLUMNS = [
@@ -206,12 +211,16 @@ BEYOND_PIN_SQL = """
 # Reported (IN_WINDOW), never touched; each becomes a candidate once its race
 # is DRAIN_DAYS old (candidate_after, worked out in SQL so it uses the same
 # interval arithmetic as the window). A run that closes the candidates while
-# any of these remain has not finished the reviewed set.
+# any of these remain has not finished the reviewed set. Whatever the race's
+# status: a rec still pending on a race that has finished (its result is in,
+# the race grader has not run yet) is pending too, so it keeps the wrapper
+# from reporting ALREADY DONE until the grader has settled it.
 IN_WINDOW_SQL = """
     SELECT rec.id::text AS rec_id,
            rec.race_id::text AS race_id,
            r.race_date,
            r.track_name,
+           r.status AS race_status,
            rec.bet_type,
            h.normalized_name AS horse,
            r.race_date + make_interval(days => %(drain_days)s) AS candidate_after
@@ -220,7 +229,6 @@ IN_WINDOW_SQL = """
     JOIN race_entrants e ON e.id = rec.entrant_id
     JOIN horses h ON h.id = e.horse_id
     WHERE rec.status IN ('pending', 'placed')
-      AND r.status NOT IN ('finished', 'cancelled', 'abandoned')
       AND r.race_date >= %(as_of)s - make_interval(days => %(drain_days)s)
       AND r.race_date < %(raced_before)s
     ORDER BY r.race_date, rec.id
@@ -700,13 +708,17 @@ def run(
     )
     for w in waiting:
         logger.info(
-            "  in window: rec %s  %s %s %s/%s — a candidate after %s",
+            "  in window: rec %s  %s %s %s/%s — %s",
             w["rec_id"],
             _utc(w["race_date"])[:16],
             w["track_name"],
             w["bet_type"],
             w["horse"],
-            _utc(w["candidate_after"]),
+            (
+                f"a candidate after {_utc(w['candidate_after'])}"
+                if w["race_status"] not in FINAL_RACE_STATUSES
+                else f"race {w['race_status']}, rec not settled yet: the race grader's, never a candidate here"
+            ),
         )
     mismatch = "; ".join(
         f"{totals[k]} {k}, expected {n}" for k, n in sorted((expect_plan or {}).items()) if totals[k] != n
