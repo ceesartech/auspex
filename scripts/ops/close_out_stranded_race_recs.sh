@@ -13,7 +13,7 @@
 # were posted after the old two-day results window; 32 voided on abandoned
 # meetings (Newbury 24 Oct, Aintree 25 Oct, Galway 27 Oct, Wexford 26 Oct,
 # Bellewstown 25-26 Aug and seven single races). Its record is
-# /app/backups/closed_out_race_recs_apply_20261102T0350*.csv with its
+# /app/backups/closed_out_race_recs_apply_20261102T035017Z.csv with its
 # .reversal.jsonl and .inserted.jsonl.
 #
 # THIS RUN (the second) closes the last 7: Southwell (AW) 31 Oct 17:40 (4
@@ -25,11 +25,16 @@
 # The drain asks about each race until it is 3 days old (load_racing_api
 # DRAIN_DAYS), so each becomes a candidate here only after
 # 2026-11-03 17:40Z, 18:50Z and 19:25Z.
-# Reviewed plan (prod 2026-11-02, read only; rehearsed on a replica of a
-# fresh read-only export with the clock at 2026-11-03 19:30Z and the API's
-# real answers for the three races):
+# Reviewed plan — rehearsed end to end on a local replica of the
+# 2026-11-02T06:38:41Z read-only export, through a docker shim, with the
+# clock moved to 2026-11-03 19:30Z and the API's real answers for the three
+# races (read 06:21Z): DONE, the after-state exact, a re-run ALREADY DONE
+# with no backup and no API call:
 #   PLAN candidates=7 races=3 settle=0 void=7 unmatched=0 errors=0
-# A result posted late would settle that race instead (settle + void stays 7).
+# A result posted late would settle that race instead (settle + void stays
+# 7). Run early on the same replica: 07:00Z on 11-02 NOT YET; 18:00Z on
+# 11-03 PARTIAL (4 voided, 3 left until 19:25Z); 18:30Z NOT YET; 19:00Z
+# PARTIAL (2 voided, 1 left); 19:30Z DONE (1 voided); 19:40Z ALREADY DONE.
 #
 # WHEN: at or after 2026-11-03 19:30Z, and before the Racing API subscription
 # is cancelled (the plan asks the API about every race; without it every race
