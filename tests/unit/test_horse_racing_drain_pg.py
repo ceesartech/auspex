@@ -737,3 +737,208 @@ def test_a_row_another_writer_commits_after_the_archive_is_not_recorded_as_inser
     inserted = [json.loads(line) for line in (tmp_path / "a.inserted.jsonl").read_text().splitlines()]
     assert [i["table"] for i in inserted] == ["leagues"]  # the track row is ours; the jockey is not
     assert "appeared after the archive but was not inserted by this apply" in caplog.text
+
+
+# ── the clock: one instant per pass, never in the future; recs still in the window ─────────────────────────
+
+
+def _window_world(db):
+    """Three races before the pin, like Southwell 31 Oct: one just out of the drain's window, two still in it."""
+    edge = NOW - timedelta(days=lra.DRAIN_DAYS)  # 2 h margins: the window is DRAIN_DAYS in the session's zone
+    races = [
+        _race(db, edge - timedelta(hours=2)),
+        _race(db, edge + timedelta(hours=2)),
+        _race(db, edge + timedelta(hours=3)),
+    ]
+    recs = [
+        [_rec(db, races[0], _entrant(db, races[0], f"Out {i}", i + 1), f"Out {i}") for i in range(4)],
+        [_rec(db, races[1], _entrant(db, races[1], f"Mid {i}", i + 1), f"Mid {i}") for i in range(2)],
+        [_rec(db, races[2], _entrant(db, races[2], "Last", 1), "Last")],
+    ]
+    return races, recs, FakeApi({r["api"]: None for r in races})
+
+
+def _clock(monkeypatch, at):
+    """Move the tool's clock (tests and rehearsals only: nothing in the tool moves it forward)."""
+    monkeypatch.setattr(cos, "db_now", lambda cur: at)
+
+
+def _leaves_window(db, race):
+    """When `race` leaves the drain's window, in the database's own interval arithmetic (DRAIN_DAYS calendar days
+    in the session's zone — 72 h in prod's UTC, 73 h across a DST change elsewhere)."""
+    db.execute("SELECT %s::timestamptz + make_interval(days => %s) AS t", (race["off"], lra.DRAIN_DAYS))
+    return db.fetchone()["t"]
+
+
+def test_an_early_run_closes_only_what_left_the_window_and_a_later_run_finishes_the_rest(
+    dsn, db, tmp_path, monkeypatch, caplog
+):
+    races, recs, api = _window_world(db)
+    conn = _conn(dsn)
+    with caplog.at_level("INFO", logger="close_out_stranded_race_recs"):
+        first = cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "dry1.csv"))
+    assert first["plan"] == {"candidates": 4, "races": 1, "settle": 0, "void": 4, "unmatched": 0, "errors": 0}
+    assert (first["in_window"], first["in_window_until"]) == (3, _leaves_window(db, races[2]))
+    # The lines the wrapper reads, in the shapes its greps take (grep -o 'IN_WINDOW recs=[0-9]* races=[0-9]*
+    # until=[^ ]*', 'BEYOND_PIN recs=[0-9]*', 'PLAN candidates=.*') — and one 'in window:' line per rec.
+    until = _leaves_window(db, races[2]).astimezone(timezone.utc).isoformat()
+    lines = [r.getMessage() for r in caplog.records]
+    assert any(line.startswith(f"IN_WINDOW recs=3 races=2 until={until} ") for line in lines), lines
+    assert any(line.startswith("BEYOND_PIN recs=0 ") for line in lines)
+    assert "PLAN candidates=4 races=1 settle=0 void=4 unmatched=0 errors=0" in lines
+    assert sum(1 for line in lines if line.startswith("  in window: rec ")) == 3
+    assert api.calls == [races[0]["api"]]  # only the race out of the window is asked about
+    applied = cos.run(
+        conn, RACED_BEFORE, api, apply_changes=True, out_csv=str(tmp_path / "a1.csv"), expect_plan=first["plan"]
+    )
+    assert applied["applied"] and applied["in_window"] == 3
+    assert {_rec_row(db, r)[0] for r in recs[0]} == {"void"}
+    assert {_rec_row(db, r)[0] for r in recs[1] + recs[2]} == {"pending"}  # never touched inside the window
+
+    _clock(monkeypatch, _leaves_window(db, races[2]) + timedelta(minutes=5))
+    second = cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "dry2.csv"))
+    assert second["plan"] == {"candidates": 3, "races": 2, "settle": 0, "void": 3, "unmatched": 0, "errors": 0}
+    assert second["in_window"] == 0 and second["in_window_until"] is None
+    done = cos.run(
+        conn, RACED_BEFORE, api, apply_changes=True, out_csv=str(tmp_path / "a2.csv"), expect_plan=second["plan"]
+    )
+    assert done["applied"] and {_rec_row(db, r)[0] for rs in recs for r in rs} == {"void"}
+    again = cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "verify.csv"))
+    assert again["plan"]["candidates"] == 0 and again["in_window"] == 0 and again["beyond_pin"] == 0
+    conn.close()
+
+
+def test_one_pass_measures_every_step_from_one_instant(dsn, db, tmp_path, monkeypatch):
+    # A race leaves the window between the dry run and the apply: pinned to T0, the apply still plans what the dry
+    # run planned (and the re-plan as of T0 is 0) instead of refusing on drift or failing the after-state.
+    races, recs, api = _window_world(db)
+    t0 = NOW
+    _clock(monkeypatch, _leaves_window(db, races[1]) + timedelta(minutes=1))  # the database is later
+    conn = _conn(dsn)
+    dry = cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "dry.csv"), as_of=t0)
+    assert dry["plan"]["candidates"] == 4 and dry["as_of"] == t0
+    applied = cos.run(
+        conn, RACED_BEFORE, api, apply_changes=True, out_csv=str(tmp_path / "a.csv"), expect_plan=dry["plan"], as_of=t0
+    )
+    assert applied["applied"] and not applied["plan_mismatch"]
+    assert cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "v.csv"), as_of=t0)["plan"]["candidates"] == 0
+    # Unpinned, the later clock sees the second race too.
+    assert cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "now.csv"))["plan"]["candidates"] == 2
+    conn.close()
+
+
+def test_an_as_of_in_the_future_is_refused_before_anything_is_read(dsn, db, tmp_path):
+    races, recs, api = _window_world(db)
+    conn = _conn(dsn)
+    with pytest.raises(cos.FutureAsOf):
+        cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "x.csv"), as_of=NOW + timedelta(days=2))
+    assert api.calls == [] and not (tmp_path / "x.csv").exists()
+    assert {_rec_row(db, r)[0] for rs in recs for r in rs} == {"pending"}
+    conn.close()
+    argv = ["--raced-before", RACED_BEFORE.isoformat(), "--database-url", dsn, "--out-csv", str(tmp_path / "y.csv")]
+    assert cos.main(argv + ["--as-of", (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()]) == 2
+    assert not (tmp_path / "y.csv").exists()
+
+
+def test_a_past_as_of_only_shrinks_the_set(dsn, db, tmp_path):
+    races, recs, api = _window_world(db)
+    conn = _conn(dsn)
+    out = cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "x.csv"), as_of=NOW - timedelta(hours=1))
+    assert out["plan"]["candidates"] == 0 and out["in_window"] == 7 and api.calls == []
+    conn.close()
+
+
+def test_a_rec_on_a_finished_race_the_grader_has_not_reached_is_still_in_the_window(dsn, db, tmp_path, caplog):
+    # The drain has ingested the result (race 'finished') but the grader has not run yet: the rec is pending, so a
+    # run must not let the wrapper report ALREADY DONE — it counts in IN_WINDOW, named as the grader's, and is never
+    # a candidate. Once the grader settles it, nothing is left.
+    race = _race(db, NOW - timedelta(hours=3), status="finished")
+    entrant = _entrant(db, race, "Graded Soon", 1)
+    db.execute("UPDATE race_entrants SET finish_position = 1 WHERE id = %s", (entrant,))
+    rec = _rec(db, race, entrant, "Graded Soon")
+    api = FakeApi({})
+    conn = _conn(dsn)
+    with caplog.at_level("INFO", logger="close_out_stranded_race_recs"):
+        before = cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "before.csv"))
+    assert before["plan"]["candidates"] == 0 and before["in_window"] == 1 and api.calls == []
+    assert before["in_window_until"] == _leaves_window(db, race)
+    (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("  in window: rec ")]
+    assert (
+        line.startswith(f"  in window: rec {rec} ") and "race finished, rec not settled yet: the race grader's" in line
+    )
+    gcr.run(dsn, 14, None)  # drain_horse_racing's second step
+    assert _rec_row(db, rec)[0] == "won"
+    after = cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "after.csv"))
+    assert (after["plan"]["candidates"], after["in_window"], after["beyond_pin"]) == (0, 0, 0)
+    conn.close()
+
+
+def test_beyond_the_pin_is_measured_from_the_same_clock(dsn, db, tmp_path, monkeypatch):
+    races, recs, api = _window_world(db)
+    pin = races[1]["off"] - timedelta(minutes=30)  # the first race is before it; the other two at or after
+    conn = _conn(dsn)
+    now = cos.run(conn, pin, api, out_csv=str(tmp_path / "now.csv"))
+    assert (now["plan"]["candidates"], now["beyond_pin"], now["in_window"]) == (4, 0, 0)
+    _clock(monkeypatch, _leaves_window(db, races[2]) + timedelta(minutes=5))
+    later = cos.run(conn, pin, api, out_csv=str(tmp_path / "later.csv"))
+    assert (later["plan"]["candidates"], later["beyond_pin"], later["in_window"]) == (4, 3, 0)
+    conn.close()
+
+
+# ── after the Racing API subscription ends ────────────────────────────────
+
+
+def _no_http(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("no Racing API call may happen here")
+
+    monkeypatch.setattr(lra.requests, "get", boom)
+    monkeypatch.setattr(lra, "_auth", lambda: None)  # the credentials are gone too
+
+
+def test_after_the_close_out_nothing_calls_the_api_and_every_tick_stays_green(dsn, db, tmp_path, monkeypatch, caplog):
+    settle, settle_recs, void, void_recs, window_rec, api = _closeout_world(db)
+    db.execute("UPDATE race_recommendations SET status = 'lost', profit_loss = 0 WHERE id = %s", (window_rec,))
+    conn = _conn(dsn)
+    pin = cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "dry.csv"))["plan"]
+    assert cos.run(conn, RACED_BEFORE, api, apply_changes=True, out_csv=str(tmp_path / "a.csv"), expect_plan=pin)[
+        "applied"
+    ]
+    conn.close()
+    _no_http(monkeypatch)
+    with caplog.at_level("WARNING"):
+        assert lra.main(["--drain", "--database-url", dsn]) == 0  # the DAG's drain_horse_racing, first step
+        assert gcr.main(["--days", "14", "--database-url", dsn]) == 0  # and its second
+        argv = ["--raced-before", RACED_BEFORE.isoformat(), "--database-url", dsn]
+        assert cos.main(argv + ["--out-csv", str(tmp_path / "rerun.csv")]) == 0  # the wrapper's ALREADY DONE path
+    assert not [r for r in caplog.records if r.levelname in ("WARNING", "ERROR")], caplog.text
+
+
+def test_a_stranded_rec_after_cancellation_warns_but_makes_no_call(dsn, db, monkeypatch, caplog):
+    race = _race(db, NOW - timedelta(days=lra.DRAIN_DAYS, hours=2))
+    _rec(db, race, _entrant(db, race, "Left Behind", 1), "Left Behind")
+    _no_http(monkeypatch)
+    with caplog.at_level("WARNING", logger="load_racing_api"):
+        assert lra.main(["--drain", "--database-url", dsn]) == 0
+    (warning,) = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warning.startswith("1 pending race rec(s) sit on races more than 3 days old")
+
+
+def test_a_pending_rec_in_the_window_after_cancellation_fails_the_drain_loudly(dsn, db, monkeypatch, caplog):
+    # Cancelled before the close-out: each tick fails until the race leaves the window (at most DRAIN_DAYS), and the
+    # close-out can then no longer ask the API — which is why the close-out runs first.
+    race = _race(db, NOW - timedelta(hours=5))
+    _rec(db, race, _entrant(db, race, "Waiting", 1), "Waiting")
+    monkeypatch.setattr(lra, "_auth", lambda: object())
+
+    class Lapsed:
+        status_code = 401
+        text = '{"detail":"Not authenticated"}'
+
+        def json(self):
+            return {"detail": "Not authenticated"}
+
+    monkeypatch.setattr(lra.requests, "get", lambda *a, **k: Lapsed())
+    with caplog.at_level("ERROR", logger="load_racing_api"):
+        assert lra.main(["--drain", "--database-url", dsn]) == 1
+    assert "HTTP 401" in caplog.text

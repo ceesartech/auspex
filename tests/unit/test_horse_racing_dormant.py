@@ -6,8 +6,12 @@
   API's generic route 404 included; the non_runners string parses into
   names; the drain's field check; --drain / --dry-run on the CLI;
 * close_out_stranded_race_recs: the verdict rules of plan_race_settlement
-  (each mirrors grade_completed_races.settle_recommendations) and what the
-  CLI refuses;
+  (each mirrors grade_completed_races.settle_recommendations), what the
+  CLI refuses, and its clock (--as-of never later than the database's);
+* after the Racing API subscription ends: --upcoming and --results exit 1
+  (missing credentials, every racecards tier refusing, a /results page
+  refused with 401/402/403) instead of staying green with nothing fetched;
+  a racecards outage (no answer, a 5xx) is logged, not raised;
 * monitor_models: horse slices stop paging once no race prediction has
   been created for HORSE_DORMANT_AFTER_HOURS, and only then.
 """
@@ -17,6 +21,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import sys
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -312,6 +317,163 @@ def test_close_out_cli_refusals():
 
 
 def test_close_out_and_drain_never_share_a_race():
-    # The drain lists races >= NOW() - DRAIN_DAYS; the close-out only < NOW() - DRAIN_DAYS.
+    # The drain lists races >= NOW() - DRAIN_DAYS; the close-out only < as_of - DRAIN_DAYS, with as_of <= the
+    # database's NOW() (run() refuses a later one: test_horse_racing_drain_pg).
     assert "r.race_date >= NOW() - make_interval(days => %(drain_days)s)" in lra.DRAIN_RACES_SQL
-    assert "r.race_date < NOW() - make_interval(days => %(drain_days)s)" in cos.CANDIDATES_SQL
+    assert "r.race_date < %(as_of)s - make_interval(days => %(drain_days)s)" in cos.CANDIDATES_SQL
+    assert "r.race_date < %(as_of)s - make_interval(days => %(drain_days)s)" in cos.BEYOND_PIN_SQL
+    # Recs still in the window are exactly the ones before the pin the candidates leave out.
+    assert "r.race_date >= %(as_of)s - make_interval(days => %(drain_days)s)" in cos.IN_WINDOW_SQL
+    assert "r.race_date < %(raced_before)s" in cos.IN_WINDOW_SQL
+    assert "NOW()" not in cos.CANDIDATES_SQL + cos.BEYOND_PIN_SQL + cos.IN_WINDOW_SQL
+
+
+def test_close_out_as_of_needs_a_zone():
+    base = ["--raced-before", "2026-11-01T00:00:00Z"]
+    assert cos.parse_args(base).as_of is None  # the database's clock
+    at = cos.parse_args(base + ["--as-of", "2026-11-03T19:30:00Z"]).as_of
+    assert at == datetime(2026, 11, 3, 19, 30, tzinfo=timezone.utc)
+    for bad in ("2026-11-03T19:30:00", "tomorrow"):
+        with pytest.raises(SystemExit):
+            cos.parse_args(base + ["--as-of", bad])
+
+
+def test_a_future_as_of_is_refused_against_the_database_clock_before_any_read():
+    db_clock = datetime(2026, 11, 2, 6, 0, tzinfo=timezone.utc)
+
+    class Cur:
+        def __init__(self):
+            self.sql = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            self.sql.append(sql)
+
+        def fetchone(self):
+            return {"now": db_clock}
+
+    class Conn:
+        def __init__(self):
+            self.cur = Cur()
+            self.rolled_back = 0
+
+        def cursor(self, cursor_factory=None):
+            return self.cur
+
+        def rollback(self):
+            self.rolled_back += 1
+
+    conn = Conn()
+    with pytest.raises(cos.FutureAsOf, match="after the database's clock"):
+        cos.run(conn, db_clock, fetch=None, out_csv="/nonexistent/x.csv", as_of=db_clock + timedelta(seconds=1))
+    assert conn.cur.sql == ["SELECT NOW() AS now"] and conn.rolled_back == 1
+
+
+# ── after the Racing API subscription ends: --upcoming / --results (the enabled branch) ─────────────────
+
+
+def _refuse_every_call(status, calls):
+    def get(url, params=None, auth=None, timeout=None):
+        calls.append(url)
+        return FakeResponse(status, {"detail": "Not authenticated"}, text='{"detail":"Not authenticated"}')
+
+    return get
+
+
+@pytest.mark.parametrize("argv", [["--upcoming", "7"], ["--results", "--start", "2026-11-01", "--end", "2026-11-01"]])
+def test_upcoming_and_results_without_credentials_exit_1_without_a_call(monkeypatch, argv):
+    calls = []
+    monkeypatch.setattr(lra.requests, "get", _refuse_every_call(401, calls))
+    monkeypatch.setattr(lra, "_auth", lambda: None)
+    assert lra.main(argv + ["--database-url", "postgresql://unused"]) == 1
+    assert calls == []
+
+
+@pytest.mark.parametrize("status", [401, 402, 403])
+def test_racecards_refused_on_every_tier_raise(monkeypatch, status):
+    calls = []
+    monkeypatch.setattr(lra.requests, "get", _refuse_every_call(status, calls))
+    monkeypatch.setattr(lra, "_CACHED_RACECARDS_PATH", None)
+    with pytest.raises(lra.RacingApiError, match="subscription"):
+        lra.fetch_racecards(lra.date(2026, 11, 2), auth=None)
+    assert [u.rsplit("/", 1)[1] for u in calls] == ["pro", "standard", "basic"] and lra._CACHED_RACECARDS_PATH is None
+
+
+def test_a_tier_that_will_not_serve_the_request_counts_as_refused(monkeypatch):
+    # 422 is a tier turning this request down on these credentials (the probe skipped it before 2026-11-02 too).
+    answers = {"pro": 422, "standard": 401, "basic": 401}
+    monkeypatch.setattr(lra.requests, "get", lambda url, **k: FakeResponse(answers[url.rsplit("/", 1)[1]], {}))
+    monkeypatch.setattr(lra, "_CACHED_RACECARDS_PATH", None)
+    with pytest.raises(lra.RacingApiError, match="every racecards tier refused"):
+        lra.fetch_racecards(lra.date(2026, 11, 2), auth=None)
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        {"pro": 503, "standard": 503, "basic": 503},  # the API is down
+        {"pro": 403, "standard": 502, "basic": 403},  # the subscribed tier is down, the others not on the plan
+        {"pro": 401, "standard": 401, "basic": "timeout"},  # one tier did not answer at all
+    ],
+)
+def test_a_racecards_outage_is_logged_not_raised(monkeypatch, caplog, answers):
+    # An outage is not a lapsed subscription: no card this tick, an ERROR, and --upcoming exits 0 — so the results
+    # fetch downstream of it in the DAG (all_success) still runs.
+    def get(url, params=None, auth=None, timeout=None):
+        answer = answers[url.rsplit("/", 1)[1]]
+        if answer == "timeout":
+            raise lra.requests.Timeout("read timed out")
+        return FakeResponse(answer, {"detail": "x"})
+
+    monkeypatch.setattr(lra.requests, "get", get)
+    monkeypatch.setattr(lra, "_CACHED_RACECARDS_PATH", None)
+    with caplog.at_level(logging.ERROR, logger="load_racing_api"):
+        assert lra.fetch_racecards(lra.date(2026, 11, 2), auth=None) == []
+    assert "no racecards tier answered 200" in caplog.text and lra._CACHED_RACECARDS_PATH is None
+
+
+def test_an_empty_card_is_not_an_error(monkeypatch):
+    monkeypatch.setattr(lra.requests, "get", lambda *a, **k: FakeResponse(200, {"racecards": []}))
+    monkeypatch.setattr(lra, "_CACHED_RACECARDS_PATH", None)
+    assert lra.fetch_racecards(lra.date(2026, 11, 2), auth=None) == []
+
+
+@pytest.mark.parametrize("status", [401, 402, 403])
+def test_a_results_page_refused_for_the_credentials_or_the_plan_raises(monkeypatch, status):
+    calls = []
+    monkeypatch.setattr(lra.requests, "get", _refuse_every_call(status, calls))
+    with pytest.raises(lra.RacingApiError, match=f"HTTP {status}"):
+        lra.fetch_results(lra.date(2026, 11, 1), auth=None)
+    assert len(calls) == 1
+
+
+class _Conn:
+    """psycopg2 connection stand-in for run(): the fetch fails before any SQL."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def cursor(self, cursor_factory=None):
+        return self
+
+    def commit(self):
+        raise AssertionError("nothing to commit")
+
+
+@pytest.mark.parametrize("argv", [["--upcoming", "7"], ["--results", "--start", "2026-11-01", "--end", "2026-11-02"]])
+def test_a_lapsed_subscription_fails_upcoming_and_results(monkeypatch, caplog, argv):
+    monkeypatch.setattr(lra.requests, "get", _refuse_every_call(403, []))
+    monkeypatch.setattr(lra, "_auth", lambda: object())
+    monkeypatch.setattr(lra, "_CACHED_RACECARDS_PATH", None)
+    monkeypatch.setattr(lra.psycopg2, "connect", lambda dsn: _Conn())
+    with caplog.at_level(logging.ERROR, logger="load_racing_api"):
+        assert lra.main(argv + ["--database-url", "postgresql://unused"]) == 1
+    assert "subscription" in caplog.text
