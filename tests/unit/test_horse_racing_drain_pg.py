@@ -843,7 +843,10 @@ def test_an_as_of_in_the_future_is_refused_before_anything_is_read(dsn, db, tmp_
 def test_a_past_as_of_only_shrinks_the_set(dsn, db, tmp_path):
     races, recs, api = _window_world(db)
     conn = _conn(dsn)
-    out = cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "x.csv"), as_of=NOW - timedelta(hours=1))
+    # Half an hour before the first race leaves the window, in the database's own arithmetic: a fixed offset from
+    # NOW sits on the boundary when the session's zone crosses a DST change (73 h, not 72 h).
+    as_of = _leaves_window(db, races[0]) - timedelta(minutes=30)
+    out = cos.run(conn, RACED_BEFORE, api, out_csv=str(tmp_path / "x.csv"), as_of=as_of)
     assert out["plan"]["candidates"] == 0 and out["in_window"] == 7 and api.calls == []
     conn.close()
 
