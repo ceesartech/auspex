@@ -45,11 +45,11 @@
 # scripts/ops wrapper or the soccer runbook runs on this host, and while an
 # apply of a scripts/ops tool is still running in the api container.
 #
-# The gate (step 0 and, binding, step 2): candidates <= 7, races <= 3,
-# settle <= 7, void <= 7, unmatched = 0, errors = 0, settle + void =
-# candidates, every candidate race one of the three reviewed
-# (REVIEWED_RACES), and at step 2 candidates = the before-state's stranded
-# count. The apply is pinned to the dry run's exact counts (--expect-plan,
+# The gate (step 0 and, binding, step 2): candidates <= 7, unmatched = 0,
+# errors = 0, settle + void = candidates (so settle and void are <= 7 too),
+# every candidate race one of the three reviewed (REVIEWED_RACES) and as many
+# as the plan's races (so races <= 3), and at step 2 candidates = the
+# before-state's stranded count. The apply is pinned to the dry run's exact counts (--expect-plan,
 # every key: any drift refuses before a write). --raced-before
 # 2026-11-01T00:00:00Z keeps races from 1 Nov on out (never reviewed; no rec
 # on them is pending). Every tool run of one pass measures the drain window
@@ -128,10 +128,7 @@ RACED_BEFORE=2026-11-01T00:00:00Z
 DRAIN_DAYS=3  # load_racing_api.DRAIN_DAYS (a test keeps them equal)
 TOOL="python /app/scripts/close_out_stranded_race_recs.py --raced-before $RACED_BEFORE"
 KEYS="candidates races settle void unmatched errors"
-MAX_CANDIDATES=7
-MAX_RACES=3
-MAX_SETTLE=7
-MAX_VOID=7
+MAX_CANDIDATES=7  # with settle + void = candidates it bounds both; REVIEWED_RACES bounds the races
 REVIEWED_RACES="rac_32302997831 rac_32303001705 rac_32303003642"
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 APPLY_CSV=/app/backups/closed_out_race_recs_apply_$STAMP.csv
@@ -154,8 +151,8 @@ read_plan() {  # read_plan <PLAN line>: sets p_<key> for every key
   local k
   for k in $KEYS; do eval "p_$k=\$(plan_num \"\$1\" $k)"; done
 }
-# gate <PLAN line> <its CSV> <step>: 0 when the plan is inside the reviewed set (ceilings, adding up, unmatched and
-# errors 0, every race reviewed); otherwise logs why and returns 1. The caller has run read_plan on it.
+# gate <PLAN line> <its CSV> <step>: 0 when the plan is inside the reviewed set (the candidates ceiling, adding up,
+# unmatched and errors 0, every race reviewed); otherwise logs why and returns 1. The caller has run read_plan on it.
 RACE_IDS_PY="import csv, sys; print(' '.join(sorted({r['racing_api_race_id'] for r in csv.DictReader(open(sys.argv[1]))})))"
 gate() {
   local ids outside="" r n=0
@@ -164,18 +161,19 @@ gate() {
   if ! [[ "$counts" =~ ^[0-9]+(\ [0-9]+){5}$ ]]; then
     log "ABORT at step $3: the PLAN line is unreadable ('$1') — nothing changed"; return 1
   fi
-  if [ "$p_candidates" -gt "$MAX_CANDIDATES" ] || [ "$p_races" -gt "$MAX_RACES" ] || [ "$p_settle" -gt "$MAX_SETTLE" ] \
-     || [ "$p_void" -gt "$MAX_VOID" ] || [ "$p_unmatched" -ne 0 ] || [ "$p_errors" -ne 0 ] \
+  if [ "$p_candidates" -gt "$MAX_CANDIDATES" ] || [ "$p_unmatched" -ne 0 ] || [ "$p_errors" -ne 0 ] \
      || [ "$p_candidates" -ne $((p_settle + p_void)) ]; then
-    log "ABORT at step $3: plan ($1) is outside the reviewed set (candidates<=$MAX_CANDIDATES, races<=$MAX_RACES, settle<=$MAX_SETTLE, void<=$MAX_VOID, unmatched=0, errors=0, settle+void=candidates) — review $2; nothing changed"; return 1
+    log "ABORT at step $3: plan ($1) is outside the reviewed set (candidates<=$MAX_CANDIDATES, unmatched=0, errors=0, settle+void=candidates) — review $2; nothing changed"; return 1
   fi
   [ "$p_candidates" = 0 ] && return 0
   ids=$($DC exec -T api python -c "$RACE_IDS_PY" "$2")
+  # Word-split below only once it is known to hold nothing a glob could expand (membership alone would refuse it too).
+  [[ "$ids" =~ ^[a-z0-9_\ ]+$ ]] || ids=""
   for r in $ids; do
     n=$((n + 1))
     case " $REVIEWED_RACES " in *" $r "*) ;; *) outside="$outside $r" ;; esac
   done
-  if [ -n "$outside" ] || [ "$n" -ne "$p_races" ] || ! [[ "$ids" =~ ^[a-z0-9_\ ]+$ ]]; then
+  if [ -z "$ids" ] || [ -n "$outside" ] || [ "$n" -ne "$p_races" ]; then
     log "ABORT at step $3: the candidate races (${ids:-unreadable}) are not all among the reviewed ($REVIEWED_RACES), or not the plan's $p_races${outside:+ — outside:$outside} — review $2; nothing changed"; return 1
   fi
 }
@@ -235,7 +233,7 @@ if [ "$rc" -ne 0 ] || [ "$p_candidates" = missing ] || [ "$beyond" = missing ] |
   exit 1
 fi
 if [ "$beyond" != "0" ]; then
-  log "NOTE: $beyond stranded race rec(s) sit on races at or after $RACED_BEFORE — outside the reviewed set, so this wrapper leaves them pending; closing them needs a new reviewed pin: RACED_BEFORE and the ceilings in this script. They are (all in /tmp/race_closeout_pre.log in the api container):"
+  log "NOTE: $beyond stranded race rec(s) sit on races at or after $RACED_BEFORE — outside the reviewed set, so this wrapper leaves them pending; closing them needs a new reviewed pin: RACED_BEFORE, MAX_CANDIDATES and REVIEWED_RACES in this script. They are (all in /tmp/race_closeout_pre.log in the api container):"
   $DC exec -T api sh -c "grep 'beyond pin:' /tmp/race_closeout_pre.log | head -50"
 fi
 if [ "$win_recs" != "0" ]; then
@@ -348,7 +346,7 @@ if [ "$as_planned" = "$p_candidates" ] && [ "$finished" = "$want_finished" ] && 
    && [ "$win_recs" != missing ] && [ -n "$win_until" ]; then
   log "DONE: $p_settle rec(s) settled from their race's result, $p_void voided (no result: abandoned) — the apply CSV $APPLY_CSV, its .reversal.jsonl and .inserted.jsonl are the record"
   if [ "$beyond1" != "0" ]; then
-    log "NOTE: $beyond1 stranded race rec(s) on races at or after $RACED_BEFORE are still pending (not part of this run) — a re-run exits 1 (NEW PIN NEEDED) until RACED_BEFORE and the ceilings are moved to a new reviewed pin"
+    log "NOTE: $beyond1 stranded race rec(s) on races at or after $RACED_BEFORE are still pending (not part of this run) — a re-run exits 1 (NEW PIN NEEDED) until RACED_BEFORE, MAX_CANDIDATES and REVIEWED_RACES are moved to a new reviewed pin"
   fi
   if [ "$win_recs" != "0" ]; then
     log "PARTIAL: $win_recs rec(s) on $win_races race(s) before $RACED_BEFORE were still inside the drain's window at $T0 and are still pending — re-run this script after $win_until to close them (exit 3)"

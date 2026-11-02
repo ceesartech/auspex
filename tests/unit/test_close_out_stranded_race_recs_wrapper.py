@@ -99,9 +99,11 @@ def _install_ps(tmp_path):
     script.chmod(0o755)
 
 
-def _run(tmp_path, rules, airflow=None, ps_extra=None, ps_fail=False):
+def _run(tmp_path, rules, airflow=None, ps_extra=None, ps_fail=False, workdir_files=()):
     env = fd.install(tmp_path, rules, airflow=airflow)
     _install_ps(tmp_path)
+    for name in workdir_files:  # files in the directory the wrapper runs in (AUSPEX_DIR)
+        (tmp_path / "auspex" / name).write_text("")
     if ps_extra:
         (tmp_path / "fake" / "ps_extra").write_text(ps_extra + "\n")
     if ps_fail:
@@ -245,17 +247,22 @@ def test_the_reviewed_set_still_closes_with_recs_beyond_the_pin_named(tmp_path):
     "kw",
     [
         {"dry": "PLAN candidates=8 races=3 settle=0 void=8 unmatched=0 errors=0"},  # more candidates than reviewed
-        {"dry": "PLAN candidates=8 races=3 settle=4 void=4 unmatched=0 errors=0"},  # ... with settle and void inside
+        # ... with settle and void each inside theirs, and the before-state agreeing: only the candidates ceiling
+        {"dry": "PLAN candidates=8 races=3 settle=4 void=4 unmatched=0 errors=0", "states": ("8|2667", "0|2667")},
         {"dry": "PLAN candidates=7 races=4 settle=0 void=7 unmatched=0 errors=0"},  # more races
         {"dry": "PLAN candidates=8 races=3 settle=8 void=0 unmatched=0 errors=0"},  # more settles
         {"dry": "PLAN candidates=7 races=3 settle=0 void=6 unmatched=1 errors=0"},  # unmatched
         {"dry": "PLAN candidates=7 races=3 settle=0 void=6 unmatched=0 errors=1"},  # an API error
+        # A PLAN line that adds up but still carries unmatched / errors (the tool never prints one): refused anyway.
+        {"dry": "PLAN candidates=7 races=3 settle=0 void=7 unmatched=1 errors=0"},
+        {"dry": "PLAN candidates=7 races=3 settle=0 void=7 unmatched=0 errors=1"},
         {"dry": "PLAN candidates=7 races=3 settle=0 void=6 unmatched=0 errors=0"},  # does not add up
         {"dry": "PLAN candidates=6 races=3 settle=0 void=6 unmatched=0 errors=0"},  # not the before-state's 7
         {"dry": "PLAN candidates=7 races=3 settle=0 void=7 unmatched=0"},  # unreadable
         {"ids_dry": "rac_32302997831 rac_32303001705 rac_99999999999"},  # a race nobody reviewed
         {"ids_dry": "rac_32302997831 rac_32303001705"},  # fewer races than the plan says
         {"ids_dry": ""},  # the dry-run CSV could not be read
+        {"ids_dry": "", "dry": "PLAN candidates=7 races=0 settle=0 void=7 unmatched=0 errors=0"},  # ... nor races
         {"ids_dry": "rac_32302997831 rac_32303001705 rac_3230300364'"},  # not an id
         {"dry_rc": 1},  # the dry run failed
         {"states": ("x|2667", "0|2667")},  # the before-state query failed
@@ -264,6 +271,14 @@ def test_the_reviewed_set_still_closes_with_recs_beyond_the_pin_named(tmp_path):
 def test_the_dry_run_gate_aborts_before_any_apply(tmp_path, kw):
     rc, out, calls = _run(tmp_path, _rules(**kw))
     assert rc == 1 and "ABORT at step 2" in out, out
+    assert not _tool_runs(calls)
+
+
+def test_a_race_id_list_that_is_a_glob_is_never_expanded(tmp_path):
+    # '*' word-split unquoted would expand to the files where the wrapper runs: three named like the reviewed races
+    # would pass the membership check.
+    rc, out, calls = _run(tmp_path, _rules(ids_dry="*"), workdir_files=REVIEWED.split())
+    assert rc == 1 and "ABORT at step 2" in out and "(unreadable)" in out, out
     assert not _tool_runs(calls)
 
 
@@ -329,6 +344,8 @@ def test_a_failed_apply_aborts_at_step_3(tmp_path):
         {"pre": "PLAN candidates=7 races=3 settle=0 void=6 unmatched=1 errors=0"},
         {"pre": ""},
         {"pre_rc": 2},  # e.g. an --as-of the database's clock has not reached
+        {"pre": "PLAN candidates=0 races=0 settle=0 void=0 unmatched=0 errors=1"},  # never ALREADY DONE with an error
+        {"pre": "PLAN candidates=0 races=0 settle=0 void=0 unmatched=1 errors=0"},
     ],
 )
 def test_an_unreadable_or_failed_precheck_aborts_before_the_backup(tmp_path, kw):
