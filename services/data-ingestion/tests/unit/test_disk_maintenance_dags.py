@@ -9,17 +9,21 @@ the script accepts; the weekly DAG no longer prunes images or logs (the old
 `until=168h` prune is gone everywhere). The task-log prune command is then
 RUN against a temp tree: old *.log and rotated *.log.N files go, fresh ones,
 other files and symlinks stay, empty directories go only once empty for an
-hour, and a missing log directory or a find error fails the task.
+hour, a file crossing the age line mid-run does not fail the after-check, no
+temp file is left, and a missing log directory or a refused delete fails the
+task.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import time
 import types
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -239,6 +243,55 @@ def test_log_prune_second_run_removes_the_dirs_it_emptied(disk, tmp_path):
 def test_log_prune_fails_loudly_on_a_missing_dir(disk, tmp_path):
     proc = run_prune(disk, tmp_path / "nope")
     assert proc.returncode != 0 and "missing" in proc.stderr
+
+
+def test_log_prune_check_does_not_race_the_age_boundary(disk, tmp_path):
+    # ~3,300 files a day cross the 14-day line on prod (2.3 a minute). A
+    # `find` shim ages one file past the line right after the delete pass —
+    # a file crossing while the prune runs. The old after-check re-ran
+    # `find -mtime +14`, saw it, and failed with "could not delete" although
+    # no delete was refused. The check must only look at what the delete
+    # pass selected; tomorrow's run takes the crossing file.
+    logs = tmp_path / "logs"
+    old = touch(logs / "dag_id=a" / "run_id=r1" / "task_id=t" / "attempt=1.log", 20)
+    crossing = touch(logs / "dag_id=a" / "run_id=r2" / "task_id=t" / "attempt=1.log", 13.99)
+    real_find = shutil.which("find")
+    assert real_find
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    marker = tmp_path / "crossed"
+    twenty_days_ago = datetime.fromtimestamp(time.time() - 20 * DAY).strftime("%Y%m%d%H%M")  # touch -t: local
+    (shim_dir / "find").write_text(
+        "#!/bin/bash\n"
+        f'"{real_find}" "$@"; rc=$?\n'
+        f'if [ ! -e "{marker}" ]; then : > "{marker}"; touch -t {twenty_days_ago} "{crossing}"; fi\n'
+        "exit $rc\n"
+    )
+    (shim_dir / "find").chmod(0o755)
+    env = {**os.environ, "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}"}
+
+    proc = subprocess.run(
+        ["bash", "-c", disk.task_log_prune_command(str(logs), 14)], capture_output=True, text=True, env=env
+    )
+
+    assert marker.exists()  # the shim ran, so the file really crossed mid-run
+    assert proc.returncode == 0, proc.stderr
+    assert "could not delete" not in proc.stderr
+    assert not old.exists() and crossing.exists()
+    assert "pruned 1 log file(s)" in proc.stdout
+
+
+def test_log_prune_leaves_no_temp_file(disk, tmp_path):
+    logs = tmp_path / "logs"
+    touch(logs / "dag_id=a" / "attempt=1.log", 30)
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    env = {**os.environ, "TMPDIR": str(tmp)}
+    proc = subprocess.run(
+        ["bash", "-c", disk.task_log_prune_command(str(logs), 14)], capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert list(tmp.iterdir()) == []
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")

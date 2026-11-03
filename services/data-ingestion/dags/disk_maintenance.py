@@ -44,18 +44,33 @@ IMAGE_GRACE_HOURS = 24
 def task_log_prune_command(log_dir: str = AIRFLOW_LOG_DIR, days: int = TASK_LOG_RETENTION_DAYS) -> str:
     """Delete Airflow log files (`*.log`, rotated `*.log.N`) older than
     `days`, then directories empty for over an hour; print what it freed.
-    Fails the task on any find/du error (set -e + pipefail) AND when an old
-    log file is still there afterwards: the after-state check catches a
-    refused delete even where find exits 0 on one (BSD find does)."""
+    Fails the task on any find/du error (set -e + pipefail) AND when a file
+    the delete pass selected is still there afterwards: that check catches a
+    refused delete even where find exits 0 on one (BSD find does).
+
+    The check reads back the exact list the delete pass printed (NUL-
+    separated, in a temp file) instead of running a second `-mtime` find:
+    each find measures age from its own start, so a second pass would also
+    see the ~2 files a minute that cross the 14-day line in between and fail
+    the task on a delete that was never refused (review, 2026-11-02)."""
     match = f"-type f \\( -name '*.log' -o -name '*.log.[0-9]*' \\) -mtime +{days}"
     return (
         "set -euo pipefail\n"
         f"d='{log_dir}'\n"
         'test -d "$d" || { echo "log dir $d is missing" >&2; exit 1; }\n'
+        'list=$(mktemp "${TMPDIR:-/tmp}/prune_task_logs.XXXXXX")\n'
+        "trap 'rm -f \"$list\"' EXIT\n"
         'before=$(du -sk "$d" | cut -f1)\n'
-        f'files=$(find "$d" {match} -print -delete | wc -l)\n'
-        f'left=$(find "$d" {match} -print | sed -n 1,5p)\n'
-        'if [ -n "$left" ]; then echo "could not delete old log file(s), e.g.: $left" >&2; exit 1; fi\n'
+        f'find "$d" {match} -print0 -delete > "$list"\n'
+        "files=0; left=0; eg=''\n"
+        "while IFS= read -r -d '' f; do\n"
+        "  files=$((files + 1))\n"
+        '  if [ -e "$f" ] || [ -L "$f" ]; then\n'
+        "    left=$((left + 1))\n"
+        '    if [ "$left" -le 5 ]; then eg="$eg $f"; fi\n'
+        "  fi\n"
+        'done < "$list"\n'
+        'if [ "$left" -gt 0 ]; then echo "could not delete $left old log file(s), e.g.:$eg" >&2; exit 1; fi\n'
         'dirs=$(find "$d" -mindepth 1 -type d -empty -mmin +60 -print -delete | wc -l)\n'
         'after=$(du -sk "$d" | cut -f1)\n'
         f'echo "pruned $((files)) log file(s) older than {days} days and $((dirs)) empty dir(s); '
