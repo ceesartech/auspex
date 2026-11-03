@@ -4,11 +4,16 @@ The `endpoint` label is the matched route TEMPLATE ("/api/v1/matches/{match_id}"
 never the raw request path. With the raw path every distinct URL became its own
 label set — each match id, and every probe a vulnerability scanner sends
 ("/.env", "/.git/HEAD", "/../../root/.config/…") — so the series count grew
-without bound until the api restarted: 7,247 api series on 2026-10-23 against
-~2,200 a week earlier, and Prometheus wrote ~700 MB/day instead of ~60 MB/day
-(prometheus_client also keeps every label set in the api's memory). Requests
-that match no route (404s, slash redirects) share one label, UNMATCHED, and an
-unknown HTTP method is labelled OTHER.
+without bound until the api restarted, and Prometheus wrote ~700 MB/day instead
+of ~60 MB/day (prometheus_client also keeps every label set in the api's
+memory). Measured on prod Prometheus (instant queries):
+    count({job="betting-api",__name__=~"http_.*"})
+        2026-10-16T23:59Z: 2,620   2026-10-23T23:59Z: 10,798
+    count(count by (endpoint) ({job="betting-api",__name__=~"http_.*"}))
+        2026-10-16T23:59Z: 127     2026-10-23T23:59Z: 533
+while every other job stayed flat (postgres 3,976 and node 994 series at both
+times). Requests that match no route (404s, slash redirects) share one label,
+UNMATCHED, and an unknown HTTP method is labelled OTHER.
 """
 
 import time
