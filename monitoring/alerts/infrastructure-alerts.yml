@@ -24,8 +24,10 @@ groups:
           description: "Root filesystem is below 10% free ({{ $value | humanizePercentage }}). Backups + Postgres WAL fill this box first — see OPERATIONS.md."
 
       # Early warning, ~7.5 GB before DiskSpaceLow on the 75 GB disk: room to
-      # act in working hours. Alertmanager mutes it while DiskSpaceLow fires
-      # (inhibit rule in monitoring/alertmanager/alertmanager.yml).
+      # act in working hours. avail_bytes leaves out ext4's 3.1G root reserve,
+      # so in `df -h /` terms this fires at ~57G Used (DiskSpaceLow at ~64G);
+      # OPERATIONS.md "Disk budget". Alertmanager mutes it while DiskSpaceLow
+      # fires (inhibit rule in monitoring/alertmanager/alertmanager.yml).
       - alert: DiskSpaceWarning
         expr: |
           node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}
