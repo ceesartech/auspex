@@ -11,9 +11,12 @@ built from services/data-ingestion/db/migrations, one database per test):
     row's, odds row's or rec's JSON, an alias claim) refuses the row;
   * the DELETE's guards: a row changed in any observed column, or referenced
     under any foreign key, after the plan is never deleted (GuardError);
-  * a cascade that slipped past the plan and the guards rolls everything back
-    (the in-transaction after-state); an archive that already exists stops it
-    before any write;
+  * a cascade or SET NULL that slipped past the plan and the guards rolls
+    everything back (the in-transaction after-state), and so does each other
+    gate of it on its own: a listed row still there although teams fell by the
+    planned count, and teams falling by more than the planned deletes; an
+    archive that already exists, or one that holds fewer rows than the plan
+    deletes, stops it before any write;
   * the teams lock: EXCLUSIVE blocks a bout insert (its foreign-key check),
     SHARE ROW EXCLUSIVE would not; the apply waits for an in-flight bout insert
     and refuses on its lock timeout with nothing written;
@@ -279,6 +282,11 @@ def test_a_listed_row_that_changed_after_the_dry_run_stops_the_apply(conn, tmp_p
             "'b', 'moneyline', 'home', 1.9, '{{\"team\": \"{opp}\"}}')",
             "odds.json",
         ),
+        (
+            "INSERT INTO betting_recommendations (match_id, bet_type, selection, odds_at_recommendation, bookmaker, "
+            "risk_factors) VALUES ('{bout}', 'moneyline', 'home', 1.9, 'b', '[\"opponent {vera}\"]')",
+            "betting_recommendations.json",
+        ),
         ("INSERT INTO players (name, normalized_name, team_id) VALUES ('P', 'p', '{vera}')", "players.team_id"),
         ("INSERT INTO match_stats (match_id, team_id) VALUES ('{bout}', '{tba}')", "match_stats.team_id"),
         ("UPDATE teams SET metadata = '{{\"aliases\": [\"Rodrigo  VÉRA\"]}}' WHERE id = '{poppeck}'", "as an alias"),
@@ -502,3 +510,80 @@ def test_a_delete_whose_guard_no_longer_matches_stops_at_that_delete(conn, tmp_p
         rc, _ = _run(conn, w, tmp_path, apply=True, expect=dry, tag="apply")
     assert rc == 1 and _fingerprint(conn) == before
     assert "touched 0 row(s), expected 1" in caplog.text and "delete 'TBA'" in caplog.text
+
+
+def _delete_by_id_only():
+    return moc.sql.SQL("DELETE FROM teams t WHERE t.id = %(id)s::uuid RETURNING t.id")
+
+
+def test_a_listed_row_left_behind_rolls_everything_back(conn, tmp_path, monkeypatch, caplog):
+    """The orphans_left gate on its own: Vera's DELETE (simulated faulty) removes the unlisted, unreferenced loner
+    instead, so teams falls by exactly the 3 planned and nothing cascades — only 'a listed row is still there'
+    catches it."""
+    w = _world(conn)
+    rc, dry = _run(conn, w, tmp_path, tag="dry")
+    real = moc.delete_params
+
+    def swapped(p):
+        params = real(p)
+        if p.team_id == w["vera"]:
+            params["id"] = w["loner"]
+        return params
+
+    monkeypatch.setattr(moc, "delete_sql", lambda fks: _delete_by_id_only())
+    monkeypatch.setattr(moc, "delete_params", swapped)
+    before = _fingerprint(conn)
+    with caplog.at_level("INFO"):
+        rc, _ = _run(conn, w, tmp_path, apply=True, expect=dry, tag="apply")
+    assert rc == 1 and _fingerprint(conn) == before
+    assert "orphans_left=1 teams_removed=3 cascaded=0" in caplog.text, caplog.text
+    assert "1 listed row(s) left" in caplog.text and "WRITTEN" not in caplog.text
+
+
+def test_teams_falling_by_more_than_the_plan_rolls_everything_back(conn, tmp_path, monkeypatch, caplog):
+    """The teams_removed gate on its own: every listed row goes and nothing cascades, but an extra (simulated)
+    delete of the unlisted loner inside the transaction makes teams fall by 4, not the 3 planned."""
+    w = _world(conn)
+    rc, dry = _run(conn, w, tmp_path, tag="dry")
+    real = moc.check_after
+
+    def with_extra_delete(cur, doc):
+        cur.execute("DELETE FROM teams WHERE id = %s", (w["loner"],))
+        return real(cur, doc)
+
+    monkeypatch.setattr(moc, "check_after", with_extra_delete)
+    before = _fingerprint(conn)
+    with caplog.at_level("INFO"):
+        rc, _ = _run(conn, w, tmp_path, apply=True, expect=dry, tag="apply")
+    assert rc == 1 and _fingerprint(conn) == before
+    assert "orphans_left=0 teams_removed=4 cascaded=0" in caplog.text, caplog.text
+    assert "teams fell by 4 (planned 3)" in caplog.text and "WRITTEN" not in caplog.text
+
+
+def test_an_archive_short_of_the_plan_stops_it_before_any_delete(conn, tmp_path, monkeypatch, caplog):
+    """A planned delete whose row the archive cannot read (simulated: a phantom row in both the dry run's and the
+    apply's plan, so the digests agree) stops the run at the archive, before the first DELETE."""
+    w = _world(conn)
+    ghost = "00000000-0000-4000-8000-0000000000aa"
+    real_plan, real_expect = moc.plan_run, moc.mic._expect
+    deletes = []
+
+    def with_ghost(orphans, state):
+        plan = real_plan(orphans, state)
+        observed = dict(next(p.observed for p in plan if p.action == "delete"), name="Ghost")
+        return plan + [moc.RowPlan(ghost, "Ghost", "delete", "phantom", observed)]
+
+    def counting(cur, query, params, what):
+        deletes.append(what)
+        return real_expect(cur, query, params, what)
+
+    monkeypatch.setattr(moc, "plan_run", with_ghost)
+    monkeypatch.setattr(moc.mic, "_expect", counting)
+    rc, dry = _run(conn, w, tmp_path, tag="dry")
+    assert rc == 0 and dry["summary"]["delete"] == 4
+    before = _fingerprint(conn)
+    with caplog.at_level("ERROR"):
+        rc, _ = _run(conn, w, tmp_path, apply=True, expect=dry, tag="apply")
+    assert rc == 1 and _fingerprint(conn) == before
+    assert "archived 3 row(s), the plan deletes 4" in caplog.text, caplog.text
+    assert deletes == []  # no DELETE ran
