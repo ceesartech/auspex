@@ -4,10 +4,13 @@ A FakeDocker answers the four read commands the script issues (ps,
 inspect, image ls, image inspect) from an in-memory image store shaped on
 the VM's 2026-11-02 state (containerd image store: Metadata.LastTagTime is
 the pull/untag time) and records every `docker image rm`. What is pinned:
-images a container uses, the newest N deploys and anything inside the grace
-are never removed; deploys are ordered by the EARLIEST pull time of their
-images; an unreadable time keeps the image and fails the run; any docker
-failure removes nothing; the dry run removes nothing; rm never uses -f.
+images a container uses, the newest N deploys (including an unused, bad
+newest deploy after a rollback to the one before it) and anything inside the
+grace (boundary included) are never removed; deploys are ordered by the
+EARLIEST pull time of their images; an unreadable time keeps the image and
+fails the run; any docker failure, an empty container list or unreadable
+container images remove nothing; the dry run removes nothing; rm never uses
+-f.
 """
 
 from __future__ import annotations
@@ -48,6 +51,7 @@ class FakeDocker:
         self.removed: list[str] = []
         self.fail: dict[str, str] = {}  # first arg(s) -> error, e.g. {"ps": "..."}
         self.rm_refuse: set[str] = set()
+        self.inspect_blank = False  # `docker inspect` prints only blank lines
 
     def add(self, img_id: str, tags: list[str], pulled: datetime | None) -> str:
         full = "sha256:" + img_id.ljust(64, "0")
@@ -82,6 +86,8 @@ class FakeDocker:
             return "".join(f"{c}\n" for c in self.containers)
         if args[:1] == ["inspect"]:
             assert args[1:3] == ["--format", "{{.Image}}"]
+            if self.inspect_blank:
+                return "\n" * len(args[3:])
             return "".join(f"{self.containers[c]}\n" for c in args[3:])
         if args[:2] == ["image", "ls"]:
             return "".join(f"{i}\n" for i in self.images)
@@ -144,6 +150,22 @@ def test_an_image_in_use_is_never_removed_even_when_old_and_outside_the_newest(v
     pdi.main(["--apply"], docker=vm, now=NOW)
     assert f"{API}:{sha(1)}" not in vm.removed
     assert f"{AIRFLOW}:{sha(1)}" in vm.removed  # the rest of deploy 1 is still old
+
+
+def test_rollback_keeps_the_bad_newer_deploy_and_two_before_it():
+    # The rollback case: deploy N (6) was bad, the containers run N-1 (5),
+    # and N was pulled more than 24 h ago and is unused. N is still one of
+    # the newest 3 by pull time, so N, N-1 and N-2 stay; N-3 and older go.
+    d = FakeDocker()
+    t0 = NOW - timedelta(days=10)
+    deploys = {n: d.deploy(n, t0 + timedelta(days=n)) for n in range(1, 7)}  # deploy 6 pulled 4 days ago
+    for img in deploys[5].values():
+        d.run(img)
+    assert pdi.main(["--apply", "--keep-deploys", "3", "--grace-hours", "24"], docker=d, now=NOW) == 0
+    for n in (6, 5, 4):
+        assert not any(sha(n) in r for r in d.removed), n
+    for n in (3, 2, 1):
+        assert {f"{API}:{sha(n)}", f"{AIRFLOW}:{sha(n)}", f"{FRONTEND}:{sha(n)}"} <= set(d.removed), n
 
 
 def test_keep_deploys_is_honoured(vm):
@@ -221,6 +243,24 @@ def test_no_containers_listed_removes_nothing(vm, caplog):
     vm.containers.clear()
     assert pdi.main(["--apply"], docker=vm, now=NOW) == 1
     assert vm.removed == [] and "listed no containers" in caplog.text
+
+
+def test_container_images_unreadable_removes_nothing(vm, caplog):
+    # `docker ps` lists containers but `docker inspect` gives no image IDs:
+    # every image would look unused, so refuse.
+    vm.inspect_blank = True
+    assert pdi.main(["--apply"], docker=vm, now=NOW) == 1
+    assert vm.removed == [] and not any(c[:2] == ["image", "rm"] for c in vm.calls)
+    assert "could not read the image of any container" in caplog.text
+
+
+def test_grace_boundary_an_image_exactly_grace_old_is_kept():
+    grace = timedelta(hours=24)
+    edge = pdi.Image(id="sha256:" + "e" * 64, tags=["edge:1"], last_tag_time=NOW - grace)
+    older = pdi.Image(id="sha256:" + "f" * 64, tags=["older:1"], last_tag_time=NOW - grace - timedelta(seconds=1))
+    plan = pdi.plan_prune({"sha256:" + "0" * 64}, [edge, older], now=NOW, keep_deploys=3, grace=grace)
+    assert plan_refs(plan, "keep") == ["edge:1"]
+    assert plan_refs(plan, "remove") == ["older:1"]
 
 
 def test_garbled_image_json_removes_nothing(vm):
