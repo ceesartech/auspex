@@ -15,7 +15,7 @@
 #     (scripts/data/mma_stale_rows_retire_20261101.csv; archive fixture_orphans_mma_20261102T043520Z.jsonl.gz):
 #     to restore any of those bouts, restore these rows first from this tool's archive.
 # fetch_upcoming skips 'TBA' and 'Opponent TBA' as placeholders before resolving a fighter, so nothing resolves to
-# those two. A real athlete of one of the other names on a future card gets a fresh row, keyed by his ESPN athlete id.
+# those two. A real athlete of one of the other names on a future card gets a fresh row, keyed by their ESPN athlete id.
 # The scans above were a one-off read-only review. On every run the tool re-checks a narrower set: it refuses a row
 # whose name, sport, ESPN id, metadata or external ids differ from this review, that any foreign key to teams
 # references (a bout included), whose id appears in the JSON of another teams row, of an MMA match or of that match's

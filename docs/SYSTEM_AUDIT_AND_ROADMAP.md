@@ -353,7 +353,7 @@ wins **and** correctly rejected calibration/match_stats/weather):
 | **Deploy the 3 exporters** | `monitoring/prometheus.yml:30-49` scrapes `node-exporter:9100`, `postgres-exporter:9187`, `redis-exporter:9121` — none exist in any compose file; 4 of 6 targets down; `DiskSpaceLow` (`monitoring/alerts/api-alerts.yml:91`) is permanently blind — on the box that had a disk-full and has an active leak. Add `prom/node-exporter` (rootfs :ro), `prometheuscommunity/postgres-exporter`, `oliver006/redis_exporter`. Delete the broken airflow scrape job (1.x path) |
 | **Attach Alertmanager (or Grafana alerts)** | `/api/v1/alertmanagers` → `[]`: all 10 loaded rules route nowhere. Cheapest: `prom/alertmanager` with a `telegram_configs` receiver (bot token + chat id already in prod .env). Airflow task failures already page Telegram (verified live) — this closes the host/service half |
 | Memory limits | Zero on all 12 services; training runs inside the api container next to postgres on 15 GiB. Size from `docker stats` (steady-state ≈7.7 GiB): api ~6g (covers training), postgres ~3g, airflow 1.5g ×2, redis 1g + `maxmemory` policy, rest 512m–1g. Roll out one at a time, watch the next Sunday retrain |
-| Log rotation + pruning | No `daemon.json` (785 MB of container logs); no prune automation (39 image tags again, 894 MB build cache). `{"max-size":"50m","max-file":"3"}` + weekly `docker image prune -af --filter until=336h && docker builder prune -af` cron + an OPERATIONS.md disk runbook section |
+| Log rotation + pruning | DONE. Container logs: json-file 50m×3 per service. Daily `disk_maintenance` DAG (2026-11-02): Airflow task logs older than 14 days, and docker images except those in use, the newest 3 deploys and anything from the last 24 h (`scripts/prune_docker_images.py`). Weekly `docker_maintenance`: build cache and B2 modal artifacts. Local dumps capped at 3: each older one is deleted only once its B2 copy is verified, and a dump that missed its upload is uploaded first. Prometheus 30d / 4 GiB. `DiskSpaceWarning` at < 20% available (≈ 57G used on `df -h`) and `DiskSpaceLow` at < 10% (≈ 64G). Budget, thresholds and runbooks are in OPERATIONS.md "Disk maintenance" and "When db_backup_daily fails". |
 | Healthchecks | celery-worker inherits the api image's HTTP check with no HTTP server (unhealthy 4+ weeks, false); frontend `wget localhost` resolves to IPv6. Fix: `celery inspect ping` test; `127.0.0.1:3000` |
 | Airflow metadata | ~365 MB and compounding; add monthly `airflow db clean --clean-before-timestamp <now-90d>` |
 | DAG cadence split | `auspex_pipeline` (*/15) over-schedules: `monitor_models` recomputes 30 days of metrics every 15 min → hourly; horse-racing branch → 30–60 min (halves the `race_predictions` churn). ~2,880→~1,500 task-runs/day |
@@ -1923,19 +1923,166 @@ with the growth-rate driver (WAL) eliminated.
 >    end `DONE:` with a last line `exit 0: ...`. Then a read-only check shows 0
 >    race recs pending; then cancel The Racing API.
 >
-> **Open:** whether void is the right settlement for a rec on a UFC draw (some
-> books settle it as a loss); counting draws as fights (a gated lever); a future
-> fighter under a name a stamped fighter already holds is refused (exit 3) until
-> given a row of their own, with no tool for that yet; 8 bout-less MMA rows not
-> in the approved list (including 'TBA', 'Opponent TBA'); tennis resolution by
-> athlete id; the predictions on Bruno Silva's bouts stay as made from the mixed
-> history; ESPN competition 401914464 sits on no row until a backfill of
+> **Open:** counting draws as fights (a gated lever); a future fighter under a
+> name a stamped fighter already holds is refused (exit 3) until given a row of
+> their own, with no tool for that yet; the 8 bout-less MMA rows (approved
+> 2026-11-02; `mma_orphan_cleanup.sh`, see 2026-11-03); tennis resolution by
+> athlete id; ESPN competition 401914464 sits on no row until a backfill of
 > 2026-09-26 stamps it on the Tina Black row; fold the per-wrapper UFC /
-> concurrent-run checks into `_airflow_lib.sh`; the AH forward-gate metric
-> (unapproved); same-book CLV is structurally 0 for soccer AH; the NHL re-gate
-> (~April 2027); the half-time markets vs a constant (≥ 3 months after the HT
-> refit); the VM fallback backend has no promote gate; `_split_temporally`'s
-> unstable sort at the 70% boundary.
+> concurrent-run checks and a backup free-space floor (10% of the disk + 1 GiB,
+> as in `mma_orphan_cleanup.sh`) into `_airflow_lib.sh`; the AH forward-gate
+> metric (unapproved); same-book CLV is structurally 0 for soccer AH; the NHL
+> re-gate (~April 2027); the half-time markets vs a constant (≥ 3 months after
+> the HT refit); the VM fallback backend has no promote gate;
+> `_split_temporally`'s unstable sort at the 70% boundary. Settled the same
+> evening (next entry): void for a rec on a UFC draw or no contest; the
+> predictions on Bruno Silva's bouts stay as made from the mixed history.
+
+> **Update (2026-11-02, late) — the user's answers, both MMA wrappers ran, and
+> the root disk filled to 95%: disk guards (closeout4/disk_guard).**
+> **Operator runs (verified read-only):** `mma_identity_cleanup.sh` DONE at
+> 22:41:52Z (the Bruno Silva split, the Cerqueira alias, José Luiz, and 1,299
+> fighters stamped with their ESPN athlete id); `settle_mma_held_rows.sh` DONE
+> at 22:44:41Z (`B VERIFIED left=7`). `close_out_stranded_race_recs.sh` at
+> 23:01Z correctly said `NOT YET` (exit 3, no backup); its real run is at or
+> after 2026-11-03 19:30Z.
+> **The user's answers (2026-11-02):** (1) void is the right settlement for a
+> rec on a UFC draw or no contest — that is what shipped, no change; (2) yes,
+> delete the 8 bout-less MMA fighter rows (next entry); (3) the predictions on
+> Bruno Silva's bouts stay as made from the mixed history.
+> **The disk.** `DiskSpaceLow` fired at 4.8% free (68G used, 3.7G available on
+> the 74.8G root). Four growers had moved together: 37 local pg_dumps (14 GB —
+> rotation was by age only, 7 days, and every ops wrapper triggers
+> `db_backup_daily` for its pre-write backup, so 21 dumps landed that day);
+> Airflow task logs (7.4 GB at 120-290 MB/day, kept 30 days); untagged
+> `:latest` leftovers among the docker images (4.9 GB); and a 7.8 GB
+> Prometheus store with no size cap. The operator ran three one-off commands
+> (keep the newest 3 dumps — all 37 were verified in B2 first; delete task logs
+> older than 14 days; `docker image prune -af --filter until=24h`): 43G used /
+> 30G free at 23:37Z. Eleven commits followed (six, then five after an
+> adversarial review). No served probability changed; all prod access was
+> read-only and every temp file was removed.
+> - **Local dumps** (`c6ae254`, `6d61ae8`). `backup_postgres.py` never deletes
+>   the dump it just wrote. With B2 it keeps the newest `BACKUP_LOCAL_KEEP` (3)
+>   and none past 7 days, and deletes an older one only after a HEAD on its own
+>   B2 key shows the same byte size. A dump that never reached B2 (a failed
+>   upload, exit 2, or `--skip-upload`) answers 404: rotation uploads it,
+>   checks the size, then deletes it — the review found that without this one
+>   failed upload turned every later run red for good (rc 0,2,0,0,3,3,…; now
+>   0,2,0,0,0,…). Anything else it cannot verify (403 or another HEAD error, B2
+>   unreachable, a copy of a different size — never overwritten, a failed
+>   re-upload or delete) keeps the file, logs an ERROR naming it and exits 3;
+>   an invalid `BACKUP_LOCAL_KEEP`/`BACKUP_LOCAL_RETENTION` exits 4 before any
+>   dump. Without B2 only the age rule applies. A reversal that needs a
+>   pre-write dump older than the newest 3 downloads it from B2 first.
+>   Rehearsed read-only against the prod files and real B2.
+> - **Docker images** (`04dadc9`, tests `8e212b6`). On the VM's containerd
+>   image store `--filter until=` compares the pull/untag time, not the build
+>   date: the old weekly prune kept untagged leftovers for a week and could
+>   delete the rollback target after a quiet week.
+>   `scripts/prune_docker_images.py` keeps every image a container uses, the
+>   newest 3 deploys (ordered by earliest pull, so an unused bad deploy N after
+>   a rollback to N-1 stays) and anything from the last 24 h; it removes the
+>   rest one `docker image rm` at a time, never `-f`, and fails closed.
+> - **Daily `disk_maintenance` DAG** (`98a82b3`, `8fbec8b`; 05:15 UTC, live on
+>   creation — this deployment creates DAGs paused, and a paused guard is a
+>   silent failure). Task logs (and rotated `*.log.N`) are kept 14 days
+>   (~2.8 GB); the after-check reads back the exact files the delete pass
+>   selected, where the old command ended in `; true`. It also runs the image
+>   prune; the weekly `docker_maintenance` keeps the build-cache and B2
+>   modal-artifact prunes.
+> - **Prometheus and alerts** (`f0d36fd`). `--storage.tsdb.retention.size=4GB`
+>   beside the 30 days (healthy ingest ~55-60 MB/day, so it binds only on a
+>   blow-up). New `DiskSpaceWarning` (< 20% available for 30m, warning), muted
+>   while `DiskSpaceLow` fires. Both divide available bytes (which exclude
+>   ext4's 3.1G root reserve) by the size: on `df -h` the warning fires at
+>   ≈ 57G Used and the critical at ≈ 64G. Checked with prod's promtool 3.15.1
+>   and amtool.
+> - **Api metrics labels** (`f157649`, figures corrected in `0f1f32c`) — the
+>   cause of the Oct 21-25 Prometheus growth (~700 MB/day). The middleware
+>   labelled requests with the raw path, so scanner probes and match ids made
+>   unbounded series: `count({job="betting-api",__name__=~"http_.*"})` was
+>   2,620 at 2026-10-16T23:59Z and 10,798 at 2026-10-23T23:59Z (endpoint values
+>   127 → 533) while every other job stayed flat. Labels are now the route
+>   template, `<unmatched>` for 404s and `OTHER` for unknown methods.
+> - **Budget** (`1ac8f40`, `a892663`; OPERATIONS.md "Disk maintenance" and
+>   "When db_backup_daily fails"). Steady state ≈ 38G used; every grower at its
+>   cap plus a dependency-change image set ≈ 54G — only ≈ 3G under the warning
+>   line, ≈ 51G with the recommended journald 1G drop-in (host config).
+>   Postgres (6.6 GB, dump +17% in October) is the one uncapped grower; its
+>   runway is ≈ 19G.
+> Tests: 76 repo-root (48 backup, 23 image prune, 5 config), 11 DAG and 12 api
+> tests; every guard mutation tried (15 backup, 6 log prune, plus the 3 the
+> review found surviving in the image prune) makes them fail.
+> **Operator:** nothing is required (it deploys on push; api and prometheus are
+> recreated). Recommended: the journald 1G drop-in. Optional: force-recreate
+> alertmanager (a single-file bind mount) so the new inhibit rule loads.
+
+> **Update (2026-11-03) — the 8 bout-less MMA fighter rows**
+> (closeout4/mma_orphans: `8b430db`, `e401e70`, `12ed4ea`, review fixes
+> `3a9423a`, `573150d`, `9d52ed2`; not a model lever; wrapper NOT YET RUN).
+> Approved by the user on 2026-11-02: Rodrigo Vera, Max Gimenis, Ramiro Jimenez,
+> Uran Satybaldiev, Henrique da Silva Lopes, Ethyn Ewing, 'TBA' and 'Opponent
+> TBA'. The ESPN sweep created each for a bout ESPN later dropped or re-drew;
+> run B deleted those 10 bouts on 2026-11-02 04:35Z.
+> - **Review** (one-off, read-only, after the 22:41Z identity clean-up and the
+>   22:44Z settle; re-checked at 00:19Z and ~01:02Z on 11-03): exactly these 8
+>   MMA rows have no bout; none carries an ESPN athlete id or any metadata;
+>   nothing references them (0 rows under each of the 9 foreign keys to teams,
+>   none in any uuid column, none in the JSON or text scanned); no other MMA row
+>   claims their names as an alias; ESPN lists none of them on a UFC card
+>   through 2026-12-17. List with the evidence:
+>   `scripts/data/mma_orphan_fighters_20261103.csv`.
+> - **Tool** (`scripts/mma_orphan_cleanup.py`, one transaction) — its own tool,
+>   not a new mode of `mma_identity_cleanup.py`, whose wrapper re-checks its
+>   recorded plan. It refuses a row whose name, sport, ESPN id, metadata or
+>   external ids differ from the review; that any foreign key to teams
+>   references; whose id appears in the JSON of another teams row, of an MMA
+>   match or that match's predictions, features_cache or odds rows, or in any
+>   rec's risk_factors; or whose name another MMA row claims as an alias. The
+>   list may not name a row of the identity clean-up's lists or the merge map,
+>   and its team ids are pinned by sha256 in the tool and the wrapper. The apply
+>   locks `teams` IN EXCLUSIVE MODE (SHARE ROW EXCLUSIVE would not block a bout
+>   insert's foreign-key check), is pinned to the dry run's plan digest
+>   (timestamps held in UTC), archives the full pre-images, guards each DELETE
+>   on every observed column and on no reference, and commits only if every
+>   listed row is gone, teams fell by exactly 8 and nothing cascaded or was set
+>   to NULL.
+> - **Wrapper** (`scripts/ops/mma_orphan_cleanup.sh`): refuses during a UFC
+>   card, beside another ops wrapper or the runbook, while an `--apply` runs in
+>   the api container, unless the list holds the 8 pinned ids and
+>   `mma_identity_cleanup.sh --verify` passes, on any plan but the reviewed or
+>   the done one, and unless the backups filesystem keeps 10% of its size + 1
+>   GiB free (the DiskSpaceLow line plus one dump, ≈ 8.5 GiB). Then the B2
+>   backup, the pinned dry run and apply, `--check-after` and a done re-plan.
+>   After a failed apply a read-only re-plan says NOTHING COMMITTED, COMMITTED
+>   despite exit N, or UNKNOWN. A re-run says ALREADY DONE.
+> - **Rehearsed** on a replica of the 23:16:10Z export: 8 deleted, 0 cascaded,
+>   MMA teams 1310 → 1302, matches unchanged; the identity, settle, merge and
+>   `--verify-b` done states all still pass, and the pipeline's own MMA sweeps
+>   made 0 new fighters and 0 refusals afterwards. Every refusal (a bout, an
+>   ESPN id, a card on, another wrapper, disk at the alert level, one id
+>   swapped, a teams lock held elsewhere) exits 1 with nothing deleted. 149
+>   tests; 97 of 97 guard mutations killed.
+> **Operator (NOT YET APPROVED):** after the deploy, run
+> `mma_orphan_cleanup.sh` outside a UFC card (ideally before 2026-11-07
+> 19:00Z) and never beside another ops script. Reversal: re-insert the
+> archived rows; restoring any of run B's deleted bouts of these fighters
+> needs these rows back first.
+> **Open:** Postgres is the one uncapped disk grower (re-measure quarterly;
+> `airflow_db_maintenance` 90 → 30 days and `features_cache` are the cheap
+> levers, untested); the journald 1G drop-in (host config, recommended);
+> one-off files the operator may delete (`backups/odds_hist_cache` 492 MB,
+> host `/tmp/soccer_export.csv` 296 MB and a few small exports);
+> `models/modal-incoming` grows ~18 MB a week with no prune; Prometheus runs
+> `:latest` and 3.15.1 marks both retention flags deprecated (pin the image or
+> move retention into prometheus.yml); a B2 lifecycle rule, if added, must not
+> expire dumps younger than 7 days; two 2026-11-07 bouts ESPN re-drew (Gabriel
+> Lorenço v Alvin Hines 401928121, Wes Schultz v Mantas Kondratavičius
+> 401928112) are still 'scheduled' with 4 predictions and 0 recs each, until
+> `cancel_dropped_bouts` cancels them after the card; after the delete 'Azamat
+> Bekoev' (1 bout ESPN could not link) is the only MMA row without an ESPN
+> athlete id.
 
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
