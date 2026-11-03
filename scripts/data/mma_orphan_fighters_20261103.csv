@@ -1,0 +1,33 @@
+# Bout-less MMA fighter rows scripts/mma_orphan_cleanup.py deletes (archived first). The user approved them on
+# 2026-11-02 ("Yes" to adding the 8 empty MMA fighter records, including 'TBA' and 'Opponent TBA', to the clean-up).
+# Reviewed 2026-11-02 read-only against prod (23:09:58Z, 23:11:58Z and the export of 23:16:10Z, taken after the
+# identity clean-up of 22:41Z and the held-rows settle of 22:44Z):
+#   - exactly these 8 MMA team rows have no bout (home or away, any status, any league); none was minted since;
+#   - each carries external_ids {} and metadata {}: no ESPN athlete id (the 22:41Z clean-up stamped 1,299 others,
+#     none of these: ESPN links no bout to them), no alias, no merge or split record;
+#   - nothing references them: 0 rows under each of the 9 foreign keys to teams, 0 rows in any uuid column of any
+#     table, and no JSON in teams (other rows), matches, predictions, features_cache, odds, recs, betting_history,
+#     leagues, match_stats, players, transfers or model logs names their ids or names; no other MMA row has the
+#     same name or claims it as an alias; no other file in the repo names their ids;
+#   - ESPN's UFC scoreboards (site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard?dates=YYYYMMDD) for every
+#     date 2026-11-02 .. 2026-12-17 (the cards of 11-07, 11-14, 11-21 and 12-12, 43 bouts) list none of them;
+#   - their bouts were the 10 rows run B of scripts/ops/repair_stranded_recs_mma.sh deleted on 2026-11-02 04:35Z
+#     (scripts/data/mma_stale_rows_retire_20261101.csv; archive fixture_orphans_mma_20261102T043520Z.jsonl.gz):
+#     to restore any of those bouts, restore these rows first from this tool's archive.
+# fetch_upcoming skips 'TBA' and 'Opponent TBA' as placeholders before resolving a fighter, so nothing resolves to
+# those two. A real athlete of one of the other names on a future card gets a fresh row, keyed by his ESPN athlete id.
+# The scans above were a one-off read-only review. On every run the tool re-checks a narrower set: it refuses a row
+# whose name, sport, ESPN id, metadata or external ids differ from this review, that any foreign key to teams
+# references (a bout included), whose id appears in the JSON of another teams row, of an MMA match or of that match's
+# predictions, features_cache or odds rows, or in any rec's risk_factors, or whose name another MMA row claims as an
+# alias. The team ids are pinned by digest in the tool and the wrapper: other ids need a new review and a new pin.
+# espn_athlete_id: the id the reviewed row carries (empty: none).
+team_id,team_name,espn_athlete_id,why
+1de9e9ce-308e-4543-8cf7-5537c1642616,Rodrigo Vera,,"created 2026-08-30 for Rodrigo Vera v Ramiro Jimenez (cdc56c94, 2026-09-12 18:00Z), dropped from the card (its ESPN competition 401913546 no longer listed); run B deleted that bout 2026-11-02; no bout, ESPN id, alias or reference left; on no ESPN UFC card through 2026-12-17"
+39ed8231-51d5-414c-b92e-68d0dfcebb21,Max Gimenis,,"created 2026-07-19 for Jovan Leka v Max Gimenis (358549d8, 2026-08-01 14:00Z); Jovan Leka fought Alexander Poppeck (ESPN 401902576); run B deleted that bout 2026-11-02; no bout, ESPN id, alias or reference left; on no ESPN UFC card through 2026-12-17"
+9e78be62-6d83-4c08-8ad7-c1e04037dbc1,Ramiro Jimenez,,"created 2026-08-30 for Rodrigo Vera v Ramiro Jimenez (cdc56c94, 2026-09-12 18:00Z), dropped from the card (its ESPN competition 401913546 no longer listed); run B deleted that bout 2026-11-02; no bout, ESPN id, alias or reference left; on no ESPN UFC card through 2026-12-17"
+a7b3589f-4c0d-4aad-8a8d-f77fc51cca27,Uran Satybaldiev,,"created 2026-07-12 for Dustin Jacoby v Uran Satybaldiev (dc8b794b, 2026-07-25 13:00Z); Dustin Jacoby fought Muhammad Said (ESPN 401898040); run B deleted that bout 2026-11-02; no bout, ESPN id, alias or reference left; on no ESPN UFC card through 2026-12-17"
+bd8405c2-bda9-4d7b-9ac0-229284fb110b,Henrique da Silva Lopes,,"created 2026-07-26 for Henrique da Silva Lopes v Louie Sutherland (10cc5c04 2026-08-08 21:00Z and c87ddb54 2026-08-09 00:00Z); Louie Sutherland fought José Montanha (ESPN 401897978); run B deleted both bouts 2026-11-02; no bout, ESPN id, alias or reference left; on no ESPN UFC card through 2026-12-17 (ESPN's 'Diego Lopes' on 2026-12-12 is another athlete)"
+db76c9cd-85aa-48dc-b907-2209dbd3fed3,Ethyn Ewing,,"created 2026-06-28 for Ethyn Ewing v Farid Basharat (2ed2b839, 2026-07-11 21:00Z); Farid Basharat fought John Garza (ESPN 401886658); run B deleted that bout 2026-11-02; no bout, ESPN id, alias or reference left; on no ESPN UFC card through 2026-12-17"
+3891a543-801b-4ed5-8911-0f8c1c1ecaa5,TBA,,"placeholder created 2026-07-29 for 'TBA' v 'Opponent TBA' slots (29cafe88 2026-08-11, 9d72031b 2026-08-12, 77efc7ce 2026-09-08, 237f6dac 2026-09-15); run B deleted all four 2026-11-02; fetch_upcoming skips 'TBA' as a placeholder, so nothing resolves to it; no bout, ESPN id, alias or reference left"
+465db744-a2f8-4b30-ad5b-16173f8849b0,Opponent TBA,,"placeholder created 2026-07-29 for 'TBA' v 'Opponent TBA' slots (29cafe88 2026-08-11, 9d72031b 2026-08-12, 77efc7ce 2026-09-08, 237f6dac 2026-09-15); run B deleted all four 2026-11-02; fetch_upcoming skips 'Opponent TBA' as a placeholder since 2026-11-02, so nothing resolves to it; no bout, ESPN id, alias or reference left"
