@@ -347,6 +347,18 @@ def test_the_wrappers_id_digest_of_the_committed_list_is_the_pin(tmp_path):
     assert "EXPECTED_IDS_SHA256=61680fc61ca18ff741ddeaf57a2957e18b736fe580ed775e6820f865479929e6" in lines
 
 
+def test_no_write_before_a_backup_that_landed(tmp_path):
+    rc, out, calls = _run(tmp_path, _rules(), airflow={"backup_fails": True})
+    assert rc == 1 and "backup did not land" in out, out
+    assert not _applies(calls) and not [c for c in calls if "/tmp/mma_orphan_dry.log" in c]
+
+
+@pytest.mark.parametrize("dry, dry_rc", [(PLAN_R, 1), (PLAN_R.replace("delete=8 done=0", "delete=7 done=1"), 0)])
+def test_a_dry_run_off_the_review_aborts_after_the_backup_with_nothing_written(tmp_path, dry, dry_rc):
+    rc, out, calls = _run(tmp_path, _rules(dry=dry, dry_rc=dry_rc))
+    assert rc == 1 and "ABORT at step 2" in out and not _applies(calls)
+
+
 @pytest.mark.parametrize("apply_rc, why", [(2, "reports a refusal before writing"), (1, "reports a roll-back")])
 def test_a_failed_apply_aborts_with_status_applying(tmp_path, apply_rc, why):
     rc, out, calls = _run(tmp_path, _rules(apply_rc=apply_rc))
