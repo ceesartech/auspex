@@ -320,6 +320,9 @@ services:
       # for B2 (it's only the fallback for real AWS S3). See OPERATIONS.md.
       - BACKUP_LOCAL_DIR=${BACKUP_LOCAL_DIR:-/app/backups}
       - BACKUP_LOCAL_RETENTION=${BACKUP_LOCAL_RETENTION:-7}
+      # Max local dumps kept when B2 is set (each older one goes only once
+      # its B2 copy is verified). Ignored without BACKUP_S3_BUCKET.
+      - BACKUP_LOCAL_KEEP=${BACKUP_LOCAL_KEEP:-3}
       - BACKUP_S3_BUCKET=${BACKUP_S3_BUCKET:-}
       - BACKUP_S3_PREFIX=${BACKUP_S3_PREFIX:-postgres/}
       - BACKUP_S3_ENDPOINT_URL=${BACKUP_S3_ENDPOINT_URL:-}
@@ -346,7 +349,8 @@ services:
       # reason as scripts/.
       - ./data:/app/data
       # Bind-mount backups/ — daily pg_dump output lands here for
-      # quick local restore (last 7 days). Host directory must be
+      # quick local restore (the newest 3, see scripts/backup_postgres.py
+      # LOCAL ROTATION). Host directory must be
       # owned by UID 1000 (appuser) so the in-container pg_dump
       # can write to it: `sudo chown -R 1000:1000 /opt/auspex/backups`.
       - ./backups:/app/backups
@@ -418,10 +422,18 @@ services:
       - prometheus_data:/prometheus
     depends_on:
       - alertmanager
+    # Retention: 30 days OR 4GB (Prometheus units are base 2: 4 GiB), whichever
+    # binds first; the oldest blocks go first. Healthy ingest is ~55-60 MB/day
+    # (Oct 25-Nov 2), so 30 days fit in ~1.8 GB and the size cap never binds.
+    # It binds on a cardinality blow-up like Oct 21-25 (~700 MB/day from the
+    # api's raw-path labels), which would otherwise fill ~21 GB in 30 days —
+    # there the cap keeps ~6 days. The prometheus_data volume survives the
+    # container recreate a flag change causes.
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=30d'
+      - '--storage.tsdb.retention.size=4GB'
       - '--web.console.libraries=/etc/prometheus/console_libraries'
       - '--web.console.templates=/etc/prometheus/consoles'
       - '--web.enable-lifecycle'

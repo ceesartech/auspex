@@ -23,6 +23,24 @@ groups:
           summary: "Low disk space on the VM root filesystem"
           description: "Root filesystem is below 10% free ({{ $value | humanizePercentage }}). Backups + Postgres WAL fill this box first — see OPERATIONS.md."
 
+      # Early warning, ~7.5 GB before DiskSpaceLow on the 75 GB disk: room to
+      # act in working hours. avail_bytes leaves out ext4's 3.1G root reserve,
+      # so in `df -h /` terms this fires at ~57G Used (DiskSpaceLow at ~64G);
+      # OPERATIONS.md "Disk budget". Alertmanager mutes it while DiskSpaceLow
+      # fires (inhibit rule in monitoring/alertmanager/alertmanager.yml).
+      - alert: DiskSpaceWarning
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}
+          /
+          node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} < 0.20
+        for: 30m
+        labels:
+          severity: warning
+          component: host
+        annotations:
+          summary: "VM root filesystem below 20% free"
+          description: "Root filesystem is at {{ $value | humanizePercentage }} free. Check the growers in OPERATIONS.md \"Disk maintenance\" (backups, Airflow task logs, docker images, Prometheus, journald) and the disk_maintenance DAG's last runs."
+
       - alert: HostMemoryHigh
         expr: |
           (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.90

@@ -13,10 +13,48 @@ at 02:00 UTC every day. The script:
 
 1. Writes a compressed `pg_dump` to `/app/backups/` inside the api
    container (bind-mounted to `/opt/auspex/backups/` on the host).
-   Files named `auspex_prod-YYYY-MM-DDTHHMMSSZ.dump`.
-2. Optionally uploads to S3-compatible storage when
-   `BACKUP_S3_BUCKET` env var is set.
-3. Rotates local backups older than 7 days.
+   Files named `<database>-YYYY-MM-DDTHHMMSSZ.dump`, on prod
+   `betting_system-…dump`.
+2. Uploads it to Backblaze B2 when `BACKUP_S3_BUCKET` is set (prod: yes)
+   and HEAD-verifies the upload.
+3. Rotates the local dumps: never the one it just wrote; with B2, keeps at
+   most `BACKUP_LOCAL_KEEP` (3) and none older than 7 days, deleting an older
+   one only after a HEAD on its own B2 copy shows the same byte size; without
+   B2, only the 7-day age rule. A dump that never reached B2 (its upload
+   failed, or the run used `--skip-upload`) answers the HEAD with a 404:
+   rotation then uploads it, verifies the size and only then deletes it, so
+   one failed upload does not turn later runs red. Anything else it cannot
+   verify (B2 unreachable, an auth error, a copy of a different size, a failed
+   re-upload or delete) keeps the file, logs an ERROR naming it, and exits 3.
+   Every ops wrapper triggers this DAG for its pre-write backup, so a busy
+   ops day used to pile up 20+ dumps under the age-only rule. On such a day an
+   earlier wrapper's pre-write dump leaves the VM within hours: a reversal
+   that needs a dump older than the newest 3 downloads it from B2 first
+   (restore option b below, with that dump's key instead of the newest).
+
+### When db_backup_daily fails
+
+The task log says which exit code and why (`docker compose exec -T
+airflow-scheduler airflow dags list-runs db_backup_daily -o json`, then the
+task log in the Airflow UI). The DAG retries once after 10 minutes with a
+fresh dump.
+
+| Exit | Meaning | What to do |
+|---|---|---|
+| 1 | `pg_dump` failed (no dump kept), or `DATABASE_URL` is unset | Read the pg_dump stderr tail in the log; check postgres is up. |
+| 2 | The dump is local but its upload to B2 failed | Check B2 (credentials in `.env`, endpoint, the B2 status page). Nothing else: the next run's rotation uploads this dump before it deletes it. |
+| 3 | The new dump is written and uploaded, but rotation kept an older dump it would have deleted | Each `KEPT <file> (…) — …` ERROR line says why. `HEAD … failed: …` (not a 404) or `the re-upload failed`: B2 was unreachable or refused — fix that, then trigger `db_backup_daily` again. `… is N bytes, the local file M`: the B2 copy differs and is never overwritten automatically — check the local file is a readable dump (`docker compose exec -T api pg_restore --list /app/backups/<file> > /dev/null && echo READABLE`); once a newer dump is confirmed in B2 (the listing below), delete the local file (`rm -v /opt/auspex/backups/<file>`) and trigger the DAG. `the delete failed`: fix the file's ownership (`ls -l /opt/auspex/backups`). |
+| 4 | `BACKUP_LOCAL_KEEP` or `BACKUP_LOCAL_RETENTION` is not a valid number (no dump was taken) | Fix the value in `.env`, recreate the api container (`export IMAGE_TAG=$(docker inspect betting-api --format '{{.Config.Image}}' \| cut -d: -f2) && docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ghcr.yml up -d --pull never api`), trigger the DAG. |
+
+A mistyped command-line flag in a manual run also exits 2, but argparse
+prints `usage:` first; the DAG passes no flags.
+
+The newest three dumps in B2, with sizes (read-only; it uses the script's own
+client, so the signing region is derived from the endpoint):
+
+```bash
+docker compose exec -T api python -c "import os,sys; sys.path.insert(0,'/app/scripts'); import backup_postgres as b; s3=b.make_s3_client(os.environ.get('BACKUP_S3_ENDPOINT_URL')); o=[x for p in s3.get_paginator('list_objects_v2').paginate(Bucket=os.environ['BACKUP_S3_BUCKET'],Prefix=os.environ.get('BACKUP_S3_PREFIX','postgres/')) for x in p.get('Contents',[])]; [print(x['Key'],x['Size'],x['LastModified']) for x in sorted(o,key=lambda x:x['LastModified'])[-3:]]"
+```
 
 ### Initial setup on a fresh host
 
@@ -122,10 +160,13 @@ wired — pings you) while the local copy is still safely written.
 
 Set a **Lifecycle Rule** on the bucket in the B2 UI (Buckets →
 Lifecycle Settings) to keep, e.g., the last 30 days, then hide +
-delete. The local copy already rotates at 7 days
-(`BACKUP_LOCAL_RETENTION`). At our backup size, even keeping a full
+delete. The local copies rotate to the newest 3 (`BACKUP_LOCAL_KEEP`),
+each older one only after its B2 copy is verified — so a B2 rule must
+never expire an object younger than a week: rotation would find it missing
+and upload the local file again before deleting it. At our backup size, even keeping a full
 year on B2 costs well under $1/yr, so retention is about tidiness more
-than cost.
+than cost. (2026-11-02: 148 dumps, 44 GB, the oldest from 2026-07-13 —
+so no expiry rule is in effect.)
 
 ### Restore — full disaster recovery
 
@@ -133,8 +174,9 @@ The DB has been wiped or the host is gone. Recovery:
 
 ```bash
 # 1. Fetch the most recent backup. Either:
-#    a) From local disk if the host is intact:
-ls -t /opt/auspex/backups/auspex_prod-*.dump | head -1
+#    a) From local disk if the host is intact (only the newest 3 are
+#       local; older ones are in B2):
+ls -t /opt/auspex/backups/betting_system-*.dump | head -1
 #    b) From B2 if the host is gone (no aws CLI needed — use boto3 via
 #       any machine with the B2 creds in env; download newest object):
 python3 - <<'PY'
@@ -158,7 +200,7 @@ docker compose exec -T postgres pg_restore \
     -d "$POSTGRES_DB" \
     --clean --if-exists \
     -j 4 \
-    < /tmp/auspex_prod-2026-06-07T020000Z.dump
+    < /tmp/betting_system-2026-11-02T020001Z.dump
 
 # 4. Bring up the rest of the stack:
 docker compose up -d
@@ -179,7 +221,7 @@ docker compose exec -T postgres pg_restore \
     -d "$POSTGRES_DB" \
     -t race_predictions \
     --data-only \
-    < /opt/auspex/backups/auspex_prod-2026-06-07T020000Z.dump
+    < /opt/auspex/backups/betting_system-2026-11-02T020001Z.dump
 ```
 
 ### Test the restore quarterly
@@ -283,23 +325,108 @@ docker compose restart airflow-scheduler
 
 ## Disk maintenance
 
-The VM's disk pressure comes from three growers; each has an automated guard:
+The VM has one 75 GB root filesystem (4 GB of it a swapfile). On 2026-11-02 it
+reached 95% used and `DiskSpaceLow` fired. Four growers had stacked up: 37 local
+pg_dumps (14 GB — the rotation was by age only, and every ops wrapper takes a
+backup, 21 of them that day), 7.4 GB of Airflow task logs (kept 30 days), a week
+of untagged `:latest` leftovers among the docker images, and a 7.8 GB Prometheus
+store (30 days, no size cap, swollen by an api label blow-up). Each now has a cap.
 
-| Grower | Guard | Where |
+### Disk budget
+
+Measured read-only on 2026-11-02 at ~23:40Z, after the one-off clean-up below.
+
+| Grower | Now | Rate | Cap / guard | Steady state |
+|---|---|---|---|---|
+| Docker images (`/var/lib/containerd`; Docker 29 uses the containerd image store) | 12 GB | a deploy adds ~10-15 MB (consecutive deploys share ~4.4 GB of layers); a dependency change adds ~8 GB; re-pulling a `:latest` third-party image leaves the old one untagged (grafana: 2 GB) | daily `disk_maintenance` → `prune_docker_images`: keeps every image a container uses and the newest 3 deploys (the rollback target), removes the rest once 24 h old (`scripts/prune_docker_images.py`) | ~12-13 GB; ≤ ~22 GB while a dependency change is inside the newest 3 |
+| Postgres volume | 6.6 GB (database 6.1 GB, WAL 0.2 GB with `max_wal_size` 1 GB) | the dump grew 334 → 390 MB in October (+17%) | none — it is the data. The headroom below is its runway | grows |
+| Prometheus volume | 7.8 GB → ≤ 4 GiB once the deploy recreates Prometheus | ~55-60 MB/day healthy; ~700 MB/day on Oct 21-25 (the api labelled metrics with raw request paths; fixed 2026-11-02) | `--storage.tsdb.retention.time=30d` and `--storage.tsdb.retention.size=4GB` (whichever binds first; oldest blocks go first) | ~1.8 GB (30 days) |
+| Airflow task logs (`services/data-ingestion/logs`) | 3.1 GB | ~200 MB/day (120-290), ~3,300 files/day, 96% `auspex_pipeline` | daily `disk_maintenance` → `prune_airflow_task_logs`: log files older than 14 days, rotated `*.log.N` included, then directories empty for an hour | ~3 GB (≤ 4 GB) |
+| journald (`/var/log/journal`) | 4.0 GB | ~40 MB/day, mostly sshd brute-force noise | systemd's default cap: the smaller of 10% of the filesystem and 4 GB | 4 GB — or 1 GB with the optional drop-in below |
+| Local pg_dumps (`/opt/auspex/backups/betting_system-*.dump`) | 1.1 GB (3 × ~380 MB) | one per backup run: daily 02:00, plus one per ops wrapper | `scripts/backup_postgres.py`: never the dump just written; the newest 3 (`BACKUP_LOCAL_KEEP`) and none past 7 days, each older one deleted only after its B2 copy is verified | ~1.2 GB, growing with the database |
+| Other files in `backups/` | 0.75 GB: `odds_hist_cache/` 0.49 GB (the October odds backfill cache), audit CSVs and reversal archives 0.25 GB | a few MB to 60 MB per ops run | none: audit records are write-once and kept on purpose | grows with ops work |
+| Container json logs | 0.15 GB | — | `max-size 50m` × `max-file 3` per container (17) | ≤ 2.5 GB |
+| Grafana volume | 0.6 GB (plugins) | — | bounded | 0.6 GB |
+| Models (`/opt/auspex/models`) | 0.5 GB | `modal-incoming/` +~18 MB per weekly retrain | none | +~1 GB/year |
+| Swapfile, OS, `/usr`, `/boot`, other `/var` | ~7 GB | — | fixed | ~7 GB |
+| Airflow metadata rows | inside Postgres | ~1,500 task runs/day | monthly `airflow_db_maintenance`: `airflow db clean` of rows older than 90 days | — |
+
+Sizes are as `du -h` / `df -h` print them (G = GiB).
+
+**Where the alerts fire, in `df -h /` terms.** The filesystem is 74.8G
+(`df -B1` on 2026-11-03: size 80,290,492,416, used 45,670,158,336, avail
+31,292,731,392 bytes); the 3.1G that is neither used nor available is ext4's
+root-reserved space, so `Used` + `Avail` is only 71.7G. The alerts divide `node_filesystem_avail_bytes`
+(which leaves out the reserved blocks) by the full size:
+
+| Alert | Fires when | `df -h /` Used at that point |
 |---|---|---|
-| Docker images (~2-4 GB per active deploy week; CI pushes SHA-tagged images every merge) | Weekly `docker_maintenance` DAG — `docker image prune -af --filter until=336h` + `docker builder prune -af` (Sundays 05:00 UTC; 14-day retention always spans a rollback target) | `services/data-ingestion/dags/docker_maintenance.py` |
-| Container logs | json-file caps: `max-size 50m` × `max-file 3` per service | `x-default-logging` anchor in both compose files |
-| Airflow metadata (~1,500 task-runs/day) | Monthly `airflow_db_maintenance` DAG — `airflow db clean` of rows older than 90 days | `services/data-ingestion/dags/airflow_db_maintenance.py` |
+| `DiskSpaceWarning` (warning, Telegram) | Avail < 20% of 74.8G = 15.0G, for 30m | ≈ 57G |
+| `DiskSpaceLow` (critical, repeats every 15m) | Avail < 10% = 7.5G, for 15m | ≈ 64G |
 
-Also automated: Prometheus TSDB retention (30d, compose `--storage.tsdb.retention.time`),
-local pg_dump rotation (7 days, `BACKUP_LOCAL_RETENTION`), and the
-`DiskSpaceLow` alert (< 10% free on `/` for 15m → Telegram) as the backstop.
+Alertmanager mutes the warning while the critical fires. (2026-11-02 at the
+incident: 68G used, 3.7G avail.)
+
+**Totals.** Steady state ≈ 38G used (~53% in df's Use% column). The worst case — every
+capped grower at its cap at once and a dependency change inside the newest 3
+deploys — is ≈ 54G: only ≈ 3G under the ≈ 57G warning line. The journald drop-in
+below (4G → 1G) brings that to ≈ 51G and ≈ 6G of margin, and is recommended for
+that reason. The ≈ 19G between steady state and the warning line is Postgres's
+runway; re-measure each quarter with the commands below.
+
+### When DiskSpaceWarning or DiskSpaceLow fires
+
+1. Find the grower (read-only):
+   ```bash
+   df -h /
+   sudo du -xsh /var/lib/containerd /var/lib/docker/volumes /opt/auspex/backups \
+       /opt/auspex/services/data-ingestion/logs /var/log/journal /opt/auspex/models /tmp
+   docker system df
+   ```
+2. Check the guards ran: the `disk_maintenance` DAG (daily 05:15 UTC) and
+   `db_backup_daily`. A backup run that exits 3 kept a dump whose B2 copy it
+   could not verify; its task log names the file in an ERROR line, and
+   "When db_backup_daily fails" above says what to do.
+   ```bash
+   docker compose exec -T airflow-scheduler airflow dags list-runs disk_maintenance -o json
+   docker compose exec -T airflow-scheduler airflow dags list-runs db_backup_daily -o json
+   ```
+3. Clean up by hand only what a guard did not cover. These are the commands
+   run on 2026-11-02; each is safe to repeat:
+   - **Local dumps.** Normally just trigger `db_backup_daily`: its rotation
+     verifies each older dump in B2 before deleting it. The blunt manual form,
+     only once you have confirmed every dump is in B2:
+     `ls -1t /opt/auspex/backups/betting_system-*.dump | tail -n +4 | xargs -r rm -v`
+   - **Airflow task logs** older than 14 days. Simplest: trigger the guard,
+     `docker compose exec -T airflow-scheduler airflow dags trigger disk_maintenance`.
+     By hand, run it inside the scheduler: the log directories belong to the
+     container's `airflow` user (uid 50000, mode 775), so the host's `auspex`
+     user cannot delete there.
+     `docker compose exec -T airflow-scheduler find /opt/airflow/logs -type f \( -name '*.log' -o -name '*.log.[0-9]*' \) -mtime +14 -delete`
+   - **Docker images.** Preview the guarded prune, then apply it:
+     ```bash
+     docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ghcr.yml \
+         exec -T airflow-scheduler python /opt/auspex/scripts/prune_docker_images.py          # dry run
+     docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ghcr.yml \
+         exec -T airflow-scheduler python /opt/auspex/scripts/prune_docker_images.py --apply
+     ```
+     Avoid `docker image prune -af --filter until=24h` (used on 2026-11-02)
+     except in an emergency: with the containerd store `until` is the pull
+     time, so it also deletes the previous deploys — the local rollback target —
+     once they are a day old. GHCR still has every tag, so a rollback can re-pull.
+   - **journald.** `sudo journalctl --vacuum-size=1G` frees ~3 GB at once; make
+     it stick with the drop-in (recommended: it is most of the margin under the
+     warning line in the worst case above):
+     `sudo mkdir -p /etc/systemd/journald.conf.d && printf '[Journal]\nSystemMaxUse=1G\n' | sudo tee /etc/systemd/journald.conf.d/auspex-size.conf && sudo systemctl restart systemd-journald`
+   - **Prometheus.** If the TSDB is the grower, look for a label blow-up in the
+     Prometheus UI: `topk(10, count by (job, __name__) ({__name__=~".+"}))`.
 
 > History: the audit-era hardening intended a host crontab for the image prune;
 > the 2026-07-14 verification pass found no crontab entry on the VM (~10 GB of
-> reclaimable layers had accumulated). It was replaced with the DAG above —
-> versioned, visible in the Airflow UI, and paging on failure. If images pile
-> up again, check that DAG's runs first, then `docker system df`.
+> reclaimable layers had accumulated). It was replaced by the weekly
+> `docker_maintenance` DAG, and on 2026-11-02 the image and log prunes moved to
+> the daily `disk_maintenance` DAG (the weekly one keeps the build-cache and B2
+> modal-artifact prunes).
 
 Manual spot-checks:
 

@@ -1,20 +1,23 @@
-"""Weekly Docker image/build-cache prune (audit doc §6.2).
+"""Weekly Docker build-cache prune + B2 Modal-artifact prune (audit doc §6.2).
 
-Every CI deploy pulls fresh api/airflow/frontend images (SHA-tagged), so old
-layers accumulate at ~2-4 GB per active week. The audit prescribed a weekly
-host cron for this, and the 2026-07-13 hardening batch believed it installed
-one — the 2026-07-14 verification pass found no crontab entry on the VM (the
-guardrail was silently absent while ~10 GB of reclaimable layers piled up).
+History: this DAG replaced a host cron the 2026-07-13 hardening batch believed
+it had installed (the 2026-07-14 verification found no crontab entry while
+~10 GB of reclaimable layers piled up). A DAG is versioned in the repo
+(survives a VM rebuild), visible in the Airflow UI, and pages Telegram on
+failure via the shared notify_failure callback. The airflow containers mount
+the docker socket, so the docker CLI works directly.
 
-A DAG beats a host cron here: it is versioned in the repo (survives a VM
-rebuild), visible in the Airflow UI, and pages Telegram on failure via the
-shared notify_failure callback. The airflow containers already mount the
-docker socket (the pipeline DAGs shell `docker compose exec`), so the docker
-CLI works directly.
+The image prune and the Airflow task-log prune moved to the DAILY
+disk_maintenance DAG on 2026-11-02, after the root disk reached 95%: the old
+`docker image prune -af --filter until=168h` kept a week of untagged :latest
+leftovers and could delete the rollback target after a quiet week (see
+scripts/prune_docker_images.py), and the 30-day log prune let task logs reach
+7.4 GB. What stays here is weekly by nature:
 
-`--filter until=336h` keeps the last 14 days of images — always spanning the
-current + previous deploy, so an emergency IMAGE_TAG rollback (see the
-API_DOWN runbook) still finds its target locally.
+* prune_build_cache — `docker builder prune -af`. CI builds the images
+  remotely, so the cache only grows after a FORCE_LOCAL_BUILD=1 deploy.
+* prune_b2_modal_artifacts — B2 modal-train/<run_id>/… objects older than 14
+  days (B2 storage, not the VM disk).
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ default_args = {
 
 with DAG(
     dag_id="docker_maintenance",
-    description="Weekly prune of Docker images older than 14 days + build cache",
+    description="Weekly docker build-cache prune + B2 modal-train artifact prune (images/logs: disk_maintenance)",
     default_args=default_args,
     start_date=datetime(2025, 1, 1),
     schedule="0 5 * * 0",  # Sundays 05:00 UTC, after the weekly retrain window opens
@@ -46,22 +49,6 @@ with DAG(
     tags=["auspex", "maintenance"],
 ) as dag:
 
-    prune_images = BashOperator(
-        task_id="prune_images",
-        bash_command="docker image prune -af --filter until=168h",
-    )
-
-    prune_airflow_task_logs = BashOperator(
-        task_id="prune_airflow_task_logs",
-        # Airflow task-log FILES are unbounded (airflow db clean prunes DB
-        # rows only): ~50-80 MB/day at the 15-min pipeline cadence, 5 GB by
-        # 2026-08. 30-day retention keeps every log the UI still links from
-        # recent runs while capping the pile at ~2 GB.
-        bash_command=(
-            "find /opt/airflow/logs -type f -name '*.log' -mtime +30 -delete "
-            "&& find /opt/airflow/logs -type d -empty -delete; true"
-        ),
-    )
     prune_build_cache = BashOperator(
         task_id="prune_build_cache",
         bash_command="docker builder prune -af",
@@ -79,4 +66,4 @@ with DAG(
         ),
     )
 
-    prune_images >> prune_build_cache >> prune_airflow_task_logs >> prune_b2_modal_artifacts
+    prune_build_cache >> prune_b2_modal_artifacts

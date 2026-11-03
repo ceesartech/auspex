@@ -1,15 +1,24 @@
 """Daily PostgreSQL backup DAG.
 
-Runs `scripts/backup_postgres.py` at 02:00 UTC every day. The script:
+Runs `scripts/backup_postgres.py` at 02:00 UTC every day; every ops
+wrapper also triggers it for its verified pre-write backup. The script:
   * Dumps the prod DB to a timestamped .dump file in /app/backups/
     (bind-mounted to /opt/auspex/backups/ on the host).
-  * Optionally uploads to S3-compatible storage when
-    BACKUP_S3_BUCKET env var is set.
-  * Rotates out local backups older than 7 days.
+  * Uploads it to B2 (S3-compatible) when BACKUP_S3_BUCKET is set, and
+    HEAD-verifies the upload.
+  * Rotates local dumps: never the one just written; with B2, at most
+    BACKUP_LOCAL_KEEP (3) and none past 7 days, each older one deleted
+    only after its own B2 copy is verified — a dump whose upload failed
+    or was skipped (HEAD 404) is uploaded and verified first; without
+    B2, the 7-day age rule alone (scripts/backup_postgres.py, LOCAL
+    ROTATION).
 
-If the dump itself fails the task fails; if the S3 upload fails the
-task succeeds (local backup is the must-have) and a Telegram alert
-fires from the Airflow-failure-callback infra (added separately).
+The task fails — and notify_failure pages Telegram — when the dump fails
+(exit 1), the upload fails (exit 2, local dump kept; a later run's
+rotation uploads it), rotation had to keep a dump whose B2 copy it could
+not verify (exit 3), or BACKUP_LOCAL_KEEP / BACKUP_LOCAL_RETENTION is
+invalid (exit 4, no dump taken). The retry takes a fresh dump.
+OPERATIONS.md "When db_backup_daily fails" has what to do for each.
 
 02:00 UTC is chosen to land BEFORE:
   * 03:00 weather_daily_vc_fetch (so a heavy backfill doesn't run

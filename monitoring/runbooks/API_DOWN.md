@@ -87,7 +87,9 @@ previous good SHA and re-pull:
 IMAGE_TAG=<previous-good-sha> dc pull api && \
 IMAGE_TAG=<previous-good-sha> dc up -d api
 ```
-(Find prior tags with `docker images ghcr.io/ceesartech/auspex/api`.)
+(Find prior tags with `docker images ghcr.io/ceesartech/auspex/api`. The daily
+`disk_maintenance` DAG keeps the images of the newest 3 deploys on the VM; an
+older tag is re-pulled from GHCR, which keeps every tag.)
 
 ---
 
