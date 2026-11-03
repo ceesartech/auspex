@@ -7,7 +7,9 @@ with the dry run's plan file, and the guarded DELETE's SQL."""
 from __future__ import annotations
 
 import csv
+import hashlib
 import importlib.util
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -98,14 +100,36 @@ def test_the_committed_list_names_no_row_of_another_mma_list():
     moc.check_no_overlap(moc.load_list(LIST), others)  # raises on an overlap
 
 
-def test_a_row_of_another_mma_list_is_refused():
+OTHER_LISTS = (
+    "the identity clean-up's split row",
+    "the identity clean-up's new split row",
+    "the identity clean-up's alias list",
+    "the identity clean-up's orphan list",
+    "the identity clean-up's athlete-id list",
+    "the fighter merge map",
+)
+
+
+def _held_by(others, label):
+    """A row only that list holds, else (the alias row is also stamped) one it holds with others."""
+    return next((k for k, v in others.items() if v == [label]), None) or next(
+        k for k, v in others.items() if label in v
+    )
+
+
+def test_every_other_mma_list_is_read():
     others = moc.other_list_ids()
-    stamped = next(k for k, v in others.items() if "athlete-id" in v)
-    with pytest.raises(moc.ListError, match="athlete-id list"):
-        moc.check_no_overlap([moc.Orphan(stamped, "Someone", "")], others)
-    merged = next(k for k, v in others.items() if "merge map" in v)
-    with pytest.raises(moc.ListError, match="merge map"):
-        moc.check_no_overlap([moc.Orphan(merged, "Someone", "")], others)
+    assert {label for v in others.values() for label in v} == set(OTHER_LISTS)
+    # the alias row is also stamped: it names both lists (one label must never hide the other)
+    alias = _held_by(others, "the identity clean-up's alias list")
+    assert others[alias] == ["the identity clean-up's alias list", "the identity clean-up's athlete-id list"]
+
+
+@pytest.mark.parametrize("label", OTHER_LISTS)
+def test_a_row_of_another_mma_list_is_refused(label):
+    others = moc.other_list_ids()
+    with pytest.raises(moc.ListError, match=re.escape(label)):
+        moc.check_no_overlap([moc.Orphan(_held_by(others, label), "Someone", "")], others)
 
 
 @pytest.mark.parametrize(
@@ -228,6 +252,8 @@ def test_plan_difference_names_an_action_change_and_a_foreign_plan():
     )
     assert "refuse, the expected plan says delete" in moc.plan_difference(a, refused)
     assert "not a mma_orphan_cleanup plan" in moc.plan_difference({"tool": "mma_identity_cleanup"}, a)
+    # another tool's plan file, even one that carries this plan's digest
+    assert "not a mma_orphan_cleanup plan" in moc.plan_difference({**a, "tool": "mma_identity_cleanup"}, a)
     assert moc.plan_difference({**a, "digest": "0" * 64}, a) == "the plan digest differs from the expected plan"
     assert "is not in the expected plan" in moc.plan_difference({**a, "digest": "0", "rows": []}, a)
 
@@ -276,11 +302,44 @@ def test_no_database_url_is_refused(monkeypatch):
     assert moc.main(["--database-url", ""]) == 2
 
 
-def test_main_refuses_a_list_naming_a_row_of_another_mma_list_before_connecting(tmp_path):
-    stamped = next(k for k, v in moc.other_list_ids().items() if "athlete-id" in v)
+def test_main_refuses_a_list_naming_a_row_of_another_mma_list_before_connecting(tmp_path, caplog):
+    stamped = _held_by(moc.other_list_ids(), "the identity clean-up's athlete-id list")
     lst = _write(tmp_path, [f"{stamped},Someone,,why"])
     # an unreachable database: the refusal comes before any connection
-    assert moc.main(["--list", str(lst), "--database-url", "postgresql://nobody@127.0.0.1:1/none"]) == 2
+    with caplog.at_level("ERROR"):
+        assert moc.main(["--list", str(lst), "--database-url", "postgresql://nobody@127.0.0.1:1/none"]) == 2
+    assert "is in the identity clean-up's athlete-id list: deleting it would break" in caplog.text
+
+
+# --- the pinned ids -----------------------------------------------------------------------------------------------
+
+
+def test_the_committed_list_is_the_pinned_one_and_the_wrapper_pins_the_same_ids():
+    assert moc.ids_digest(moc.load_list(LIST)) == moc.PINNED_IDS_SHA256
+    moc.check_pinned_ids(moc.load_list(LIST))
+    wrapper = (SCRIPTS_DIR / "ops" / "mma_orphan_cleanup.sh").read_text()
+    assert f"EXPECTED_IDS_SHA256={moc.PINNED_IDS_SHA256}" in wrapper
+
+
+def test_the_ids_digest_is_the_sorted_id_column_one_per_line():
+    a, b = moc.Orphan("b" * 8, "B", ""), moc.Orphan("a" * 8, "A", "")
+    assert moc.ids_digest([a, b]) == hashlib.sha256(f"{'a' * 8}\n{'b' * 8}\n".encode()).hexdigest()
+
+
+def test_main_refuses_a_list_of_other_ids_before_connecting(tmp_path, caplog):
+    """Eight unreferenced rows that are not the reviewed eight (a list edited on the VM): refused on the pin."""
+    rows = [f"{i:08x}-0000-4000-8000-000000000000,Fighter {i},,why" for i in range(8)]
+    with caplog.at_level("ERROR"):
+        rc = moc.main(["--list", str(_write(tmp_path, rows)), "--database-url", "postgresql://nobody@127.0.0.1:1/none"])
+    assert rc == 2 and "are not the reviewed ones" in caplog.text, caplog.text
+    one_swapped = [ln for ln in LIST.read_text(encoding="utf-8").splitlines() if not ln.startswith("#")][1:]
+    one_swapped[0] = "00000000-0000-4000-8000-000000000000" + one_swapped[0][36:]
+    caplog.clear()
+    with caplog.at_level("ERROR"):
+        rc = moc.main(
+            ["--list", str(_write(tmp_path, one_swapped)), "--database-url", "postgresql://nobody@127.0.0.1:1/none"]
+        )
+    assert rc == 2 and "are not the reviewed ones" in caplog.text, caplog.text
 
 
 def test_the_digest_does_not_depend_on_the_session_time_zone():
@@ -288,3 +347,85 @@ def test_the_digest_does_not_depend_on_the_session_time_zone():
     local = _doc(_row(created_at=CREATED.astimezone(denver), updated_at=CREATED.astimezone(denver)))
     assert local["digest"] == _doc()["digest"]
     assert local["rows"][0]["observed"]["created_at"].utcoffset() == timedelta(0)
+
+
+# --- the schema guard and --check-after without a database --------------------------------------------------------
+
+
+class _FakeCursor:
+    """Answers the foreign-key discovery with `fks` and every count with `n`."""
+
+    def __init__(self, fks=(), n=0):
+        self.fks, self.n, self.sql = list(fks), n, []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, query, params=None):
+        self.sql.append(str(query))
+
+    def fetchall(self):
+        return [{"tbl": t, "col": c} for t, c in self.fks]
+
+    def fetchone(self):
+        return {"n": self.n}
+
+
+class _FakeConn:
+    def __init__(self, cur):
+        self.cur = cur
+
+    def cursor(self, cursor_factory=None):
+        return self.cur
+
+    def rollback(self):
+        pass
+
+
+@pytest.mark.parametrize(
+    "fks",
+    [
+        [],
+        [("players", "team_id")],
+        [("matches", "home_team_id")],  # one side of the bout is not enough
+        [("matches", "away_team_id"), ("players", "team_id")],
+    ],
+)
+def test_a_schema_without_both_bout_foreign_keys_is_refused(fks):
+    """No matches -> teams foreign keys: the reference counts and the DELETE's NOT EXISTS guards would miss bouts."""
+    cur = _FakeCursor(fks)
+    with pytest.raises(moc.GuardError, match="no matches -> teams foreign keys"):
+        moc.load_state(cur, (ORPHAN,))
+    assert len(cur.sql) == 1  # nothing read past the discovery
+
+
+def test_check_after_refuses_a_plan_that_refuses_a_row(tmp_path, caplog):
+    state = _state(_row())
+    doc = moc.plan_document(
+        [
+            moc.plan_row(ORPHAN, state),
+            moc.RowPlan("39ed8231-51d5-414c-b92e-68d0dfcebb21", "Max Gimenis", "refuse", "x"),
+        ],
+        state,
+        "dry-run",
+    )
+    plan = tmp_path / "refusing.plan.json"
+    plan.write_text(moc.mic._j(doc), encoding="utf-8")
+    cur = _FakeCursor(n=0)  # the delete row reads gone
+    with caplog.at_level("ERROR"):
+        assert moc.run_check_after(_FakeConn(cur), plan) == 2
+    assert "plans a refusal" in caplog.text and not cur.sql  # refused before reading the database
+
+
+def test_check_after_holds_only_when_every_listed_row_is_planned_gone_and_is_gone(tmp_path):
+    state = _state(_row())
+    plan = tmp_path / "ok.plan.json"
+    plan.write_text(moc.mic._j(moc.plan_document([moc.plan_row(ORPHAN, state)], state, "dry-run")), encoding="utf-8")
+    assert moc.run_check_after(_FakeConn(_FakeCursor(n=0)), plan) == 0
+    assert moc.run_check_after(_FakeConn(_FakeCursor(n=1)), plan) == 1
+    other = tmp_path / "other.plan.json"
+    other.write_text('{"tool": "mma_identity_cleanup", "rows": []}', encoding="utf-8")
+    assert moc.run_check_after(_FakeConn(_FakeCursor(n=0)), other) == 2

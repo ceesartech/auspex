@@ -3,11 +3,14 @@ it refuses while another scripts/ops wrapper or the soccer runbook runs (never
 over its own parents or subshells), while an apply still runs in the api
 container, while a UFC card is on, unless the list holds exactly 8 rows and the
 identity clean-up is verified (mma_identity_cleanup.sh --verify, stubbed here);
-the reviewed plan before the backup and again from the dry run; a free-space
-floor before the backup; no write before a backup that landed; the apply
-pinned to the dry run's plan file; the exact after-state (--check-after and a
-done re-plan); 'already done' only once the recorded plan's after-state holds;
---verify (read only, never a backup)."""
+the list's team ids pinned by digest; the reviewed plan before the backup and
+again from the dry run; a free-space floor before the backup (the DiskSpaceLow
+line, 10% of the filesystem, plus 1 GiB for the dump); no write before a backup
+that landed; the apply pinned to the dry run's plan file; after a failed apply,
+a read-only re-plan that says whether it committed; the exact after-state
+(--check-after and a done re-plan); 'already done' only once the recorded
+plan's after-state holds; --verify (read only on the database, never a
+backup)."""
 
 from __future__ import annotations
 
@@ -37,10 +40,22 @@ pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash
 
 PLAN_R = "PLAN listed=8 delete=8 done=0 refuse=0"
 DONE_P = "PLAN listed=8 delete=0 done=8 refuse=0"
-DF_OK = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 78643200 71303168 3984588 95% /"
+DF_HEAD = "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+DF_OK = DF_HEAD + "/dev/sda1 78643200 47185920 31457280 60% /"  # prod at 23:55Z on 2026-11-02: 30G free of 75G
+NEED_KB = 78643200 // 10 + 1048576  # 8912896: 10% of the filesystem (the DiskSpaceLow line) plus 1 GiB for the dump
 
 
-def _rules(pre=PLAN_R, dry=PLAN_R, verify=DONE_P, dry_rc=0, apply_rc=0, after_rc=0, card="CARD_CHECK_OK", card_rc=0):
+def _rules(
+    pre=PLAN_R,
+    dry=PLAN_R,
+    verify=DONE_P,
+    post=PLAN_R,
+    dry_rc=0,
+    apply_rc=0,
+    after_rc=0,
+    card="CARD_CHECK_OK",
+    card_rc=0,
+):
     rules = [
         {"match": r"> /tmp/mma_orphan_apply\.log 2>&1", "out": f"tool exit {apply_rc}", "rc": apply_rc},
         {"match": r"> /tmp/mma_orphan_after\.log 2>&1", "out": "AFTER-STATE (scripted)", "rc": after_rc},
@@ -49,7 +64,7 @@ def _rules(pre=PLAN_R, dry=PLAN_R, verify=DONE_P, dry_rc=0, apply_rc=0, after_rc
         {"match": r"postgres sh -c psql .*mma_orphan_card\.sql", "out": card, "rc": card_rc},
         {"match": r"postgres rm -f", "out": ""},
     ]
-    for name, plan in (("pre", pre), ("dry", dry), ("verify", verify)):
+    for name, plan in (("pre", pre), ("dry", dry), ("verify", verify), ("post", post)):
         rules.append({"match": rf"grep -oE 'PLAN .*' /tmp/mma_orphan_{name}\.log", "out": plan})
     return rules
 
@@ -126,7 +141,8 @@ def test_a_clean_run_pins_the_plan_and_applies_it(tmp_path):
     rc, out, calls = _run(tmp_path, _rules())
     assert rc == 0 and "DONE: the 8 bout-less MMA fighter rows are deleted" in out, out
     assert "identity stub --verify" in out and _backups(tmp_path) == 1
-    assert "backups filesystem: 3984588 KiB free" in out
+    assert f"backups filesystem: 31457280 KiB free of 78643200 (needs at least {NEED_KB}" in out
+    assert not [c for c in calls if "mma_orphan_post" in c]  # no post-failure re-plan after a clean apply
     (apply,) = _applies(calls)
     (dry,) = [c for c in calls if "/tmp/mma_orphan_dry.log" in c and "mma_orphan_cleanup.py" in c]
     plan_file = dry.split("--plan-out ")[1].split()[0]
@@ -279,12 +295,18 @@ def test_a_list_with_another_count_aborts(tmp_path, cut):
 @pytest.mark.parametrize(
     "df, why",
     [
+        # the DiskSpaceLow the user reported (3.7G free, 4.8%): the old 2 GiB floor would have let it through
         (
-            "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 78643200 77594624 1048576 99% /",
-            "1048576 KiB free",
+            DF_HEAD + "/dev/sda1 78643200 74658612 3984588 95% /",
+            f"has 3984588 KiB free of 78643200; the backup needs at least {NEED_KB} KiB",
         ),
-        ("", "an unreadable amount of KiB free"),
-        ("df: backups: No such file or directory", "an unreadable amount of KiB free"),
+        # 10% free, exactly the alert line: no room for the dump
+        (DF_HEAD + "/dev/sda1 78643200 70778880 7864320 90% /", "has 7864320 KiB free"),
+        (DF_HEAD + f"/dev/sda1 78643200 1 {NEED_KB - 1} 89% /", f"has {NEED_KB - 1} KiB free"),
+        ("", "could not read the backups filesystem's size and free space"),
+        ("df: backups: No such file or directory", "could not read the backups filesystem's size and free space"),
+        (DF_HEAD + "/dev/sda1 - - 31457280 - /", "could not read the backups filesystem's size and free space"),
+        (DF_HEAD + "/dev/sda1 0 0 31457280 0% /", "could not read the backups filesystem's size and free space"),
     ],
 )
 def test_too_little_free_disk_or_an_unreadable_df_refuses_before_the_backup(tmp_path, df, why):
@@ -293,23 +315,70 @@ def test_too_little_free_disk_or_an_unreadable_df_refuses_before_the_backup(tmp_
     assert _backups(tmp_path) == 0 and not _applies(calls)
 
 
-def test_no_write_before_a_backup_that_landed(tmp_path):
-    rc, out, calls = _run(tmp_path, _rules(), airflow={"backup_fails": True})
-    assert rc == 1 and "backup did not land" in out, out
-    assert not _applies(calls) and not [c for c in calls if "/tmp/mma_orphan_dry.log" in c]
+def test_free_disk_exactly_at_the_floor_is_enough(tmp_path):
+    rc, out, calls = _run(tmp_path, _rules(), df=DF_HEAD + f"/dev/sda1 78643200 1 {NEED_KB} 89% /")
+    assert rc == 0 and f"{NEED_KB} KiB free of 78643200 (needs at least {NEED_KB}" in out, out
 
 
-@pytest.mark.parametrize("dry, dry_rc", [(PLAN_R, 1), (PLAN_R.replace("delete=8 done=0", "delete=7 done=1"), 0)])
-def test_a_dry_run_off_the_review_aborts_after_the_backup_with_nothing_written(tmp_path, dry, dry_rc):
-    rc, out, calls = _run(tmp_path, _rules(dry=dry, dry_rc=dry_rc))
-    assert rc == 1 and "ABORT at step 2" in out and not _applies(calls)
+def test_a_list_naming_other_ids_aborts_before_the_backup(tmp_path):
+    """The same 8-row count with one id swapped (a list edited on the VM's bind-mounted scripts/data)."""
+    env = _install(tmp_path, _rules())
+    f = tmp_path / "auspex" / "scripts" / "data" / LIST
+    text = f.read_text()
+    assert text.count("1de9e9ce-308e-4543-8cf7-5537c1642616") == 1
+    f.write_text(text.replace("1de9e9ce-308e-4543-8cf7-5537c1642616", "1de9e9ce-308e-4543-8cf7-5537c1642617"))
+    rc, out = fd.run(_script(tmp_path), env)
+    assert rc == 1 and "are not the reviewed ones (61680fc6" in out, out
+    assert not _tool(fd.calls(tmp_path)) and _backups(tmp_path) == 0
+    rc, out = fd.run(_script(tmp_path), env, "--verify")
+    assert rc == 1 and "are not the reviewed ones" in out, out
 
 
-@pytest.mark.parametrize("apply_rc, why", [(2, "refused before writing"), (1, "rolled back")])
+def test_the_wrappers_id_digest_of_the_committed_list_is_the_pin(tmp_path):
+    """The wrapper's own ids_sha256 (cut, LC_ALL=C sort, sha256sum) over the committed list gives the pinned digest,
+    the same one scripts/mma_orphan_cleanup.py computes in Python (test_mma_orphan_cleanup.py checks that side)."""
+    lines = (OPS / "mma_orphan_cleanup.sh").read_text().splitlines()
+    start = lines.index("ids_sha256() {")
+    func = lines[start : lines.index("}", start) + 1]
+    sh = tmp_path / "ids.sh"
+    sh.write_text("\n".join(func) + f"\nids_sha256 {shlex.quote(str(DATA / LIST))}\n")
+    got = subprocess.run(["bash", str(sh)], capture_output=True, text=True, timeout=30)
+    assert got.stdout.strip() == "61680fc61ca18ff741ddeaf57a2957e18b736fe580ed775e6820f865479929e6", got
+    assert "EXPECTED_IDS_SHA256=61680fc61ca18ff741ddeaf57a2957e18b736fe580ed775e6820f865479929e6" in lines
+
+
+@pytest.mark.parametrize("apply_rc, why", [(2, "reports a refusal before writing"), (1, "reports a roll-back")])
 def test_a_failed_apply_aborts_with_status_applying(tmp_path, apply_rc, why):
     rc, out, calls = _run(tmp_path, _rules(apply_rc=apply_rc))
     assert rc == 1 and why in out and "STATUS=applying" in _state(tmp_path)
     assert not [c for c in calls if "--check-after" in c]
+    (post,) = [c for c in _tool(calls) if "/tmp/mma_orphan_post.log" in c]
+    assert "--apply" not in post and "--plan-out /app/backups/mma_orphan_cleanup_postfail_" in post  # a dry run
+    assert "NOTHING COMMITTED: the re-plan is the reviewed plan" in out and "takes another backup" in out, out
+    assert "COMMITTED despite" not in out
+
+
+def test_an_apply_that_committed_despite_a_failed_exit_says_so_and_a_re_run_completes(tmp_path):
+    """The exec channel dropped after COMMIT: the re-plan reads the done plan; a re-run records STATUS=done."""
+    rc, out, calls = _run(tmp_path, _rules(apply_rc=1, post=DONE_P))
+    assert rc == 1 and "COMMITTED despite exit 1" in out and "NOTHING COMMITTED" not in out, out
+    assert "STATUS=applying" in _state(tmp_path) and _backups(tmp_path) == 1
+    rc, out, calls = _rerun(tmp_path, _rules(pre=DONE_P))
+    assert rc == 0 and "COMPLETED" in out and "STATUS=done" in _state(tmp_path), out
+    assert _backups(tmp_path) == 1 and not _applies(calls)
+
+
+@pytest.mark.parametrize("post", ["", PLAN_R.replace("delete=8 done=0", "delete=4 done=4")])
+def test_a_failed_apply_whose_re_plan_is_neither_plan_says_inspect(tmp_path, post):
+    rc, out, calls = _run(tmp_path, _rules(apply_rc=1, post=post))
+    assert rc == 1 and "UNKNOWN: the re-plan reads" in out and "inspect before any re-run" in out, out
+    assert "NOTHING COMMITTED" not in out and "COMMITTED despite" not in out
+
+
+def test_a_failed_status_applying_write_aborts_before_the_apply(tmp_path):
+    rc, out, calls = _run(tmp_path, _rules(), airflow={"write_fails": [STATE]})
+    assert rc == 1 and "ABORT at step 3: could not record the apply (STATUS=applying)" in out, out
+    assert _backups(tmp_path) == 1 and not _applies(calls)
 
 
 def test_a_failed_after_state_exits_1_and_keeps_status_applying(tmp_path):

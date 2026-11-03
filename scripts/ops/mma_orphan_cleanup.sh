@@ -26,18 +26,24 @@
 #      scripts/ tool still runs in the api container, or while a UFC card is
 #      on (a UFC bout kicked off within the last $CARD_BEFORE_H h or starts
 #      within $CARD_AFTER_H h, or one is 'live'); refuse unless the list holds
-#      exactly $EXPECTED_ORPHANS rows and the identity clean-up is done and
-#      verified (scripts/ops/mma_identity_cleanup.sh --verify, read only: the
-#      list was reviewed against the state it leaves).
+#      exactly $EXPECTED_ORPHANS rows, its team ids are the reviewed ones
+#      (EXPECTED_IDS_SHA256: sha256 of the sorted team_id column; the tool pins
+#      the same digest), and the identity clean-up is done and verified
+#      (scripts/ops/mma_identity_cleanup.sh --verify, read only on the database:
+#      the list was reviewed against the state it leaves).
 #      Already done? The tool's read-only dry run must plan exactly the
 #      reviewed plan (not done) or exactly the done plan; a done plan is checked
 #      with --check-after on the plan the last apply recorded ($STATE_FILE)
 #      before ALREADY DONE (exit 0, no backup). Anything else — a row that
 #      gained a bout or a reference, an ESPN id, aliases or other metadata, a
 #      renamed row, a row deleted by hand — aborts before the backup;
-#   1. refuse unless the backups filesystem has at least $MIN_FREE_KB KiB free
-#      (a dump is ~0.4 GB; the root filesystem also holds Postgres and its WAL),
-#      then a verified backup (B2) — abort if it does not land;
+#   1. refuse unless the backups filesystem would still be at or above the
+#      DiskSpaceLow line after the dump: free >= $ALERT_FREE_PCT% of its size
+#      + $DUMP_ROOM_KB KiB (1 GiB: a dump is ~0.4 GB, plus WAL headroom) — about
+#      8.5 GiB on the 75 GB root filesystem, which holds /opt/auspex/backups,
+#      Postgres and its WAL (monitoring/alerts/infrastructure-alerts.yml fires
+#      DiskSpaceLow below 10% free); then a verified backup (B2) — abort if it
+#      does not land;
 #   2. dry run (write-once CSV + plan file) — abort unless it exits 0 with
 #      the reviewed plan;
 #   3. record the plan (STATUS=applying) in $STATE_FILE, then
@@ -49,13 +55,22 @@
 #      record) before its first write, deletes each row guarded on the row as
 #      the plan saw it and on no reference under any foreign key to teams, and
 #      commits only once every listed row is gone, teams fell by exactly 8 and
-#      no table with a foreign key to teams lost a row, inside it;
+#      no table with a foreign key to teams lost a row or a non-NULL reference,
+#      inside it. On a non-zero exit a read-only re-plan says which happened:
+#      the reviewed plan (nothing committed: every row is still there; a re-run
+#      starts at step 0 and takes another backup — after a lock timeout behind a
+#      sweep, wait a few minutes), the done plan (it committed though the exec
+#      reported a failure, e.g. the channel dropped after COMMIT: re-run, which
+#      checks the recorded plan and records STATUS=done with no backup), or
+#      anything else (inspect);
 #   4. after-state: --check-after on the dry run's plan file and a fresh dry
 #      run that plans exactly the done plan; STATUS=done.
 #   No follow-ups: no bout, prediction, feature or rec changes.
-#   --verify (read only; for a later wrapper): the done plan, a recorded apply
-#      whose after-state passed (STATUS=done), and --check-after on the
-#      recorded plan — exit 0 when done and verified, else 1.
+#   --verify (read only on the database; for a later wrapper): the done plan,
+#      a recorded apply whose after-state passed (STATUS=done), and
+#      --check-after on the recorded plan — exit 0 when done and verified, else
+#      1. Like every pre-check, it leaves two small write-once audit files in
+#      /app/backups (mma_orphan_cleanup_precheck_<stamp>.csv and .plan.json).
 # Exit: 0 done (or already done, or verified); 1 aborted or an after-state failed.
 # The other MMA wrappers' done states hold afterwards (rehearsed): the rows are
 # in none of their lists (the tool refuses a list that names a row of the
@@ -75,6 +90,9 @@
 # one-liner work too):
 #   bash /opt/auspex/scripts/ops/mma_orphan_cleanup.sh 2>&1 | tee -a ~/mma_orphan_cleanup.log
 # (AUSPEX_DIR, TMPDIR, AF_STATE_DIR, MMA_ORPHAN_PS and MMA_ORPHAN_DF exist for tests and rehearsals.)
+# The free-space floor lives here, not in _airflow_lib.sh: the other wrappers that take a backup have already run on
+# prod as reviewed, and a floor shared by all of them belongs with the disk work (closeout4/disk_guard caps the local
+# dumps at 3, the cause of the 2026-11-02 DiskSpaceLow).
 set -uo pipefail
 MODE=apply
 case "${1:-}" in
@@ -112,12 +130,15 @@ same_plan() {  # same_plan <PLAN line> <reviewed 'k=v ...'>: every reviewed key 
 
 LIST=scripts/data/mma_orphan_fighters_20261103.csv
 EXPECTED_ORPHANS=8
+# sha256 of the list's team ids, sorted, one per line (= scripts/mma_orphan_cleanup.py PINNED_IDS_SHA256)
+EXPECTED_IDS_SHA256=61680fc61ca18ff741ddeaf57a2957e18b736fe580ed775e6820f865479929e6
 TOOL="python /app/scripts/mma_orphan_cleanup.py"
 PLAN_R="listed=8 delete=8 done=0 refuse=0"
 DONE_P="listed=8 delete=0 done=8 refuse=0"
 CARD_BEFORE_H=8
 CARD_AFTER_H=3
-MIN_FREE_KB=2097152  # 2 GiB
+ALERT_FREE_PCT=10      # DiskSpaceLow: the root filesystem below 10% free (monitoring/alerts/infrastructure-alerts.yml)
+DUMP_ROOM_KB=1048576   # 1 GiB on top: one ~0.4 GB dump plus WAL headroom while it runs
 STATE_FILE=/app/backups/mma_orphan_cleanup_last_apply.env
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)_$$
 PLAN_FILE=/app/backups/mma_orphan_cleanup_dryrun_$STAMP.plan.json
@@ -197,11 +218,16 @@ SQL
   echo "$out" | sed 's/^/  /'
   return 0
 }
-# free_kb: the KiB available on the backups filesystem ($DF_CMD, POSIX output), or empty when unreadable.
-free_kb() {
-  local v
-  v=$($DF_CMD 2>/dev/null | awk 'NR == 2 { print $4 }')
-  if [[ "$v" =~ ^[0-9]+$ ]]; then echo "$v"; fi
+# disk_room: "<size KiB> <available KiB>" of the backups filesystem ($DF_CMD, POSIX output: the same blocks and
+# available counts as node_exporter's size and avail bytes), or nothing when unreadable.
+disk_room() {
+  $DF_CMD 2>/dev/null | awk 'NR == 2 && $2 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $2 > 0 { print $2, $4 }'
+}
+# ids_sha256 <list>: sha256 of its team_id column (comments, header and blank lines skipped), sorted, one per line.
+ids_sha256() {
+  local sum=sha256sum
+  command -v sha256sum >/dev/null 2>&1 || sum="shasum -a 256"
+  grep -v '^#' "$1" | tail -n +2 | grep . | cut -d, -f1 | LC_ALL=C sort | $sum 2>/dev/null | cut -d' ' -f1
 }
 
 if [ "$MODE" = apply ]; then
@@ -231,6 +257,11 @@ fi
 n_orphans=$(grep -v '^#' "$LIST" | tail -n +2 | grep -c .)
 if [ "$n_orphans" != "$EXPECTED_ORPHANS" ]; then
   log "ABORT: $LIST holds $n_orphans row(s); this script expects $EXPECTED_ORPHANS — nothing changed"
+  exit 1
+fi
+ids=$(ids_sha256 "$LIST")
+if [ "$ids" != "$EXPECTED_IDS_SHA256" ]; then
+  log "ABORT: the team ids in $LIST (sha256 ${ids:-unreadable}) are not the reviewed ones ($EXPECTED_IDS_SHA256) — a list that names other rows needs a new review; nothing changed (no backup)"
   exit 1
 fi
 
@@ -283,12 +314,17 @@ fi
 log "not done yet (pre-plan '$pre') — continuing"
 
 log "1/4 disk, then backup"
-free=$(free_kb)
-if [ -z "$free" ] || [ "$free" -lt "$MIN_FREE_KB" ]; then
-  log "ABORT at step 1: the backups filesystem has ${free:-an unreadable amount of} KiB free ($DF_CMD); a backup needs at least $MIN_FREE_KB KiB (2 GiB) there, so a dump never fills the disk Postgres writes to — free space first (OPERATIONS.md, disk); nothing changed (no backup)"
+read -r size free <<< "$(disk_room)"
+if [ -z "${size:-}" ] || [ -z "${free:-}" ]; then
+  log "ABORT at step 1: could not read the backups filesystem's size and free space ($DF_CMD) — nothing changed (no backup)"
   exit 1
 fi
-log "backups filesystem: $free KiB free (at least $MIN_FREE_KB)"
+need=$(( size * ALERT_FREE_PCT / 100 + DUMP_ROOM_KB ))
+if [ "$free" -lt "$need" ]; then
+  log "ABORT at step 1: the backups filesystem has $free KiB free of $size; the backup needs at least $need KiB ($ALERT_FREE_PCT% of the filesystem, the DiskSpaceLow line, plus $DUMP_ROOM_KB KiB for the dump), so it never pushes the disk Postgres writes to under that line — free space first (OPERATIONS.md, disk); nothing changed (no backup)"
+  exit 1
+fi
+log "backups filesystem: $free KiB free of $size (needs at least $need: $ALERT_FREE_PCT% plus $DUMP_ROOM_KB KiB)"
 before=$(date -u +%s)
 $DC exec -T airflow-scheduler airflow dags trigger db_backup_daily >/dev/null 2>&1
 landed=""
@@ -316,9 +352,18 @@ log "3/4 apply (--expect-plan $PLAN_FILE; recorded STATUS=applying)"
 run_tool mma_orphan_apply "$TOOL --apply --expect-plan $PLAN_FILE --out-csv /app/backups/mma_orphan_cleanup_apply_$STAMP.csv --archive /app/backups/mma_orphan_cleanup_apply_$STAMP.jsonl.gz"
 rc=$?
 if [ "$rc" -ne 0 ]; then
-  why="it rolled back"
-  [ "$rc" = "2" ] && why="it refused before writing (its plan differs from the dry run's, the teams lock timed out, or a refusal above)"
-  log "ABORT at step 3 (exit $rc; full log /tmp/mma_orphan_apply.log in the api container): $why — one transaction, nothing committed; a re-run starts from step 0"
+  why="it reports a roll-back"
+  [ "$rc" = "2" ] && why="it reports a refusal before writing (its plan differs from the dry run's, the teams lock timed out behind a sweep, or a refusal above)"
+  log "ABORT at step 3 (exit $rc; full log /tmp/mma_orphan_apply.log in the api container): $why — the apply is one transaction; a read-only re-plan says whether it committed:"
+  run_tool mma_orphan_post "$TOOL --out-csv /app/backups/mma_orphan_cleanup_postfail_$STAMP.csv --plan-out /app/backups/mma_orphan_cleanup_postfail_$STAMP.plan.json"
+  post=$(plan_of mma_orphan_post)
+  if same_plan "$post" "$PLAN_R"; then
+    log "NOTHING COMMITTED: the re-plan is the reviewed plan ('$post'): every listed row is still there. A re-run starts at step 0 (it refuses while an apply still runs in the api container) and takes another backup (~0.4 GB local dump, up to 20 min); after a lock timeout, wait a few minutes for the sweep to finish first"
+  elif same_plan "$post" "$DONE_P"; then
+    log "COMMITTED despite exit $rc: the re-plan is the done plan ('$post') (the exec channel dropped after the commit?). Re-run this script: it checks the recorded plan $PLAN_FILE (STATUS=applying) and records STATUS=done, with no backup"
+  else
+    log "UNKNOWN: the re-plan reads '${post:-unreadable}', neither the reviewed plan ($PLAN_R) nor the done plan ($DONE_P) — inspect before any re-run (STATUS stays 'applying'; the apply's CSV and archive /app/backups/mma_orphan_cleanup_apply_$STAMP.* are the record)"
+  fi
   exit 1
 fi
 

@@ -9,10 +9,14 @@ Lopes, Ethyn Ewing, and the placeholders 'TBA' and 'Opponent TBA'. Each was
 created by the ESPN sweep for a bout ESPN later dropped or re-drew; run B of
 scripts/ops/repair_stranded_recs_mma.sh deleted those 10 bouts on 2026-11-02
 (archive /app/backups/fixture_orphans_mma_20261102T043520Z.jsonl.gz), which left
-the rows with no bout. None carries an ESPN athlete id, an alias or any other
-metadata; nothing references them under any foreign key or in any JSON column;
-ESPN lists none of them on a UFC card through 2026-12-17. fetch_upcoming skips
-'TBA' and 'Opponent TBA' as placeholders, so nothing resolves to those two.
+the rows with no bout. The one-off read-only review of 2026-11-02 (the list's
+header has the evidence) found that none carries an ESPN athlete id, an alias or
+any other metadata; that nothing references them under any foreign key, in any
+uuid column of any table, or in the JSON or text of the tables it scanned; and
+that ESPN lists none of them on a UFC card through 2026-12-17. fetch_upcoming
+skips 'TBA' and 'Opponent TBA' as placeholders, so nothing resolves to those two.
+This tool does not repeat that whole review; what it re-checks on every run is
+listed below.
 
 WHY A TOOL OF ITS OWN (and not a new mode of scripts/mma_identity_cleanup.py)
 ------------------------------------------------------------------------------
@@ -24,13 +28,19 @@ exactly-one-row guard, the write-once audit CSV and plan file) and adds the
 guards this delete needs:
   * every listed row is planned against the row as it is now: delete, done
     (gone) or refuse. It is refused when its name, sport or ESPN id differ from
-    the list, when it carries aliases, when any foreign key to teams references
-    it, when another team row's metadata or external_ids, or an MMA match's (or
-    its predictions', features', odds' or recs' JSON), names its id, or when
-    another MMA row claims its name as an alias;
+    the list; when it carries any metadata (aliases, merge or split records) or
+    any external id other than the listed one; when any foreign key to teams
+    references it (every one pg_constraint lists at run time: 9 on prod); when
+    its id appears in the JSON of another teams row (metadata, external_ids),
+    of an MMA match (metadata, external_ids), of that match's predictions
+    (metadata, features_used, feature_importance), features_cache rows
+    (features) or odds rows (metadata), or of any rec's risk_factors; or when
+    another MMA row claims its name as an alias (accent- and case-folded);
   * the list may not name a row any other MMA list holds (the identity
     clean-up's split, alias, orphan and athlete-id lists, the fighter merge
     map), so their --verify keeps holding after this runs;
+  * the list's ids are pinned (PINNED_IDS_SHA256, also in the wrapper): a list
+    edited to name other rows is refused before any connection;
   * each DELETE is guarded on the row exactly as the plan saw it: id, sport,
     name, normalized_name, league, country, is_active, external_ids, metadata,
     created_at and updated_at, and NOT EXISTS under every foreign key to teams
@@ -53,7 +63,7 @@ WHAT --apply DOES (ONE transaction: any failure rolls all of it back)
 4. Delete each row, guarded as above; each must touch exactly one row.
 5. Commit only if, inside the transaction: every listed row is gone, teams
    fell by exactly the deletes, and no table with a foreign key to teams lost a
-   row (no cascade).
+   row (no cascade) or a non-NULL reference (no SET NULL).
 
 The dry run (the default) runs in a READ ONLY transaction and writes only its
 write-once audit CSV and plan file. --check-after <plan file> (read only)
@@ -106,6 +116,10 @@ SPORT = "mma"
 LOCK_TIMEOUT = "10s"
 TOOL = "mma_orphan_cleanup"
 PLAN_KEYS = ("listed", "delete", "done", "refuse")
+# sha256 of the reviewed list's team ids, sorted, one per line ("<id>\n" each): which 8 rows may be deleted is pinned
+# here and in scripts/ops/mma_orphan_cleanup.sh (EXPECTED_IDS_SHA256), not only by git. Not the plan digest: that
+# covers is_active and updated_at too, and would abort a run over a harmless change to one of the rows.
+PINNED_IDS_SHA256 = "61680fc61ca18ff741ddeaf57a2957e18b736fe580ed775e6820f865479929e6"
 GuardError = mic.GuardError
 ListError = mic.ListError
 
@@ -153,33 +167,58 @@ def load_list(path: Path) -> tuple[Orphan, ...]:
     return tuple(out)
 
 
-def other_list_ids(merge_map: Path = MERGE_MAP_PATH) -> dict[str, str]:
-    """{team id: which list} for every row another MMA list holds: the identity
-    clean-up's four lists (split row and its new row, aliases, orphans, athlete
-    ids) and the fighter merge map (merged and kept rows)."""
+def other_list_ids(merge_map: Path = MERGE_MAP_PATH) -> dict[str, list[str]]:
+    """{team id: every list that holds it} for every row another MMA list holds:
+    the identity clean-up's four lists (split row and its new row, aliases,
+    orphans, athlete ids) and the fighter merge map (merged and kept rows). A row
+    in several lists (the alias row is also in the athlete-id list) names each."""
     lists = mic.load_lists()
-    out: dict[str, str] = {}
-    out[lists.split.team_id] = "the identity clean-up's split row"
-    out[lists.split.new_team_id] = "the identity clean-up's new split row"
-    out.update({a.team_id: "the identity clean-up's alias list" for a in lists.aliases})
-    out.update({o.team_id: "the identity clean-up's orphan list" for o in lists.orphans})
-    out.update({r.team_id: "the identity clean-up's athlete-id list" for r in lists.ids})
+    out: dict[str, list[str]] = {}
+
+    def add(team_id: str, label: str) -> None:
+        held = out.setdefault(team_id, [])
+        if label not in held:
+            held.append(label)
+
+    add(lists.split.team_id, "the identity clean-up's split row")
+    add(lists.split.new_team_id, "the identity clean-up's new split row")
+    for a in lists.aliases:
+        add(a.team_id, "the identity clean-up's alias list")
+    for o in lists.orphans:
+        add(o.team_id, "the identity clean-up's orphan list")
+    for r in lists.ids:
+        add(r.team_id, "the identity clean-up's athlete-id list")
     with merge_map.open(newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(ln for ln in fh if not ln.startswith("#")):
             for col in ("merged_team_id", "kept_team_id"):
                 if not (row.get(col) or "").strip():
                     raise ListError(f"{merge_map}: a row without {col}")
-                out[row[col].strip()] = "the fighter merge map"
+                add(row[col].strip(), "the fighter merge map")
     return out
 
 
-def check_no_overlap(orphans: Iterable[Orphan], others: dict[str, str]) -> None:
+def check_no_overlap(orphans: Iterable[Orphan], others: dict[str, list[str]]) -> None:
     for o in orphans:
         if o.team_id in others:
             raise ListError(
-                f"{o.team_name!r} ({o.team_id}) is in {others[o.team_id]}: deleting it would break that list's done "
-                "state — never listed here"
+                f"{o.team_name!r} ({o.team_id}) is in {' and '.join(others[o.team_id])}: deleting it would break "
+                "that list's done state — never listed here"
             )
+
+
+def ids_digest(orphans: Iterable[Orphan]) -> str:
+    """sha256 of the team ids, sorted, one per line: what the wrapper computes from the list with
+    `cut -d, -f1 | LC_ALL=C sort | sha256sum`."""
+    return hashlib.sha256("".join(f"{i}\n" for i in sorted(o.team_id for o in orphans)).encode()).hexdigest()
+
+
+def check_pinned_ids(orphans: Iterable[Orphan]) -> None:
+    got = ids_digest(orphans)
+    if got != PINNED_IDS_SHA256:
+        raise ListError(
+            f"the list's team ids (sha256 {got}) are not the reviewed ones ({PINNED_IDS_SHA256}) — a list that names "
+            "other rows needs a new review and a new pin in this tool and its wrapper"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -693,6 +732,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         orphans = load_list(args.list)
         check_no_overlap(orphans, other_list_ids())
+        check_pinned_ids(orphans)
         expect = json.loads(args.expect_plan.read_text(encoding="utf-8")) if args.expect_plan else None
     except (ListError, OSError, ValueError) as e:
         logger.error("REFUSED: %s", e)

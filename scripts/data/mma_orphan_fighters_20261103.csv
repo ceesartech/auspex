@@ -16,8 +16,12 @@
 #     to restore any of those bouts, restore these rows first from this tool's archive.
 # fetch_upcoming skips 'TBA' and 'Opponent TBA' as placeholders before resolving a fighter, so nothing resolves to
 # those two. A real athlete of one of the other names on a future card gets a fresh row, keyed by his ESPN athlete id.
-# espn_athlete_id: the id the reviewed row carries (empty: none). The tool refuses a row whose name, ESPN id,
-# metadata or external ids differ from this review, or that gained a bout or any reference.
+# The scans above were a one-off read-only review. On every run the tool re-checks a narrower set: it refuses a row
+# whose name, sport, ESPN id, metadata or external ids differ from this review, that any foreign key to teams
+# references (a bout included), whose id appears in the JSON of another teams row, of an MMA match or of that match's
+# predictions, features_cache or odds rows, or in any rec's risk_factors, or whose name another MMA row claims as an
+# alias. The team ids are pinned by digest in the tool and the wrapper: other ids need a new review and a new pin.
+# espn_athlete_id: the id the reviewed row carries (empty: none).
 team_id,team_name,espn_athlete_id,why
 1de9e9ce-308e-4543-8cf7-5537c1642616,Rodrigo Vera,,"created 2026-08-30 for Rodrigo Vera v Ramiro Jimenez (cdc56c94, 2026-09-12 18:00Z), dropped from the card (its ESPN competition 401913546 no longer listed); run B deleted that bout 2026-11-02; no bout, ESPN id, alias or reference left; on no ESPN UFC card through 2026-12-17"
 39ed8231-51d5-414c-b92e-68d0dfcebb21,Max Gimenis,,"created 2026-07-19 for Jovan Leka v Max Gimenis (358549d8, 2026-08-01 14:00Z); Jovan Leka fought Alexander Poppeck (ESPN 401902576); run B deleted that bout 2026-11-02; no bout, ESPN id, alias or reference left; on no ESPN UFC card through 2026-12-17"
