@@ -28,10 +28,18 @@ file in the directory are never touched):
   * With BACKUP_S3_BUCKET set: keep at most --local-keep dumps (the
     newest N, default 3) and none older than --local-retention-days
     (default 7). An older dump is deleted ONLY after a HEAD on its B2
-    copy (same key as its upload) shows the same byte size. If B2
-    cannot be reached, or the copy is missing or a different size,
-    the file is kept and an ERROR names it (fail closed), and the run
-    exits 3 so the DAG turns red.
+    copy (same key as its upload) shows the same byte size.
+  * Self-healing for a dump that never reached B2 (its upload failed,
+    exit 2, or the run used --skip-upload): when the HEAD answers a
+    definite "no such object" (HTTP 404), rotation uploads that dump to
+    its own key, HEAD-verifies the size, and only then deletes it. A
+    single failed upload therefore costs nothing later; under a plain
+    "keep it" rule it would make every later run exit 3 for good.
+  * Fail closed for everything else: B2 unreachable, an auth or other
+    error on the HEAD, a copy of a different size (never overwritten),
+    a failed re-upload or a failed delete — the file is kept, an ERROR
+    names it, and the run exits 3 so the DAG turns red. OPERATIONS.md
+    "When db_backup_daily fails" says what to do for each ERROR.
   * Without BACKUP_S3_BUCKET the local copy is the only copy: only the
     age rule applies (--local-keep is ignored), as before.
 Why 3: every older dump is already in B2 before its local copy goes,
@@ -40,11 +48,18 @@ copy. A restore after a bad write wants the dump taken just before
 that write (every ops wrapper takes one), so the newest three cover the
 last write, the one before it and the previous run, at ~380 MB each
 (2026-11). Ops days took 21 dumps in one day under the age-only rule
-and filled the disk.
+and filled the disk. On a busy ops day an earlier wrapper's pre-write
+dump leaves the VM within hours: a reversal that needs a dump older
+than the newest 3 downloads it from B2 first (OPERATIONS.md, "Restore
+— full disaster recovery", option b, with that dump's key).
 
-Exit codes: 0 ok; 1 pg_dump failed (no dump kept); 2 the offsite upload
-failed (local dump kept); 3 the dump and upload succeeded but rotation
-kept a dump it would have deleted (see the ERROR lines).
+Exit codes: 0 ok; 1 pg_dump failed (no dump kept) or DATABASE_URL is
+unset; 2 the offsite upload failed (local dump kept; a later run's
+rotation uploads it); 3 the dump and upload succeeded but rotation kept
+a dump it would have deleted (see the ERROR lines); 4 a setting is
+invalid (BACKUP_LOCAL_KEEP / BACKUP_LOCAL_RETENTION or their flags) —
+no dump was taken. A mistyped command-line flag is an argparse usage
+error, which also exits 2 but prints "usage:"; the DAG passes no flags.
 
 Restore (full DR, see OPERATIONS.md for details):
     pg_restore -h HOST -U USER -d betting_system --clean --if-exists \\
@@ -277,18 +292,47 @@ def plan_rotation(
     return planned
 
 
-def remote_copy_problem(s3, bucket: str, key: str, local_size: int) -> Optional[str]:
-    """None when s3://bucket/key exists with exactly local_size bytes,
-    else why not. Any failure (missing object, auth, network) is a
-    problem: the caller then keeps the local file."""
+VERIFIED = "verified"  # the copy exists with the local file's byte size
+MISSING = "missing"  # the store answered a definite "no such object"
+UNVERIFIED = "unverified"  # anything else: unreachable, auth, wrong size, odd answer
+
+# A HEAD has no body, so botocore's ClientError carries the bare HTTP
+# status as its code: '404' (B2 and AWS, checked against prod B2 with
+# botocore 1.35.99 on 2026-11-03). GET-style calls say NoSuchKey/NotFound.
+_MISSING_OBJECT_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
+
+
+def is_missing_object(exc: BaseException) -> bool:
+    """True only for a definite "no such object" answer: a botocore-style
+    ClientError whose response has HTTP status 404 AND a not-found code.
+    Network errors, auth errors (a key without list rights gets 403 for
+    a missing object), throttling and anything unrecognised are False,
+    so the caller stays fail-closed. (A HEAD on a missing BUCKET also
+    answers 404; the re-upload then fails and the file is kept.)"""
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return False
+    error = response.get("Error")
+    meta = response.get("ResponseMetadata")
+    code = str(error.get("Code", "")) if isinstance(error, dict) else ""
+    status = meta.get("HTTPStatusCode") if isinstance(meta, dict) else None
+    return status == 404 and code in _MISSING_OBJECT_CODES
+
+
+def check_remote_copy(s3, bucket: str, key: str, local_size: int) -> tuple[str, str]:
+    """(VERIFIED, detail) when s3://bucket/key exists with exactly
+    local_size bytes; (MISSING, detail) only on a definite 404;
+    (UNVERIFIED, why) for every other outcome — the caller then keeps
+    the local file."""
     try:
         head = s3.head_object(Bucket=bucket, Key=key)
-    except Exception as e:  # botocore raises several unrelated types; every one means "not verified"
-        return f"HEAD s3://{bucket}/{key} failed: {type(e).__name__}: {e}"
+    except Exception as e:  # botocore raises several unrelated types; only a definite 404 is "missing"
+        detail = f"HEAD s3://{bucket}/{key} failed: {type(e).__name__}: {e}"
+        return (MISSING if is_missing_object(e) else UNVERIFIED), detail
     remote_size = head.get("ContentLength") if isinstance(head, dict) else None
     if remote_size != local_size:
-        return f"s3://{bucket}/{key} is {remote_size} bytes, the local file {local_size}"
-    return None
+        return UNVERIFIED, f"s3://{bucket}/{key} is {remote_size} bytes, the local file {local_size}"
+    return VERIFIED, f"{local_size} bytes at s3://{bucket}/{key}"
 
 
 def rotate_local_backups(
@@ -307,7 +351,8 @@ def rotate_local_backups(
     """Apply the LOCAL ROTATION rules (module docstring). Returns
     (deleted, kept_with_error): kept_with_error are dumps the rules
     wanted gone but that stayed because their B2 copy was not verified
-    or the delete failed; each was logged at ERROR by name."""
+    (and, for a missing copy, the re-upload failed) or the delete
+    failed; each was logged at ERROR by name."""
     if keep < 1:
         raise ValueError(f"keep must be >= 1, got {keep}")
     now = now or datetime.now(timezone.utc)
@@ -342,12 +387,32 @@ def rotate_local_backups(
             continue
         if s3_bucket:
             key = s3_key_for(s3_prefix, f.name)
-            problem = client_error or remote_copy_problem(s3, s3_bucket, key, size)
-            if problem:
-                logger.error("KEPT %s (%s) — its B2 copy is not verified: %s", f, reason, problem)
+            if client_error:
+                status, detail = UNVERIFIED, client_error
+            else:
+                status, detail = check_remote_copy(s3, s3_bucket, key, size)
+            healed = False
+            if status == MISSING:
+                # Its upload failed or was skipped: upload it now (upload_to_s3
+                # HEAD-verifies the size) rather than keep it — and exit 3 —
+                # on every run from here on.
+                logger.warning(
+                    "%s has no B2 copy (%s) — its upload failed or was skipped; uploading it before it rotates out",
+                    f.name,
+                    detail,
+                )
+                try:
+                    upload_to_s3(f, s3_bucket, key, s3_endpoint_url, s3=s3)
+                except Exception as e:  # any failure leaves it unverified: keep the file
+                    status, detail = UNVERIFIED, f"it had no B2 copy and the re-upload failed: {type(e).__name__}: {e}"
+                else:
+                    status, healed = VERIFIED, True
+            if status != VERIFIED:
+                logger.error("KEPT %s (%s) — its B2 copy is not verified: %s", f, reason, detail)
                 kept.append(f)
                 continue
-            why = f"{reason}; B2 copy verified, {size} bytes at s3://{s3_bucket}/{key}"
+            how = "uploaded by this run and verified" if healed else "B2 copy verified"
+            why = f"{reason}; {how}, {size} bytes at s3://{s3_bucket}/{key}"
         else:
             why = reason
         try:
@@ -361,14 +426,23 @@ def rotate_local_backups(
     return deleted, kept
 
 
-def _positive_int(value: str) -> int:
-    n = int(value)
-    if n < 1:
-        raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
+EXIT_BAD_SETTING = 4
+
+
+def parse_setting(name: str, value: object, minimum: int) -> int:
+    """An integer setting >= minimum, else ValueError naming it. Settings
+    come from the api container's env (the DAG passes no flags), so a bad
+    value must not look like a failed upload (argparse would exit 2)."""
+    try:
+        n = int(str(value).strip())
+    except ValueError:
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}") from None
+    if n < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {n}")
     return n
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: Optional[list[str]] = None, now: Optional[datetime] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     parser.add_argument(
@@ -378,18 +452,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument(
         "--local-retention-days",
-        type=int,
-        default=int(os.environ.get("BACKUP_LOCAL_RETENTION", "7")),
+        default=os.environ.get("BACKUP_LOCAL_RETENTION", "7"),
         help="Delete this database's local dumps older than this many days (default 7, env "
-        "BACKUP_LOCAL_RETENTION; 0 disables the age rule). With B2 set, only after the B2 copy is verified.",
+        "BACKUP_LOCAL_RETENTION; >= 0, 0 disables the age rule). With B2 set, only after the B2 copy is "
+        "verified. An invalid value exits 4 before any dump.",
     )
     parser.add_argument(
         "--local-keep",
-        type=_positive_int,
         default=os.environ.get("BACKUP_LOCAL_KEEP", "3"),
         help="With BACKUP_S3_BUCKET set: keep at most this many local dumps of this database, the newest "
-        "(default 3, env BACKUP_LOCAL_KEEP; >= 1). An older one is deleted only after its B2 copy is "
-        "confirmed with the same byte size; when that cannot be confirmed the file is kept and the run "
+        "(default 3, env BACKUP_LOCAL_KEEP; >= 1, an invalid value exits 4 before any dump). An older one "
+        "is deleted only after its B2 copy is confirmed with the same byte size; a dump that never reached "
+        "B2 (HEAD 404) is uploaded first; when the copy cannot be confirmed the file is kept and the run "
         "exits 3. Ignored without BACKUP_S3_BUCKET: the local copy is then the only copy, so only the "
         "age rule applies.",
     )
@@ -420,6 +494,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     logger.setLevel(args.log_level)
 
+    try:
+        retention_days = parse_setting("BACKUP_LOCAL_RETENTION / --local-retention-days", args.local_retention_days, 0)
+        local_keep = parse_setting("BACKUP_LOCAL_KEEP / --local-keep", args.local_keep, 1)
+    except ValueError as e:
+        logger.error("Invalid setting, no dump taken (exit %d): %s", EXIT_BAD_SETTING, e)
+        return EXIT_BAD_SETTING
+
     if not args.database_url:
         logger.error("DATABASE_URL not set.")
         return 1
@@ -430,7 +511,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Filename includes UTC timestamp + DB name from URL — makes
     # multi-DB setups distinguish naturally.
     db_name = parse_database_url(args.database_url)["dbname"]
-    ts = datetime.now(timezone.utc).strftime(DUMP_STAMP_FORMAT)
+    now = now or datetime.now(timezone.utc)
+    ts = now.strftime(DUMP_STAMP_FORMAT)
     filename = f"{db_name}-{ts}.dump"
     local_path = local_dir / filename
 
@@ -456,35 +538,45 @@ def main(argv: Optional[list[str]] = None) -> int:
         try:
             upload_to_s3(local_path, args.s3_bucket, s3_key, args.s3_endpoint_url)
         except Exception as e:
-            logger.error("S3 upload FAILED (local backup retained): %s", e)
+            logger.error(
+                "S3 upload FAILED (local backup retained; a later run's rotation uploads it before deleting it): %s",
+                e,
+            )
             s3_failed = True
+    elif args.s3_bucket:
+        logger.warning(
+            "--skip-upload: %s is not in B2 yet; a later run's rotation uploads it before deleting it.", filename
+        )
 
     # Rotate old local backups (always — even after a failed upload: an
-    # older dump goes only once its own B2 copy is verified, and this
-    # run's dump is never a candidate).
+    # older dump goes only once its own B2 copy is verified, a dump that
+    # never reached B2 is uploaded first, and this run's dump is never a
+    # candidate).
     deleted, kept = rotate_local_backups(
         local_dir,
         db_name,
         current=local_path,
-        retention_days=args.local_retention_days,
-        keep=args.local_keep,
+        retention_days=retention_days,
+        keep=local_keep,
         s3_bucket=args.s3_bucket,
         s3_prefix=args.s3_prefix,
         s3_endpoint_url=args.s3_endpoint_url,
+        now=now,
     )
     logger.info("Rotation: %d old backup(s) deleted, %d kept on an ERROR.", len(deleted), len(kept))
 
     if s3_failed:
         logger.error(
             "Backup run completed with a FAILED offsite upload — local "
-            "copy is safe but the remote DR copy did not land. "
+            "copy is safe but the remote DR copy did not land (a later "
+            "run's rotation uploads it before deleting it). "
             "Exiting non-zero so the failure is visible."
         )
         return 2
     if kept:
         logger.error(
-            "Backup and upload OK, but rotation kept %d dump(s) it would have deleted (ERROR lines above: "
-            "%s). Exiting 3 so the disk does not fill silently.",
+            "The new dump is written, but rotation kept %d dump(s) it would have deleted (ERROR lines above: "
+            '%s; OPERATIONS.md "When db_backup_daily fails"). Exiting 3 so the disk does not fill silently.',
             len(kept),
             ", ".join(f.name for f in kept),
         )

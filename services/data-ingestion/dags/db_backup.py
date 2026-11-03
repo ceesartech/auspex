@@ -8,13 +8,17 @@ wrapper also triggers it for its verified pre-write backup. The script:
     HEAD-verifies the upload.
   * Rotates local dumps: never the one just written; with B2, at most
     BACKUP_LOCAL_KEEP (3) and none past 7 days, each older one deleted
-    only after its own B2 copy is verified; without B2, the 7-day age
-    rule alone (scripts/backup_postgres.py, LOCAL ROTATION).
+    only after its own B2 copy is verified — a dump whose upload failed
+    or was skipped (HEAD 404) is uploaded and verified first; without
+    B2, the 7-day age rule alone (scripts/backup_postgres.py, LOCAL
+    ROTATION).
 
 The task fails — and notify_failure pages Telegram — when the dump fails
-(exit 1), the upload fails (exit 2, local dump kept) or rotation had to
-keep a dump whose B2 copy it could not verify (exit 3). The retry takes
-a fresh dump.
+(exit 1), the upload fails (exit 2, local dump kept; a later run's
+rotation uploads it), rotation had to keep a dump whose B2 copy it could
+not verify (exit 3), or BACKUP_LOCAL_KEEP / BACKUP_LOCAL_RETENTION is
+invalid (exit 4, no dump taken). The retry takes a fresh dump.
+OPERATIONS.md "When db_backup_daily fails" has what to do for each.
 
 02:00 UTC is chosen to land BEFORE:
   * 03:00 weather_daily_vc_fetch (so a heavy backfill doesn't run
