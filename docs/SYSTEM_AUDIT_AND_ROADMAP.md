@@ -2084,6 +2084,45 @@ with the growth-rate driver (WAL) eliminated.
 > Bekoev' (1 bout ESPN could not link) is the only MMA row without an ESPN
 > athlete id.
 
+> **Update (2026-11-15) — state check after 12 days (read-only; no write, no
+> served probability changed).** Prod is on `ec21b96`; every container up; root
+> disk 39G used / 34G free (54%, under the ≈57G warning line); no alert firing;
+> all 9,965 recorded `auspex_pipeline` runs `success` (latest 20:00Z, ~1.5 min).
+> The weekly `retrain_models` (04:00Z) promoted 13/13 and restarted the api at
+> 04:06Z (`reload_api`); soccer `match_result` after the reload: 328 rows, 201
+> distinct confidences (no constant prior). `mma_moneyline` promoted at held-out
+> Brier 0.5074 against a best-of-8 baseline of 0.4848 — inside the gate's
+> tolerance (0.0308 at n=301), but the worst of the eight.
+> - **Done since 11-03:** `mma_orphan_cleanup.sh` ran DONE at 2026-11-03
+>   05:28:46Z (8 deleted; archive
+>   `/app/backups/mma_orphan_cleanup_apply_20261103T052632Z_1392674.jsonl.gz`)
+>   — the 11-03 entry's "NOT YET RUN" is superseded. The two re-drawn
+>   2026-11-07 bouts were cancelled by `cancel_dropped_bouts`
+>   (`DROPPED_FROM_CARD`), as designed. The soccer repair runbook had already
+>   ended `ALL STEPS DONE` at 2026-11-02 06:01Z.
+> - **Still open — horse-racing close-out run 2.** Its last run (11-03
+>   05:30Z) was `NOT YET`, and it was not re-run after 19:25Z: the 7 Southwell
+>   (AW) 31 Oct recs are still `pending` (race recs: 680 won, 1,947 lost, 33
+>   void, 7 pending) and the drain logs one stranded WARNING per tick. The
+>   tool's dry run at 20:09Z today reproduced the reviewed plan exactly —
+>   `PLAN candidates=7 races=3 settle=0 void=7 unmatched=0 errors=0`, every
+>   race answering `404 Result not found` (not 401: the Racing API
+>   subscription is still live). **Operator:**
+>   `bash /opt/auspex/scripts/ops/close_out_stranded_race_recs.sh 2>&1 | tee -a ~/close_out_stranded_race_recs.log`,
+>   outside a UFC card; cancel the subscription only after it ends `DONE` /
+>   `exit 0`.
+> - **Not a defect — 6 MMA kickoff-time forks left `scheduled`** (Ricci v
+>   Kline 07-18; Luque v Gore twice, Njokuani v Álvarez, Magny v Brahimaj
+>   08-15; Nzechukwu v Gaziev 08-23). Each has a finished twin with the result,
+>   and each holds the prediction behind one settled rec that
+>   `repair_stranded_recs` re-pointed to that twin (match_id moved,
+>   prediction_id kept — 1 won, 3 lost, 2 void), so `repair_fixture_orphans`
+>   leaves them (`has_recs`, with a 7th: Holland v Smith 07-19, cancelled)
+>   and the NO ACTION FK (migration 025) would refuse
+>   a delete. Not finished, so neither training nor grading reads them. Its MMA
+>   dry run otherwise plans `delete_no_twin=8` (bouts dropped from the 10-31
+>   and 11-07 cards, 0 recs) — routine, operator-run, not urgent.
+
 > **Update (2026-09-02) — UI: panes showed ~3 matches, detail page
 > overflowed, deploys broken by a GitHub 401.** Three root causes, all
 > fixed in one push. (1) `GET /predictions/upcoming` applied `LIMIT` to
